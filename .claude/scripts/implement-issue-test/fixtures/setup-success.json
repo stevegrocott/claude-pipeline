@@ -1,0 +1,26 @@
+{
+    "result": "Setup completed successfully",
+    "structured_output": {
+        "status": "success",
+        "worktree": "/tmp/test-worktree",
+        "branch": "feat/issue-123",
+        "plan_path": "/tmp/test-worktree/.claude/plan.md",
+        "tasks": [
+            {
+                "id": 1,
+                "description": "Create the user model migration",
+                "agent": "laravel-backend-developer"
+            },
+            {
+                "id": 2,
+                "description": "Implement the UserController",
+                "agent": "laravel-backend-developer"
+            },
+            {
+                "id": 3,
+                "description": "Add frontend styling",
+                "agent": "bulletproof-frontend-developer"
+            }
+        ]
+    }
+}
