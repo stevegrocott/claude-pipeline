@@ -75,7 +75,7 @@ gh issue view $ISSUE_NUMBER --json state,number,title
 gh pr view $PR_NUMBER --json number,title,state,headRefName,comments
 
 # Also get the full PR view with comments for parsing
-gh pr view $PR_NUMBER --repo your-org/your-repo --comments
+gh pr view $PR_NUMBER --repo OWNER/REPO --comments
 ```
 
 **Extract:**
@@ -225,7 +225,7 @@ For each extracted issue:
 
 ```bash
 gh issue create \
-  --repo your-org/your-repo \
+  --repo OWNER/REPO \
   --title "$ISSUE_TITLE" \
   --body "$(cat <<'EOF'
 ## Context

@@ -215,7 +215,7 @@ if [ -z "$PR_NUMBER" ]; then
     echo "[$(date)] PR number not found in output, trying GitHub fallback query..." >> "$LOG_FILE"
 
     # Search for open PRs with exact issue number in title (word boundary via regex)
-    PR_NUMBER=$(gh pr list --repo your-org/your-repo --state open \
+    PR_NUMBER=$(gh pr list --repo OWNER/REPO --state open \
         --json number,title \
         --jq ".[] | select(.title | test(\"issue-${ISSUE_NUMBER}[^0-9]\") or test(\"issue-${ISSUE_NUMBER}\$\")) | .number" \
         2>/dev/null | head -1 || echo "")

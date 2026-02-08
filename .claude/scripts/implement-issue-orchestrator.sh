@@ -510,7 +510,7 @@ sync_status_to_log() {
 # GITHUB COMMENT HELPERS
 # =============================================================================
 
-REPO="${GITHUB_REPO:-your-org/your-repo}"
+REPO="${GITHUB_REPO:-OWNER/REPO}"
 
 # comment_issue <title> <body> [agent]
 # If agent is provided, shows "Written by `agent`", otherwise "Posted by orchestrator"

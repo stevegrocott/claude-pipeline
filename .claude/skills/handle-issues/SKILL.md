@@ -147,14 +147,14 @@ Build and execute `gh` command based on parsed criteria:
 
 ```bash
 # Example: issues assigned to user
-gh issue list --repo your-org/your-repo \
+gh issue list --repo OWNER/REPO \
   --assignee @me \
   --state open \
   --json number,title,labels,milestone,createdAt \
   --limit 100
 
 # Example: critical bugs
-gh issue list --repo your-org/your-repo \
+gh issue list --repo OWNER/REPO \
   --label "bug,critical" \
   --state open \
   --json number,title,labels,milestone,createdAt

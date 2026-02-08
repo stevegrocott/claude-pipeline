@@ -3,6 +3,6 @@
     "structured_output": {
         "status": "success",
         "pr_number": 456,
-        "pr_url": "https://github.com/your-org/your-repo/pull/456"
+        "pr_url": "https://github.com/OWNER/REPO/pull/456"
     }
 }
