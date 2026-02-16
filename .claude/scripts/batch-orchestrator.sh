@@ -376,42 +376,6 @@ extract_wait_time() {
 }
 
 # =============================================================================
-# WORKTREE CLEANUP
-# =============================================================================
-
-cleanup_worktree() {
-    local issue_num="$1"
-    local issue_status_file="$2"
-
-    if [[ ! -f "$issue_status_file" ]]; then
-        log "No status file for worktree cleanup (issue #$issue_num)"
-        return
-    fi
-
-    local worktree_path
-    worktree_path=$(jq -r '.worktree // empty' "$issue_status_file" 2>/dev/null)
-
-    if [[ -z "$worktree_path" || ! -d "$worktree_path" ]]; then
-        log "No worktree to clean up for issue #$issue_num"
-        return
-    fi
-
-    local worktree_branch
-    worktree_branch=$(jq -r '.branch // empty' "$issue_status_file" 2>/dev/null)
-
-    log "Cleaning up worktree for issue #$issue_num: $worktree_path"
-
-    if git worktree remove "$worktree_path" --force 2>/dev/null; then
-        log "Worktree removed: $worktree_path"
-    else
-        log "Warning: Could not remove worktree $worktree_path (may need manual cleanup)"
-    fi
-
-    # Prune stale worktree references
-    git worktree prune 2>/dev/null
-}
-
-# =============================================================================
 # ISSUE PROCESSING
 # =============================================================================
 
@@ -428,6 +392,17 @@ process_issue() {
     update_issue_field "$issue_num" "started_at" "$(date -Iseconds)"
     update_issue_field "$issue_num" "stage" "implement-issue"
     update_progress
+
+    # Set up feature branch for this issue
+    local feature_branch="feature/issue-$issue_num"
+    log "Setting up feature branch: $feature_branch"
+    git checkout "$BRANCH" 2>/dev/null
+    git pull --ff-only 2>/dev/null || true
+    if git show-ref --verify --quiet "refs/heads/$feature_branch" 2>/dev/null; then
+        git checkout "$feature_branch" 2>/dev/null
+    else
+        git checkout -b "$feature_branch" "$BRANCH" 2>/dev/null
+    fi
 
     # -------------------------------------------------------------------------
     # IMPLEMENT-ISSUE (via orchestrator script)
@@ -495,6 +470,7 @@ process_issue() {
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "${impl_error:-implement-issue failed with status: $impl_status}"
         update_progress
+        git checkout "$BRANCH" 2>/dev/null || true
         return 1
     fi
 
@@ -503,6 +479,7 @@ process_issue() {
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "No PR number in status file or output"
         update_progress
+        git checkout "$BRANCH" 2>/dev/null || true
         return 1
     fi
     log "implement-issue complete. PR #$pr_number created"
@@ -577,6 +554,7 @@ process_issue() {
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "Timeout after ${ISSUE_TIMEOUT}s during process-pr"
         update_progress
+        git checkout "$BRANCH" 2>/dev/null || true
         return 1
     fi
 
@@ -597,7 +575,9 @@ process_issue() {
             update_issue_field "$issue_num" "status" "completed"
             update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
             update_issue_field "$issue_num" "follow_ups" "$follow_ups" "true"
-            cleanup_worktree "$issue_num" "$issue_status_file"
+            # Push feature branch and return to base
+            git push -u origin "$feature_branch" 2>/dev/null || true
+            git checkout "$BRANCH" 2>/dev/null || true
             ;;
         changes_requested)
             # process-pr handles re-implementation internally by calling implement-issue again
@@ -605,13 +585,13 @@ process_issue() {
             log "Issue #$issue_num: changes were requested and addressed"
             update_issue_field "$issue_num" "status" "completed"
             update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
-            cleanup_worktree "$issue_num" "$issue_status_file"
             ;;
         error|rate_limit|*)
             log_error "process-pr failed for #$issue_num: ${proc_error:-status was $proc_status}"
             update_issue_field "$issue_num" "status" "failed"
             update_issue_field "$issue_num" "error" "${proc_error:-process-pr failed with status: $proc_status}"
             update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
             return 1
             ;;
     esac
