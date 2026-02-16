@@ -15,6 +15,22 @@ Assume skilled developer, unfamiliar with our toolset/domain, weak on test desig
 
 **Save to:** `docs/plans/YYYY-MM-DD-<feature-name>.md`
 
+## Output Modes
+
+**Local file (default):** Save to `docs/plans/YYYY-MM-DD-<feature-name>.md`
+
+**GitHub Issue (`--github`):** Output the plan as a structured GH issue body with parseable task format. Used by the `/explore` skill.
+
+### GitHub Issue Task Format
+
+When outputting for GitHub, use this parseable task list in the `## Implementation Tasks` section:
+
+```markdown
+- [ ] `[agent-name]` Task description
+```
+
+Agent values should match your project's `.claude/agents/` directory. Common: `[backend-developer]`, `[frontend-developer]`, `[default]`.
+
 ## Bite-Sized Task Granularity
 
 **Each step is one action (2-5 minutes):**
@@ -99,8 +115,14 @@ git commit -m "feat: add specific feature"
 
 ## Execution Handoff
 
-**"Plan complete and saved to `docs/plans/<filename>.md`. Proceeding with subagent-driven implementation."**
+**Local plan:**
+"Plan complete and saved to `docs/plans/<filename>.md`. Proceeding with subagent-driven implementation."
 
 **REQUIRED:** Use subagent-driven-development (fresh subagent per task, code review between tasks).
 
 **Alternative:** If user requests, guide to executing-plans skill for parallel session with checkpoints.
+
+**GitHub Issue plan:**
+"Plan captured in GitHub Issue #NNN. Ready for implementation."
+
+**Next step:** `/implement-issue NNN main`

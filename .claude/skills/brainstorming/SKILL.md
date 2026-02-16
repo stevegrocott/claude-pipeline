@@ -35,13 +35,13 @@ Start by understanding the current project context, then ask questions one at a 
 ## After the Design
 
 **Documentation:**
-- Write the validated design to `docs/plans/YYYY-MM-DD-<topic>-design.md`
+- Standalone invocation: Write the validated design to `docs/plans/YYYY-MM-DD-<topic>-design.md` and commit to git
+- Via `/explore`: Output is captured in the GitHub Issue body (no local file needed)
 - Use elements-of-style:writing-clearly-and-concisely skill if available
-- Commit the design document to git
 
 **Implementation (if continuing):**
 - Ask: "Ready to set up for implementation?"
-- Use using-git-worktrees to create isolated workspace
+- Create a feature branch from main
 - Use writing-plans to create detailed implementation plan
 
 ## Key Principles
