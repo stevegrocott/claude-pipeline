@@ -155,8 +155,7 @@ init_status() {
         --argjson issue "$ISSUE_NUMBER" \
         --arg base_branch "$BASE_BRANCH" \
         --arg branch "" \
-        --arg worktree "" \
-        --arg current_stage "setup" \
+        --arg current_stage "parse_issue" \
         --argjson current_task "null" \
         --arg log_dir "$LOG_BASE" \
         '{
@@ -164,14 +163,11 @@ init_status() {
             issue: $issue,
             base_branch: $base_branch,
             branch: $branch,
-            worktree: $worktree,
             current_stage: $current_stage,
             current_task: $current_task,
             stages: {
-                setup: {status: "pending", started_at: null, completed_at: null},
-                research: {status: "pending", started_at: null, completed_at: null},
-                evaluate: {status: "pending", started_at: null, completed_at: null},
-                plan: {status: "pending", started_at: null, completed_at: null},
+                parse_issue: {status: "pending", started_at: null, completed_at: null},
+                validate_plan: {status: "pending", started_at: null, completed_at: null},
                 implement: {status: "pending", task_progress: "0/0"},
                 quality_loop: {status: "pending", iteration: 0},
                 test_loop: {status: "pending", iteration: 0},
@@ -267,12 +263,10 @@ set_tasks() {
     sync_status_to_log
 }
 
-set_worktree_info() {
-    local worktree="$1"
-    local branch="$2"
-    jq --arg worktree "$worktree" \
-       --arg branch "$branch" \
-       '.worktree = $worktree | .branch = $branch | .last_update = (now | todate)' \
+set_branch_info() {
+    local branch="$1"
+    jq --arg branch "$branch" \
+       '.branch = $branch | .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
 }
@@ -324,7 +318,7 @@ validate_resume_status() {
     fi
 
     # Check required fields exist
-    local required_fields=("issue" "branch" "worktree" "current_stage" "log_dir")
+    local required_fields=("issue" "branch" "current_stage" "log_dir")
     local field
     for field in "${required_fields[@]}"; do
         local value
@@ -347,7 +341,7 @@ validate_resume_status() {
 }
 
 # Load resume state from status file
-# Sets global variables: ISSUE_NUMBER, BASE_BRANCH, LOG_BASE, WORKTREE, BRANCH
+# Sets global variables: ISSUE_NUMBER, BASE_BRANCH, LOG_BASE, BRANCH
 # Also sets: RESUME_STAGE, RESUME_TASK, RESUME_TASKS_JSON
 load_resume_state() {
     local status_path="$1"
@@ -362,7 +356,6 @@ load_resume_state() {
         echo "WARNING: No base_branch in status file and none provided via --branch" >&2
     fi
     BRANCH=$(jq -r '.branch' "$status_path")
-    WORKTREE=$(jq -r '.worktree' "$status_path")
     LOG_BASE=$(jq -r '.log_dir' "$status_path")
 
     RESUME_STAGE=$(jq -r '.current_stage' "$status_path")
@@ -392,29 +385,11 @@ get_completed_task_count() {
     jq '[.tasks[] | select(.status == "completed")] | length' "$STATUS_FILE" 2>/dev/null || echo "0"
 }
 
-# Check if worktree exists and is valid
-validate_worktree() {
-    local worktree_path="$1"
-
-    if [[ ! -d "$worktree_path" ]]; then
-        echo "ERROR: Worktree not found: $worktree_path" >&2
-        return 1
-    fi
-
-    if [[ ! -d "$worktree_path/.git" && ! -f "$worktree_path/.git" ]]; then
-        echo "ERROR: Path is not a git worktree: $worktree_path" >&2
-        return 1
-    fi
-
-    return 0
-}
-
 # =============================================================================
 # RESUME MODE INITIALIZATION
 # =============================================================================
 
 # These will be populated in resume mode
-WORKTREE=""
 BRANCH=""
 RESUME_STAGE=""
 RESUME_TASK=""
@@ -445,10 +420,6 @@ if [[ "$RESUME_MODE" == "logdir" ]]; then
     STATUS_FILE="$local_status_file"
     # LOG_BASE was set by load_resume_state
 
-    if ! validate_worktree "$WORKTREE"; then
-        exit 1
-    fi
-
 elif [[ "$RESUME_MODE" == "status" ]]; then
     # Resume from current status file
     if ! validate_resume_status "$STATUS_FILE"; then
@@ -456,10 +427,6 @@ elif [[ "$RESUME_MODE" == "status" ]]; then
     fi
 
     load_resume_state "$STATUS_FILE"
-
-    if ! validate_worktree "$WORKTREE"; then
-        exit 1
-    fi
 
 else
     # Normal mode - set LOG_BASE
@@ -472,7 +439,6 @@ if [[ -n "$RESUME_MODE" ]]; then
     echo "Resuming from: $STATUS_FILE"
     echo "Issue: #$ISSUE_NUMBER"
     echo "Branch: $BRANCH"
-    echo "Worktree: $WORKTREE"
     echo "Resume stage: $RESUME_STAGE"
     [[ -n "$RESUME_TASK" && "$RESUME_TASK" != "null" ]] && echo "Resume task: $RESUME_TASK"
     echo "Log dir: $LOG_BASE"
@@ -735,14 +701,14 @@ run_stage() {
 # Run the quality loop (simplify -> review -> fix, repeat)
 # Note: Testing is handled separately by run_test_loop after all tasks complete
 # Arguments:
-#   $1 - worktree path
+#   $1 - working directory
 #   $2 - branch name
 #   $3 - stage prefix for logging (e.g., "task-1" or "pr-fix")
 # Returns:
 #   0 on success (approved)
 #   2 on max iterations exceeded (calls exit 2)
 run_quality_loop() {
-    local loop_worktree="$1"
+    local loop_dir="$1"
     local loop_branch="$2"
     local stage_prefix="${3:-main}"
 
@@ -764,7 +730,7 @@ run_quality_loop() {
         # -------------------------------------------------------------------------
         # SIMPLIFY → Issue comment #7
         # -------------------------------------------------------------------------
-        local simplify_prompt="Run code-simplifier on modified PHP files in worktree $loop_worktree on branch $loop_branch.
+        local simplify_prompt="Run code-simplifier on modified PHP files in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify PHP code that is directly related to the issue's goals. Do NOT apply general PHP modernization (constructor promotion, match expressions, etc.) to files that were only incidentally touched or are outside the issue's focus area.
 
@@ -785,7 +751,7 @@ Output a summary of changes made."
         # -------------------------------------------------------------------------
         # REVIEW → Issue comment #9
         # -------------------------------------------------------------------------
-        local review_prompt="Review the code changes for task scope '$stage_prefix' in worktree $loop_worktree on branch $loop_branch.
+        local review_prompt="Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT: This is a task-level quality check within the implementation workflow, NOT a full PR review.
 Your job is to verify code quality for the changes made in this task only.
@@ -821,7 +787,7 @@ $review_summary" "code-reviewer"
             review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
             printf '%s\n' "$review_comments" >> "$LOG_BASE/context/review-comments.json"
 
-            local fix_prompt="Address code review feedback in worktree $loop_worktree on branch $loop_branch:
+            local fix_prompt="Address code review feedback in working directory $loop_dir on branch $loop_branch:
 
 $review_comments
 
@@ -854,13 +820,13 @@ Fix the issues and commit. Output a summary of fixes applied."
 #   4. If validation fails: fix with laravel-backend-developer, loop
 #   5. If validation passes: done
 # Arguments:
-#   $1 - worktree path
+#   $1 - working directory
 #   $2 - branch name
 # Returns:
 #   0 on success (tests pass and validated)
 #   2 on max iterations exceeded (calls exit 2)
 run_test_loop() {
-    local loop_worktree="$1"
+    local loop_dir="$1"
     local loop_branch="$2"
 
     local loop_complete=false
@@ -883,9 +849,9 @@ run_test_loop() {
         # -------------------------------------------------------------------------
         # TEST EXECUTION → Issue comment
         # -------------------------------------------------------------------------
-        local test_prompt="Run the test suite in worktree $loop_worktree:
+        local test_prompt="Run the test suite in working directory $loop_dir:
 
-cd $loop_worktree && AWS_ENABLED=false USE_AWS_SECRETS=false php artisan test
+cd $loop_dir && AWS_ENABLED=false USE_AWS_SECRETS=false php artisan test
 
 Report pass/fail, test counts, and any failures. Output a summary suitable for a GitHub comment."
 
@@ -908,7 +874,7 @@ $test_summary" "php-test-validator"
             local failures
             failures=$(printf '%s' "$test_result" | jq -c '.failures')
 
-            local fix_prompt="Fix test failures in worktree $loop_worktree on branch $loop_branch:
+            local fix_prompt="Fix test failures in working directory $loop_dir on branch $loop_branch:
 
 Failures:
 $failures
@@ -931,10 +897,10 @@ Fix the issues and commit. Output a summary of fixes applied."
         # -------------------------------------------------------------------------
         log "Tests passed. Running test validation for issue #$ISSUE_NUMBER..."
 
-        local validate_prompt="Validate test comprehensiveness and integrity for issue #$ISSUE_NUMBER in worktree $loop_worktree.
+        local validate_prompt="Validate test comprehensiveness and integrity for issue #$ISSUE_NUMBER in working directory $loop_dir.
 
 SCOPE: Only validate tests related to this issue's implementation. Get modified PHP files with:
-git -C $loop_worktree diff $BASE_BRANCH...HEAD --name-only -- '*.php' | grep -E '^app/'
+git -C $loop_dir diff $BASE_BRANCH...HEAD --name-only -- '*.php' | grep -E '^app/'
 
 IMPORTANT SCOPE CONSTRAINTS:
 - If NO testable PHP code was modified (e.g., CSS-only, Blade templates, config changes), output 'passed' immediately. Do NOT request new tests for non-PHP changes.
@@ -942,7 +908,7 @@ IMPORTANT SCOPE CONSTRAINTS:
 - Do NOT request tests for views, routes, config, or frontend assets
 
 For each modified implementation file that warrants testing, identify the corresponding test file and audit:
-1. Run the test suite: cd $loop_worktree && AWS_ENABLED=false USE_AWS_SECRETS=false php artisan test
+1. Run the test suite: cd $loop_dir && AWS_ENABLED=false USE_AWS_SECRETS=false php artisan test
 2. Check for TODO/FIXME/incomplete tests
 3. Check for hollow assertions (assertTrue(true), no assertions)
 4. Verify edge cases and error conditions are tested
@@ -975,7 +941,7 @@ $validate_summary" "php-test-validator"
             local validate_comments
             validate_comments=$(printf '%s' "$validate_result" | jq -r '.comments // .summary // "Fix test quality issues"')
 
-            local fix_prompt="Address test quality issues in worktree $loop_worktree on branch $loop_branch:
+            local fix_prompt="Address test quality issues in working directory $loop_dir on branch $loop_branch:
 
 $validate_comments
 
@@ -1002,7 +968,7 @@ Output a summary of fixes applied."
 
 main() {
     # Declare local variables used throughout main
-    local worktree branch tasks_json task_count completed_tasks
+    local branch tasks_json task_count completed_tasks
 
     # -------------------------------------------------------------------------
     # RESUME VS FRESH START INITIALIZATION
@@ -1013,13 +979,11 @@ main() {
         log "=========================================="
         log "Issue: #$ISSUE_NUMBER"
         log "Branch: $BRANCH"
-        log "Worktree: $WORKTREE"
         log "Resume stage: $RESUME_STAGE"
         log "Resume task: ${RESUME_TASK:-none}"
         log "Log dir: $LOG_BASE"
 
         # Use values from resume state
-        worktree="$WORKTREE"
         branch="$BRANCH"
         tasks_json="$RESUME_TASKS_JSON"
 
@@ -1033,7 +997,6 @@ main() {
         comment_issue "Resuming Automated Processing" "Resuming processing of issue #$ISSUE_NUMBER.
 
 **Resuming from stage:** \`$RESUME_STAGE\`
-**Worktree:** \`$worktree\`
 **Branch:** \`$branch\`
 
 Log directory: \`$LOG_BASE\`"
@@ -1055,241 +1018,137 @@ Log directory: \`$LOG_BASE\`"
         comment_issue "Starting Automated Processing" "Processing issue #$ISSUE_NUMBER against branch \`$BASE_BRANCH\`.
 
 **Stages:**
-1. Setup worktree
-2. Research context
-3. Evaluate approach
-4. Create implementation plan
-5. Implement tasks (with per-task quality loop: simplify, review)
-6. Test loop (run tests, fix failures)
-7. Documentation
-8. Create/update PR
-9. PR review loop
+1. Parse issue (extract tasks from GH issue body)
+2. Validate plan (verify references exist)
+3. Implement tasks (with per-task quality loop: simplify, review)
+4. Test loop (run tests, fix failures)
+5. Documentation
+6. Create/update PR
+7. PR review loop
 
 Log directory: \`$LOG_BASE\`"
     fi
 
     # -------------------------------------------------------------------------
-    # STAGE: SETUP (worktree creation)
+    # STAGE: PARSE ISSUE (extract tasks from GH issue body)
     # -------------------------------------------------------------------------
-    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "setup"; then
-        log "Skipping setup stage (already completed)"
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "parse_issue"; then
+        log "Skipping parse_issue stage (already completed)"
     else
-        set_stage_started "setup"
+        set_stage_started "parse_issue"
 
-        local setup_prompt="Set up worktree for issue #$ISSUE_NUMBER against branch $BASE_BRANCH.
+        log "Fetching issue #$ISSUE_NUMBER from GitHub..."
+        local issue_body
+        issue_body=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body -q '.body' 2>/dev/null)
 
-You must:
-1. Fetch the issue title and body from GitHub using: gh issue view $ISSUE_NUMBER --repo $REPO --json title,body
-2. Check for existing PR (if re-implementation)
-3. Create or checkout worktree using using-git-worktrees skill
-
-Output the worktree path and branch name."
-
-        local setup_result
-        setup_result=$(run_stage "setup" "$setup_prompt" "implement-issue-setup.json" "$AGENT")
-
-        local setup_status
-        setup_status=$(printf '%s' "$setup_result" | jq -r '.status')
-
-        if [[ "$setup_status" != "success" ]]; then
-            local error
-            error=$(printf '%s' "$setup_result" | jq -r '.error // "unknown error"')
-            log_error "Setup failed: $error"
+        if [[ -z "$issue_body" ]]; then
+            log_error "Failed to fetch issue #$ISSUE_NUMBER body"
             set_final_state "error"
             exit 1
         fi
 
-        worktree=$(printf '%s' "$setup_result" | jq -r '.worktree')
-        branch=$(printf '%s' "$setup_result" | jq -r '.branch')
+        # Save issue body for reference
+        printf '%s\n' "$issue_body" > "$LOG_BASE/context/issue-body.md"
 
-        set_worktree_info "$worktree" "$branch"
-        printf '%s\n' "$setup_result" > "$LOG_BASE/context/setup-output.json"
+        # Extract tasks from ## Implementation Tasks section
+        # Format: - [ ] `[agent-name]` Task description
+        log "Parsing implementation tasks from issue body..."
+        local tasks_section
+        tasks_section=$(printf '%s' "$issue_body" | sed -n '/^## Implementation Tasks/,/^## /p' | head -n -1)
 
-        set_stage_completed "setup"
-        log "Setup complete. Worktree: $worktree, Branch: $branch"
-
-        # -------------------------------------------------------------------------
-        # BUILD FRONTEND ASSETS (required for tests that render views)
-        # -------------------------------------------------------------------------
-        log "Building frontend assets in worktree..."
-        if [[ -f "$worktree/package.json" ]]; then
-            (
-                cd "$worktree" || exit 1
-                npm install --silent 2>/dev/null
-                npm run build --silent 2>/dev/null
-            ) && log "Frontend assets built successfully" \
-              || log "Frontend build skipped or failed (non-blocking)"
-        else
-            log "No package.json found, skipping frontend build"
-        fi
-    fi
-
-    # -------------------------------------------------------------------------
-    # STAGE: RESEARCH (no comment per user request)
-    # -------------------------------------------------------------------------
-    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "research"; then
-        log "Skipping research stage (already completed)"
-    else
-        set_stage_started "research"
-
-        local research_prompt="Research context for issue #$ISSUE_NUMBER in worktree $worktree.
-
-You must:
-1. Read the issue details from GitHub
-2. Explore related files and code structure
-3. Identify dependencies and related components
-4. Document relevant context for implementation
-
-Output the research findings."
-
-        local research_result
-        research_result=$(run_stage "research" "$research_prompt" "implement-issue-research.json" "$AGENT")
-
-        printf '%s\n' "$research_result" > "$LOG_BASE/context/research-output.json"
-
-        set_stage_completed "research"
-        log "Research complete."
-    fi
-
-    # -------------------------------------------------------------------------
-    # STAGE: EVALUATE → Issue comment #3
-    # -------------------------------------------------------------------------
-    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "evaluate"; then
-        log "Skipping evaluate stage (already completed)"
-    else
-        set_stage_started "evaluate"
-
-        local evaluate_prompt="Evaluate the best implementation approach for issue #$ISSUE_NUMBER.
-
-Based on the research, determine:
-1. The recommended approach
-2. Rationale for this approach
-3. Potential risks or concerns
-4. Alternative approaches considered
-
-Output your evaluation with a summary suitable for a GitHub comment."
-
-        local evaluate_result
-        evaluate_result=$(run_stage "evaluate" "$evaluate_prompt" "implement-issue-evaluate.json" "$AGENT")
-
-        local evaluate_status
-        evaluate_status=$(printf '%s' "$evaluate_result" | jq -r '.status')
-
-        # Comment #3: Evaluate findings (always post, format based on status)
-        local eval_summary approach rationale
-        eval_summary=$(printf '%s' "$evaluate_result" | jq -r '.summary')
-        approach=$(printf '%s' "$evaluate_result" | jq -r '.approach // ""')
-        rationale=$(printf '%s' "$evaluate_result" | jq -r '.rationale // ""')
-
-        if [[ "$evaluate_status" == "success" ]]; then
-            local eval_body="**Approach:** $approach
-
-**Rationale:** $rationale
-
-$eval_summary"
-            comment_issue "Evaluation: Best Path" "$eval_body" "${AGENT:-}"
-        else
-            local eval_error risks_text
-            eval_error=$(printf '%s' "$evaluate_result" | jq -r '.error // "Unknown error"')
-            risks_text=$(printf '%s' "$evaluate_result" | jq -r '.risks // [] | map("- " + .) | join("\n")')
-
-            local eval_body="⚠️ **Status:** Error - requires attention
-
-**Approach:** $approach
-
-**Rationale:** $rationale
-
-**Error:** $eval_error"
-
-            if [[ -n "$risks_text" ]]; then
-                eval_body="$eval_body
-
-**Risks:**
-$risks_text"
-            fi
-
-            comment_issue "Evaluation: Issue Concerns" "$eval_body" "${AGENT:-}"
-
-            # Exit early - evaluation found blocking issues
-            printf '%s\n' "$evaluate_result" > "$LOG_BASE/context/evaluate-output.json"
-            set_stage_completed "evaluate"
-            log_error "Evaluation found blocking issues. Exiting."
-            set_final_state "blocked"
+        if [[ -z "$tasks_section" ]]; then
+            log_error "No '## Implementation Tasks' section found in issue #$ISSUE_NUMBER"
+            set_final_state "error"
             exit 1
         fi
 
-        printf '%s\n' "$evaluate_result" > "$LOG_BASE/context/evaluate-output.json"
+        # Parse tasks into JSON array
+        local task_id=0
+        tasks_json="[]"
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^-\ \[\ \]\ \`\[([^\]]+)\]\`\ (.+)$ ]]; then
+                task_id=$((task_id + 1))
+                local agent="${BASH_REMATCH[1]}"
+                local desc="${BASH_REMATCH[2]}"
+                tasks_json=$(printf '%s' "$tasks_json" | jq \
+                    --argjson id "$task_id" \
+                    --arg desc "$desc" \
+                    --arg agent "$agent" \
+                    '. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0}]')
+            fi
+        done <<< "$tasks_section"
 
-        set_stage_completed "evaluate"
-        log "Evaluation complete."
+        local task_count
+        task_count=$(printf '%s' "$tasks_json" | jq length)
+
+        if (( task_count == 0 )); then
+            log_error "No parseable tasks found in issue #$ISSUE_NUMBER"
+            set_final_state "error"
+            exit 1
+        fi
+
+        log "Extracted $task_count tasks from issue body"
+        set_tasks "$tasks_json"
+        printf '%s\n' "$tasks_json" > "$LOG_BASE/context/tasks.json"
+
+        # Create or checkout feature branch
+        branch="feature/issue-${ISSUE_NUMBER}"
+        log "Setting up feature branch: $branch"
+
+        if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+            log "Branch $branch already exists, checking out"
+            git checkout "$branch" 2>/dev/null
+        else
+            log "Creating branch $branch from $BASE_BRANCH"
+            git checkout -b "$branch" "$BASE_BRANCH" 2>/dev/null
+        fi
+
+        set_branch_info "$branch"
+
+        set_stage_completed "parse_issue"
+        log "Parse issue complete. Branch: $branch, Tasks: $task_count"
     fi
 
     # -------------------------------------------------------------------------
-    # STAGE: PLAN → Issue comments #4 (plan) and #5 (task list)
+    # STAGE: VALIDATE PLAN (lightweight check)
     # -------------------------------------------------------------------------
-    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "plan"; then
-        log "Skipping plan stage (already completed)"
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "validate_plan"; then
+        log "Skipping validate_plan stage (already completed)"
         # Load tasks from status file for implement stage
         tasks_json=$(jq -c '.tasks' "$STATUS_FILE")
     else
-        set_stage_started "plan"
+        set_stage_started "validate_plan"
 
-        local plan_prompt="Create an implementation plan for issue #$ISSUE_NUMBER in worktree $worktree on branch $branch.
+        local task_count
+        task_count=$(printf '%s' "$tasks_json" | jq length)
 
-Based on the evaluation, you must:
-1. Write a detailed implementation plan using writing-plans skill
-2. Break down into tasks with agent assignments
-3. Each task should specify: id, description, and agent (laravel-backend-developer or bulletproof-frontend-developer)
-
-Output the plan path, task list, a summary of the plan, and a markdown-formatted task list for GitHub."
-
-        local plan_result
-        plan_result=$(run_stage "plan" "$plan_prompt" "implement-issue-plan.json" "$AGENT")
-
-        local plan_status
-        plan_status=$(printf '%s' "$plan_result" | jq -r '.status')
-
-        if [[ "$plan_status" != "success" ]]; then
-            local error
-            error=$(printf '%s' "$plan_result" | jq -r '.error // "unknown error"')
-            log_error "Plan failed: $error"
+        if (( task_count == 0 )); then
+            log_error "No tasks to implement"
             set_final_state "error"
             exit 1
         fi
 
-        local plan_summary task_list_md plan_path
-        tasks_json=$(printf '%s' "$plan_result" | jq -c '.tasks')
-        plan_summary=$(printf '%s' "$plan_result" | jq -r '.summary')
-        task_list_md=$(printf '%s' "$plan_result" | jq -r '.task_list_markdown')
-        plan_path=$(printf '%s' "$plan_result" | jq -r '.plan_path // empty')
+        log "Plan validated: $task_count tasks ready for implementation"
 
-        set_tasks "$tasks_json"
-        printf '%s\n' "$plan_result" > "$LOG_BASE/context/plan-output.json"
-        printf '%s\n' "$tasks_json" > "$LOG_BASE/context/tasks.json"
+        # Comment: Confirm plan
+        local task_list_md=""
+        for ((i=0; i<task_count; i++)); do
+            local desc agent
+            desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
+            agent=$(printf '%s' "$tasks_json" | jq -r ".[$i].agent")
+            task_list_md="${task_list_md}
+$((i+1)). \`[$agent]\` $desc"
+        done
 
-        # Comment #4: Implementation Plan (with full plan in collapsible)
-        local plan_body="$plan_summary"
-        if [[ -n "$plan_path" && -f "$worktree/$plan_path" ]]; then
-            local plan_content
-            plan_content=$(cat "$worktree/$plan_path")
-            plan_body="$plan_summary
+        comment_issue "Implementation Plan Confirmed" "Extracted **$task_count tasks** from issue body. Starting implementation.
 
-<details>
-<summary>Full Implementation Plan</summary>
+**Tasks:**
+$task_list_md
 
-\`\`\`markdown
-$plan_content
-\`\`\`
+**Branch:** \`$branch\`"
 
-</details>"
-        fi
-        comment_issue "Implementation Plan" "$plan_body"
-
-        # Comment #5: Task List
-        comment_issue "Task List" "$task_list_md"
-
-        set_stage_completed "plan"
-        log "Plan complete. Tasks: $(printf '%s' "$tasks_json" | jq length)"
+        set_stage_completed "validate_plan"
+        log "Plan validation complete."
     fi
 
     # -------------------------------------------------------------------------
@@ -1335,7 +1194,7 @@ $plan_content
 
             while [[ "$task_approved" != "true" ]] && (( review_attempts < MAX_TASK_REVIEW_ATTEMPTS )); do
                 # Implement
-                local impl_prompt="Implement task $task_id in worktree $worktree on branch $branch:
+                local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
 
 $task_desc
 
@@ -1386,7 +1245,7 @@ $impl_summary" "$task_agent"
 
                     # Run quality loop for this task
                     log "Running quality loop for task $task_id"
-                    run_quality_loop "$worktree" "$branch" "task-$task_id"
+                    run_quality_loop "." "$branch" "task-$task_id"
 
                 else
                     review_attempts=$((review_attempts+1))
@@ -1396,7 +1255,7 @@ $impl_summary" "$task_agent"
                     log "Task $task_id needs fixes (attempt $review_attempts/$MAX_TASK_REVIEW_ATTEMPTS)"
 
                     # Fix
-                    local fix_prompt="Fix issues in task $task_id (commit $commit_sha) in worktree $worktree on branch $branch:
+                    local fix_prompt="Fix issues in task $task_id (commit $commit_sha) on branch $branch in the current working directory:
 
 Review feedback:
 $review_comments
@@ -1428,7 +1287,7 @@ Address the issues and commit."
         set_stage_started "test_loop"
         log "Running test loop after all tasks complete..."
 
-        run_test_loop "$worktree" "$branch"
+        run_test_loop "." "$branch"
 
         set_stage_completed "test_loop"
         log "Test loop complete."
@@ -1442,7 +1301,7 @@ Address the issues and commit."
     else
         set_stage_started "docs"
 
-        local docs_prompt="Write PHPDoc blocks for all modified PHP files in worktree $worktree on branch $branch.
+        local docs_prompt="Write PHPDoc blocks for all modified PHP files on branch $branch in the current working directory.
 
 Get modified files with: git diff $BASE_BRANCH...HEAD --name-only -- '*.php' | grep -E '^app/'
 
@@ -1471,7 +1330,7 @@ Add comprehensive docblocks and commit with message: docs(issue-$ISSUE_NUMBER): 
     else
         set_stage_started "pr"
 
-        local pr_prompt="Create or update PR for issue #$ISSUE_NUMBER in worktree $worktree.
+        local pr_prompt="Create or update PR for issue #$ISSUE_NUMBER.
 
 If no PR exists, create one:
 gh pr create --base $BASE_BRANCH --title 'feat(issue-$ISSUE_NUMBER): <description>'
@@ -1581,7 +1440,7 @@ $code_summary" "code-reviewer"
             spec_comments=$(printf '%s' "$spec_result" | jq -r '.comments // ""')
             code_comments=$(printf '%s' "$code_result" | jq -r '.comments // ""')
 
-            local fix_prompt="Address PR review feedback in worktree $worktree on branch $branch:
+            local fix_prompt="Address PR review feedback on branch $branch in the current working directory:
 
 Spec review:
 $spec_comments
@@ -1602,11 +1461,11 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             # Re-run quality loop after PR review fixes
             log "Re-running quality loop after PR review fixes..."
-            run_quality_loop "$worktree" "$branch" "pr-fix"
+            run_quality_loop "." "$branch" "pr-fix"
 
             # Push updates
             log "Pushing updates to PR..."
-            git -C "$worktree" push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
+            git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
         fi
         done
 

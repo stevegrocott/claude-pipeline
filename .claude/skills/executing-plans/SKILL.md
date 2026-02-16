@@ -1,14 +1,14 @@
 ---
 name: executing-plans
 description: Use when you have a written implementation plan to execute in a separate session with review checkpoints
-argument-hint: "[plan-file-path]"
+argument-hint: "[plan-file-path or GH-issue-number]"
 ---
 
 # Executing Plans
 
 ## Overview
 
-Load plan, review critically, execute tasks in batches, report for review between batches.
+Load plan from a file path or a GitHub Issue number, review critically, execute tasks in batches, report for review between batches.
 
 **Core principle:** Batch execution with checkpoints for architect review.
 
@@ -17,7 +17,12 @@ Load plan, review critically, execute tasks in batches, report for review betwee
 ## The Process
 
 ### Step 1: Load and Review Plan
-1. Read plan file
+
+**Input sources:**
+- **Plan file:** Read from specified file path
+- **GH issue:** Fetch via `gh issue view N --json body -q '.body'` and parse the `## Implementation Tasks` section
+
+1. Read plan file or fetch GH issue body
 2. Review critically - identify any questions or concerns about the plan
 3. If concerns: Raise them with your human partner before starting
 4. If no concerns: Create TodoWrite and proceed

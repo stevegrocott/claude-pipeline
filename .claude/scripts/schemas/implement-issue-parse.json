@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error", "rate_limit"],
+      "description": "Whether task extraction succeeded"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "description": { "type": "string" },
+          "agent": { "type": "string" }
+        },
+        "required": ["id", "description", "agent"]
+      },
+      "description": "Extracted implementation tasks"
+    },
+    "branch": {
+      "type": "string",
+      "description": "Feature branch name"
+    },
+    "task_count": {
+      "type": "integer",
+      "description": "Number of tasks extracted"
+    },
+    "summary": {
+      "type": "string",
+      "description": "Brief summary of extraction"
+    },
+    "error": {
+      "type": "string",
+      "description": "Error message if status is error"
+    }
+  },
+  "required": ["status"]
+}

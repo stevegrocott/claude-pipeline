@@ -1,69 +1,97 @@
-# Aaddrick's Claude Code Implementation Pipeline
+# Claude Pipeline (stevegrocott fork)
 
-This is a complete `.claude/` folder you can drop into any project. It gives Claude Code a full multi-agent development pipeline: skills, agents, hooks, orchestration scripts, and quality gates that all work together.
+> Forked from [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline) — a portable `.claude/` folder for structured Claude Code development workflows.
 
-> **Warning:** The orchestration scripts in this pipeline use Claude's `--dangerously-skip-permissions` flag. That means Claude runs without permission prompts during automated workflows. The pipeline also interacts with your GitHub repo autonomously -- creating branches, opening PRs, and posting comments. You should only use this in a safe, sandboxed environment -- not on a machine with access to production systems or sensitive data. Review the scripts before running them, and make sure you're comfortable with what they do. If either of these behaviors isn't what you want, ask Claude to adjust the pipeline to match your preferred workflow.
+This fork modifies the pipeline to use **GitHub Issues as the single source of truth** for plans and tasks. Instead of generating local plan files during implementation, plans are written to GitHub Issues during a discovery phase and read back during implementation.
 
-> **Important:** This repo is a template, not a project with active development issues. Do not submit issues or PRs here as part of your automated workflows. After copying the `.claude/` folder into your own project, all automation (issue handling, PR creation, branch management) should target **your** project's repository. If your pipeline is creating issues or PRs against `aaddrick/claude-pipeline`, something is misconfigured. Issues and PRs opened here by automation will be closed without review.
+## Changes from Upstream
+
+### Two-Phase Workflow
+
+The original pipeline runs 4 stages before implementation (setup → research → evaluate → plan) that generate local artifacts. This fork replaces that with a two-phase approach:
+
+**Phase 1: Discovery (`/explore`)**
+```
+/explore "vague idea or bug observation"
+```
+Chains: understand → research codebase → evaluate approaches → plan → `gh issue create`
+
+The GH issue body contains the full plan with a **parseable task list**:
+```markdown
+## Implementation Tasks
+- [ ] `[backend-developer]` Add migration for new column
+- [ ] `[backend-developer]` Update service with new logic
+- [ ] `[frontend-developer]` Add UI component
+- [ ] `[default]` Add test coverage
+```
+
+**Phase 2: Implementation (`/implement-issue`)**
+```
+/implement-issue 42 main
+```
+Reads the GH issue body → extracts tasks → implements → tests → reviews → creates PR.
+
+### No Git Worktrees
+
+The upstream pipeline uses git worktrees for isolation. This fork uses **feature branches** in the current working directory instead, which is simpler and avoids merge conflicts from parallel worktree execution.
+
+### Simplified Orchestrator Stages
+
+| Upstream | This Fork |
+|----------|-----------|
+| setup (worktree) → research → evaluate → plan → implement | parse_issue → validate_plan → implement |
+
+The research, evaluation, and planning happen during Phase 1 (`/explore`). Phase 2 just reads the result.
 
 ## Quick Start
 
-Get it running in three steps:
-
 ```bash
 # 1. Copy the .claude folder into your project
-git clone https://github.com/aaddrick/claude-pipeline.git .claude-pipeline-source
+git clone https://github.com/stevegrocott/claude-pipeline.git .claude-pipeline-source
 cp -r .claude-pipeline-source/.claude .claude
 rm -rf .claude-pipeline-source
 
 # 2. Start Claude Code in your project
 claude
 
-# 3. Run the adaptation skill to customize everything for your codebase
+# 3. Run the adaptation skill to customize for your codebase
 > /adapting-claude-pipeline
 ```
 
-That's it. The adaptation skill walks you through a brainstorming session about your project, figures out which parts of the pipeline to keep, modify, or remove, and then handles the changes with subagents. It works for any tech stack -- not just the Laravel/web defaults that ship with the template.
+The adaptation skill walks you through a brainstorming session about your project and customizes the pipeline for your tech stack.
 
-## What This Is
+## What's Inside
 
-I built this as a portable Claude Code configuration. You clone it into your project and it gives you everything you need to run structured development workflows.
-
-Here's what's inside:
-
-- **19 skills** for process discipline (TDD, debugging, brainstorming), implementation workflows (issue handling, PR processing), and meta-skills (writing new skills and agents)
-- **10 specialized agents** including backend and frontend developers, code reviewers, test validators, orchestration writers, and documentation generators
-- **2 hooks** for session initialization and post-PR code simplification
-- **3 orchestration scripts** that chain Claude CLI calls for batch issue processing and end-to-end implementation
-- **14 JSON schemas** for structured output from each orchestration stage
-- **Quality gates** at every level: spec compliance review, code quality review, test validation, and automated simplification
-
-Some of the skills are adapted from [obra/superpowers](https://github.com/obra/superpowers). I keep all skills in the project folder rather than installing them globally. That way you can modify them to fit your project without worrying about updates breaking things or changes bleeding into other projects.
+- **22 skills** including the new `/explore` discovery skill
+- **10 specialized agents** (backend/frontend developers, reviewers, validators)
+- **2 hooks** for session initialization and post-PR simplification
+- **3 orchestration scripts** for batch issue processing and end-to-end implementation
+- **11 JSON schemas** for structured output (reduced from 14 — removed redundant pre-implementation schemas)
+- **Quality gates** at every level: spec compliance, code quality, test validation
 
 ## Architecture
 
-### Multi-Agent Collaboration
-
-Each agent has a clear role. They don't try to do everything. Instead, they defer to each other when the work crosses boundaries.
+### Two-Phase Workflow
 
 ```
-bulletproof-frontend-developer <-> laravel-backend-developer  (frontend/backend split)
-bash-script-craftsman -> bats-test-validator                  (write -> validate)
-code-reviewer                                                 (quality gate)
-spec-reviewer                                                 (spec compliance gate)
-php-test-validator                                            (test integrity gate)
-cc-orchestration-writer                                       (builds orchestration scripts)
+Phase 1: Discovery
+  /explore "idea"
+    → understand → research → evaluate → plan
+    → gh issue create (with structured plan)
+
+Phase 2: Implementation
+  /implement-issue N main
+    → parse GH issue → validate plan
+    → implement → test → review → PR
 ```
 
 ### Orchestration Hierarchy
 
-The orchestration flows from top to bottom. You start with an issue, and the pipeline handles the rest.
-
 ```
-handle-issues (skill) -> batch-orchestrator.sh
+handle-issues (skill) → batch-orchestrator.sh
                              |
                    implement-issue-orchestrator.sh (per issue)
-                      setup -> plan -> implement -> test -> review -> pr
+                      parse_issue → validate → implement → test → review → pr
                              |
                    process-pr (skill)
                       merge + follow-ups  OR  re-run implementation
@@ -73,106 +101,55 @@ handle-issues (skill) -> batch-orchestrator.sh
 
 | Category | Skills | Purpose |
 |----------|--------|---------|
+| **Discovery** | explore | Turn ideas into fully-planned GH issues |
 | **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents | Enforce discipline and methodology |
 | **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans | Automate multi-step development workflows |
 | **Domain** | bulletproof-frontend, ui-design-fundamentals, write-docblocks, review-ui | Tech-stack-specific guidance |
 | **Meta** | using-skills, writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop | Maintain and extend the pipeline itself |
 
-## Installation
-
-### Quick Start
-
-You can get this running in about two minutes. Clone the repo into your project and then use the built-in adaptation skill to customize it.
-
-1. Clone this repo into your project:
-
-```bash
-# From your project root
-git clone https://github.com/aaddrick/claude-pipeline.git .claude-pipeline-source
-cp -r .claude-pipeline-source/.claude .claude
-rm -rf .claude-pipeline-source
-```
-
-2. Adapt it to your project:
-
-```bash
-# Start a Claude Code session in your project
-claude
-
-# Use the adaptation skill
-> /adapting-claude-pipeline
-```
-
-The adaptation skill walks you through a brainstorming session. It audits the pipeline against your tech stack, writes a plan, and then executes the changes with subagents.
-
-### Manual Installation
-
-If you'd rather cherry-pick the parts you need, here's the layout:
-
-```
-.claude/
-├── agents/           # Copy agents relevant to your stack
-├── hooks/            # Copy hooks, modify for your tools
-├── prompts/          # Copy or replace with your templates
-├── scripts/          # Copy orchestrators if using GitHub Issues workflow
-├── skills/           # Copy skills by category (process skills are universal)
-└── settings.json     # Copy and modify hook configurations
-```
-
-### What to Keep vs. What to Remove
-
-**Always keep these.** They're universal process skills that work with any stack:
-- brainstorming, writing-plans, systematic-debugging, test-driven-development
-- dispatching-parallel-agents, subagent-driven-development, executing-plans
-- using-skills, writing-skills, writing-agents, using-git-worktrees
-- adapting-claude-pipeline, improvement-loop
-- investigating-codebase-for-user-stories
-
-**Keep these if you're using GitHub Issues and PRs:**
-- handle-issues, implement-issue, process-pr
-- All orchestration scripts and schemas
-
-**Replace or remove these.** They're tied to specific tech stacks:
-- bulletproof-frontend, review-ui, ui-design-fundamentals (web/CSS only)
-- write-docblocks (PHP only)
-- laravel-backend-developer, bulletproof-frontend-developer, code-simplifier, phpdoc-writer, php-test-validator (Laravel/PHP only)
-
 ## Usage
 
-### Day-to-Day Development
+### Discovery → Implementation Flow
 
-Skills get invoked automatically when they're relevant. You can also call them manually with slash commands:
+```bash
+# Phase 1: Discover and plan
+> /explore "users can't reset their password from the settings page"
+# Creates GH issue #42 with full plan
 
-```
-/brainstorming          # Before any creative work
-/systematic-debugging   # When you hit a bug
-/implement-issue 42     # Implement GitHub issue #42
-/writing-plans          # Create an implementation plan
+# Phase 2: Implement
+> /implement-issue 42 main
+# Reads plan from issue, implements, creates PR
 ```
 
 ### Batch Processing
 
-Use the `handle-issues` skill to process multiple GitHub issues. Tell Claude which issues you want handled and it takes care of the rest:
-
-```
-> /handle-issues Process issues 12, 15, and 23 against main branch using the backend developer agent
+```bash
+> /handle-issues "open issues assigned to me, priority order"
 ```
 
-The skill coordinates the batch orchestrator under the hood -- rate limiting, status tracking, and circuit breakers are all handled for you.
+Issues are processed sequentially on feature branches. Each issue goes through the full implementation pipeline.
 
-### Single Issue Implementation
-
-Use the `implement-issue` skill to go end-to-end on a single GitHub issue:
+### Day-to-Day Skills
 
 ```
-> /implement-issue 42
+/brainstorming          # Before any creative work
+/systematic-debugging   # When you hit a bug
+/writing-plans          # Create an implementation plan
 ```
 
-It handles the full cycle: setup, research, planning, implementation, testing, review, and PR creation.
+## Task Format Specification
 
-### Extending the Pipeline
+The orchestrator parses tasks from GH issue bodies using this convention:
 
-You can grow the pipeline as your needs change. There are skills for that too.
+```markdown
+- [ ] `[agent-name]` Task description
+```
+
+**Parsing rule:** Regex `- \[[ x]\] ` `` `\[(.+?)\]` `` ` (.+)` extracts agent and description.
+
+**Agent values** should match your `.claude/agents/` directory. The adaptation skill sets these up for your tech stack.
+
+## Extending the Pipeline
 
 Create new skills:
 ```
@@ -184,124 +161,42 @@ Create new agents:
 > /writing-agents
 ```
 
-## The Improvement Loop
-
-This one's important enough to call out on its own. The improvement loop is how the pipeline gets better over time.
-
-When a skill, agent, or hook produces bad output, don't immediately edit it. Finish what you're working on first. Get to the correct solution. Only then go back and update the pipeline with what you learned.
-
-The skill enforces this:
-
+After resolving a bug or observing a recurring problem:
 ```
 > /improvement-loop
 ```
 
-It checks that your current issue is actually resolved before letting you make pipeline changes. That way you're encoding real understanding, not guesses. It also watches for recurring problems and suggests improvements proactively -- but it always asks before making changes.
-
-I've found this makes a real difference. The instinct is to jump in and tweak things the moment something goes wrong. That doesn't work well because you end up encoding partial understanding. The loop keeps you honest.
-
 ## Hooks
 
-### Session Start (`hooks/session-start.sh`)
-
-This injects the `using-skills` skill into every conversation. It makes sure Claude always checks for relevant skills and uses them.
-
-### Post-PR Simplify (`hooks/post-pr-simplify.sh`)
-
-After `gh pr create` succeeds, this automatically runs the code-simplifier agent on your changed files. You don't have to think about it.
-
-### Settings Guards (`settings.json`)
-
-These protect you from common mistakes:
-
-- **File protection:** Blocks writes to `.env`, credentials, `package-lock.json`
-- **Deploy protection:** Blocks `deploy_to_production` commands
-- **Auto-formatting:** Runs your project formatter on edited files
-- **Desktop notifications:** Alerts you when Claude is waiting for input
+- **Session Start** (`hooks/session-start.sh`): Injects `using-skills` into every conversation
+- **Post-PR Simplify** (`hooks/post-pr-simplify.sh`): Runs code-simplifier after PR creation
 
 ## Testing
-
-I've included a comprehensive BATS test suite for the orchestration scripts:
 
 ```bash
 cd .claude/scripts/implement-issue-test
 ./run-tests.sh
 ```
 
-Tests cover argument parsing, status management, rate limit handling, JSON parsing edge cases, and integration flows.
-
-## Project Structure
-
-```
-.claude/
-├── agents/                          # 10 specialized agent definitions
-│   ├── bash-script-craftsman.md
-│   ├── bats-test-validator.md
-│   ├── bulletproof-frontend-developer.md
-│   ├── cc-orchestration-writer.md
-│   ├── code-reviewer.md
-│   ├── code-simplifier.md
-│   ├── laravel-backend-developer.md
-│   ├── phpdoc-writer.md
-│   ├── php-test-validator.md
-│   └── spec-reviewer.md
-├── hooks/                           # Lifecycle hooks
-│   ├── session-start.sh
-│   └── post-pr-simplify.sh
-├── prompts/                         # Prompt templates
-│   └── frontend/
-│       ├── audit-blade.md
-│       ├── refactor-blade-basic.md
-│       └── refactor-blade-thorough.md
-├── scripts/                         # Orchestration scripts
-│   ├── batch-orchestrator.sh
-│   ├── batch-runner.sh
-│   ├── implement-issue-orchestrator.sh
-│   ├── schemas/                     # 14 JSON schemas
-│   └── implement-issue-test/        # BATS test suite
-├── skills/                          # 21 skills
-│   ├── adapting-claude-pipeline/
-│   ├── brainstorming/
-│   ├── bulletproof-frontend/
-│   ├── dispatching-parallel-agents/
-│   ├── executing-plans/
-│   ├── handle-issues/
-│   ├── implement-issue/
-│   ├── improvement-loop/
-│   ├── investigating-codebase-for-user-stories/
-│   ├── process-pr/
-│   ├── review-ui/
-│   ├── subagent-driven-development/
-│   ├── systematic-debugging/
-│   ├── test-driven-development/
-│   ├── ui-design-fundamentals/
-│   ├── using-git-worktrees/
-│   ├── using-skills/
-│   ├── write-docblocks/
-│   ├── writing-agents/
-│   ├── writing-plans/
-│   └── writing-skills/
-└── settings.json                    # Hook and guard configurations
-```
-
 ## Philosophy
 
-I built this pipeline around a few ideas that I've found make a real difference.
+This fork preserves the upstream's core philosophy while adding one key principle:
 
-**Skills are TDD for process documentation.** Every skill follows RED-GREEN-REFACTOR. You test that agents fail without the skill, write the skill, then verify they comply. It keeps things honest.
+**GitHub Issues are the single source of truth.** Plans, research, and task lists live in GH issues, not in local files. This prevents drift between what was planned and what the pipeline executes.
 
-**Agents should be specialized, not general.** Each agent has a clear persona, explicit scope boundaries, and anti-patterns drawn from real-world research. They defer to each other rather than trying to do everything. That's the whole point.
-
-**Fix first, improve later.** The improvement loop enforces that pipeline changes only happen after you fully understand the problem. You don't tweak things during active debugging.
-
-**Quality gates over trust.** Every implementation goes through spec compliance review, code quality review, and test validation. The pipeline doesn't trust any single agent's output, and you shouldn't either.
-
-**Delete aggressively.** When you adapt this to a new project, remove what you don't need. A focused pipeline beats a comprehensive one every time.
-
-## Further Reading
-
-I wrote a detailed walkthrough of the patterns and thinking behind this pipeline: [My Claude Project Implementation Patterns Guide](https://aaddrick.com/blog/my-claude-project-implementation-patterns-guide)
+Other preserved principles:
+- **Skills are TDD for process documentation** — tested with subagents before deployment
+- **Agents should be specialized, not general** — each has clear scope boundaries
+- **Fix first, improve later** — pipeline changes happen after understanding the problem
+- **Quality gates over trust** — every implementation goes through multiple reviews
+- **Delete aggressively** — remove what you don't need
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE)
+
+## Credits
+
+- Original pipeline: [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline)
+- Skills adapted from: [obra/superpowers](https://github.com/obra/superpowers)
+- Fork maintained by: [stevegrocott](https://github.com/stevegrocott)

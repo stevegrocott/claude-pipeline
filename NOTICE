@@ -47,3 +47,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+This fork (stevegrocott/claude-pipeline) includes modifications by Steve Grocott:
+
+  - New `/explore` skill for GitHub Issue-driven discovery workflow
+  - Modified orchestrator to parse tasks from GitHub Issue bodies
+  - Removed git worktree management in favor of feature branches
+  - Modified skills to reference GitHub Issues as single source of truth
+
+These modifications are released under the same MIT License.
