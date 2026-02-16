@@ -47,6 +47,10 @@ Break the chosen approach into implementable tasks:
 - Each task specifies an agent type (see Task Format below)
 - Tasks are ordered by dependency (data layer first, then presentation)
 - Each task is a single logical unit of work
+- Each task should target 5-30 minutes of subagent execution time
+- If a task requires reading more than 3 files or modifying more than 2 files, split it
+- Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
+- Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
 - Include acceptance criteria for the overall issue
 
 ### Step 5: Create GitHub Issue
@@ -81,10 +85,10 @@ gh issue create --title "$TITLE" --body "$(cat <<'EOF'
 - [alternative 2] — rejected because [reason]
 
 ## Implementation Tasks
-- [ ] `[agent-name]` Description of task 1
-- [ ] `[agent-name]` Description of task 2
-- [ ] `[agent-name]` Description of task 3
-- [ ] `[default]` Description of general task (e.g., tests, config)
+- [ ] `[agent-name]` **(S)** Description of task 1
+- [ ] `[agent-name]` **(M)** Description of task 2
+- [ ] `[agent-name]` **(L)** Description of task 3
+- [ ] `[default]` **(S)** Description of general task (e.g., tests, config)
 
 ## Acceptance Criteria
 - [ ] AC1: [measurable criterion]
@@ -109,7 +113,7 @@ Ready for implementation: /implement-issue NNN main
 The `## Implementation Tasks` section must use this parseable convention:
 
 ```markdown
-- [ ] `[agent-name]` Task description
+- [ ] `[agent-name]` **(M)** Task description
 ```
 
 **Agent values** (adapt to your project's agents):
@@ -142,3 +146,4 @@ The `## Implementation Tasks` section must use this parseable convention:
 | Over-plan with 20+ tasks | Keep it focused; split into multiple issues if needed |
 | Combine multiple concerns in one issue | One issue = one problem = one PR |
 | Ask too many clarifying questions | 0-2 questions max; research answers most questions |
+| Single task modifies 5+ files | Split into focused subtasks |

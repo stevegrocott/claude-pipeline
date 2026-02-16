@@ -173,11 +173,15 @@ mkdir -p "$LOG_BASE"
 LOG_FILE="$LOG_BASE/orchestrator.log"
 
 log() {
-    echo "[$(date -Iseconds)] $*" | tee -a "$LOG_FILE"
+    local msg="[$(date -Iseconds)] $*"
+    printf '%s\n' "$msg" >> "$LOG_FILE"
+    printf '%s\n' "$msg" >&2
 }
 
 log_error() {
-    echo "[$(date -Iseconds)] ERROR: $*" | tee -a "$LOG_FILE" >&2
+    local msg="[$(date -Iseconds)] ERROR: $*"
+    printf '%s\n' "$msg" >> "$LOG_FILE"
+    printf '%s\n' "$msg" >&2
 }
 
 # =============================================================================
@@ -187,7 +191,7 @@ log_error() {
 init_status() {
     local issues_json="[]"
     for issue in "${ISSUE_ARRAY[@]}"; do
-        issues_json=$(echo "$issues_json" | jq --argjson num "$issue" '. + [{
+        issues_json=$(printf '%s' "$issues_json" | jq --argjson num "$issue" '. + [{
             "number": $num,
             "status": "pending",
             "stage": null,
@@ -309,7 +313,7 @@ detect_rate_limit() {
 
     # Check structured output first (most reliable)
     local status
-    status=$(echo "$output" | jq -r '.structured_output.status // empty' 2>/dev/null)
+    status=$(printf '%s' "$output" | jq -r '.structured_output.status // empty' 2>/dev/null)
 
     # If structured output shows success, definitively NOT rate limited
     if [[ "$status" == "success" || "$status" == "merged" || "$status" == "changes_requested" ]]; then
@@ -324,15 +328,15 @@ detect_rate_limit() {
     # Only check text patterns if structured output is empty/error (fallback detection)
     # Check result text for rate limit indicators
     local result
-    result=$(echo "$output" | jq -r '.result // empty' 2>/dev/null)
-    if echo "$result" | grep -qiE 'rate.limit|429|too many requests|quota.exceeded|secondary rate'; then
+    result=$(printf '%s' "$output" | jq -r '.result // empty' 2>/dev/null)
+    if printf '%s' "$result" | grep -qiE 'rate.limit|429|too many requests|quota.exceeded|secondary rate'; then
         return 0
     fi
 
     # Check raw output only if JSON parsing failed (no valid structured_output)
     # Use word boundaries to avoid matching field names like "rate_limit" in JSON
     if [[ -z "$status" ]]; then
-        if echo "$output" | grep -qiE '\brate limit\b|HTTP 429|\btoo many requests\b|quota exceeded'; then
+        if printf '%s' "$output" | grep -qiE '\brate limit\b|HTTP 429|\btoo many requests\b|quota exceeded'; then
             return 0
         fi
     fi
@@ -343,36 +347,36 @@ detect_rate_limit() {
 extract_wait_time() {
     local output="$1"
     local result
-    result=$(echo "$output" | jq -r '.result // empty' 2>/dev/null)
+    result=$(printf '%s' "$output" | jq -r '.result // empty' 2>/dev/null)
 
     # Combine result and raw output for searching
     local search_text="$result $output"
 
     # Try to find retry-after seconds
     local retry_after
-    retry_after=$(echo "$search_text" | grep -oiE 'retry.after[^0-9]*([0-9]+)' | grep -oE '[0-9]+' | head -1)
+    retry_after=$(printf '%s' "$search_text" | grep -oiE 'retry.after[^0-9]*([0-9]+)' | grep -oE '[0-9]+' | head -1)
     if [[ -n "$retry_after" ]] && (( retry_after > 0 )); then
-        echo "$retry_after"
+        printf '%s\n' "$retry_after"
         return
     fi
 
     # Try to find "wait X minutes/hours"
     local wait_mins
-    wait_mins=$(echo "$search_text" | grep -oiE 'wait[^0-9]*([0-9]+)[^0-9]*min' | grep -oE '[0-9]+' | head -1)
+    wait_mins=$(printf '%s' "$search_text" | grep -oiE 'wait[^0-9]*([0-9]+)[^0-9]*min' | grep -oE '[0-9]+' | head -1)
     if [[ -n "$wait_mins" ]] && (( wait_mins > 0 )); then
-        echo $((wait_mins * 60))
+        printf '%s\n' "$((wait_mins * 60))"
         return
     fi
 
     local wait_hours
-    wait_hours=$(echo "$search_text" | grep -oiE 'wait[^0-9]*([0-9]+)[^0-9]*hour' | grep -oE '[0-9]+' | head -1)
+    wait_hours=$(printf '%s' "$search_text" | grep -oiE 'wait[^0-9]*([0-9]+)[^0-9]*hour' | grep -oE '[0-9]+' | head -1)
     if [[ -n "$wait_hours" ]] && (( wait_hours > 0 )); then
-        echo $((wait_hours * 3600))
+        printf '%s\n' "$((wait_hours * 3600))"
         return
     fi
 
     # Default to configured wait time
-    echo "$RATE_LIMIT_DEFAULT_WAIT"
+    printf '%s\n' "$RATE_LIMIT_DEFAULT_WAIT"
 }
 
 # =============================================================================
@@ -426,9 +430,9 @@ process_issue() {
         --status-file "$issue_status_file" \
         2>&1) || impl_exit=$?
 
-    echo "=== implement-issue output ===" >> "$issue_log"
-    echo "$impl_output" >> "$issue_log"
-    echo "=== exit code: $impl_exit ===" >> "$issue_log"
+    printf '%s\n' "=== implement-issue output ===" >> "$issue_log"
+    printf '%s\n' "$impl_output" >> "$issue_log"
+    printf '%s\n' "=== exit code: $impl_exit ===" >> "$issue_log"
 
     # Parse result from status file
     local impl_status="error"
@@ -447,7 +451,7 @@ process_issue() {
                 pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
                 if [[ -z "$pr_number" ]]; then
                     # Fallback: try to parse from log output
-                    pr_number=$(echo "$impl_output" | grep -oE 'PR: #[0-9]+' | grep -oE '[0-9]+' | head -1)
+                    pr_number=$(printf '%s' "$impl_output" | grep -oE 'PR: #[0-9]+' | grep -oE '[0-9]+' | head -1)
                 fi
                 ;;
             error|max_iterations_quality|max_iterations_pr_review)
@@ -501,12 +505,12 @@ process_issue() {
         --json-schema "$PROCESS_SCHEMA" \
         2>&1) || proc_exit=$?
 
-    echo "=== process-pr output ===" >> "$issue_log"
-    echo "$proc_output" >> "$issue_log"
-    echo "=== exit code: $proc_exit ===" >> "$issue_log"
+    printf '%s\n' "=== process-pr output ===" >> "$issue_log"
+    printf '%s\n' "$proc_output" >> "$issue_log"
+    printf '%s\n' "=== exit code: $proc_exit ===" >> "$issue_log"
 
     # Update session ID
-    session_id=$(echo "$proc_output" | jq -r '.session_id // empty' 2>/dev/null)
+    session_id=$(printf '%s' "$proc_output" | jq -r '.session_id // empty' 2>/dev/null)
     if [[ -n "$session_id" ]]; then
         update_issue_field "$issue_num" "session_id" "$session_id"
     fi
@@ -544,8 +548,8 @@ process_issue() {
                 2>&1) || proc_exit=$?
         fi
 
-        echo "=== process-pr resume output ===" >> "$issue_log"
-        echo "$proc_output" >> "$issue_log"
+        printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
+        printf '%s\n' "$proc_output" >> "$issue_log"
     fi
 
     # Check for timeout
@@ -563,9 +567,9 @@ process_issue() {
     local follow_ups
     local proc_error
 
-    proc_status=$(echo "$proc_output" | jq -r '.structured_output.status // "error"' 2>/dev/null)
-    follow_ups=$(echo "$proc_output" | jq -c '.structured_output.follow_up_issues // []' 2>/dev/null)
-    proc_error=$(echo "$proc_output" | jq -r '.structured_output.error // empty' 2>/dev/null)
+    proc_status=$(printf '%s' "$proc_output" | jq -r '.structured_output.status // "error"' 2>/dev/null)
+    follow_ups=$(printf '%s' "$proc_output" | jq -c '.structured_output.follow_up_issues // []' 2>/dev/null)
+    proc_error=$(printf '%s' "$proc_output" | jq -r '.structured_output.error // empty' 2>/dev/null)
 
     log "process-pr status: $proc_status"
 

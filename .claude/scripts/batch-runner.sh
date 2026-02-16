@@ -1,4 +1,5 @@
 #!/bin/bash
+# DEPRECATED: Use batch-orchestrator.sh instead. This script is maintained for backward compatibility only.
 #
 # batch-runner.sh
 # Executes implement-issue and process-pr for a single issue
