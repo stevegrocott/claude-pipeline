@@ -6,7 +6,7 @@ argument-hint: "[issue-number] [base-branch]"
 
 # Implement Issue
 
-End-to-end issue implementation via orchestrator script.
+End-to-end issue implementation — reads plan from GitHub Issue, implements with quality gates.
 
 **Announce at start:** "Using implement-issue to run orchestrator for #$ISSUE against $BRANCH"
 
@@ -51,14 +51,13 @@ watch -n 5 'jq -c "{state,stage:.current_stage,task:.current_task,quality:.quali
 
 | Stage | Agent | Description |
 |-------|-------|-------------|
-| setup | default | fetch, worktree, research, evaluate, plan |
-| implement | per-task | execute each task from plan |
+| parse-issue | default | read GH issue body, extract implementation tasks |
+| validate-plan | default | verify referenced files/patterns still exist |
+| implement | per-task | execute each task from GH issue task list |
 | task-review | spec-reviewer | verify task achieved goal |
 | fix | per-task | address review findings |
-| simplify | code-simplifier | clean up code |
-| test | php-test-validator | run test suite |
+| test | default | run test suite |
 | review | code-reviewer | internal code review |
-| docs | phpdoc-writer | add PHPDoc blocks |
 | pr | default | create/update PR |
 | spec-review | spec-reviewer | verify PR achieves issue goals |
 | code-review | code-reviewer | final code quality check |

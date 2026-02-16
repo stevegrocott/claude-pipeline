@@ -54,8 +54,8 @@ The orchestrator uses specialized agents via `--agent` flag to ensure the right 
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ batch-orchestrator.sh (shell script)                            │
-│  • Loops through issues autonomously                            │
-│  • Invokes claude with --agent and --dangerously-skip-permissions│
+│  • Loops through issues SEQUENTIALLY                            │
+│  • Each issue: feature branch → implement → merge → next        │
 │  • Parses structured_output via jq                              │
 │  • Updates status.json after each operation                     │
 │  • Handles rate limits, timeouts, circuit breaker               │
@@ -385,7 +385,7 @@ echo "**Logs:** $LOG_DIR"
 | Manage the loop yourself | Context bloat. Let orchestrator handle it. |
 | Check status more often than 5 min | Unnecessary overhead. Orchestrator updates status.json. |
 | Skip the confirmation step | May process wrong issues. |
-| Run multiple batches in parallel | Lock file exists for a reason. |
+| Run multiple batches in parallel | Issues are processed sequentially to avoid merge conflicts. Lock file exists for a reason. |
 | Ignore incomplete batch check | May reprocess or lose progress. |
 
 ## Example Session (Backend)

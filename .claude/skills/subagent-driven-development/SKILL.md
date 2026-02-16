@@ -41,6 +41,8 @@ digraph when_to_use {
 
 **CRITICAL: Track the feature branch name.** Subagents have no memory of branch context. You must include the branch name in every implementer dispatch.
 
+If the GH issue body includes a `**Feature Branch:**` line, use that branch name. Otherwise, derive from issue number: `feature/issue-N-short-description`.
+
 ```dot
 digraph process {
     rankdir=TB;
@@ -63,12 +65,12 @@ digraph process {
     }
 
     "Note feature branch name from plan or git" [shape=box style=filled fillcolor=yellow];
-    "Read plan, extract all tasks with full text, note context, create TodoWrite" [shape=box];
+    "Read GH issue body, extract all tasks with full text, note context, create TodoWrite" [shape=box];
     "More tasks remain?" [shape=diamond];
     "Dispatch final code reviewer subagent for entire implementation" [shape=box];
     "Use finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
 
-    "Read plan, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./implementer-prompt.md)";
+    "Read GH issue body, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./implementer-prompt.md)";
     "Dispatch implementer subagent (./implementer-prompt.md)" -> "Implementer subagent asks questions?";
     "Implementer subagent asks questions?" -> "Answer questions, provide context" [label="yes"];
     "Answer questions, provide context" -> "Dispatch implementer subagent (./implementer-prompt.md)";
@@ -117,8 +119,8 @@ Route tasks to the appropriate implementer agent based on task type:
 ```
 You: I'm using Subagent-Driven Development to execute this plan.
 
-[Read plan file once: docs/plans/feature-plan.md]
-[Extract all 5 tasks with full text and context]
+[Read GH issue body: gh issue view N --json body]
+[Parse ## Implementation Tasks section into task list]
 [Create TodoWrite with all tasks]
 
 Task 1: Hook installation script

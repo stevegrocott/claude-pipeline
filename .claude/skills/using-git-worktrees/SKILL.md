@@ -3,6 +3,8 @@ name: using-git-worktrees
 description: Use when starting feature work that needs isolation from current workspace or before executing implementation plans - creates isolated git worktrees in .worktrees/
 ---
 
+> **Note:** This skill is not used by the automated pipeline (`implement-issue`, `handle-issues`). The pipeline uses feature branches instead. This skill remains available for manual use when workspace isolation is needed.
+
 # Using Git Worktrees
 
 ## Overview
