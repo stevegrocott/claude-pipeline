@@ -5,7 +5,7 @@
 #
 # Usage:
 #   ./implement-issue-orchestrator.sh --issue 123 --branch test
-#   ./implement-issue-orchestrator.sh --issue 123 --branch test --agent laravel-backend-developer
+#   ./implement-issue-orchestrator.sh --issue 123 --branch test --agent my-backend-developer
 #
 # Outputs:
 #   - status.json: Real-time progress
@@ -754,6 +754,7 @@ run_stage() {
 #   $1 - worktree path
 #   $2 - branch name
 #   $3 - stage prefix for logging (e.g., "task-1" or "pr-fix")
+#   $4 - agent name for fix stages (optional, falls back to $AGENT global)
 # Returns:
 #   0 on success (approved)
 #   2 on max iterations exceeded (calls exit 2)
@@ -761,6 +762,7 @@ run_quality_loop() {
     local loop_worktree="$1"
     local loop_branch="$2"
     local stage_prefix="${3:-main}"
+    local loop_agent="${4:-$AGENT}"
 
     local loop_approved=false
     local loop_iteration=0  # Per-loop counter (resets each call)
@@ -780,23 +782,23 @@ run_quality_loop() {
         # -------------------------------------------------------------------------
         # SIMPLIFY → Issue comment #7
         # -------------------------------------------------------------------------
-        local simplify_prompt="Run code-simplifier on modified PHP files in worktree $loop_worktree on branch $loop_branch.
+        local simplify_prompt="Review and simplify modified files in worktree $loop_worktree on branch $loop_branch.
 
-IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify PHP code that is directly related to the issue's goals. Do NOT apply general PHP modernization (constructor promotion, match expressions, etc.) to files that were only incidentally touched or are outside the issue's focus area.
+IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify code that is directly related to the issue's goals. Do NOT apply general refactoring or modernization to files that were only incidentally touched or are outside the issue's focus area.
 
-If no PHP files were modified as part of this issue's implementation, make no changes and report 'No PHP changes to simplify'.
+If no files were modified as part of this issue's implementation, make no changes and report 'No changes to simplify'.
 
 Simplify code for clarity and consistency without changing functionality.
 Output a summary of changes made."
 
         local simplify_result
-        simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "code-simplifier")
+        simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json")
 
         local simplify_summary
         simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.summary // "No changes"')
 
         # Comment #7: Simplify summary
-        comment_issue "Quality Loop [$stage_prefix]: Simplify ($loop_iteration/$MAX_QUALITY_ITERATIONS)" "$simplify_summary" "code-simplifier"
+        comment_issue "Quality Loop [$stage_prefix]: Simplify ($loop_iteration/$MAX_QUALITY_ITERATIONS)" "$simplify_summary"
 
         # -------------------------------------------------------------------------
         # REVIEW → Issue comment #9
@@ -844,13 +846,13 @@ $review_comments
 Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_result
-            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "laravel-backend-developer")
+            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment #10: Fix results (review fix)
-            comment_issue "Quality Loop [$stage_prefix]: Review Fix ($loop_iteration/$MAX_QUALITY_ITERATIONS)" "$fix_summary" "laravel-backend-developer"
+            comment_issue "Quality Loop [$stage_prefix]: Review Fix ($loop_iteration/$MAX_QUALITY_ITERATIONS)" "$fix_summary" "$loop_agent"
         fi
     done
 
@@ -864,10 +866,10 @@ Fix the issues and commit. Output a summary of fixes applied."
 # Run the test loop (test -> validate -> fix, repeat until pass)
 # Called once after all tasks complete
 # Flow:
-#   1. Run tests (php-test-validator)
-#   2. If tests fail: fix with laravel-backend-developer, loop
-#   3. If tests pass: validate test quality (php-test-validator, scoped to issue)
-#   4. If validation fails: fix with laravel-backend-developer, loop
+#   1. Run tests (test-validator agent)
+#   2. If tests fail: fix with assigned agent, loop
+#   3. If tests pass: validate test quality (test-validator, scoped to issue)
+#   4. If validation fails: fix with assigned agent, loop
 #   5. If validation passes: done
 # Arguments:
 #   $1 - worktree path
@@ -899,14 +901,14 @@ run_test_loop() {
         # -------------------------------------------------------------------------
         # TEST EXECUTION → Issue comment
         # -------------------------------------------------------------------------
-        local test_prompt="Run the test suite in worktree $loop_worktree:
+        local test_prompt="Run the test suite in worktree $loop_worktree.
 
-cd $loop_worktree && AWS_ENABLED=false USE_AWS_SECRETS=false php artisan test
+Identify the project's test runner (e.g., npm test, pytest, php artisan test, etc.) and execute it.
 
 Report pass/fail, test counts, and any failures. Output a summary suitable for a GitHub comment."
 
         local test_result
-        test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json" "php-test-validator")
+        test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json")
 
         local test_status test_summary
         test_status=$(printf '%s' "$test_result" | jq -r '.result')
@@ -917,7 +919,7 @@ Report pass/fail, test counts, and any failures. Output a summary suitable for a
         [[ "$test_status" == "failed" ]] && test_icon="❌"
         comment_issue "Test Loop: Tests ($test_iteration/$MAX_TEST_ITERATIONS)" "$test_icon **Result:** $test_status
 
-$test_summary" "php-test-validator"
+$test_summary"
 
         if [[ "$test_status" == "failed" ]]; then
             log "Tests failed. Getting failures and fixing..."
@@ -932,13 +934,13 @@ $failures
 Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_result
-            fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "laravel-backend-developer")
+            fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment: Fix results
-            comment_issue "Test Loop: Test Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "laravel-backend-developer"
+            comment_issue "Test Loop: Test Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$AGENT"
             continue
         fi
 
@@ -949,28 +951,28 @@ Fix the issues and commit. Output a summary of fixes applied."
 
         local validate_prompt="Validate test comprehensiveness and integrity for issue #$ISSUE_NUMBER in worktree $loop_worktree.
 
-SCOPE: Only validate tests related to this issue's implementation. Get modified PHP files with:
-git -C $loop_worktree diff $BASE_BRANCH...HEAD --name-only -- '*.php' | grep -E '^app/'
+SCOPE: Only validate tests related to this issue's implementation. Get modified source files with:
+git -C $loop_worktree diff $BASE_BRANCH...HEAD --name-only
 
 IMPORTANT SCOPE CONSTRAINTS:
-- If NO testable PHP code was modified (e.g., CSS-only, Blade templates, config changes), output 'passed' immediately. Do NOT request new tests for non-PHP changes.
-- Only validate tests for modified PHP files in app/ (Services, Controllers, Models, etc.)
+- If NO testable code was modified (e.g., CSS-only, templates, config changes), output 'passed' immediately.
+- Only validate tests for modified implementation files (services, controllers, models, etc.)
 - Do NOT request tests for views, routes, config, or frontend assets
 
 For each modified implementation file that warrants testing, identify the corresponding test file and audit:
-1. Run the test suite: cd $loop_worktree && AWS_ENABLED=false USE_AWS_SECRETS=false php artisan test
+1. Run the project's test suite
 2. Check for TODO/FIXME/incomplete tests
-3. Check for hollow assertions (assertTrue(true), no assertions)
+3. Check for hollow assertions (no real assertions)
 4. Verify edge cases and error conditions are tested
 5. Check for mock abuse patterns
 
 Output:
-- result: 'passed' if tests are comprehensive OR if no testable PHP was modified, 'failed' if issues found
+- result: 'passed' if tests are comprehensive OR if no testable code was modified, 'failed' if issues found
 - issues: array of issues found (if any)
-- summary: suitable for a GitHub comment (note if validation was skipped due to no testable PHP changes)"
+- summary: suitable for a GitHub comment (note if validation was skipped due to no testable changes)"
 
         local validate_result
-        validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json" "php-test-validator")
+        validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json")
 
         local validate_status validate_summary
         validate_status=$(printf '%s' "$validate_result" | jq -r '.result')
@@ -981,7 +983,7 @@ Output:
         [[ "$validate_status" == "changes_requested" || "$validate_status" == "failed" ]] && validate_icon="🔄"
         comment_issue "Test Loop: Validation ($test_iteration/$MAX_TEST_ITERATIONS)" "$validate_icon **Result:** $validate_status
 
-$validate_summary" "php-test-validator"
+$validate_summary"
 
         if [[ "$validate_status" == "approved" || "$validate_status" == "passed" ]]; then
             loop_complete=true
@@ -999,13 +1001,13 @@ Fix the test quality issues (add missing assertions, remove TODOs, add edge case
 Output a summary of fixes applied."
 
             local fix_result
-            fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "laravel-backend-developer")
+            fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment: Fix results
-            comment_issue "Test Loop: Validation Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "laravel-backend-developer"
+            comment_issue "Test Loop: Validation Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$AGENT"
         fi
     done
 
@@ -1255,7 +1257,7 @@ $risks_text"
 Based on the evaluation, you must:
 1. Write a detailed implementation plan using writing-plans skill
 2. Break down into tasks with agent assignments
-3. Each task should specify: id, description, and agent (laravel-backend-developer or bulletproof-frontend-developer)
+3. Each task should specify: id, description, and agent (use agent names from .claude/agents/ directory)
 
 Output the plan path, task list, a summary of the plan, and a markdown-formatted task list for GitHub."
 
@@ -1273,6 +1275,12 @@ Output the plan path, task list, a summary of the plan, and a markdown-formatted
             exit 1
         fi
 
+        # Task parsing: The plan stage outputs JSON tasks extracted from the issue body.
+        # The issue body uses this markdown convention for unchecked tasks:
+        #   - [ ] `[agent-name]` **(S)** Task description
+        # Regex to match unchecked tasks: /- \[ \] `\[(.+?)\]` (.+)/
+        # This extracts: agent name (group 1) and description (group 2).
+        # Task IDs are assigned sequentially starting from 1.
         local plan_summary task_list_md plan_path
         tasks_json=$(printf '%s' "$plan_result" | jq -c '.tasks')
         plan_summary=$(printf '%s' "$plan_result" | jq -r '.summary')
@@ -1282,6 +1290,63 @@ Output the plan path, task list, a summary of the plan, and a markdown-formatted
         set_tasks "$tasks_json"
         printf '%s\n' "$plan_result" > "$LOG_BASE/context/plan-output.json"
         printf '%s\n' "$tasks_json" > "$LOG_BASE/context/tasks.json"
+
+        # =====================================================================
+        # VALIDATE PLAN
+        # =====================================================================
+        local issue_body_file="$LOG_BASE/context/issue-body.md"
+        task_count=$(printf '%s' "$tasks_json" | jq length)
+
+        # (a) Check that ## Implementation Tasks section exists in saved issue body
+        if [[ -f "$issue_body_file" ]]; then
+            if ! grep -q '## Implementation Tasks' "$issue_body_file"; then
+                log_error "Issue body is missing '## Implementation Tasks' section"
+                log_error "The issue must contain a structured task list for the orchestrator to parse"
+                set_final_state "error"
+                exit 1
+            fi
+        else
+            log "WARNING: Issue body file not found at $issue_body_file — skipping body validation"
+        fi
+
+        # (b) Verify each task's agent has a definition file in .claude/agents/
+        local agents_dir="$SCRIPT_DIR/../agents"
+        for ((i=0; i<task_count; i++)); do
+            local check_agent
+            check_agent=$(printf '%s' "$tasks_json" | jq -r ".[$i].agent")
+            if [[ ! -f "$agents_dir/${check_agent}.md" ]]; then
+                log "WARNING: Task $((i+1)) uses agent '$check_agent' which has no definition in .claude/agents/"
+            fi
+        done
+
+        # (c) Warn about oversized task descriptions (>200 chars)
+        for ((i=0; i<task_count; i++)); do
+            local check_desc
+            check_desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
+            local desc_len=${#check_desc}
+            if (( desc_len > 200 )); then
+                log "WARNING: Task $((i+1)) description is $desc_len chars — consider splitting into smaller tasks"
+            fi
+        done
+
+        # (d) Check referenced file paths from issue body
+        if [[ -f "$issue_body_file" ]]; then
+            local -a found_paths=()
+            local path_match
+            while IFS= read -r path_match; do
+                [[ -n "$path_match" ]] || continue
+                found_paths+=("$path_match")
+                if (( ${#found_paths[@]} >= 10 )); then break; fi
+            done < <(grep -oE '`[a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}`' "$issue_body_file" \
+                | sed 's/`//g' | sort -u | head -10)
+            for path_match in "${found_paths[@]}"; do
+                if [[ ! -e "$path_match" ]]; then
+                    log "WARNING: Referenced file path '$path_match' does not exist in the repo"
+                fi
+            done
+        fi
+
+        log "Plan validated"
 
         # Comment #4: Implementation Plan (with full plan in collapsible)
         local plan_body="$plan_summary"
@@ -1402,7 +1467,7 @@ $impl_summary" "$task_agent"
 
                     # Run quality loop for this task
                     log "Running quality loop for task $task_id"
-                    run_quality_loop "$worktree" "$branch" "task-$task_id"
+                    run_quality_loop "$worktree" "$branch" "task-$task_id" "$task_agent"
 
                 else
                     review_attempts=$((review_attempts+1))
@@ -1458,13 +1523,13 @@ Address the issues and commit."
     else
         set_stage_started "docs"
 
-        local docs_prompt="Write PHPDoc blocks for all modified PHP files in worktree $worktree on branch $branch.
+        local docs_prompt="Write documentation comments for all modified source files in worktree $worktree on branch $branch.
 
-Get modified files with: git diff $BASE_BRANCH...HEAD --name-only -- '*.php' | grep -E '^app/'
+Get modified files with: git diff $BASE_BRANCH...HEAD --name-only
 
-Add comprehensive docblocks and commit with message: docs(issue-$ISSUE_NUMBER): add PHPDoc blocks"
+Add comprehensive documentation comments appropriate to the language and commit with message: docs(issue-$ISSUE_NUMBER): add documentation comments"
 
-        run_stage "docs" "$docs_prompt" "implement-issue-implement.json" "phpdoc-writer"
+        run_stage "docs" "$docs_prompt" "implement-issue-implement.json"
 
         set_stage_completed "docs"
     fi
@@ -1608,13 +1673,13 @@ $code_comments
 Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_result
-            fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "laravel-backend-developer")
+            fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment #13: PR Fix Result
-            comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" "$fix_summary" "laravel-backend-developer"
+            comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" "$fix_summary" "$AGENT"
 
             # Re-run quality loop after PR review fixes
             log "Re-running quality loop after PR review fixes..."

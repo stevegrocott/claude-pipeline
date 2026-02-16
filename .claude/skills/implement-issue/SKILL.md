@@ -55,10 +55,10 @@ watch -n 5 'jq -c "{state,stage:.current_stage,task:.current_task,quality:.quali
 | implement | per-task | execute each task from plan |
 | task-review | spec-reviewer | verify task achieved goal |
 | fix | per-task | address review findings |
-| simplify | code-simplifier | clean up code |
-| test | php-test-validator | run test suite |
+| simplify | default | clean up code |
+| test | default | run test suite |
 | review | code-reviewer | internal code review |
-| docs | phpdoc-writer | add PHPDoc blocks |
+| docs | default | add documentation comments |
 | pr | default | create/update PR |
 | spec-review | spec-reviewer | verify PR achieves issue goals |
 | code-review | code-reviewer | final code quality check |
