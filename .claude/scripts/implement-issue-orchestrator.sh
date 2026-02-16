@@ -31,6 +31,114 @@ readonly RATE_LIMIT_BUFFER=60
 readonly RATE_LIMIT_DEFAULT_WAIT=3600
 
 # =============================================================================
+# PROJECT PIPELINE CONFIG (.claude-pipeline.json)
+# =============================================================================
+
+PIPELINE_CONFIG_FILE=".claude-pipeline.json"
+CFG_BUILD_COMMAND=""
+CFG_HEALTH_CHECK_URL=""
+CFG_HEALTH_CHECK_TIMEOUT=120
+CFG_HEALTH_CHECK_INTERVAL=5
+CFG_UNIT_TEST_COMMAND=""
+CFG_E2E_TEST_COMMAND=""
+CFG_PLAYWRIGHT_USE_CLI=false
+CFG_PLAYWRIGHT_FORBID_MCP=false
+
+load_pipeline_config() {
+    if [[ ! -f "$PIPELINE_CONFIG_FILE" ]]; then
+        log "No $PIPELINE_CONFIG_FILE found — using defaults"
+        return 0
+    fi
+
+    log "Loading pipeline config from $PIPELINE_CONFIG_FILE"
+
+    CFG_BUILD_COMMAND=$(jq -r '.build.command // empty' "$PIPELINE_CONFIG_FILE")
+    CFG_HEALTH_CHECK_URL=$(jq -r '.build.health_check_url // empty' "$PIPELINE_CONFIG_FILE")
+    CFG_HEALTH_CHECK_TIMEOUT=$(jq -r '.build.health_check_timeout // 120' "$PIPELINE_CONFIG_FILE")
+    CFG_HEALTH_CHECK_INTERVAL=$(jq -r '.build.health_check_interval // 5' "$PIPELINE_CONFIG_FILE")
+    CFG_UNIT_TEST_COMMAND=$(jq -r '.test.unit_command // empty' "$PIPELINE_CONFIG_FILE")
+    CFG_E2E_TEST_COMMAND=$(jq -r '.test.e2e_command // empty' "$PIPELINE_CONFIG_FILE")
+    CFG_PLAYWRIGHT_USE_CLI=$(jq -r '.playwright.use_cli // false' "$PIPELINE_CONFIG_FILE")
+    CFG_PLAYWRIGHT_FORBID_MCP=$(jq -r '.playwright.forbid_mcp // false' "$PIPELINE_CONFIG_FILE")
+
+    [[ -n "$CFG_BUILD_COMMAND" ]] && log "  Build: $CFG_BUILD_COMMAND"
+    [[ -n "$CFG_HEALTH_CHECK_URL" ]] && log "  Health: $CFG_HEALTH_CHECK_URL (timeout: ${CFG_HEALTH_CHECK_TIMEOUT}s)"
+    [[ -n "$CFG_UNIT_TEST_COMMAND" ]] && log "  Unit tests: $CFG_UNIT_TEST_COMMAND"
+    [[ -n "$CFG_E2E_TEST_COMMAND" ]] && log "  E2E tests: $CFG_E2E_TEST_COMMAND"
+    [[ "$CFG_PLAYWRIGHT_USE_CLI" == "true" ]] && log "  Playwright: CLI mode (MCP forbidden: $CFG_PLAYWRIGHT_FORBID_MCP)"
+}
+
+# =============================================================================
+# PRE-TEST BUILD HOOK
+# =============================================================================
+
+# Runs build command and waits for health check if configured
+# Returns 0 on success, 1 on failure
+run_pre_test_build() {
+    if [[ -z "$CFG_BUILD_COMMAND" ]]; then
+        log "No build command configured — skipping pre-test build"
+        return 0
+    fi
+
+    log "Running pre-test build: $CFG_BUILD_COMMAND"
+    local build_log="$LOG_BASE/stages/$(next_stage_log "pre-test-build")"
+
+    local build_exit=0
+    eval "$CFG_BUILD_COMMAND" >> "$build_log" 2>&1 || build_exit=$?
+
+    if (( build_exit != 0 )); then
+        log_error "Pre-test build failed (exit code: $build_exit)"
+        log_error "See: $build_log"
+        return 1
+    fi
+
+    log "Build completed successfully"
+
+    # Health check polling
+    if [[ -n "$CFG_HEALTH_CHECK_URL" ]]; then
+        log "Waiting for health check: $CFG_HEALTH_CHECK_URL (timeout: ${CFG_HEALTH_CHECK_TIMEOUT}s)"
+        local elapsed=0
+
+        while (( elapsed < CFG_HEALTH_CHECK_TIMEOUT )); do
+            local http_code
+            http_code=$(curl -s -o /dev/null -w '%{http_code}' "$CFG_HEALTH_CHECK_URL" 2>/dev/null || echo "000")
+
+            if [[ "$http_code" == "200" ]]; then
+                log "Health check passed (${elapsed}s)"
+                return 0
+            fi
+
+            sleep "$CFG_HEALTH_CHECK_INTERVAL"
+            elapsed=$((elapsed + CFG_HEALTH_CHECK_INTERVAL))
+        done
+
+        log_error "Health check timed out after ${CFG_HEALTH_CHECK_TIMEOUT}s"
+        return 1
+    fi
+
+    return 0
+}
+
+# =============================================================================
+# PORTABLE TIMEOUT (macOS does not ship GNU timeout)
+# =============================================================================
+
+if ! command -v timeout &>/dev/null; then
+    timeout() {
+        local duration="$1"; shift
+        perl -e '
+            use POSIX ":sys_wait_h";
+            alarm shift @ARGV;
+            $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
+            $pid = fork // die "fork: $!";
+            if ($pid == 0) { exec @ARGV; die "exec: $!" }
+            waitpid($pid, 0);
+            exit ($? >> 8);
+        ' "$duration" "$@"
+    }
+fi
+
+# =============================================================================
 # ARGUMENT PARSING
 # =============================================================================
 
@@ -466,7 +574,8 @@ sync_status_to_log() {
 	if [[ -n "$LOG_BASE" && -d "$LOG_BASE" && -f "$STATUS_FILE" ]]; then
 		local target="$LOG_BASE/status.json"
 		# Avoid copying file to itself (happens with --resume-from)
-		if [[ "$(realpath "$STATUS_FILE")" != "$(realpath "$target")" ]]; then
+		# Guard: realpath fails if target doesn't exist yet (first sync call)
+		if [[ ! -f "$target" ]] || [[ "$(realpath "$STATUS_FILE")" != "$(realpath "$target")" ]]; then
 			cp "$STATUS_FILE" "$target"
 		fi
 	fi
@@ -476,7 +585,22 @@ sync_status_to_log() {
 # GITHUB COMMENT HELPERS
 # =============================================================================
 
-REPO="${GITHUB_REPO:-OWNER/REPO}"
+# Auto-detect repository: env var > gh CLI > git remote
+if [[ -n "${GITHUB_REPO:-}" ]]; then
+	REPO="$GITHUB_REPO"
+elif REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) && [[ -n "$REPO" ]]; then
+	: # REPO already set by command substitution
+else
+	# Parse from git remote (handles both HTTPS and SSH URLs)
+	REPO=$(git remote get-url origin 2>/dev/null | sed -E 's|.*github\.com[:/]||; s|\.git$||')
+fi
+
+if [[ -z "$REPO" ]]; then
+	echo "ERROR: Could not determine GitHub repository." >&2
+	echo "Set GITHUB_REPO=owner/repo or run from a repo with a GitHub remote." >&2
+	exit 3
+fi
+log "Using GitHub repository: $REPO"
 
 # comment_issue <title> <body> [agent]
 # If agent is provided, shows "Written by `agent`", otherwise "Posted by orchestrator"
@@ -502,7 +626,7 @@ EOF
 )
 
 	log "Commenting on issue #$ISSUE_NUMBER: $title"
-	if ! gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$comment" 2>/dev/null; then
+	if ! gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
 		log_error "Failed to comment on issue #$ISSUE_NUMBER"
 	fi
 }
@@ -532,7 +656,7 @@ EOF
 )
 
 	log "Commenting on PR #$pr_num: $title"
-	if ! gh pr comment "$pr_num" --repo "$REPO" --body "$comment" 2>/dev/null; then
+	if ! gh pr comment "$pr_num" --repo "$REPO" --body "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
 		log_error "Failed to comment on PR #$pr_num"
 	fi
 }
@@ -648,7 +772,7 @@ run_stage() {
     local output
     local exit_code=0
 
-    output=$(timeout "$STAGE_TIMEOUT" claude -p "$prompt" \
+    output=$(timeout "$STAGE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
         "${agent_args[@]}" \
         --dangerously-skip-permissions \
         --output-format json \
@@ -670,7 +794,7 @@ run_stage() {
     if detect_rate_limit "$output"; then
         handle_rate_limit "$output"
         # Retry
-        output=$(timeout "$STAGE_TIMEOUT" claude -p "$prompt" \
+        output=$(timeout "$STAGE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
             "${agent_args[@]}" \
             --dangerously-skip-permissions \
             --output-format json \
@@ -704,7 +828,7 @@ run_stage() {
 #   $1 - working directory
 #   $2 - branch name
 #   $3 - stage prefix for logging (e.g., "task-1" or "pr-fix")
-#   $4 - agent name for fix stage (optional, defaults to no agent)
+#   $4 - agent to use for fix stages (optional, falls back to global $AGENT)
 # Returns:
 #   0 on success (approved)
 #   2 on max iterations exceeded (calls exit 2)
@@ -712,7 +836,7 @@ run_quality_loop() {
     local loop_dir="$1"
     local loop_branch="$2"
     local stage_prefix="${3:-main}"
-    local fix_agent="${4:-}"
+    local loop_agent="${4:-$AGENT}"
 
     local loop_approved=false
     local loop_iteration=0  # Per-loop counter (resets each call)
@@ -732,11 +856,13 @@ run_quality_loop() {
         # -------------------------------------------------------------------------
         # SIMPLIFY → Issue comment #7
         # -------------------------------------------------------------------------
-        local simplify_prompt="Simplify modified source files in working directory $loop_dir on branch $loop_branch.
+        local simplify_prompt="Simplify modified TypeScript/React files in the current branch in working directory $loop_dir on branch $loop_branch.
 
-IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify code that is directly related to the issue's goals. Do NOT apply general modernization or style changes to files that were only incidentally touched or are outside the issue's focus area.
+IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify code that is directly related to the issue's goals. Do NOT apply unrelated refactoring to files that were only incidentally touched or are outside the issue's focus area.
 
-If no source files were modified as part of this issue's implementation, make no changes and report 'No changes to simplify'.
+Get modified files with: git -C $loop_dir diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx'
+
+If no TypeScript/React files were modified as part of this issue's implementation, make no changes and report 'No changes to simplify'.
 
 Simplify code for clarity and consistency without changing functionality.
 Output a summary of changes made."
@@ -796,13 +922,13 @@ $review_comments
 Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_result
-            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$fix_agent")
+            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment #10: Fix results (review fix)
-            comment_issue "Quality Loop [$stage_prefix]: Review Fix ($loop_iteration/$MAX_QUALITY_ITERATIONS)" "$fix_summary" "$fix_agent"
+            comment_issue "Quality Loop [$stage_prefix]: Review Fix ($loop_iteration/$MAX_QUALITY_ITERATIONS)" "$fix_summary" "$loop_agent"
         fi
     done
 
@@ -816,22 +942,22 @@ Fix the issues and commit. Output a summary of fixes applied."
 # Run the test loop (test -> validate -> fix, repeat until pass)
 # Called once after all tasks complete
 # Flow:
-#   1. Run tests (test-validator)
-#   2. If tests fail: fix with the designated agent, loop
-#   3. If tests pass: validate test quality (test-validator, scoped to issue)
-#   4. If validation fails: fix with the designated agent, loop
+#   1. Run tests (default agent)
+#   2. If tests fail: fix with task agent, loop
+#   3. If tests pass: validate test quality (default, scoped to issue)
+#   4. If validation fails: fix with task agent, loop
 #   5. If validation passes: done
 # Arguments:
 #   $1 - working directory
 #   $2 - branch name
-#   $3 - agent name for fix stage (optional, defaults to no agent)
+#   $3 - agent to use for fix stages (optional, falls back to global $AGENT)
 # Returns:
 #   0 on success (tests pass and validated)
 #   2 on max iterations exceeded (calls exit 2)
 run_test_loop() {
     local loop_dir="$1"
     local loop_branch="$2"
-    local fix_agent="${3:-}"
+    local loop_agent="${3:-$AGENT}"
 
     local loop_complete=false
     local test_iteration=0
@@ -853,14 +979,39 @@ run_test_loop() {
         # -------------------------------------------------------------------------
         # TEST EXECUTION → Issue comment
         # -------------------------------------------------------------------------
-        local test_prompt="Run the project's test suite in working directory $loop_dir.
+        local unit_cmd="${CFG_UNIT_TEST_COMMAND:-npm test}"
+        local e2e_cmd="${CFG_E2E_TEST_COMMAND:-}"
+        local mcp_warning=""
+        if [[ "$CFG_PLAYWRIGHT_FORBID_MCP" == "true" ]]; then
+            mcp_warning="
 
-Detect the project type and run the appropriate test command (e.g., npm test, pytest, go test, etc.).
+CRITICAL: Do NOT use Playwright MCP tools (browser_snapshot, browser_click, etc.) for testing.
+MCP browser tools burn 5-10x more context tokens than CLI runners.
+Always use CLI test commands as specified below."
+        fi
 
-Report pass/fail, test counts, and any failures. Output a summary suitable for a GitHub comment."
+        local test_prompt="Run tests in working directory $loop_dir:
+$mcp_warning
+
+STEP 1 - UNIT TESTS:
+Run: cd $loop_dir && $unit_cmd
+Report pass/fail counts."
+
+        if [[ -n "$e2e_cmd" ]]; then
+            test_prompt="$test_prompt
+
+STEP 2 - E2E TESTS:
+Run: cd $loop_dir && $e2e_cmd
+Parse the JSON reporter output for pass/fail/count.
+Do NOT use MCP Playwright browser tools. Use the CLI command above."
+        fi
+
+        test_prompt="$test_prompt
+
+Output a combined summary suitable for a GitHub comment."
 
         local test_result
-        test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json" "test-validator")
+        test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json" "default")
 
         local test_status test_summary
         test_status=$(printf '%s' "$test_result" | jq -r '.result')
@@ -871,7 +1022,7 @@ Report pass/fail, test counts, and any failures. Output a summary suitable for a
         [[ "$test_status" == "failed" ]] && test_icon="❌"
         comment_issue "Test Loop: Tests ($test_iteration/$MAX_TEST_ITERATIONS)" "$test_icon **Result:** $test_status
 
-$test_summary" "test-validator"
+$test_summary" "default"
 
         if [[ "$test_status" == "failed" ]]; then
             log "Tests failed. Getting failures and fixing..."
@@ -886,13 +1037,13 @@ $failures
 Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_result
-            fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$fix_agent")
+            fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment: Fix results
-            comment_issue "Test Loop: Test Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$fix_agent"
+            comment_issue "Test Loop: Test Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$loop_agent"
             continue
         fi
 
@@ -902,29 +1053,30 @@ Fix the issues and commit. Output a summary of fixes applied."
         log "Tests passed. Running test validation for issue #$ISSUE_NUMBER..."
 
         local validate_prompt="Validate test comprehensiveness and integrity for issue #$ISSUE_NUMBER in working directory $loop_dir.
+$mcp_warning
 
-SCOPE: Only validate tests related to this issue's implementation. Get modified source files with:
-git -C $loop_dir diff $BASE_BRANCH...HEAD --name-only
+SCOPE: Only validate tests related to this issue's implementation. Get modified TypeScript files with:
+git -C $loop_dir diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx' | grep -E '^(apps|packages)/'
 
 IMPORTANT SCOPE CONSTRAINTS:
-- If NO testable source code was modified (e.g., CSS-only, templates, config changes), output 'passed' immediately. Do NOT request new tests for non-code changes.
-- Only validate tests for modified implementation files (services, controllers, models, etc.)
-- Do NOT request tests for views, routes, config, or static assets
+- If NO testable TypeScript code was modified (e.g., config-only, style-only changes), output 'passed' immediately. Do NOT request new tests for non-logic changes.
+- Only validate tests for modified TypeScript files in apps/ or packages/ (services, routes, components, hooks)
+- Do NOT request tests for config files, static assets, or type-only changes
 
 For each modified implementation file that warrants testing, identify the corresponding test file and audit:
-1. Run the project's test suite using the appropriate test runner
+1. Run the test suite: cd $loop_dir && $unit_cmd
 2. Check for TODO/FIXME/incomplete tests
-3. Check for hollow assertions (e.g., assertTrue(true), no assertions, expect(true).toBe(true))
+3. Check for hollow assertions (expect(true).toBe(true), no assertions)
 4. Verify edge cases and error conditions are tested
 5. Check for mock abuse patterns
 
 Output:
-- result: 'passed' if tests are comprehensive OR if no testable code was modified, 'failed' if issues found
+- result: 'passed' if tests are comprehensive OR if no testable TypeScript was modified, 'failed' if issues found
 - issues: array of issues found (if any)
-- summary: suitable for a GitHub comment (note if validation was skipped due to no testable code changes)"
+- summary: suitable for a GitHub comment (note if validation was skipped due to no testable changes)"
 
         local validate_result
-        validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json" "test-validator")
+        validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json" "default")
 
         local validate_status validate_summary
         validate_status=$(printf '%s' "$validate_result" | jq -r '.result')
@@ -935,7 +1087,7 @@ Output:
         [[ "$validate_status" == "changes_requested" || "$validate_status" == "failed" ]] && validate_icon="🔄"
         comment_issue "Test Loop: Validation ($test_iteration/$MAX_TEST_ITERATIONS)" "$validate_icon **Result:** $validate_status
 
-$validate_summary" "test-validator"
+$validate_summary" "default"
 
         if [[ "$validate_status" == "approved" || "$validate_status" == "passed" ]]; then
             loop_complete=true
@@ -953,13 +1105,13 @@ Fix the test quality issues (add missing assertions, remove TODOs, add edge case
 Output a summary of fixes applied."
 
             local fix_result
-            fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$fix_agent")
+            fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment: Fix results
-            comment_issue "Test Loop: Validation Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$fix_agent"
+            comment_issue "Test Loop: Validation Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$loop_agent"
         fi
     done
 
@@ -973,6 +1125,9 @@ Output a summary of fixes applied."
 main() {
     # Declare local variables used throughout main
     local branch tasks_json task_count completed_tasks
+
+    # Load project pipeline config (build commands, test commands, etc.)
+    load_pipeline_config
 
     # -------------------------------------------------------------------------
     # RESUME VS FRESH START INITIALIZATION
@@ -1043,7 +1198,7 @@ Log directory: \`$LOG_BASE\`"
 
         log "Fetching issue #$ISSUE_NUMBER from GitHub..."
         local issue_body
-        issue_body=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body -q '.body' 2>/dev/null)
+        issue_body=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body -q '.body' 2>>"${LOG_FILE:-/dev/stderr}")
 
         if [[ -z "$issue_body" ]]; then
             log_error "Failed to fetch issue #$ISSUE_NUMBER body"
@@ -1058,7 +1213,7 @@ Log directory: \`$LOG_BASE\`"
         # Format: - [ ] `[agent-name]` Task description
         log "Parsing implementation tasks from issue body..."
         local tasks_section
-        tasks_section=$(printf '%s' "$issue_body" | sed -n '/^## Implementation Tasks/,/^## /p' | head -n -1)
+        tasks_section=$(printf '%s' "$issue_body" | sed -n '/^## Implementation Tasks/,/^## /p' | sed '$d')
 
         if [[ -z "$tasks_section" ]]; then
             log_error "No '## Implementation Tasks' section found in issue #$ISSUE_NUMBER"
@@ -1067,12 +1222,12 @@ Log directory: \`$LOG_BASE\`"
         fi
 
         # Parse tasks into JSON array
+        # Regex matches only unchecked boxes: - [ ] `[agent]` description
+        # This is intentional — checked boxes [x] are considered already
+        # complete and are skipped during parsing.
         local task_id=0
         tasks_json="[]"
         while IFS= read -r line; do
-            # Match task lines: - [ ] `[agent-name]` Task description
-            # Captures: BASH_REMATCH[1]=agent-name, BASH_REMATCH[2]=description
-            # Optional complexity hint like **(S)** is included in the description
             if [[ "$line" =~ ^-\ \[\ \]\ \`\[([^\]]+)\]\`\ (.+)$ ]]; then
                 task_id=$((task_id + 1))
                 local agent="${BASH_REMATCH[1]}"
@@ -1126,16 +1281,7 @@ Log directory: \`$LOG_BASE\`"
     else
         set_stage_started "validate_plan"
 
-        local task_count
-        task_count=$(printf '%s' "$tasks_json" | jq length)
-
-        if (( task_count == 0 )); then
-            log_error "No tasks to implement"
-            set_final_state "error"
-            exit 1
-        fi
-
-        # (a) Validate ## Implementation Tasks section exists
+        # (c) Validate ## Implementation Tasks section exists in saved issue body
         local issue_body_file="$LOG_BASE/context/issue-body.md"
         if [[ -f "$issue_body_file" ]]; then
             if ! grep -q '^## Implementation Tasks' "$issue_body_file"; then
@@ -1147,7 +1293,16 @@ Log directory: \`$LOG_BASE\`"
             log "WARNING: Issue body file not found at $issue_body_file — skipping section check"
         fi
 
-        # (b) Verify agent names have matching definition files
+        local task_count
+        task_count=$(printf '%s' "$tasks_json" | jq length)
+
+        if (( task_count == 0 )); then
+            log_error "No tasks to implement"
+            set_final_state "error"
+            exit 1
+        fi
+
+        # (a) Verify agent names have definitions in .claude/agents/
         local agents_dir="$SCRIPT_DIR/../agents"
         for ((i=0; i<task_count; i++)); do
             local check_agent
@@ -1157,7 +1312,7 @@ Log directory: \`$LOG_BASE\`"
             fi
         done
 
-        # (c) Warn about oversized descriptions
+        # (b) Warn about large task descriptions (>200 chars)
         for ((i=0; i<task_count; i++)); do
             local check_desc
             check_desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
@@ -1167,16 +1322,21 @@ Log directory: \`$LOG_BASE\`"
             fi
         done
 
-        # (d) Check file paths referenced in issue body
+        # (d) Extract backtick-quoted file paths from issue body and check existence
         if [[ -f "$issue_body_file" ]]; then
             local -a found_paths=()
             local path_match
             while IFS= read -r path_match; do
                 [[ -n "$path_match" ]] || continue
                 found_paths+=("$path_match")
-                if (( ${#found_paths[@]} >= 10 )); then break; fi
+                if (( ${#found_paths[@]} >= 10 )); then
+                    break
+                fi
             done < <(grep -oE '`[a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}`' "$issue_body_file" \
-                | sed 's/`//g' | sort -u | head -10)
+                | sed 's/`//g' \
+                | sort -u \
+                | head -10)
+
             for path_match in "${found_paths[@]}"; do
                 if [[ ! -e "$path_match" ]]; then
                     log "WARNING: Referenced file path '$path_match' does not exist in the repo"
@@ -1335,6 +1495,20 @@ Address the issues and commit."
     fi
 
     # -------------------------------------------------------------------------
+    # STAGE: PRE-TEST BUILD (rebuild containers if configured)
+    # -------------------------------------------------------------------------
+    log "Running pre-test build hook (if configured)..."
+    if ! run_pre_test_build; then
+        log_error "Pre-test build failed — test results would verify stale code"
+        comment_issue "Pre-Test Build Failed" "Build command failed before test loop. Fix build issues before tests can run.
+
+**Command:** \`$CFG_BUILD_COMMAND\`
+**Health check:** \`$CFG_HEALTH_CHECK_URL\`"
+        set_final_state "error"
+        exit 1
+    fi
+
+    # -------------------------------------------------------------------------
     # STAGE: TEST LOOP (after all tasks complete)
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "test_loop"; then
@@ -1343,10 +1517,7 @@ Address the issues and commit."
         set_stage_started "test_loop"
         log "Running test loop after all tasks complete..."
 
-        # Use the first task's agent for test fix stages
-        local test_fix_agent
-        test_fix_agent=$(printf '%s' "$tasks_json" | jq -r '.[0].agent // empty' 2>/dev/null)
-        run_test_loop "." "$branch" "$test_fix_agent"
+        run_test_loop "." "$branch" "$AGENT"
 
         set_stage_completed "test_loop"
         log "Test loop complete."
@@ -1360,13 +1531,12 @@ Address the issues and commit."
     else
         set_stage_started "docs"
 
-        local docs_prompt="Add or update documentation comments for all modified source files on branch $branch in the current working directory.
+        local docs_prompt="Write JSDoc/TSDoc comments for all modified TypeScript files on branch $branch in the current working directory.
 
-Get modified files with: git diff $BASE_BRANCH...HEAD --name-only
+Get modified files with: git diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx' | grep -E '^(apps|packages)/' 
 
-Add comprehensive documentation comments (JSDoc, docstrings, etc. as appropriate for the language) and commit with message: docs(issue-$ISSUE_NUMBER): add documentation comments"
-
-        run_stage "docs" "$docs_prompt" "implement-issue-implement.json"
+Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSUE_NUMBER): add JSDoc comments"
+        run_stage "docs" "$docs_prompt" "implement-issue-implement.json" "default"
 
         set_stage_completed "docs"
     fi
@@ -1428,10 +1598,6 @@ Include 'Closes #$ISSUE_NUMBER' in the body."
         log "Skipping pr_review stage (already completed)"
     else
         set_stage_started "pr_review"
-
-        # Use the first task's agent for PR-level fixes
-        local pr_fix_agent
-        pr_fix_agent=$(printf '%s' "$tasks_json" | jq -r '.[0].agent // empty' 2>/dev/null)
 
         local pr_approved=false
 
@@ -1514,17 +1680,17 @@ $code_comments
 Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_result
-            fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$pr_fix_agent")
+            fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment #13: PR Fix Result
-            comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" "$fix_summary" "$pr_fix_agent"
+            comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" "$fix_summary" "$AGENT"
 
             # Re-run quality loop after PR review fixes
             log "Re-running quality loop after PR review fixes..."
-            run_quality_loop "." "$branch" "pr-fix" "$pr_fix_agent"
+            run_quality_loop "." "$branch" "pr-fix" "$AGENT"
 
             # Push updates
             log "Pushing updates to PR..."
