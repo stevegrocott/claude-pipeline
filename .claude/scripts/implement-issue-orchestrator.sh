@@ -500,7 +500,8 @@ sync_status_to_log() {
 	if [[ -n "$LOG_BASE" && -d "$LOG_BASE" && -f "$STATUS_FILE" ]]; then
 		local target="$LOG_BASE/status.json"
 		# Avoid copying file to itself (happens with --resume-from)
-		if [[ "$(realpath "$STATUS_FILE")" != "$(realpath "$target")" ]]; then
+		# Guard: realpath fails if target doesn't exist yet (first sync call)
+		if [[ ! -f "$target" ]] || [[ "$(realpath "$STATUS_FILE")" != "$(realpath "$target")" ]]; then
 			cp "$STATUS_FILE" "$target"
 		fi
 	fi
@@ -510,7 +511,22 @@ sync_status_to_log() {
 # GITHUB COMMENT HELPERS
 # =============================================================================
 
-REPO="${GITHUB_REPO:-OWNER/REPO}"
+# Auto-detect repository: env var > gh CLI > git remote
+if [[ -n "${GITHUB_REPO:-}" ]]; then
+	REPO="$GITHUB_REPO"
+elif REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) && [[ -n "$REPO" ]]; then
+	: # REPO already set by command substitution
+else
+	# Parse from git remote (handles both HTTPS and SSH URLs)
+	REPO=$(git remote get-url origin 2>/dev/null | sed -E 's|.*github\.com[:/]||; s|\.git$||')
+fi
+
+if [[ -z "$REPO" ]]; then
+	echo "ERROR: Could not determine GitHub repository." >&2
+	echo "Set GITHUB_REPO=owner/repo or run from a repo with a GitHub remote." >&2
+	exit 3
+fi
+log "Using GitHub repository: $REPO"
 
 # comment_issue <title> <body> [agent]
 # If agent is provided, shows "Written by `agent`", otherwise "Posted by orchestrator"
@@ -536,7 +552,7 @@ EOF
 )
 
 	log "Commenting on issue #$ISSUE_NUMBER: $title"
-	if ! gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$comment" 2>/dev/null; then
+	if ! gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
 		log_error "Failed to comment on issue #$ISSUE_NUMBER"
 	fi
 }
@@ -566,7 +582,7 @@ EOF
 )
 
 	log "Commenting on PR #$pr_num: $title"
-	if ! gh pr comment "$pr_num" --repo "$REPO" --body "$comment" 2>/dev/null; then
+	if ! gh pr comment "$pr_num" --repo "$REPO" --body "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
 		log_error "Failed to comment on PR #$pr_num"
 	fi
 }
