@@ -262,25 +262,25 @@ EOF
     [[ "$main_def" == *'comment_issue "Starting Automated Processing"'* ]]
 }
 
-@test "main flow calls comment_issue after evaluation" {
+@test "main flow calls comment_issue for implementation plan confirmed" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *'comment_issue "Evaluation'* ]]
+    [[ "$main_def" == *'comment_issue "Implementation Plan Confirmed"'* ]]
 }
 
-@test "main flow calls comment_issue for implementation plan" {
+@test "main flow calls comment_issue for task completion" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *'comment_issue "Implementation Plan"'* ]]
+    [[ "$main_def" == *'comment_issue "Task'* ]]
 }
 
-@test "main flow calls comment_issue for task list" {
+@test "main flow calls comment_issue for resuming" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *'comment_issue "Task List"'* ]]
+    [[ "$main_def" == *'comment_issue "Resuming Automated Processing"'* ]]
 }
 
 @test "main flow calls comment_pr for completion" {
@@ -290,9 +290,43 @@ EOF
     [[ "$main_def" == *'comment_pr "$pr_number" "Implementation Complete"'* ]]
 }
 
-@test "quality loop calls comment_issue" {
+@test "quality loop does not call comment_issue for intermediate stages" {
+    # Intermediate quality loop comments were removed in #561 to reduce noise.
+    # Milestone comments (task complete, PR complete) are still posted by main().
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    [[ "$func_def" == *"comment_issue"* ]]
+    [[ "$func_def" != *"comment_issue"* ]]
+}
+
+# =============================================================================
+# QUIET MODE
+# =============================================================================
+
+@test "comment_issue is a no-op when QUIET=true" {
+    local gh_calls="$TEST_TMP/gh-calls.txt"
+    cat > "$TEST_TMP/bin/gh" << EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$gh_calls"
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/gh"
+
+    QUIET=true comment_issue "Test Title" "Test body"
+
+    [ ! -f "$gh_calls" ] || fail "gh should not have been called when QUIET=true"
+}
+
+@test "comment_pr is a no-op when QUIET=true" {
+    local gh_calls="$TEST_TMP/gh-calls.txt"
+    cat > "$TEST_TMP/bin/gh" << EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$gh_calls"
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/gh"
+
+    QUIET=true comment_pr 456 "Test Title" "Test body"
+
+    [ ! -f "$gh_calls" ] || fail "gh should not have been called when QUIET=true"
 }

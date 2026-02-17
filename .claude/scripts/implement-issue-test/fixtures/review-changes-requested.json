@@ -3,6 +3,6 @@
     "structured_output": {
         "status": "success",
         "result": "changes_requested",
-        "comments": "Please fix the following:\n1. Missing PHPDoc on createUser method\n2. UserController should use dependency injection\n3. Variable naming inconsistent"
+        "comments": "Please fix the following:\n1. Missing TSDoc on createUser method\n2. UserRoute should use dependency injection\n3. Variable naming inconsistent"
     }
 }

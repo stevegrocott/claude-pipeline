@@ -1,5 +1,5 @@
 #!/bin/bash
-# DEPRECATED: Use batch-orchestrator.sh instead. This script is maintained for backward compatibility only.
+# DEPRECATED: Use batch-orchestrator.sh instead. This script has known issues (set -e, OWNER/REPO literal).
 #
 # batch-runner.sh
 # Executes implement-issue and process-pr for a single issue

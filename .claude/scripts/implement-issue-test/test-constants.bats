@@ -39,16 +39,12 @@ teardown() {
 # RETRY LIMITS
 # =============================================================================
 
-@test "MAX_TASK_REVIEW_ATTEMPTS is 3" {
-    [ "$MAX_TASK_REVIEW_ATTEMPTS" -eq 3 ]
-}
-
 @test "MAX_QUALITY_ITERATIONS is 5" {
     [ "$MAX_QUALITY_ITERATIONS" -eq 5 ]
 }
 
-@test "MAX_PR_REVIEW_ITERATIONS is 3" {
-    [ "$MAX_PR_REVIEW_ITERATIONS" -eq 3 ]
+@test "MAX_PR_REVIEW_ITERATIONS is 2" {
+    [ "$MAX_PR_REVIEW_ITERATIONS" -eq 2 ]
 }
 
 # =============================================================================
@@ -104,7 +100,6 @@ teardown() {
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
     [[ "$script_content" == *"readonly STAGE_TIMEOUT"* ]]
-    [[ "$script_content" == *"readonly MAX_TASK_REVIEW_ATTEMPTS"* ]]
     [[ "$script_content" == *"readonly MAX_QUALITY_ITERATIONS"* ]]
     [[ "$script_content" == *"readonly MAX_PR_REVIEW_ITERATIONS"* ]]
     [[ "$script_content" == *"readonly RATE_LIMIT_BUFFER"* ]]
@@ -155,4 +150,66 @@ teardown() {
     # Verify it uses the preferred pattern: set -uo pipefail (without -e)
     [[ "$script_content" == *"set -uo pipefail"* ]] || \
         fail "Script should use 'set -uo pipefail' (without -e) for error handling"
+}
+
+# =============================================================================
+# get_max_review_attempts() - SCALED REVIEW CAPS BY TASK SIZE
+# =============================================================================
+
+@test "get_max_review_attempts is defined" {
+    [ "$(type -t get_max_review_attempts)" = "function" ]
+}
+
+@test "get_max_review_attempts returns 1 for S-size tasks" {
+    local result
+    result=$(get_max_review_attempts "S")
+    [ "$result" -eq 1 ]
+}
+
+@test "get_max_review_attempts returns 2 for M-size tasks" {
+    local result
+    result=$(get_max_review_attempts "M")
+    [ "$result" -eq 2 ]
+}
+
+@test "get_max_review_attempts returns 3 for L-size tasks" {
+    local result
+    result=$(get_max_review_attempts "L")
+    [ "$result" -eq 3 ]
+}
+
+@test "get_max_review_attempts returns 3 for unknown size (safe default)" {
+    local result
+    result=$(get_max_review_attempts "")
+    [ "$result" -eq 3 ]
+}
+
+@test "get_max_review_attempts returns 3 for unrecognised size (safe default)" {
+    local result
+    result=$(get_max_review_attempts "XL")
+    [ "$result" -eq 3 ]
+}
+
+@test "get_max_review_attempts emits warning to stderr for unrecognised size" {
+    # Capture stderr to a temp file; stdout must still be 3
+    local stderr_file="$TEST_TMP/warn_stderr.txt"
+    local stdout_val
+    stdout_val=$(get_max_review_attempts "XL" 2>"$stderr_file")
+
+    [ "$stdout_val" = "3" ]
+    grep -q "WARN" "$stderr_file"
+}
+
+@test "while loop uses get_max_review_attempts not fixed MAX_TASK_REVIEW_ATTEMPTS" {
+    local script_content
+    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
+
+    # Must call the function
+    [[ "$script_content" == *"get_max_review_attempts"* ]]
+
+    # max_attempts must be pre-computed from the function before the loop
+    [[ "$script_content" == *'max_attempts=$(get_max_review_attempts'* ]]
+
+    # The while loop condition must use the pre-computed variable
+    [[ "$script_content" == *'review_attempts < max_attempts'* ]]
 }

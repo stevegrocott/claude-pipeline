@@ -1,5 +1,6 @@
 ---
 name: spec-reviewer
+model: sonnet
 description: Validates PR implementation against issue requirements and implementation plan. Focuses on goal achievement, not implementation details. Flags scope creep (unrelated features) for removal.
 ---
 

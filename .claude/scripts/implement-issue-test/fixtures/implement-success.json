@@ -4,8 +4,8 @@
         "status": "success",
         "commit": "abc1234def5678",
         "files_changed": [
-            "app/Models/User.php",
-            "app/Http/Controllers/UserController.php"
+            "apps/backend/src/models/user.ts",
+            "apps/backend/src/routes/users.ts"
         ]
     }
 }

@@ -8,18 +8,18 @@
         "tasks": [
             {
                 "id": 1,
-                "description": "Create the user model migration",
-                "agent": "laravel-backend-developer"
+                "description": "Create the Prisma migration for users",
+                "agent": "fastify-backend-developer"
             },
             {
                 "id": 2,
-                "description": "Implement the UserController",
-                "agent": "laravel-backend-developer"
+                "description": "Implement the user routes",
+                "agent": "fastify-backend-developer"
             },
             {
                 "id": 3,
-                "description": "Add frontend styling",
-                "agent": "bulletproof-frontend-developer"
+                "description": "Add frontend components",
+                "agent": "react-frontend-developer"
             }
         ]
     }

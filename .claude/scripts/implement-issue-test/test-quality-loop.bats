@@ -157,15 +157,17 @@ teardown() {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    # Simplify comes before test
-    local simplify_pos test_pos review_pos
+    # Quality loop runs: simplify → review (tests are handled by run_test_loop separately)
+    local simplify_pos review_pos
     simplify_pos=$(echo "$func_def" | grep -n "simplify" | head -1 | cut -d: -f1)
-    test_pos=$(echo "$func_def" | grep -n "test-\${stage_prefix}" | head -1 | cut -d: -f1)
     review_pos=$(echo "$func_def" | grep -n "review-\${stage_prefix}" | head -1 | cut -d: -f1)
 
-    # Test comes after simplify
+    # Both stages must be present
     [ -n "$simplify_pos" ]
-    [ -n "$test_pos" ] || [ -n "$(echo "$func_def" | grep -n 'test-.*iter')" ]
+    [ -n "$review_pos" ]
+
+    # Simplify comes before review
+    [ "$simplify_pos" -lt "$review_pos" ]
 }
 
 # =============================================================================
@@ -188,25 +190,26 @@ teardown() {
     [[ "$func_def" == *"implement-issue-simplify.json"* ]]
 }
 
-@test "quality loop calls comment_issue for each sub-stage" {
+@test "quality loop does not call comment_issue for intermediate sub-stages" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    # Check for comment_issue calls
-    [[ "$func_def" == *"comment_issue"* ]]
+    # No comment_issue calls must appear anywhere in run_quality_loop.
+    # Using "comment_issue" as the anchor ensures any future call with any title is caught.
+    [[ "$func_def" != *"comment_issue"* ]]
 }
 
 # =============================================================================
 # BEHAVIORAL TESTS - RETRY LOGIC
 # =============================================================================
 
-@test "quality loop retries when tests fail then pass" {
-    # Use a file to track calls across subshell boundaries
-    local counter_file="$TEST_TMP/retry_test_count"
+@test "quality loop retries when review requests changes then approves" {
+    # Use a file to track review calls across subshell boundaries
+    local counter_file="$TEST_TMP/retry_review_count"
     echo "0" > "$counter_file"
     export counter_file
 
-    # Mock run_stage to fail tests on first attempt, pass on second
+    # Mock run_stage: review requests changes on first call, approves on second
     run_stage() {
         local stage_name="$1"
 
@@ -214,7 +217,7 @@ teardown() {
             simplify-*)
                 echo '{"status":"success","summary":"Simplified code"}'
                 ;;
-            test-*)
+            review-*)
                 # Read and increment counter
                 local count
                 count=$(cat "$counter_file")
@@ -222,18 +225,15 @@ teardown() {
                 echo "$count" > "$counter_file"
 
                 if [[ "$count" -le 1 ]]; then
-                    # First test call fails
-                    echo '{"status":"success","result":"failed","failures":[{"test":"TestCase","message":"failed"}],"summary":"1 test failed"}'
+                    # First review requests changes
+                    echo '{"status":"success","result":"changes_requested","comments":"Fix naming conventions","summary":"1 issue found"}'
                 else
-                    # Second test call passes
-                    echo '{"status":"success","result":"passed","summary":"All tests passed"}'
+                    # Second review approves
+                    echo '{"status":"success","result":"approved","summary":"All issues resolved"}'
                 fi
                 ;;
-            review-*)
-                echo '{"status":"success","result":"approved","summary":"Code approved"}'
-                ;;
-            fix-*)
-                echo '{"status":"success","summary":"Fixed test failures"}'
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed naming conventions"}'
                 ;;
         esac
     }
@@ -273,12 +273,12 @@ teardown() {
 }
 
 @test "quality loop increments iteration on each retry" {
-    # Use a file to track calls across subshell boundaries
-    local counter_file="$TEST_TMP/test_call_count"
+    # Use a file to track review calls across subshell boundaries
+    local counter_file="$TEST_TMP/review_call_count"
     echo "0" > "$counter_file"
     export counter_file
 
-    # Mock run_stage to track iterations and succeed on 2nd quality iteration
+    # Mock run_stage: review requests changes on first call, approves on second
     run_stage() {
         local stage_name="$1"
 
@@ -286,7 +286,7 @@ teardown() {
             simplify-*)
                 echo '{"status":"success","summary":"Simplified"}'
                 ;;
-            test-*)
+            review-*)
                 # Read and increment counter
                 local count
                 count=$(cat "$counter_file")
@@ -294,15 +294,12 @@ teardown() {
                 echo "$count" > "$counter_file"
 
                 if [[ "$count" -lt 2 ]]; then
-                    echo '{"status":"success","result":"failed","failures":[{"test":"Test","message":"failed"}],"summary":"Test failed"}'
+                    echo '{"status":"success","result":"changes_requested","comments":"Fix issue","summary":"Changes needed"}'
                 else
-                    echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
                 fi
                 ;;
-            review-*)
-                echo '{"status":"success","result":"approved","summary":"Approved"}'
-                ;;
-            fix-*)
+            fix-review-*)
                 echo '{"status":"success","summary":"Fixed"}'
                 ;;
         esac
@@ -315,8 +312,117 @@ teardown() {
 
     run_quality_loop "/tmp/worktree" "test-branch" "test"
 
-    # Verify we went through multiple test iterations
+    # Verify we went through multiple review iterations
     local final_count
     final_count=$(cat "$counter_file")
     [ "$final_count" -ge 2 ]
+}
+
+# =============================================================================
+# should_run_quality_loop() HELPER FUNCTION
+# =============================================================================
+
+@test "should_run_quality_loop function is defined" {
+    [ "$(type -t should_run_quality_loop)" = "function" ]
+}
+
+@test "should_run_quality_loop returns 1 (skip) for S-size tasks" {
+    run should_run_quality_loop "S"
+    [ "$status" -eq 1 ]
+}
+
+@test "should_run_quality_loop returns 0 (run) for M-size tasks" {
+    run should_run_quality_loop "M"
+    [ "$status" -eq 0 ]
+}
+
+@test "should_run_quality_loop returns 0 (run) for L-size tasks" {
+    run should_run_quality_loop "L"
+    [ "$status" -eq 0 ]
+}
+
+@test "should_run_quality_loop returns 0 (run) for unknown size (safe default)" {
+    run should_run_quality_loop "X"
+    [ "$status" -eq 0 ]
+}
+
+@test "should_run_quality_loop returns 0 (run) when size is empty (safe default)" {
+    run should_run_quality_loop ""
+    [ "$status" -eq 0 ]
+}
+
+@test "quality loop is skipped for S-size tasks in implementation loop" {
+    local orchestrator_src
+    orchestrator_src=$(cat "$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh" 2>/dev/null || true)
+
+    # Guard must appear as a conditional wrapping run_quality_loop:
+    #   if should_run_quality_loop ...; then
+    #       run_quality_loop ...
+    # Verify:
+    #   1. The if-guard line exists
+    #   2. A run_quality_loop call appears on the immediately following non-blank line (within 5 lines)
+    local guard_line
+    guard_line=$(grep -n "if should_run_quality_loop" <<< "$orchestrator_src" | head -1 | cut -d: -f1)
+
+    [[ -n "$guard_line" ]]
+
+    # The then-body (within 5 lines after guard) must contain a run_quality_loop call
+    local then_body
+    then_body=$(awk "NR>$guard_line && NR<=$((guard_line+5))" <<< "$orchestrator_src")
+    grep -q "run_quality_loop" <<< "$then_body"
+}
+
+# =============================================================================
+# --quiet FLAG: comment_issue suppression
+# =============================================================================
+
+@test "comment_issue is suppressed when QUIET=true" {
+    # Track whether the mock gh binary was invoked (it records calls via a file)
+    local gh_call_file="$TEST_TMP/gh_issue_comment_calls"
+    echo "0" > "$gh_call_file"
+    export gh_call_file
+
+    # Replace the mock gh with one that records invocations
+    cat > "$TEST_TMP/bin/gh" << GHEOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "comment" ]]; then
+    count=\$(cat "$gh_call_file")
+    count=\$((count + 1))
+    echo "\$count" > "$gh_call_file"
+fi
+GHEOF
+    chmod +x "$TEST_TMP/bin/gh"
+
+    # Use the real comment_issue from the orchestrator (already sourced via source_orchestrator_functions)
+    QUIET=true
+    comment_issue "Test Title" "Test body"
+
+    local final_count
+    final_count=$(cat "$gh_call_file")
+    [ "$final_count" -eq 0 ]
+}
+
+@test "comment_issue is not suppressed when QUIET=false" {
+    # Track whether the mock gh binary was invoked
+    local gh_call_file="$TEST_TMP/gh_issue_comment_calls_unquiet"
+    echo "0" > "$gh_call_file"
+    export gh_call_file
+
+    cat > "$TEST_TMP/bin/gh" << GHEOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "issue" && "\${2:-}" == "comment" ]]; then
+    count=\$(cat "$gh_call_file")
+    count=\$((count + 1))
+    echo "\$count" > "$gh_call_file"
+fi
+GHEOF
+    chmod +x "$TEST_TMP/bin/gh"
+
+    # Use the real comment_issue from the orchestrator with QUIET=false
+    QUIET=false
+    comment_issue "Test Title" "Test body"
+
+    local final_count
+    final_count=$(cat "$gh_call_file")
+    [ "$final_count" -eq 1 ]
 }

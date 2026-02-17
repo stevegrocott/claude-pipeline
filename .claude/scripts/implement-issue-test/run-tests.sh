@@ -70,6 +70,7 @@ show_help() {
     echo "  test-stage-runner.bats        Stage runner function tests"
     echo "  test-quality-loop.bats        Quality loop helper tests"
     echo "  test-constants.bats           Configuration constants tests"
+    echo "  test-helper-functions.bats    detect_change_scope / should_run_quality_loop / get_max_review_attempts tests"
     echo "  test-integration.bats         Integration tests"
     echo ""
     echo "Examples:"

@@ -415,7 +415,7 @@ done
 ```
 
 ### Piping Variables to Commands
-**Never use `echo "$var" | command`** — `echo` can mangle data:
+**Never use `echo "$var" | command`** -- `echo` can mangle data:
 - Leading hyphens (`-n`, `-e`) interpreted as echo flags
 - Backslash sequences may be interpreted
 - Behavior varies by shell and options (`xpg_echo`, `POSIXLY_CORRECT`)
@@ -497,8 +497,8 @@ log() { echo "$*" | tee -a "$LOG_FILE" >&2; }
 
 ### Design Rule
 When designing functions, decide upfront:
-- **Returns data via stdout** → No logging to stdout, use stderr
-- **Performs actions only** → Can log to stdout freely
+- **Returns data via stdout** -> No logging to stdout, use stderr
+- **Performs actions only** -> Can log to stdout freely
 
 ```bash
 # Data-returning function: stdout is sacred
@@ -664,10 +664,10 @@ When writing scripts for this project:
 ### When to Write BATS Tests
 
 Write BATS tests for:
-- **Any script with functions** — Unit test individual functions
-- **Any script with argument parsing** — Test all flag combinations
-- **Any script with error handling** — Test failure paths
-- **Any script that modifies state** — Test setup/teardown behavior
+- **Any script with functions** -- Unit test individual functions
+- **Any script with argument parsing** -- Test all flag combinations
+- **Any script with error handling** -- Test failure paths
+- **Any script that modifies state** -- Test setup/teardown behavior
 
 Skip BATS tests only for:
 - Simple one-liner wrapper scripts
@@ -854,15 +854,15 @@ bats --filter "fails when" test-feature.bats
 
 ## Test Validation Workflow
 
-**After writing BATS tests, request bats-test-validator review.**
+**After writing BATS tests, request code-reviewer review.**
 
 When you complete a script with BATS tests:
 
 1. **Run the tests yourself** to verify they pass
 2. **Report to the orchestrating agent** that tests are ready for validation
-3. **Request bats-test-validator subagent** to audit test quality
+3. **Request code-reviewer subagent** to audit test quality
 
-The bats-test-validator will check for:
+The code-reviewer will check for:
 - TODO/incomplete tests
 - Hollow assertions (tests that always pass)
 - Missing edge cases
@@ -886,10 +886,10 @@ Test Results:
   X tests passed
   0 tests failed
 
-Ready for bats-test-validator review.
+Ready for code-reviewer review.
 ```
 
-If bats-test-validator finds issues, fix them and re-run validation.
+If code-reviewer finds issues, fix them and re-run validation.
 
 ---
 

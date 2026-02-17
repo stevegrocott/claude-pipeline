@@ -58,9 +58,9 @@ teardown() {
     # We can't run the full script, but we can verify it parses args correctly
     # by checking the output header. Timeout is expected (exit 124) since script
     # will hang waiting for external commands after printing header.
-    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --agent laravel-backend-developer 2>&1
+    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --agent fastify-backend-developer 2>&1
     [[ "$status" -eq 0 || "$status" -eq 124 ]] || fail "Unexpected exit status: $status"
-    [[ "$output" == *"Agent: laravel-backend-developer"* ]]
+    [[ "$output" == *"Agent: fastify-backend-developer"* ]]
 }
 
 @test "fails with --agent but no value" {
@@ -140,4 +140,19 @@ teardown() {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
     [[ "$status" -eq 0 || "$status" -eq 124 ]] || fail "Unexpected exit status: $status"
     [[ "$output" == *"Status file: status.json"* ]]
+}
+
+# =============================================================================
+# --quiet FLAG
+# =============================================================================
+
+@test "--quiet flag is accepted without error" {
+    run bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --quiet --help 2>&1
+    [ "$status" -eq 3 ]
+    [[ "$output" != *"Unknown option: --quiet"* ]]
+}
+
+@test "--quiet flag does not appear as unknown option" {
+    run bash "$ORCHESTRATOR_SCRIPT" --quiet 2>&1
+    [[ "$output" != *"Unknown option: --quiet"* ]]
 }

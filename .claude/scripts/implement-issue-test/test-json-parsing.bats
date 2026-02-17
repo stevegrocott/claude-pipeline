@@ -183,7 +183,7 @@ teardown() {
 	# Real Claude CLI output often contains code in the result field
 	local claude_output
 	read -r -d '' claude_output << 'HEREDOC' || true
-{"result":"I created the file:\n```php\n<?php\nnamespace App\\Services;\n\nclass TestService\n{\n    public function run(): bool\n    {\n        return true;\n    }\n}\n```","structured_output":{"status":"success","files":["TestService.php"]}}
+{"result":"I created the file:\n```typescript\nimport { FastifyInstance } from 'fastify';\nimport { PrismaClient } from '@prisma/client';\n\nexport class TestService {\n    constructor(private prisma: PrismaClient) {}\n\n    async run(): Promise<boolean> {\n        return true;\n    }\n}\n```","structured_output":{"status":"success","files":["apps/backend/src/services/TestService.ts"]}}
 HEREDOC
 
 	local output="$claude_output"
@@ -282,7 +282,7 @@ EOF
 @test "run_stage handles special characters in structured_output" {
 	export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
 	cat > "$MOCK_CLAUDE_RESPONSE" << 'EOF'
-{"result":"file created","structured_output":{"status":"success","path":"C:\\Users\\test\\file.php","message":"Created with\ttabs"}}
+{"result":"file created","structured_output":{"status":"success","path":"C:\\Users\\test\\file.ts","message":"Created with\ttabs"}}
 EOF
 
 	timeout() {
@@ -298,7 +298,7 @@ EOF
 
 	local path_val
 	path_val=$(printf '%s' "$result" | jq -r '.path')
-	[ "$path_val" = 'C:\Users\test\file.php' ] || fail "Path mangled: $path_val"
+	[ "$path_val" = 'C:\Users\test\file.ts' ] || fail "Path mangled: $path_val"
 }
 
 # =============================================================================
@@ -394,7 +394,7 @@ EOF
 
 @test "BUG_REPRO: Large structured output with tasks array" {
 	# Create a realistic Claude CLI output with task data
-	local tasks='[{"id":1,"description":"Create migration","agent":"laravel"},{"id":2,"description":"Create model","agent":"laravel"},{"id":3,"description":"Create service","agent":"laravel"}]'
+	local tasks='[{"id":1,"description":"Create migration","agent":"fastify"},{"id":2,"description":"Create model","agent":"fastify"},{"id":3,"description":"Create service","agent":"fastify"}]'
 
 	local json
 	json=$(jq -n --argjson tasks "$tasks" '{
@@ -467,7 +467,7 @@ EOF
 	# structured=$(echo "$output" | jq -c '.structured_output // empty' 2>/dev/null)
 
 	# Simulate realistic Claude CLI JSON output
-	local output='{"cost":0.005,"duration_ms":1234,"result":"Implementation complete.\n\nCreated files:\n- app/Services/TestService.php\n- app/Http/Controllers/TestController.php","structured_output":{"status":"success","worktree":"/home/user/.worktrees/feature-123","branch":"feature-123","tasks":[{"id":1,"description":"Create TestService class","agent":"laravel-backend-developer"}]}}'
+	local output='{"cost":0.005,"duration_ms":1234,"result":"Implementation complete.\n\nCreated files:\n- apps/backend/src/services/TestService.ts\n- apps/backend/src/routes/test.ts","structured_output":{"status":"success","worktree":"/home/user/.worktrees/feature-123","branch":"feature-123","tasks":[{"id":1,"description":"Create TestService class","agent":"fastify-backend-developer"}]}}'
 
 	# Use the exact extraction pattern from the script
 	local structured
@@ -560,7 +560,7 @@ EOF
 {
   "cost": 0.0123,
   "duration_ms": 45678,
-  "result": "I've completed the implementation.\n\nChanges made:\n1. Created app/Services/UserService.php\n2. Updated app/Http/Controllers/UserController.php\n3. Added migration 2024_01_01_create_users_table.php\n\nThe code follows Laravel best practices and includes proper error handling.",
+  "result": "I've completed the implementation.\n\nChanges made:\n1. Created apps/backend/src/services/UserService.ts\n2. Updated apps/backend/src/routes/users.ts\n3. Added Prisma migration 20240101_create_users.ts\n\nThe code follows TypeScript best practices and includes proper error handling.",
   "structured_output": {
     "status": "success",
     "worktree": "/home/developer/.worktrees/issue-123",
@@ -569,12 +569,12 @@ EOF
       {
         "id": 1,
         "description": "Create UserService class with CRUD operations",
-        "agent": "laravel-backend-developer"
+        "agent": "fastify-backend-developer"
       },
       {
         "id": 2,
-        "description": "Update UserController to use UserService",
-        "agent": "laravel-backend-developer"
+        "description": "Update user routes to use UserService",
+        "agent": "fastify-backend-developer"
       }
     ]
   }
@@ -603,11 +603,11 @@ EOF
 	# This fixture contains code with backslashes, quotes, etc.
 	cat > "$fixture" << 'FIXTURE_EOF'
 {
-  "result": "Created file:\n```php\n<?php\n\nnamespace App\\Services;\n\nclass TestService\n{\n    public function format(string $input): string\n    {\n        return \"Formatted: {$input}\";\n    }\n}\n```",
+  "result": "Created file:\n```typescript\nimport { PrismaClient } from '@prisma/client';\n\nexport class TestService {\n    constructor(private prisma: PrismaClient) {}\n\n    async format(input: string): Promise<string> {\n        return `Formatted: ${input}`;\n    }\n}\n```",
   "structured_output": {
     "status": "success",
     "commit": "abc123def456",
-    "files": ["app/Services/TestService.php"]
+    "files": ["apps/backend/src/services/TestService.ts"]
   }
 }
 FIXTURE_EOF

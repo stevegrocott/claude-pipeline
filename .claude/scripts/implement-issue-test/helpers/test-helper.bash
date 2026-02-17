@@ -310,6 +310,7 @@ STATUS_FILE="${STATUS_FILE:-status.json}"
 LOG_BASE="${LOG_BASE:-logs/test}"
 LOG_FILE="${LOG_FILE:-$LOG_BASE/orchestrator.log}"
 STAGE_COUNTER="${STAGE_COUNTER:-0}"
+QUIET="${QUIET:-false}"
 EOF
 
     # Source it

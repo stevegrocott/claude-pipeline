@@ -6,11 +6,11 @@
 # Usage:
 #   ./batch-orchestrator.sh --manifest <path>
 #   ./batch-orchestrator.sh --issues "123,124,125" --branch "test"
-#   ./batch-orchestrator.sh --manifest <path> --agent bulletproof-frontend-developer
+#   ./batch-orchestrator.sh --manifest <path> --agent react-frontend-developer
 #
 # Agent Selection:
-#   --agent <name>  Specify agent for implement-issue (e.g., bulletproof-frontend-developer,
-#                   laravel-backend-developer). Process-pr always uses code-reviewer.
+#   --agent <name>  Specify agent for implement-issue (e.g., react-frontend-developer,
+#                   fastify-backend-developer). Process-pr always uses code-reviewer.
 #
 # Outputs:
 #   - status.json: Real-time progress (read by handle-issues skill)
@@ -53,7 +53,7 @@ AGENT=""
 usage() {
     echo "Usage: $0 --manifest <path>"
     echo "       $0 --issues \"123,124,125\" --branch \"test\""
-    echo "       $0 --manifest <path> --agent bulletproof-frontend-developer"
+    echo "       $0 --manifest <path> --agent react-frontend-developer"
     echo ""
     echo "Options:"
     echo "  --manifest <path>   Path to manifest.json with issues and branch"
@@ -62,8 +62,8 @@ usage() {
     echo "  --agent <name>      Agent for implement-issue stage (optional)"
     echo ""
     echo "Available agents:"
-    echo "  bulletproof-frontend-developer  CSS, HTML, Blade templates, frontend"
-    echo "  laravel-backend-developer       PHP, Laravel, controllers, services"
+    echo "  react-frontend-developer        React, Next.js, shadcn/ui, Tailwind"
+    echo "  fastify-backend-developer        TypeScript, Fastify, routes, services"
     echo "  (none specified)                Default claude behavior"
     echo ""
     echo "Note: process-pr stage always uses code-reviewer agent"
@@ -329,14 +329,14 @@ detect_rate_limit() {
     # Check result text for rate limit indicators
     local result
     result=$(printf '%s' "$output" | jq -r '.result // empty' 2>/dev/null)
-    if printf '%s' "$result" | grep -qiE 'rate.limit|429|too many requests|quota.exceeded|secondary rate'; then
+    if echo "$result" | grep -qiE 'rate.limit|429|too many requests|quota.exceeded|secondary rate'; then
         return 0
     fi
 
     # Check raw output only if JSON parsing failed (no valid structured_output)
     # Use word boundaries to avoid matching field names like "rate_limit" in JSON
     if [[ -z "$status" ]]; then
-        if printf '%s' "$output" | grep -qiE '\brate limit\b|HTTP 429|\btoo many requests\b|quota exceeded'; then
+        if echo "$output" | grep -qiE '\brate limit\b|HTTP 429|\btoo many requests\b|quota exceeded'; then
             return 0
         fi
     fi
@@ -354,29 +354,29 @@ extract_wait_time() {
 
     # Try to find retry-after seconds
     local retry_after
-    retry_after=$(printf '%s' "$search_text" | grep -oiE 'retry.after[^0-9]*([0-9]+)' | grep -oE '[0-9]+' | head -1)
+    retry_after=$(echo "$search_text" | grep -oiE 'retry.after[^0-9]*([0-9]+)' | grep -oE '[0-9]+' | head -1)
     if [[ -n "$retry_after" ]] && (( retry_after > 0 )); then
-        printf '%s\n' "$retry_after"
+        echo "$retry_after"
         return
     fi
 
     # Try to find "wait X minutes/hours"
     local wait_mins
-    wait_mins=$(printf '%s' "$search_text" | grep -oiE 'wait[^0-9]*([0-9]+)[^0-9]*min' | grep -oE '[0-9]+' | head -1)
+    wait_mins=$(echo "$search_text" | grep -oiE 'wait[^0-9]*([0-9]+)[^0-9]*min' | grep -oE '[0-9]+' | head -1)
     if [[ -n "$wait_mins" ]] && (( wait_mins > 0 )); then
-        printf '%s\n' "$((wait_mins * 60))"
+        echo $((wait_mins * 60))
         return
     fi
 
     local wait_hours
-    wait_hours=$(printf '%s' "$search_text" | grep -oiE 'wait[^0-9]*([0-9]+)[^0-9]*hour' | grep -oE '[0-9]+' | head -1)
+    wait_hours=$(echo "$search_text" | grep -oiE 'wait[^0-9]*([0-9]+)[^0-9]*hour' | grep -oE '[0-9]+' | head -1)
     if [[ -n "$wait_hours" ]] && (( wait_hours > 0 )); then
-        printf '%s\n' "$((wait_hours * 3600))"
+        echo $((wait_hours * 3600))
         return
     fi
 
     # Default to configured wait time
-    printf '%s\n' "$RATE_LIMIT_DEFAULT_WAIT"
+    echo "$RATE_LIMIT_DEFAULT_WAIT"
 }
 
 # =============================================================================
@@ -430,9 +430,9 @@ process_issue() {
         --status-file "$issue_status_file" \
         2>&1) || impl_exit=$?
 
-    printf '%s\n' "=== implement-issue output ===" >> "$issue_log"
-    printf '%s\n' "$impl_output" >> "$issue_log"
-    printf '%s\n' "=== exit code: $impl_exit ===" >> "$issue_log"
+    echo "=== implement-issue output ===" >> "$issue_log"
+    echo "$impl_output" >> "$issue_log"
+    echo "=== exit code: $impl_exit ===" >> "$issue_log"
 
     # Parse result from status file
     local impl_status="error"
@@ -451,7 +451,7 @@ process_issue() {
                 pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
                 if [[ -z "$pr_number" ]]; then
                     # Fallback: try to parse from log output
-                    pr_number=$(printf '%s' "$impl_output" | grep -oE 'PR: #[0-9]+' | grep -oE '[0-9]+' | head -1)
+                    pr_number=$(echo "$impl_output" | grep -oE 'PR: #[0-9]+' | grep -oE '[0-9]+' | head -1)
                 fi
                 ;;
             error|max_iterations_quality|max_iterations_pr_review)
@@ -505,9 +505,9 @@ process_issue() {
         --json-schema "$PROCESS_SCHEMA" \
         2>&1) || proc_exit=$?
 
-    printf '%s\n' "=== process-pr output ===" >> "$issue_log"
-    printf '%s\n' "$proc_output" >> "$issue_log"
-    printf '%s\n' "=== exit code: $proc_exit ===" >> "$issue_log"
+    echo "=== process-pr output ===" >> "$issue_log"
+    echo "$proc_output" >> "$issue_log"
+    echo "=== exit code: $proc_exit ===" >> "$issue_log"
 
     # Update session ID
     session_id=$(printf '%s' "$proc_output" | jq -r '.session_id // empty' 2>/dev/null)
@@ -548,8 +548,8 @@ process_issue() {
                 2>&1) || proc_exit=$?
         fi
 
-        printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
-        printf '%s\n' "$proc_output" >> "$issue_log"
+        echo "=== process-pr resume output ===" >> "$issue_log"
+        echo "$proc_output" >> "$issue_log"
     fi
 
     # Check for timeout

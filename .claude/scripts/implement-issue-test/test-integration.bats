@@ -169,11 +169,11 @@ teardown() {
     [[ "$main_def" == *"completed_tasks"* ]]
 }
 
-@test "implementation respects MAX_TASK_REVIEW_ATTEMPTS" {
+@test "implementation while-loop guard calls get_max_review_attempts" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"MAX_TASK_REVIEW_ATTEMPTS"* ]]
+    [[ "$main_def" == *"get_max_review_attempts"* ]]
 }
 
 @test "implementation comments on issue after task completion" {
@@ -188,10 +188,12 @@ teardown() {
 # PR REVIEW LOOP
 # =============================================================================
 
-@test "PR review uses spec-reviewer agent" {
+@test "task-level review uses spec-reviewer agent" {
     local main_def
     main_def=$(declare -f main)
 
+    # spec-reviewer is used in the per-task review loop (task-review stage),
+    # not in the PR review section which uses code-reviewer for combined review.
     [[ "$main_def" == *"spec-reviewer"* ]]
 }
 
@@ -209,12 +211,14 @@ teardown() {
     [[ "$main_def" == *"MAX_PR_REVIEW_ITERATIONS"* ]]
 }
 
-@test "PR review re-runs quality loop after fixes" {
+@test "PR review skips quality loop — re-review catches remaining issues" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"run_quality_loop"* ]]
-    [[ "$main_def" == *"pr-fix"* ]]
+    # Quality loop was intentionally removed from PR review (commit 4b0f8da0).
+    # The re-review iteration itself catches remaining issues, cutting PR review
+    # time roughly in half.
+    [[ "$main_def" != *'run_quality_loop'*'pr-fix'* ]]
 }
 
 # =============================================================================
@@ -309,32 +313,25 @@ teardown() {
 # AGENT SELECTION
 # =============================================================================
 
-@test "orchestrator uses laravel-backend-developer for fixes" {
+@test "orchestrator uses fastify-backend-developer for fixes" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"laravel-backend-developer"* ]]
+    [[ "$main_def" == *"fastify-backend-developer"* ]]
 }
 
-@test "orchestrator uses code-simplifier in quality loop" {
+@test "orchestrator uses code-reviewer in quality loop" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    [[ "$func_def" == *"code-simplifier"* ]]
+    [[ "$func_def" == *"code-reviewer"* ]]
 }
 
-@test "orchestrator uses php-test-validator for tests" {
-    local func_def
-    func_def=$(declare -f run_quality_loop)
-
-    [[ "$func_def" == *"php-test-validator"* ]]
-}
-
-@test "orchestrator uses phpdoc-writer for docs" {
+@test "orchestrator uses code-reviewer for reviews" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"phpdoc-writer"* ]]
+    [[ "$main_def" == *"code-reviewer"* ]]
 }
 
 # =============================================================================
@@ -388,17 +385,21 @@ teardown() {
     local tasks='[{"id":1,"title":"Task 1"}]'
     set_tasks "$tasks"
 
-    # Simulate hitting max review attempts (use task id)
+    # L-size: cap is 3
+    local max_l
+    max_l=$(get_max_review_attempts "L")
     local attempt
-    for attempt in 1 2 3; do
+    for attempt in $(seq 1 "$max_l"); do
         update_task 1 "in_progress" "$attempt"
     done
 
-    # After MAX_TASK_REVIEW_ATTEMPTS, task should be marked appropriately
     local review_attempts
     review_attempts=$(jq -r '.tasks[0].review_attempts' "$STATUS_FILE")
-    [ "$review_attempts" = "3" ]
-    [ "$review_attempts" -eq "$MAX_TASK_REVIEW_ATTEMPTS" ]
+    [ "$review_attempts" -eq "$max_l" ]
+
+    # S-size: cap is 1; M-size: cap is 2
+    [ "$(get_max_review_attempts "S")" -eq 1 ]
+    [ "$(get_max_review_attempts "M")" -eq 2 ]
 }
 
 # =============================================================================

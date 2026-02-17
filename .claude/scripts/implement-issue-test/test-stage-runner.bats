@@ -183,23 +183,137 @@ teardown() {
 # =============================================================================
 
 @test "run_stage passes agent when specified" {
-    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
-    echo '{"result":"ok","structured_output":{"status":"success"}}' > "$MOCK_CLAUDE_RESPONSE"
-
-    # Create a tracking mock that logs to test temp dir
+    # Override timeout to intercept and record claude args
     local claude_calls="$TEST_TMP/claude-calls.txt"
-    cat > "$TEST_TMP/bin/claude" << EOF
-#!/usr/bin/env bash
-echo "\$@" >> "$claude_calls"
-echo '{"result":"ok","structured_output":{"status":"success"}}'
-EOF
-    chmod +x "$TEST_TMP/bin/claude"
+    timeout() {
+        shift  # skip timeout value
+        shift  # skip 'env'
+        shift  # skip '-u'
+        shift  # skip 'CLAUDECODE'
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
 
-    run_stage "test" "prompt" "test-schema.json" "laravel-backend-developer"
+    run_stage "test" "prompt" "test-schema.json" "fastify-backend-developer"
 
     # Verify agent was passed to claude
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--agent laravel-backend-developer" "$claude_calls" || \
-        grep -q "laravel-backend-developer" "$claude_calls" || \
-        fail "Agent 'laravel-backend-developer' was not passed to claude. Calls: $(cat "$claude_calls")"
+    grep -q -- "--agent fastify-backend-developer" "$claude_calls" || \
+        fail "Agent 'fastify-backend-developer' was not passed to claude. Calls: $(cat "$claude_calls")"
+}
+
+# =============================================================================
+# MODEL SELECTION
+#
+# BATS runs each @test in a forked subprocess. Exported functions survive the
+# fork, but bash arrays (including readonly arrays) do not. model-config.sh
+# defines _STAGE_PREFIXES as a readonly array, so we must re-source it at the
+# top of every @test body that exercises model/tier resolution.
+#
+# The re-source MUST happen at the @test scope (not inside a helper function)
+# because `readonly -a` inside a function creates a function-local variable
+# that is invisible to the caller.
+# =============================================================================
+
+@test "run_stage passes --model to claude" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--model" "$claude_calls" || \
+        fail "--model was not passed to claude. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage resolves opus for implement stage" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--model opus" "$claude_calls" || \
+        fail "Expected --model opus for implement stage. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage resolves haiku for test stage" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "test-loop-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--model haiku" "$claude_calls" || \
+        fail "Expected --model haiku for test stage. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage uses complexity hint to override model" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # implement defaults to opus, but S complexity overrides to sonnet
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--model sonnet" "$claude_calls" || \
+        fail "Expected --model sonnet with S complexity. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs model in stage output" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "review-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    # Verify model was logged
+    grep -q "Model: sonnet" "$LOG_FILE" || \
+        fail "Model was not logged. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage logs complexity hint when provided" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
+
+    # Verify complexity was logged
+    grep -q "complexity: L" "$LOG_FILE" || \
+        fail "Complexity hint was not logged. Log: $(cat "$LOG_FILE")"
 }

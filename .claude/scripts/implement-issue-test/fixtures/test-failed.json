@@ -8,11 +8,11 @@
         "tests_failed": 2,
         "failures": [
             {
-                "test": "UserTest::testCreateUser",
+                "test": "UserService.createUser",
                 "message": "Expected status 201, got 500"
             },
             {
-                "test": "UserTest::testValidation",
+                "test": "UserService.validation",
                 "message": "Validation should fail for empty email"
             }
         ]

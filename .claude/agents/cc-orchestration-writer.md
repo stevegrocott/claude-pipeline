@@ -604,8 +604,8 @@ Setup stage returns task list with agent assignments:
 ```json
 {
   "tasks": [
-    {"id": 1, "description": "Build API endpoint", "agent": "laravel-backend-developer"},
-    {"id": 2, "description": "Style the form", "agent": "bulletproof-frontend-developer"}
+    {"id": 1, "description": "Build API endpoint", "agent": "fastify-backend-developer"},
+    {"id": 2, "description": "Style the form", "agent": "react-frontend-developer"}
   ]
 }
 ```
@@ -1076,6 +1076,6 @@ Before delivering, verify:
 - [style.ysap.sh](https://style.ysap.sh/md) - Bash style guide
 - [BATS Gotchas](https://bats-core.readthedocs.io/en/stable/gotchas.html) - Common BATS pitfalls
 - `bash-script-craftsman` agent - Script writing conventions
-- `bats-test-validator` agent - Test quality auditing
+- `code-reviewer` agent - Test quality auditing
 - `.claude/scripts/implement-issue-orchestrator.sh` - Reference implementation
 - `.claude/scripts/implement-issue-test/` - Reference test suite
