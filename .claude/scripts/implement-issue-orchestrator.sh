@@ -773,7 +773,7 @@ run_stage() {
     local exit_code=0
 
     output=$(timeout "$STAGE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
-        "${agent_args[@]}" \
+        ${agent_args[@]+"${agent_args[@]}"} \
         --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$schema" \
@@ -795,7 +795,7 @@ run_stage() {
         handle_rate_limit "$output"
         # Retry
         output=$(timeout "$STAGE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
-            "${agent_args[@]}" \
+            ${agent_args[@]+"${agent_args[@]}"} \
             --dangerously-skip-permissions \
             --output-format json \
             --json-schema "$schema" \
@@ -805,11 +805,27 @@ run_stage() {
         printf '%s\n' "$output" >> "$stage_log"
     fi
 
-    # Extract structured output
+    # Extract structured output — try .structured_output first, fall back to
+    # wrapping .result text as a success payload (subagents sometimes return
+    # plain .result without matching the JSON schema)
     local structured
     structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
 
     if [[ -z "$structured" ]]; then
+        # Fallback: if the CLI returned successfully (.is_error == false) and
+        # has a .result string, wrap it as a synthetic structured output
+        local fallback_result
+        fallback_result=$(printf '%s' "$output" | jq -c '
+            select(.is_error == false and .result != null) |
+            {status: "success", summary: .result}
+        ' 2>/dev/null)
+
+        if [[ -n "$fallback_result" ]]; then
+            log "WARNING: No .structured_output from $stage_name — using .result fallback"
+            printf '%s\n' "$fallback_result"
+            return 0
+        fi
+
         log_error "No structured output from $stage_name"
         echo '{"status":"error","error":"no structured output"}'
         return 1
