@@ -653,31 +653,180 @@ HIST_EOF
 }
 
 # =============================================================================
+# DIFF-BASED HELPERS — get_diff_line_count, get_diff_based_max_iterations
+# =============================================================================
+
+# Helper: create a git repo in TEST_TMP with a branch that has N lines changed
+# Arguments:
+#   $1 - number of lines to add (simulates insertions)
+#   $2 - base branch name (default: test-base)
+_setup_git_repo_with_diff() {
+    local line_count="${1:-0}"
+    local base="${2:-test-base}"
+
+    cd "$TEST_TMP" || return 1
+    git init -q .
+    git checkout -q -b "$base"
+    echo "base content" > base.txt
+    git add base.txt
+    git commit -q -m "initial"
+    git checkout -q -b "feature-branch"
+
+    if ((line_count > 0)); then
+        local i
+        for ((i = 1; i <= line_count; i++)); do
+            echo "added line $i" >> diff-file.txt
+        done
+        git add diff-file.txt
+        git commit -q -m "add $line_count lines"
+    fi
+}
+
+@test "get_diff_line_count returns 0 when no diff exists" {
+    _setup_git_repo_with_diff 0 "test-base"
+    local result
+    result=$(get_diff_line_count "test-base")
+    [ "$result" -eq 0 ]
+}
+
+@test "get_diff_line_count counts insertions on branch" {
+    _setup_git_repo_with_diff 10 "test-base"
+    local result
+    result=$(get_diff_line_count "test-base")
+    [ "$result" -eq 10 ]
+}
+
+@test "get_diff_line_count returns 0 outside git repo" {
+    cd "$TEST_TMP" || return 1
+    local result
+    result=$(get_diff_line_count "main")
+    [ "$result" -eq 0 ]
+}
+
+@test "get_diff_based_max_iterations returns 1 for tiny diffs (<20)" {
+    local result
+    result=$(get_diff_based_max_iterations 5)
+    [ "$result" -eq 1 ]
+}
+
+@test "get_diff_based_max_iterations returns 2 for small diffs (20-99)" {
+    local result
+    result=$(get_diff_based_max_iterations 50)
+    [ "$result" -eq 2 ]
+}
+
+@test "get_diff_based_max_iterations returns 3 for medium diffs (100-299)" {
+    local result
+    result=$(get_diff_based_max_iterations 200)
+    [ "$result" -eq 3 ]
+}
+
+@test "get_diff_based_max_iterations returns 5 for large diffs (300+)" {
+    local result
+    result=$(get_diff_based_max_iterations 500)
+    [ "$result" -eq 5 ]
+}
+
+@test "get_diff_based_max_iterations returns 1 for zero lines" {
+    local result
+    result=$(get_diff_based_max_iterations 0)
+    [ "$result" -eq 1 ]
+}
+
+@test "get_diff_based_max_iterations boundary at 20" {
+    local below above
+    below=$(get_diff_based_max_iterations 19)
+    above=$(get_diff_based_max_iterations 20)
+    [ "$below" -eq 1 ]
+    [ "$above" -eq 2 ]
+}
+
+@test "get_diff_based_max_iterations boundary at 100" {
+    local below above
+    below=$(get_diff_based_max_iterations 99)
+    above=$(get_diff_based_max_iterations 100)
+    [ "$below" -eq 2 ]
+    [ "$above" -eq 3 ]
+}
+
+@test "get_diff_based_max_iterations boundary at 300" {
+    local below above
+    below=$(get_diff_based_max_iterations 299)
+    above=$(get_diff_based_max_iterations 300)
+    [ "$below" -eq 3 ]
+    [ "$above" -eq 5 ]
+}
+
+# =============================================================================
 # SIZE-BASED ITERATION CAPS — get_max_quality_iterations
 # =============================================================================
 
+# These tests set up a git repo with a large diff (500 lines) so the diff-based
+# cap (5) never constrains the size-based cap, testing size logic in isolation.
+
 @test "get_max_quality_iterations returns 1 for S-size tasks" {
+    _setup_git_repo_with_diff 500 "test-base"
     local result
-    result=$(get_max_quality_iterations "**(S)** Fix a typo")
+    result=$(get_max_quality_iterations "**(S)** Fix a typo" "test-base")
     [ "$result" -eq 1 ]
 }
 
 @test "get_max_quality_iterations returns 2 for M-size tasks" {
+    _setup_git_repo_with_diff 500 "test-base"
     local result
-    result=$(get_max_quality_iterations "**(M)** Refactor auth module")
+    result=$(get_max_quality_iterations "**(M)** Refactor auth module" "test-base")
     [ "$result" -eq 2 ]
 }
 
 @test "get_max_quality_iterations returns 3 for L-size tasks" {
+    _setup_git_repo_with_diff 500 "test-base"
     local result
-    result=$(get_max_quality_iterations "**(L)** Implement new feature")
+    result=$(get_max_quality_iterations "**(L)** Implement new feature" "test-base")
     [ "$result" -eq 3 ]
 }
 
 @test "get_max_quality_iterations returns 3 for unknown size" {
+    _setup_git_repo_with_diff 500 "test-base"
     local result
-    result=$(get_max_quality_iterations "No size marker here")
+    result=$(get_max_quality_iterations "No size marker here" "test-base")
     [ "$result" -eq 3 ]
+}
+
+# =============================================================================
+# COMBINED MIN(size, diff) LOGIC — get_max_quality_iterations
+# =============================================================================
+
+@test "get_max_quality_iterations caps L-size task with tiny diff to 1" {
+    _setup_git_repo_with_diff 5 "test-base"
+    local result
+    result=$(get_max_quality_iterations "**(L)** Big feature" "test-base")
+    # size_based=3, diff_based=1 (5 lines < 20), min=1
+    [ "$result" -eq 1 ]
+}
+
+@test "get_max_quality_iterations caps L-size task with small diff to 2" {
+    _setup_git_repo_with_diff 50 "test-base"
+    local result
+    result=$(get_max_quality_iterations "**(L)** Big feature" "test-base")
+    # size_based=3, diff_based=2 (50 lines), min=2
+    [ "$result" -eq 2 ]
+}
+
+@test "get_max_quality_iterations uses size cap when diff is larger" {
+    _setup_git_repo_with_diff 200 "test-base"
+    local result
+    result=$(get_max_quality_iterations "**(M)** Medium task" "test-base")
+    # size_based=2, diff_based=3 (200 lines), min=2
+    [ "$result" -eq 2 ]
+}
+
+@test "get_max_quality_iterations returns 1 when no git diff available" {
+    # No git repo in TEST_TMP — diff_lines=0, diff_based=1
+    cd "$TEST_TMP" || return 1
+    local result
+    result=$(get_max_quality_iterations "**(L)** Big feature" "main")
+    # size_based=3, diff_based=1 (no repo), min=1
+    [ "$result" -eq 1 ]
 }
 
 # =============================================================================

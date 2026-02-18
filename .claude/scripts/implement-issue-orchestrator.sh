@@ -1013,25 +1013,79 @@ extract_task_size() {
     fi
 }
 
-# Get max quality loop iterations based on task size.
+# Count lines changed (added + deleted) on the current branch vs a base branch.
+# Uses three-dot diff for merge-base semantics (only branch changes, not base changes).
+# Arguments:
+#   $1 - base branch (default: main)
+# Outputs:
+#   Total number of lines changed (insertions + deletions)
+get_diff_line_count() {
+	local base_branch="${1:-main}"
+	local lines
+	lines=$(git diff --stat "${base_branch}...HEAD" 2>/dev/null \
+		| tail -1 \
+		| grep -oE '[0-9]+ insertion|[0-9]+ deletion' \
+		| grep -oE '[0-9]+' \
+		| paste -sd+ - \
+		| bc 2>/dev/null || printf '0')
+	printf '%s' "${lines:-0}"
+}
+
+# Scale quality loop iterations by diff size.
+# Tiny diffs need fewer review passes regardless of task size label.
+# Arguments:
+#   $1 - number of lines changed
+# Outputs:
+#   Max iterations (1-5) based on diff size
+get_diff_based_max_iterations() {
+	local diff_lines="${1:-0}"
+	if ((diff_lines < 20)); then
+		echo 1
+	elif ((diff_lines < 100)); then
+		echo 2
+	elif ((diff_lines < 300)); then
+		echo 3
+	else
+		echo 5
+	fi
+}
+
+# Get max quality loop iterations based on task size AND diff size.
+# Combines two signals: the task size label (S/M/L) and the actual diff
+# line count, taking the MINIMUM of both caps. This prevents unnecessary
+# review passes when a large task produces a small diff, or when a small
+# task label was applied to a large change.
 # S-size tasks skip quality loop entirely (handled by should_run_quality_loop).
-# M-size: 2 iterations (enough to find + fix issues).
-# L-size: 3 iterations (complex code needs more passes).
 # Arguments:
 #   $1 - task description (size extracted via extract_task_size)
+#   $2 - base branch for diff comparison (default: main)
 # Outputs:
-#   Number of max iterations (1, 2, or 3)
+#   Number of max iterations (1-5)
 get_max_quality_iterations() {
-    local task_desc="${1:-}"
-    local task_size
-    task_size=$(extract_task_size "$task_desc")
+	local task_desc="${1:-}"
+	local base_branch="${2:-main}"
+	local task_size
+	task_size=$(extract_task_size "$task_desc")
 
-    case "$task_size" in
-        S) echo 1 ;;
-        M) echo 2 ;;
-        L) echo 3 ;;
-        *) echo 3 ;;
-    esac
+	local size_based
+	case "$task_size" in
+		S) size_based=1 ;;
+		M) size_based=2 ;;
+		L) size_based=3 ;;
+		*) size_based=3 ;;
+	esac
+
+	local diff_lines
+	diff_lines=$(get_diff_line_count "$base_branch")
+	local diff_based
+	diff_based=$(get_diff_based_max_iterations "$diff_lines")
+
+	# Take the minimum — small diffs don't need many passes even for L tasks
+	if ((diff_based < size_based)); then
+		echo "$diff_based"
+	else
+		echo "$size_based"
+	fi
 }
 
 # =============================================================================
@@ -1613,60 +1667,82 @@ Commit your changes with a descriptive message."
                 local commit_sha
                 commit_sha=$(printf '%s' "$impl_result" | jq -r '.commit')
 
-                # Review task
-                local review_prompt="Review task $task_id implementation (commit $commit_sha):
+                # Skip task review for trivial S-size tasks (<10 lines changed)
+                local diff_lines
+                diff_lines=$(get_diff_line_count "$BASE_BRANCH")
 
-Task description: $task_desc
-
-Did the implementation achieve the task's goal? Are there suggested improvements?"
-
-                local review_result
-                review_result=$(run_stage "task-review-$task_id-attempt-$((review_attempts+1))" "$review_prompt" "implement-issue-task-review.json" "spec-reviewer")
-
-                local review_verdict suggested_improvements
-                review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
-                suggested_improvements=$(printf '%s' "$review_result" | jq -r '.suggested_improvements')
-
-                if [[ "$review_verdict" == "passed" && "$suggested_improvements" != "yes" ]]; then
+                if [[ "$task_size" == "S" ]] && (( ${diff_lines:-0} < 10 )); then
+                    log "Skipping task review for trivial S-size task ($diff_lines lines changed)"
                     task_approved=true
-                    update_task "$task_id" "completed" "$((review_attempts+1))"
+                    update_task "$task_id" "completed" "0"
                     completed_tasks=$((completed_tasks+1))
 
-                    # Comment #6: Task complete (with summary from implementing agent)
                     local impl_summary
                     impl_summary=$(printf '%s' "$impl_result" | jq -r '.summary // "Implementation completed"')
                     comment_issue "Task $task_id Complete" "**$task_desc**
 
 **Commit:** \`$commit_sha\`
+**Review:** Skipped (trivial S-size, $diff_lines lines changed)
 
 $impl_summary" "$task_agent"
 
-                    # Run quality loop for this task (skipped for S-size tasks)
-                    if should_run_quality_loop "$task_size"; then
-                        local quality_max
-                        quality_max=$(get_max_quality_iterations "$task_desc")
-                        log "Running quality loop for task $task_id (size: ${task_size:-unknown}, max_iterations: $quality_max)"
-                        run_quality_loop "." "$branch" "task-$task_id" "$task_agent" "$quality_max"
-                    else
-                        log "Skipping quality loop for task $task_id (S-size task)"
-                    fi
-
+                    log "Skipping quality loop for task $task_id (S-size task)"
                 else
-                    review_attempts=$((review_attempts+1))
-                    local review_comments
-                    review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
+                    # Review task
+                    local review_prompt="Review task $task_id implementation (commit $commit_sha):
 
-                    log "Task $task_id needs fixes (attempt $review_attempts/$max_attempts)"
+Task description: $task_desc
 
-                    # Fix
-                    local fix_prompt="Fix issues in task $task_id (commit $commit_sha) on branch $branch in the current working directory:
+Did the implementation achieve the task's goal? Are there suggested improvements?"
+
+                    local review_result
+                    review_result=$(run_stage "task-review-$task_id-attempt-$((review_attempts+1))" "$review_prompt" "implement-issue-task-review.json" "spec-reviewer")
+
+                    local review_verdict suggested_improvements
+                    review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+                    suggested_improvements=$(printf '%s' "$review_result" | jq -r '.suggested_improvements')
+
+                    if [[ "$review_verdict" == "passed" && "$suggested_improvements" != "yes" ]]; then
+                        task_approved=true
+                        update_task "$task_id" "completed" "$((review_attempts+1))"
+                        completed_tasks=$((completed_tasks+1))
+
+                        # Comment #6: Task complete (with summary from implementing agent)
+                        local impl_summary
+                        impl_summary=$(printf '%s' "$impl_result" | jq -r '.summary // "Implementation completed"')
+                        comment_issue "Task $task_id Complete" "**$task_desc**
+
+**Commit:** \`$commit_sha\`
+
+$impl_summary" "$task_agent"
+
+                        # Run quality loop for this task (skipped for S-size tasks)
+                        if should_run_quality_loop "$task_size"; then
+                            local quality_max
+                            quality_max=$(get_max_quality_iterations "$task_desc" "$BASE_BRANCH")
+                            log "Running quality loop for task $task_id (size: ${task_size:-unknown}, max_iterations: $quality_max)"
+                            run_quality_loop "." "$branch" "task-$task_id" "$task_agent" "$quality_max"
+                        else
+                            log "Skipping quality loop for task $task_id (S-size task)"
+                        fi
+
+                    else
+                        review_attempts=$((review_attempts+1))
+                        local review_comments
+                        review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
+
+                        log "Task $task_id needs fixes (attempt $review_attempts/$max_attempts)"
+
+                        # Fix
+                        local fix_prompt="Fix issues in task $task_id (commit $commit_sha) on branch $branch in the current working directory:
 
 Review feedback:
 $review_comments
 
 Address the issues and commit."
 
-                    run_stage "fix-task-$task_id-attempt-$review_attempts" "$fix_prompt" "implement-issue-fix.json" "$task_agent"
+                        run_stage "fix-task-$task_id-attempt-$review_attempts" "$fix_prompt" "implement-issue-fix.json" "$task_agent"
+                    fi
                 fi
             done
 
