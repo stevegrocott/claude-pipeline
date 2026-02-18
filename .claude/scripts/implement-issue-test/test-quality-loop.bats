@@ -426,3 +426,284 @@ GHEOF
     final_count=$(cat "$gh_call_file")
     [ "$final_count" -eq 1 ]
 }
+
+# =============================================================================
+# CONTEXT PASSING — PRIOR ITERATION FINDINGS
+# =============================================================================
+
+@test "review prompt includes PRIOR ITERATION FINDINGS when review history exists" {
+    # Create a review history file with prior iteration data
+    local history_file="$LOG_BASE/context/review-history-test.json"
+    cat > "$history_file" << 'HIST_EOF'
+[{"iteration":1,"issues":[{"description":"Missing error handling in parser"}],"result":"changes_requested"}]
+HIST_EOF
+
+    # Track the review prompt passed to run_stage
+    local prompt_capture="$TEST_TMP/review_prompt_capture"
+    export prompt_capture
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                # Capture the prompt for assertion
+                printf '%s' "$prompt" > "$prompt_capture"
+                echo '{"status":"success","result":"approved","summary":"Approved"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Force iteration > 1 by having first review request changes, second approve
+    # But simpler: set loop_iteration to start > 1 by having the history file
+    # and making the function iterate twice
+    local counter_file="$TEST_TMP/ctx_review_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+
+                # Capture prompt on second iteration (when prior context should appear)
+                if (( count >= 2 )); then
+                    printf '%s' "$prompt" > "$prompt_capture"
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                else
+                    echo '{"status":"success","result":"changes_requested","comments":"Fix error handling","issues":[{"description":"Missing error handling in parser"}],"summary":"1 issue"}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    # The captured prompt from the second iteration must include PRIOR ITERATION FINDINGS
+    [[ -f "$prompt_capture" ]]
+    local captured
+    captured=$(< "$prompt_capture")
+    [[ "$captured" == *"PRIOR ITERATION FINDINGS"* ]]
+}
+
+# =============================================================================
+# REVIEW HISTORY ACCUMULATION
+# =============================================================================
+
+@test "review history file is created with correct JSON structure after first iteration" {
+    local history_file="$LOG_BASE/context/review-history-test.json"
+
+    # Ensure no history file exists before the loop
+    rm -f "$history_file"
+
+    run_stage() {
+        case "$1" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                echo '{"status":"success","result":"approved","issues":[{"description":"Minor naming issue"}],"summary":"Approved with notes"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    # History file should exist
+    [[ -f "$history_file" ]]
+
+    # Should be valid JSON array
+    local entry_count
+    entry_count=$(jq 'length' "$history_file")
+    [ "$entry_count" -eq 1 ]
+
+    # First entry should have iteration=1
+    local iter
+    iter=$(jq '.[0].iteration' "$history_file")
+    [ "$iter" -eq 1 ]
+
+    # Should have issues array
+    local issues_count
+    issues_count=$(jq '.[0].issues | length' "$history_file")
+    [ "$issues_count" -eq 1 ]
+
+    # Should have result field
+    local result
+    result=$(jq -r '.[0].result' "$history_file")
+    [ "$result" = "approved" ]
+}
+
+@test "review history accumulates across multiple iterations" {
+    local history_file="$LOG_BASE/context/review-history-test.json"
+    rm -f "$history_file"
+
+    local counter_file="$TEST_TMP/accum_review_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        case "$1" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+
+                if (( count < 2 )); then
+                    echo '{"status":"success","result":"changes_requested","issues":[{"description":"Issue A"}],"summary":"Fix needed"}'
+                else
+                    echo '{"status":"success","result":"approved","issues":[{"description":"Issue B"}],"summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    # History file should have 2 entries (one per iteration)
+    [[ -f "$history_file" ]]
+    local entry_count
+    entry_count=$(jq 'length' "$history_file")
+    [ "$entry_count" -eq 2 ]
+
+    # First entry: iteration 1
+    [ "$(jq '.[0].iteration' "$history_file")" -eq 1 ]
+
+    # Second entry: iteration 2
+    [ "$(jq '.[1].iteration' "$history_file")" -eq 2 ]
+}
+
+# =============================================================================
+# CONVERGENCE DETECTION
+# =============================================================================
+
+@test "convergence detection checks repeat ratio above 50%" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # Must compare repeat_ratio against 50
+    [[ "$func_def" == *"repeat_ratio > 50"* ]]
+}
+
+@test "convergence detection sets loop_approved on repeat detection" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # On convergence, the loop must set loop_approved=true and break
+    [[ "$func_def" == *"loop_approved=true"* ]]
+}
+
+@test "convergence detection logs warning on early exit" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # Must log a convergence failure warning
+    [[ "$func_def" == *"convergence failure"* ]]
+}
+
+@test "convergence detection only runs after iteration 1" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # Convergence check is gated on loop_iteration > 1
+    [[ "$func_def" == *"loop_iteration > 1"* ]]
+}
+
+@test "convergence detection uses review history file" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # Must reference the review-history file for convergence comparison
+    [[ "$func_def" == *"review-history-\${stage_prefix}.json"* ]] || [[ "$func_def" == *'review-history-${stage_prefix}.json'* ]]
+}
+
+# =============================================================================
+# SIZE-BASED ITERATION CAPS — get_max_quality_iterations
+# =============================================================================
+
+@test "get_max_quality_iterations returns 1 for S-size tasks" {
+    local result
+    result=$(get_max_quality_iterations "**(S)** Fix a typo")
+    [ "$result" -eq 1 ]
+}
+
+@test "get_max_quality_iterations returns 2 for M-size tasks" {
+    local result
+    result=$(get_max_quality_iterations "**(M)** Refactor auth module")
+    [ "$result" -eq 2 ]
+}
+
+@test "get_max_quality_iterations returns 3 for L-size tasks" {
+    local result
+    result=$(get_max_quality_iterations "**(L)** Implement new feature")
+    [ "$result" -eq 3 ]
+}
+
+@test "get_max_quality_iterations returns 3 for unknown size" {
+    local result
+    result=$(get_max_quality_iterations "No size marker here")
+    [ "$result" -eq 3 ]
+}
+
+# =============================================================================
+# extract_task_size
+# =============================================================================
+
+@test "extract_task_size extracts S from description" {
+    local result
+    result=$(extract_task_size "**(S)** Some task description")
+    [ "$result" = "S" ]
+}
+
+@test "extract_task_size extracts M from description" {
+    local result
+    result=$(extract_task_size "**(M)** Some task description")
+    [ "$result" = "M" ]
+}
+
+@test "extract_task_size extracts L from description" {
+    local result
+    result=$(extract_task_size "**(L)** Some task description")
+    [ "$result" = "L" ]
+}
+
+@test "extract_task_size returns empty for descriptions without size markers" {
+    local result
+    result=$(extract_task_size "A task with no size marker")
+    [ -z "$result" ]
+}
