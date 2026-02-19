@@ -33,6 +33,8 @@ Explore relevant files, patterns, and dependencies:
 - Document current behavior vs desired behavior
 - Note architectural patterns to follow
 
+**Context Checkpoint (Optional):** If the research phase read many files or generated extensive tool output, consider writing a concise research summary to a temp file and suggesting `/clear` before evaluation. The evaluation and planning phases only need the summary, not the raw exploration context. Use `/create-session-summary` if checkpointing.
+
 ### Step 3: Evaluate Approaches
 
 Determine the best implementation strategy:

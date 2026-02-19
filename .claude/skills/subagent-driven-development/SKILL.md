@@ -190,6 +190,22 @@ Final reviewer: All requirements met, ready to merge
 Done!
 ```
 
+## Context Checkpoint (Optional — Token Optimization)
+
+The orchestrator session accumulates context from every subagent dispatch, review cycle, and decision — even though subagents themselves get fresh contexts. After every **3 completed task cycles**, evaluate whether to checkpoint:
+
+1. **Check:** Have 3+ tasks completed since the last checkpoint (or since start)?
+2. **Save state:** Run `/create-session-summary` with:
+   - Active skill: `subagent-driven-development`
+   - Current phase: "Task N of M complete"
+   - Remaining work: list of pending task descriptions from the plan
+   - Key decisions: any answers given to subagent questions
+   - Feature branch name (critical — subagents need this)
+3. **Suggest to user:** "Orchestrator context is growing. You can `/clear` and `/resume-session` to continue with fresh context, or say 'continue' to keep going."
+4. **If user clears and resumes:** Reload the plan, skip completed tasks (check git log / TodoWrite), and continue dispatching from the next pending task.
+
+**When to skip:** If running in headless mode (called from implement-issue), don't suggest `/clear` — the orchestrator script already handles context isolation via `claude -p` per stage. This checkpoint is for interactive sessions only.
+
 ## Advantages
 
 **vs. Manual execution:**

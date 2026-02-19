@@ -42,6 +42,16 @@ When batch complete:
 - Show verification output
 - Say: "Ready for feedback."
 
+### Context Checkpoint (Optional — Token Optimization)
+
+After reporting a batch and before continuing, check whether context has grown large (many file reads, tool calls, or 3+ batches completed). If so:
+
+1. **Save state:** Run `/create-session-summary` to persist progress to `.claude/sessions/`
+2. **Suggest to user:** "This session has accumulated significant context. You can run `/clear` to free tokens, then `/resume-session` to continue from where we left off. Or just say 'continue' to keep going."
+3. **If user clears:** They will invoke `/resume-session` which will reload this skill at Step 4
+
+**When to suggest:** After the 2nd batch completes, or whenever the session feels heavy. This is optional — skip if the plan is nearly complete or context is manageable.
+
 ### Step 4: Continue
 Based on feedback:
 - Apply changes if needed
