@@ -44,6 +44,26 @@ teardown_test_env() {
 }
 
 # =============================================================================
+# PORTABLE TIMEOUT (macOS does not ship GNU timeout)
+# =============================================================================
+
+if ! command -v timeout &>/dev/null; then
+    timeout() {
+        local duration="$1"; shift
+        perl -e '
+            use POSIX ":sys_wait_h";
+            alarm shift @ARGV;
+            $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
+            $pid = fork // die "fork: $!";
+            if ($pid == 0) { exec @ARGV; die "exec: $!" }
+            waitpid($pid, 0);
+            exit ($? >> 8);
+        ' "$duration" "$@"
+    }
+    export -f timeout
+fi
+
+# =============================================================================
 # MOCK FUNCTIONS
 # =============================================================================
 
