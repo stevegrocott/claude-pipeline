@@ -28,8 +28,8 @@ claude -p "prompt here" \
     --output-format json \
     --json-schema "$SCHEMA"
 
-# With timeout (via bash timeout command)
-timeout "$STAGE_TIMEOUT" claude -p "prompt" ...
+# With stage-type-based timeout (via get_stage_timeout)
+timeout "$(get_stage_timeout "$stage_name")" claude -p "prompt" ...
 ```
 
 | Flag | Purpose |
@@ -105,8 +105,8 @@ LOG_BASE="logs/workflow-$(date +%Y%m%d-%H%M%S)"
 STATUS_FILE="status.json"
 LOCK_FILE="logs/.workflow.lock"
 
-# Timeouts and limits
-readonly STAGE_TIMEOUT=3600           # 1 hour per stage
+# Timeouts and limits (stage-type-based via get_stage_timeout())
+# test/docs/pr→600s, task-review/test-validate→900s, implement/fix→1800s, pr-review→1800s
 readonly MAX_ITERATIONS=5             # Loop iteration limits
 readonly MAX_CONSECUTIVE_FAILURES=3   # Circuit breaker threshold
 readonly RATE_LIMIT_BUFFER=60         # Extra wait after rate limit reset
@@ -360,7 +360,10 @@ run_stage() {
     local output
     local exit_code=0
 
-    output=$(timeout "$STAGE_TIMEOUT" claude -p "$prompt" \
+    local stage_timeout
+    stage_timeout=$(get_stage_timeout "$stage_name")
+
+    output=$(timeout "$stage_timeout" claude -p "$prompt" \
         "${agent_args[@]}" \
         --dangerously-skip-permissions \
         --output-format json \
@@ -373,7 +376,7 @@ run_stage() {
 
     # Handle timeout
     if (( exit_code == 124 )); then
-        log_error "Stage $stage_name timed out"
+        log_error "Stage $stage_name timed out after ${stage_timeout}s"
         printf '%s\n' '{"status":"error","error":"timeout"}'
         return 1
     fi
@@ -382,7 +385,7 @@ run_stage() {
     if detect_rate_limit "$output"; then
         handle_rate_limit "$output"
         # Retry once
-        output=$(timeout "$STAGE_TIMEOUT" claude -p "$prompt" \
+        output=$(timeout "$stage_timeout" claude -p "$prompt" \
             "${agent_args[@]}" \
             --dangerously-skip-permissions \
             --output-format json \

@@ -22,7 +22,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 
 # Timeouts and limits
-readonly STAGE_TIMEOUT=3600  # 1 hour per stage
 readonly MAX_QUALITY_ITERATIONS=5
 readonly MAX_TEST_ITERATIONS=10
 # Cap at 2: merged spec+code review per iteration makes each pass thorough
@@ -49,6 +48,28 @@ if ! command -v timeout &>/dev/null; then
         ' "$duration" "$@"
     }
 fi
+
+# =============================================================================
+# STAGE-TYPE-BASED TIMEOUTS
+# =============================================================================
+#
+# Replaces the flat STAGE_TIMEOUT constant with per-stage timeouts.
+# Compound prefixes (test-validate, pr-review) are matched first to avoid
+# being swallowed by their shorter generic siblings (test, pr).
+#
+
+get_stage_timeout() {
+    local stage_name="${1:-}"
+
+    case "$stage_name" in
+        test-validate*) printf '%s' 900 ;;
+        pr-review*)     printf '%s' 1800 ;;
+        test*|docs*|pr*) printf '%s' 600 ;;
+        task-review*)    printf '%s' 900 ;;
+        implement*|fix*) printf '%s' 1800 ;;
+        *)               printf '%s' 1800 ;;
+    esac
+}
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -724,10 +745,14 @@ run_stage() {
         agent_args=(--agent "$agent")
     fi
 
+    local stage_timeout
+    stage_timeout=$(get_stage_timeout "$stage_name")
+    log "  Timeout: ${stage_timeout}s"
+
     local output
     local exit_code=0
 
-    output=$(timeout "$STAGE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+    output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
         ${agent_args[@]+"${agent_args[@]}"} \
         --dangerously-skip-permissions \
         --output-format json \
@@ -740,7 +765,7 @@ run_stage() {
 
     # Check timeout
     if (( exit_code == 124 )); then
-        log_error "Stage $stage_name timed out after ${STAGE_TIMEOUT}s"
+        log_error "Stage $stage_name timed out after ${stage_timeout}s"
         echo '{"status":"error","error":"timeout"}'
         return 1
     fi
@@ -749,7 +774,7 @@ run_stage() {
     if detect_rate_limit "$output"; then
         handle_rate_limit "$output"
         # Retry
-        output=$(timeout "$STAGE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+        output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
             --dangerously-skip-permissions \
             --output-format json \

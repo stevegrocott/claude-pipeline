@@ -28,11 +28,81 @@ teardown() {
 }
 
 # =============================================================================
-# TIMEOUT CONSTANTS
+# STAGE-TYPE-BASED TIMEOUTS — get_stage_timeout()
 # =============================================================================
 
-@test "STAGE_TIMEOUT is 1 hour" {
-    [ "$STAGE_TIMEOUT" -eq 3600 ]
+@test "get_stage_timeout is defined" {
+    [ "$(type -t get_stage_timeout)" = "function" ]
+}
+
+@test "get_stage_timeout returns 600 for test stages" {
+    local result
+    result=$(get_stage_timeout "test-loop-iter-1")
+    [ "$result" -eq 600 ]
+}
+
+@test "get_stage_timeout returns 600 for docs stage" {
+    local result
+    result=$(get_stage_timeout "docs")
+    [ "$result" -eq 600 ]
+}
+
+@test "get_stage_timeout returns 600 for pr stage" {
+    local result
+    result=$(get_stage_timeout "pr")
+    [ "$result" -eq 600 ]
+}
+
+@test "get_stage_timeout returns 900 for task-review stages" {
+    local result
+    result=$(get_stage_timeout "task-review-iter-1")
+    [ "$result" -eq 900 ]
+}
+
+@test "get_stage_timeout returns 900 for test-validate stages" {
+    local result
+    result=$(get_stage_timeout "test-validate-iter-1")
+    [ "$result" -eq 900 ]
+}
+
+@test "get_stage_timeout returns 1800 for implement stages" {
+    local result
+    result=$(get_stage_timeout "implement-task-1")
+    [ "$result" -eq 1800 ]
+}
+
+@test "get_stage_timeout returns 1800 for fix stages" {
+    local result
+    result=$(get_stage_timeout "fix-tests-iter-1")
+    [ "$result" -eq 1800 ]
+}
+
+@test "get_stage_timeout returns 1800 for pr-review stages" {
+    local result
+    result=$(get_stage_timeout "pr-review-iter-1")
+    [ "$result" -eq 1800 ]
+}
+
+@test "get_stage_timeout returns 1800 for unknown stages" {
+    local result
+    result=$(get_stage_timeout "unknown-stage")
+    [ "$result" -eq 1800 ]
+}
+
+@test "get_stage_timeout distinguishes test-validate from test" {
+    local test_timeout validate_timeout
+    test_timeout=$(get_stage_timeout "test-loop-iter-1")
+    validate_timeout=$(get_stage_timeout "test-validate-iter-1")
+    [ "$test_timeout" -eq 600 ]
+    [ "$validate_timeout" -eq 900 ]
+}
+
+@test "get_stage_timeout distinguishes pr-review from pr" {
+    local pr_timeout review_timeout
+    pr_timeout=$(get_stage_timeout "pr")
+    review_timeout=$(get_stage_timeout "pr-review-iter-1")
+    [ "$pr_timeout" -eq 600 ]
+    [ "$review_timeout" -eq 1800 ]
 }
 
 # =============================================================================
@@ -99,7 +169,6 @@ teardown() {
     local script_content
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
-    [[ "$script_content" == *"readonly STAGE_TIMEOUT"* ]]
     [[ "$script_content" == *"readonly MAX_QUALITY_ITERATIONS"* ]]
     [[ "$script_content" == *"readonly MAX_PR_REVIEW_ITERATIONS"* ]]
     [[ "$script_content" == *"readonly RATE_LIMIT_BUFFER"* ]]
