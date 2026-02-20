@@ -856,3 +856,113 @@ _setup_git_repo_with_diff() {
     result=$(extract_task_size "A task with no size marker")
     [ -z "$result" ]
 }
+
+# =============================================================================
+# TIMEOUT HANDLING — is_stage_timeout() and caller behaviour
+# =============================================================================
+
+@test "quality loop retries when review stage times out" {
+    # Track review calls to ensure retry after timeout
+    local counter_file="$TEST_TMP/timeout_review_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        local stage_name="$1"
+
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+
+                if (( count <= 1 )); then
+                    # First review times out
+                    echo '{"status":"error","error":"timeout"}'
+                else
+                    # Second review approves
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    local exit_status=$?
+
+    # Should succeed after retrying past the timeout
+    [ "$exit_status" -eq 0 ]
+
+    # Should have needed at least 2 iterations (timeout + approval)
+    local review_count
+    review_count=$(cat "$counter_file")
+    [ "$review_count" -ge 2 ]
+}
+
+@test "quality loop does not invoke fix stage after review timeout" {
+    # When review times out, the loop should NOT try to extract comments
+    # and run a fix stage — it should continue to the next iteration.
+    local fix_called="$TEST_TMP/fix_called_after_timeout"
+    echo "false" > "$fix_called"
+    export fix_called
+
+    local counter_file="$TEST_TMP/timeout_fix_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        local stage_name="$1"
+
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+
+                if (( count <= 1 )); then
+                    echo '{"status":"error","error":"timeout"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo "true" > "$fix_called"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    # Fix should NOT have been called (timeout should skip to next iteration)
+    local was_fix_called
+    was_fix_called=$(cat "$fix_called")
+    [ "$was_fix_called" = "false" ]
+}
+
+@test "quality loop structure checks timeout before checking review verdict" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # The function must call is_stage_timeout before checking review_verdict
+    [[ "$func_def" == *"is_stage_timeout"* ]]
+}

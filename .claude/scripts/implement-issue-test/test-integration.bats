@@ -747,3 +747,25 @@ teardown() {
     run should_run_docs_stage "typescript"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# TIMEOUT-AS-SUCCESS BUG — is_stage_timeout() in callers
+# =============================================================================
+
+@test "is_stage_timeout helper function is defined" {
+    [ "$(type -t is_stage_timeout)" = "function" ]
+}
+
+@test "test loop checks for stage timeout before inspecting result" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"is_stage_timeout"* ]]
+}
+
+@test "PR review loop checks for stage timeout before inspecting result" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"is_stage_timeout"* ]]
+}

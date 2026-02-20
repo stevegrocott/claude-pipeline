@@ -426,6 +426,19 @@ is_stage_completed() {
     [[ "$status" == "completed" ]]
 }
 
+# Check if a stage result is a timeout error
+# Arguments:
+#   $1 - JSON string from run_stage output
+# Returns 0 if timeout, 1 if not
+is_stage_timeout() {
+    local result="${1:-}"
+    [[ -z "$result" ]] && return 1
+    local err_status err_type
+    err_status=$(printf '%s' "$result" | jq -r '.status // empty' 2>/dev/null)
+    err_type=$(printf '%s' "$result" | jq -r '.error // empty' 2>/dev/null)
+    [[ "$err_status" == "error" && "$err_type" == "timeout" ]]
+}
+
 # Get count of completed tasks
 get_completed_task_count() {
     jq '[.tasks[] | select(.status == "completed")] | length' "$STATUS_FILE" 2>/dev/null || echo "0"
@@ -871,6 +884,12 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         local review_result
         review_result=$(run_stage "review-${stage_prefix}-iter-$loop_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer")
 
+        # Handle timeout: skip result inspection and retry on next iteration
+        if is_stage_timeout "$review_result"; then
+            log_warn "Review stage timed out on iteration $loop_iteration — retrying next iteration"
+            continue
+        fi
+
         local review_verdict review_summary
         review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
@@ -1247,6 +1266,13 @@ Report pass/fail, test counts, and any failures. Output a summary suitable for a
         local test_result
         test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json" "default")
 
+        # Handle timeout: skip result inspection and retry on next iteration
+        if is_stage_timeout "$test_result"; then
+            log_warn "Test stage timed out on iteration $test_iteration — retrying next iteration"
+            comment_issue "Test Loop: Timeout ($test_iteration/$MAX_TEST_ITERATIONS)" "⏱️ Test stage timed out. Retrying on next iteration." "default"
+            continue
+        fi
+
         local test_status test_summary
         test_status=$(printf '%s' "$test_result" | jq -r '.result')
         test_summary=$(printf '%s' "$test_result" | jq -r '.summary // "Tests completed"')
@@ -1325,6 +1351,13 @@ Output:
 
         local validate_result
         validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json" "default")
+
+        # Handle timeout: skip validation and retry on next iteration
+        if is_stage_timeout "$validate_result"; then
+            log_warn "Test validation timed out on iteration $test_iteration — retrying next iteration"
+            comment_issue "Test Loop: Validation Timeout ($test_iteration/$MAX_TEST_ITERATIONS)" "⏱️ Validation stage timed out. Retrying on next iteration." "default"
+            continue
+        fi
 
         local validate_status validate_summary
         validate_status=$(printf '%s' "$validate_result" | jq -r '.result')
@@ -1848,6 +1881,13 @@ Approve or request changes. Output a summary suitable for a GitHub comment."
 
         local review_result
         review_result=$(run_stage "pr-review-iter-$pr_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer")
+
+        # Handle timeout: skip result inspection and retry on next iteration
+        if is_stage_timeout "$review_result"; then
+            log_warn "PR review timed out on iteration $pr_iteration — retrying next iteration"
+            comment_pr "$pr_number" "PR Review: Timeout (Iteration $pr_iteration)" "⏱️ Review stage timed out. Retrying on next iteration." "code-reviewer"
+            continue
+        fi
 
         local review_verdict review_summary
         review_verdict=$(printf '%s' "$review_result" | jq -r '.result')

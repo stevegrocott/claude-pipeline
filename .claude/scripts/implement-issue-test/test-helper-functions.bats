@@ -317,3 +317,32 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+# =============================================================================
+# is_stage_timeout() — timeout detection helper
+# =============================================================================
+
+@test "is_stage_timeout returns 0 (true) for timeout error JSON" {
+    run is_stage_timeout '{"status":"error","error":"timeout"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "is_stage_timeout returns 1 (false) for successful result" {
+    run is_stage_timeout '{"status":"success","result":"passed","summary":"All tests passed"}'
+    [ "$status" -eq 1 ]
+}
+
+@test "is_stage_timeout returns 1 (false) for non-timeout error" {
+    run is_stage_timeout '{"status":"error","error":"no structured output"}'
+    [ "$status" -eq 1 ]
+}
+
+@test "is_stage_timeout returns 1 (false) for empty string" {
+    run is_stage_timeout ''
+    [ "$status" -eq 1 ]
+}
+
+@test "is_stage_timeout returns 1 (false) for schema-not-found error" {
+    run is_stage_timeout '{"status":"error","error":"schema not found"}'
+    [ "$status" -eq 1 ]
+}
+
