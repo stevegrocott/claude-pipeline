@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path // empty' | { read f; if [ -n \"$f\" ] && echo \"$f\" | grep -q '\\.php$'; then cd \"$CLAUDE_PROJECT_DIR\" && ./vendor/bin/pint \"$f\" 2>/dev/null; fi; }",
+            "command": "jq -r '.tool_input.file_path // empty' | { read f; if [ -n \"$f\" ] && echo \"$f\" | grep -q '\\.php$'; then if [ -f \"$CLAUDE_PROJECT_DIR/composer.json\" ] || find \"$CLAUDE_PROJECT_DIR\" -maxdepth 2 -name '*.php' -print -quit 2>/dev/null | grep -q .; then cd \"$CLAUDE_PROJECT_DIR\" && ./vendor/bin/pint \"$f\" 2>/dev/null; fi; fi; }",
             "timeout": 30
           }
         ]
