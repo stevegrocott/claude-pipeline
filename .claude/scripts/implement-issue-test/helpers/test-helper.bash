@@ -32,6 +32,11 @@ setup_test_env() {
         cp -r "$SCRIPT_DIR/schemas/"* "$TEST_TMP/schemas/" 2>/dev/null || true
     fi
 
+    # Copy model-config.sh so run_stage can resolve models
+    if [[ -f "$SCRIPT_DIR/model-config.sh" ]]; then
+        cp "$SCRIPT_DIR/model-config.sh" "$TEST_TMP/model-config.sh"
+    fi
+
     # Change to test directory
     cd "$TEST_TMP" || exit 1
 }
@@ -312,6 +317,11 @@ LOG_FILE="${LOG_FILE:-$LOG_BASE/orchestrator.log}"
 STAGE_COUNTER="${STAGE_COUNTER:-0}"
 QUIET="${QUIET:-false}"
 EOF
+
+    # Source model-config.sh first (provides resolve_model, _next_model_up)
+    if [[ -f "$TEST_TMP/model-config.sh" ]]; then
+        source "$TEST_TMP/model-config.sh"
+    fi
 
     # Source it
     source "$func_file"
