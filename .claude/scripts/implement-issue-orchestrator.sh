@@ -72,6 +72,34 @@ get_stage_timeout() {
 }
 
 # =============================================================================
+# BRANCH VERIFICATION
+# =============================================================================
+#
+# Guards fix stages against committing on the wrong branch.  Called before
+# each fix-* stage invocation so that a stale checkout or unexpected HEAD
+# is caught early rather than silently committing to the wrong ref.
+#
+
+verify_on_feature_branch() {
+    local expected="${1:-}"
+
+    if [[ -z "$expected" ]]; then
+        log_error "verify_on_feature_branch: no expected branch provided"
+        return 1
+    fi
+
+    local actual
+    actual=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+    if [[ "$actual" != "$expected" ]]; then
+        log_error "Expected branch '$expected' but HEAD is on '$actual'"
+        return 1
+    fi
+
+    return 0
+}
+
+# =============================================================================
 # ARGUMENT PARSING
 # =============================================================================
 
@@ -981,6 +1009,8 @@ fi)
 
 Fix the issues and commit. Output a summary of fixes applied."
 
+            verify_on_feature_branch "$loop_branch" || true
+
             local fix_result
             fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
 
@@ -1339,6 +1369,8 @@ $failures
 
 Fix the issues and commit. Output a summary of fixes applied."
 
+            verify_on_feature_branch "$loop_branch" || true
+
             local fix_result
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
 
@@ -1433,6 +1465,8 @@ $validate_comments
 
 Fix the test quality issues (add missing assertions, remove TODOs, add edge case tests, etc.) and commit.
 Output a summary of fixes applied."
+
+            verify_on_feature_branch "$loop_branch" || true
 
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
@@ -1965,6 +1999,8 @@ Review feedback:
 $review_comments
 
 Fix the issues and commit. Output a summary of fixes applied."
+
+            verify_on_feature_branch "$branch" || true
 
             local fix_result
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
