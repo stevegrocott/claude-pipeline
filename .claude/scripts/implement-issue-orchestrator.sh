@@ -1304,7 +1304,10 @@ $test_summary" "default"
                 exit 2
             fi
 
-            local fix_prompt="Fix test failures in working directory $safe_dir on branch $loop_branch:
+            local fix_prompt="Fix ONLY the specific test failures listed below. Do NOT rewrite test files, introduce new dependencies, or modify pre-existing test code. Only fix the failing assertions.
+
+Working directory: $safe_dir
+Branch: $loop_branch
 
 Failures:
 $failures
