@@ -1330,15 +1330,35 @@ Fix the issues and commit. Output a summary of fixes applied."
         # -------------------------------------------------------------------------
         log "Tests passed. Running test validation for issue #$ISSUE_NUMBER..."
 
+        # Compute explicit changed-file list (three-dot merge-base diff, not
+        # Jest's --changedSince dependency graph) so the validate agent
+        # operates on a deterministic, pre-computed scope.
+        local changed_files
+        changed_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+
+        if [[ -z "$changed_files" ]]; then
+            log "No changed files detected for validation — skipping"
+            comment_issue "Test Loop: Validation Skipped ($test_iteration/$MAX_TEST_ITERATIONS)" \
+                "⏭️ No changed files detected vs $BASE_BRANCH. Skipping validation." "default"
+            loop_complete=true
+            break
+        fi
+
         local validate_prompt="Validate test comprehensiveness and integrity for issue #$ISSUE_NUMBER in working directory $safe_dir.
 
-SCOPE: Only validate tests related to this issue's implementation. Get modified TypeScript files with:
-git -C $safe_dir diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx' | grep -E '^(apps|packages)/'
+CHANGED FILES (computed via git diff $safe_branch...HEAD --name-only):
+$changed_files
+
+ONLY validate tests for these specific files. Do NOT expand scope beyond this list.
 
 IMPORTANT SCOPE CONSTRAINTS:
-- If NO testable TypeScript code was modified (e.g., config-only, style-only changes), output 'passed' immediately. Do NOT request new tests for non-logic changes.
-- Only validate tests for modified TypeScript files in apps/ or packages/ (services, routes, components, hooks)
+- If NONE of the changed files contain testable code (e.g., config-only, style-only, docs-only changes), output 'passed' immediately. Do NOT request new tests for non-logic changes.
+- Only validate tests for modified code files (services, routes, components, hooks, scripts)
 - Do NOT request tests for config files, static assets, or type-only changes
+
+PRE-EXISTING ISSUES POLICY:
+- If a test file has pre-existing quality issues NOT introduced by this PR, report 'passed' and note them separately under a 'pre_existing_issues' key.
+- Only report 'failed' for quality issues that are directly related to the changed files in this PR.
 
 For each modified implementation file that warrants testing, identify the corresponding test file and audit:
 1. Run the test suite: $test_command
@@ -1348,8 +1368,9 @@ For each modified implementation file that warrants testing, identify the corres
 5. Check for mock abuse patterns
 
 Output:
-- result: 'passed' if tests are comprehensive OR if no testable TypeScript was modified, 'failed' if issues found
-- issues: array of issues found (if any)
+- result: 'passed' if tests are comprehensive OR if no testable code was modified, 'failed' if issues found in PR-related code
+- issues: array of issues found (if any) — only for code changed in this PR
+- pre_existing_issues: array of pre-existing quality issues found in test files not introduced by this PR (informational only)
 - summary: suitable for a GitHub comment (note if validation was skipped due to no testable changes)"
 
         local validate_result
