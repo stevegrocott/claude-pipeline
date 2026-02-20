@@ -24,12 +24,7 @@ setup() {
 
     mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
 
-    # Copy real schemas if available
-    if [[ -d "$SCRIPT_DIR/schemas" ]]; then
-        cp -r "$SCRIPT_DIR/schemas/"* "$SCHEMA_DIR/" 2>/dev/null || true
-    fi
-
-    # Create minimal schemas if not copied
+    # Fallback: create minimal schemas if setup_test_env didn't copy real ones
     for schema in implement-issue-parse implement-issue-implement implement-issue-test \
                   implement-issue-review implement-issue-fix implement-issue-task-review \
                   implement-issue-pr implement-issue-complete implement-issue-simplify; do
@@ -276,17 +271,13 @@ teardown() {
 }
 
 @test "M-size tasks run quality loop" {
-    local result
-    should_run_quality_loop "M"
-    result=$?
-    [ "$result" -eq 0 ]
+    run should_run_quality_loop "M"
+    [ "$status" -eq 0 ]
 }
 
 @test "L-size tasks run quality loop" {
-    local result
-    should_run_quality_loop "L"
-    result=$?
-    [ "$result" -eq 0 ]
+    run should_run_quality_loop "L"
+    [ "$status" -eq 0 ]
 }
 
 @test "get_max_review_attempts returns correct values for S/M/L" {
@@ -380,7 +371,7 @@ teardown() {
     [[ "$func_def" == *"mixed"* ]]
 }
 
-@test "detect_change_scope classifies typescript files" {
+@test "detect_change_scope function exists" {
     [ "$(type -t detect_change_scope)" = "function" ]
 }
 
@@ -508,29 +499,35 @@ teardown() {
     local main_def
     main_def=$(declare -f main)
 
-    # Exits 1 when issue body is empty or no tasks found
-    [[ "$main_def" == *"exit 1"* ]]
+    # Verify the specific parse_issue failure paths exit 1 with error state
+    [[ "$main_def" == *'set_final_state "error"'*'exit 1'* ]]
+    [[ "$main_def" == *"No tasks to implement"*"exit 1"* ]] || \
+    [[ "$main_def" == *"No parseable tasks"*"exit 1"* ]] || \
+    [[ "$main_def" == *"Implementation Tasks"*"exit 1"* ]]
 }
 
 @test "orchestrator exits 2 on max quality iterations" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    [[ "$func_def" == *"exit 2"* ]]
+    [[ "$func_def" == *'set_final_state "max_iterations_quality"'* ]]
+    [[ "$func_def" == *'set_final_state "max_iterations_quality"'*"exit 2"* ]]
 }
 
 @test "orchestrator exits 2 on max test iterations" {
     local func_def
     func_def=$(declare -f run_test_loop)
 
-    [[ "$func_def" == *"exit 2"* ]]
+    [[ "$func_def" == *'set_final_state "max_iterations_test"'* ]]
+    [[ "$func_def" == *'set_final_state "max_iterations_test"'*"exit 2"* ]]
 }
 
 @test "orchestrator exits 2 on max PR review iterations" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"exit 2"* ]]
+    [[ "$main_def" == *'set_final_state "max_iterations_pr_review"'* ]]
+    [[ "$main_def" == *'set_final_state "max_iterations_pr_review"'*"exit 2"* ]]
 }
 
 # =============================================================================
@@ -747,8 +744,6 @@ teardown() {
 }
 
 @test "should_run_docs_stage runs for typescript changes" {
-    local result
-    should_run_docs_stage "typescript"
-    result=$?
-    [ "$result" -eq 0 ]
+    run should_run_docs_stage "typescript"
+    [ "$status" -eq 0 ]
 }
