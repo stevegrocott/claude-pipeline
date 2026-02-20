@@ -13,6 +13,10 @@ setup() {
     # Set required variables
     export ISSUE_NUMBER=123
     export BASE_BRANCH=test
+    # REPO is set via a conditional block in the orchestrator (if/elif/else)
+    # which the awk filter in source_orchestrator_functions() cannot extract.
+    # Mock it directly, matching the pattern used by test-argument-parsing.bats.
+    export REPO="test-owner/test-repo"
     export STATUS_FILE="$TEST_TMP/status.json"
     export LOG_BASE="$TEST_TMP/logs/test"
     export LOG_FILE="$LOG_BASE/orchestrator.log"
