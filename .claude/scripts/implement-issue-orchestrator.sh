@@ -1222,6 +1222,7 @@ run_test_loop() {
             ;;
     esac
 
+    local prior_failure_sigs=""
     while [[ "$loop_complete" != "true" ]]; do
         test_iteration=$((test_iteration + 1))
         increment_test_iteration  # Track iteration in status file
@@ -1261,6 +1262,21 @@ $test_summary" "default"
             log "Tests failed. Getting failures and fixing..."
             local failures
             failures=$(printf '%s' "$test_result" | jq -c '.failures')
+
+            # Convergence detection: exit early if same failures repeat 3 times
+            local failure_sig
+            failure_sig=$(printf '%s' "$failures" | md5sum | cut -d' ' -f1)
+            prior_failure_sigs="${prior_failure_sigs} ${failure_sig}"
+            local sig_count
+            sig_count=$(printf '%s' "$prior_failure_sigs" | tr ' ' '\n' | grep -c "^${failure_sig}$" || true)
+            if (( sig_count >= 3 )); then
+                log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Exiting loop."
+                comment_issue "Test Loop: Convergence Failure" "⚠️ Same test failures repeated $sig_count times. Aborting test-fix loop to prevent waste.
+
+$test_summary" "default"
+                set_final_state "test_convergence_failure"
+                exit 2
+            fi
 
             local fix_prompt="Fix test failures in working directory $safe_dir on branch $loop_branch:
 
@@ -1408,11 +1424,11 @@ Log directory: \`$LOG_BASE\`"
 **Stages:**
 1. Parse issue (extract tasks from GH issue body)
 2. Validate plan (verify references exist)
-3. Implement tasks (with per-task quality loop: simplify, review)
+3. Implement tasks with self-review (per-task quality loop: simplify, review)
 4. Test loop (run tests, fix failures)
 5. Documentation
 6. Create/update PR
-7. PR review loop
+7. PR review loop (combined spec + code review)
 
 Log directory: \`$LOG_BASE\`"
     fi
@@ -1639,112 +1655,54 @@ $task_list_md
             log "Implementing task $task_id: $task_desc (agent: $task_agent)"
             update_task "$task_id" "in_progress"
 
-            local review_attempts=0
-            local task_approved=false
-            local max_attempts
-            max_attempts=$(get_max_review_attempts "$task_size")
-
-            while [[ "$task_approved" != "true" ]] && (( review_attempts < max_attempts )); do
-                # Implement
-                local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
+            # Implement with self-review (eliminates separate task-review invocation)
+            local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
 
 $task_desc
 
+SELF-REVIEW BEFORE COMMITTING:
+After implementing, verify your changes against the task description above:
+1. Does your implementation fully achieve the task's goal?
+2. Are there any obvious issues, missing edge cases, or incomplete parts?
+3. If you find problems, fix them before committing.
+
+Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
 
-                local impl_result
-                impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent")
+            local impl_result
+            impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent")
 
-                local impl_status
-                impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
+            local impl_status
+            impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
 
-                if [[ "$impl_status" != "success" ]]; then
-                    log_error "Task $task_id implementation failed"
-                    update_task "$task_id" "failed" "$review_attempts"
-                    break
-                fi
+            if [[ "$impl_status" != "success" ]]; then
+                log_error "Task $task_id implementation failed"
+                update_task "$task_id" "failed" "0"
+            else
+                update_task "$task_id" "completed" "0"
+                completed_tasks=$((completed_tasks+1))
 
                 local commit_sha
                 commit_sha=$(printf '%s' "$impl_result" | jq -r '.commit')
 
-                # Skip task review for trivial S-size tasks (<10 lines changed)
-                local diff_lines
-                diff_lines=$(get_diff_line_count "$BASE_BRANCH")
-
-                if [[ "$task_size" == "S" ]] && (( ${diff_lines:-0} < 10 )); then
-                    log "Skipping task review for trivial S-size task ($diff_lines lines changed)"
-                    task_approved=true
-                    update_task "$task_id" "completed" "0"
-                    completed_tasks=$((completed_tasks+1))
-
-                    local impl_summary
-                    impl_summary=$(printf '%s' "$impl_result" | jq -r '.summary // "Implementation completed"')
-                    comment_issue "Task $task_id Complete" "**$task_desc**
+                local impl_summary
+                impl_summary=$(printf '%s' "$impl_result" | jq -r '.summary // "Implementation completed"')
+                comment_issue "Task $task_id Complete" "**$task_desc**
 
 **Commit:** \`$commit_sha\`
-**Review:** Skipped (trivial S-size, $diff_lines lines changed)
 
 $impl_summary" "$task_agent"
 
-                    log "Skipping quality loop for task $task_id (S-size task)"
+                # Run quality loop for this task (skipped for S-size tasks)
+                if should_run_quality_loop "$task_size"; then
+                    local quality_max
+                    quality_max=$(get_max_quality_iterations "$task_desc" "$BASE_BRANCH")
+                    log "Running quality loop for task $task_id (size: ${task_size:-unknown}, max_iterations: $quality_max)"
+                    run_quality_loop "." "$branch" "task-$task_id" "$task_agent" "$quality_max"
                 else
-                    # Review task
-                    local review_prompt="Review task $task_id implementation (commit $commit_sha):
-
-Task description: $task_desc
-
-Did the implementation achieve the task's goal? Are there suggested improvements?"
-
-                    local review_result
-                    review_result=$(run_stage "task-review-$task_id-attempt-$((review_attempts+1))" "$review_prompt" "implement-issue-task-review.json" "spec-reviewer")
-
-                    local review_verdict suggested_improvements
-                    review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
-                    suggested_improvements=$(printf '%s' "$review_result" | jq -r '.suggested_improvements')
-
-                    if [[ "$review_verdict" == "passed" && "$suggested_improvements" != "yes" ]]; then
-                        task_approved=true
-                        update_task "$task_id" "completed" "$((review_attempts+1))"
-                        completed_tasks=$((completed_tasks+1))
-
-                        # Comment #6: Task complete (with summary from implementing agent)
-                        local impl_summary
-                        impl_summary=$(printf '%s' "$impl_result" | jq -r '.summary // "Implementation completed"')
-                        comment_issue "Task $task_id Complete" "**$task_desc**
-
-**Commit:** \`$commit_sha\`
-
-$impl_summary" "$task_agent"
-
-                        # Run quality loop for this task (skipped for S-size tasks)
-                        if should_run_quality_loop "$task_size"; then
-                            local quality_max
-                            quality_max=$(get_max_quality_iterations "$task_desc" "$BASE_BRANCH")
-                            log "Running quality loop for task $task_id (size: ${task_size:-unknown}, max_iterations: $quality_max)"
-                            run_quality_loop "." "$branch" "task-$task_id" "$task_agent" "$quality_max"
-                        else
-                            log "Skipping quality loop for task $task_id (S-size task)"
-                        fi
-
-                    else
-                        review_attempts=$((review_attempts+1))
-                        local review_comments
-                        review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
-
-                        log "Task $task_id needs fixes (attempt $review_attempts/$max_attempts)"
-
-                        # Fix
-                        local fix_prompt="Fix issues in task $task_id (commit $commit_sha) on branch $branch in the current working directory:
-
-Review feedback:
-$review_comments
-
-Address the issues and commit."
-
-                        run_stage "fix-task-$task_id-attempt-$review_attempts" "$fix_prompt" "implement-issue-fix.json" "$task_agent"
-                    fi
+                    log "Skipping quality loop for task $task_id (S-size task)"
                 fi
-            done
+            fi
 
             # Update progress
             jq --arg progress "$completed_tasks/$task_count" \

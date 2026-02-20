@@ -135,7 +135,7 @@ main() {
     echo ""
 
     # Run tests
-    if bats "${bats_args[@]}" "${test_files[@]}"; then
+    if bats ${bats_args[@]+"${bats_args[@]}"} "${test_files[@]}"; then
         echo ""
         echo -e "${GREEN}All tests passed!${NC}"
         exit 0
