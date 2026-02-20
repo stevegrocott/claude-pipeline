@@ -52,32 +52,41 @@ teardown() {
 
 @test "init_status initializes all stages as pending" {
     init_status
-    local setup_status research_status evaluate_status plan_status impl_status quality_status
-    setup_status=$(jq -r '.stages.setup.status' "$STATUS_FILE")
-    research_status=$(jq -r '.stages.research.status' "$STATUS_FILE")
-    evaluate_status=$(jq -r '.stages.evaluate.status' "$STATUS_FILE")
-    plan_status=$(jq -r '.stages.plan.status' "$STATUS_FILE")
+    local parse_issue_status validate_plan_status impl_status quality_status
+    local test_loop_status docs_status pr_status pr_review_status complete_status
+    parse_issue_status=$(jq -r '.stages.parse_issue.status' "$STATUS_FILE")
+    validate_plan_status=$(jq -r '.stages.validate_plan.status' "$STATUS_FILE")
     impl_status=$(jq -r '.stages.implement.status' "$STATUS_FILE")
     quality_status=$(jq -r '.stages.quality_loop.status' "$STATUS_FILE")
+    test_loop_status=$(jq -r '.stages.test_loop.status' "$STATUS_FILE")
+    docs_status=$(jq -r '.stages.docs.status' "$STATUS_FILE")
+    pr_status=$(jq -r '.stages.pr.status' "$STATUS_FILE")
+    pr_review_status=$(jq -r '.stages.pr_review.status' "$STATUS_FILE")
+    complete_status=$(jq -r '.stages.complete.status' "$STATUS_FILE")
 
-    [ "$setup_status" = "pending" ]
-    [ "$research_status" = "pending" ]
-    [ "$evaluate_status" = "pending" ]
-    [ "$plan_status" = "pending" ]
+    [ "$parse_issue_status" = "pending" ]
+    [ "$validate_plan_status" = "pending" ]
     [ "$impl_status" = "pending" ]
     [ "$quality_status" = "pending" ]
+    [ "$test_loop_status" = "pending" ]
+    [ "$docs_status" = "pending" ]
+    [ "$pr_status" = "pending" ]
+    [ "$pr_review_status" = "pending" ]
+    [ "$complete_status" = "pending" ]
 }
 
-@test "init_status initializes new stages with timestamps" {
+@test "init_status initializes stages with null timestamps" {
     init_status
-    local research_started evaluate_started plan_started
-    research_started=$(jq -r '.stages.research.started_at' "$STATUS_FILE")
-    evaluate_started=$(jq -r '.stages.evaluate.started_at' "$STATUS_FILE")
-    plan_started=$(jq -r '.stages.plan.started_at' "$STATUS_FILE")
+    local parse_issue_started validate_plan_started parse_issue_completed validate_plan_completed
+    parse_issue_started=$(jq -r '.stages.parse_issue.started_at' "$STATUS_FILE")
+    validate_plan_started=$(jq -r '.stages.validate_plan.started_at' "$STATUS_FILE")
+    parse_issue_completed=$(jq -r '.stages.parse_issue.completed_at' "$STATUS_FILE")
+    validate_plan_completed=$(jq -r '.stages.validate_plan.completed_at' "$STATUS_FILE")
 
-    [ "$research_started" = "null" ]
-    [ "$evaluate_started" = "null" ]
-    [ "$plan_started" = "null" ]
+    [ "$parse_issue_started" = "null" ]
+    [ "$validate_plan_started" = "null" ]
+    [ "$parse_issue_completed" = "null" ]
+    [ "$validate_plan_completed" = "null" ]
 }
 
 @test "init_status sets log_dir" {
@@ -249,28 +258,6 @@ teardown() {
     local current
     current=$(jq -r '.current_task' "$STATUS_FILE")
     [ "$current" = "2" ]
-}
-
-# =============================================================================
-# SET_WORKTREE_INFO
-# =============================================================================
-
-@test "set_worktree_info sets worktree path" {
-    init_status
-    set_worktree_info "/path/to/worktree" "feat/issue-123"
-
-    local worktree
-    worktree=$(jq -r '.worktree' "$STATUS_FILE")
-    [ "$worktree" = "/path/to/worktree" ]
-}
-
-@test "set_worktree_info sets branch name" {
-    init_status
-    set_worktree_info "/path/to/worktree" "feat/issue-123"
-
-    local branch
-    branch=$(jq -r '.branch' "$STATUS_FILE")
-    [ "$branch" = "feat/issue-123" ]
 }
 
 # =============================================================================
