@@ -1414,7 +1414,16 @@ For each modified implementation file that warrants testing, identify the corres
 1. Check for TODO/FIXME/incomplete tests
 2. Check for hollow assertions (expect(true).toBe(true), no assertions)
 3. Verify edge cases and error conditions are tested
-4. Check for mock abuse patterns"
+4. Check for mock abuse patterns
+
+INTEGRATION TEST REQUIREMENT FOR API ROUTES (claude-pipeline#25):
+- If ANY changed file is an API route file (matches */routes/*.ts or */routes/*.js), there MUST be
+  an integration test that verifies the actual HTTP response shape (not just unit tests of service methods).
+- Unit tests that mock the service layer are NOT sufficient for route changes — the Fastify response schema
+  can silently strip fields via fast-json-stringify, which unit tests cannot catch.
+- If route files were changed but no integration test exists for the changed endpoint(s), set
+  validation_result to 'failed' and describe which endpoint(s) lack integration test coverage.
+- This is a HARD REQUIREMENT, not a suggestion. Do NOT pass with a note about missing integration tests."
         else
             validation_section="STEP 2 — TEST VALIDATION: SKIPPED
 No changed files detected vs $BASE_BRANCH. Set validation_result to 'skipped'."
