@@ -263,6 +263,7 @@ init_status() {
                 implement: {status: "pending", task_progress: "0/0"},
                 quality_loop: {status: "pending", iteration: 0},
                 test_loop: {status: "pending", iteration: 0},
+                acceptance_test: {status: "pending"},
                 docs: {status: "pending"},
                 pr: {status: "pending"},
                 pr_review: {status: "pending", iteration: 0},
@@ -1018,6 +1019,16 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             fi
         fi
 
+        # MAJOR-ISSUE OVERRIDE: same logic as PR review (claude-pipeline#25)
+        if [[ "$review_verdict" == "approved" ]]; then
+            local major_issue_count
+            major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
+            if (( major_issue_count > 0 )); then
+                log_warn "Quality review for $stage_prefix approved but $major_issue_count major issue(s) found — overriding to changes_requested"
+                review_verdict="changes_requested"
+            fi
+        fi
+
         if [[ "$review_verdict" == "approved" ]]; then
             loop_approved=true
             log "Quality loop for $stage_prefix approved on iteration $loop_iteration"
@@ -1403,7 +1414,16 @@ For each modified implementation file that warrants testing, identify the corres
 1. Check for TODO/FIXME/incomplete tests
 2. Check for hollow assertions (expect(true).toBe(true), no assertions)
 3. Verify edge cases and error conditions are tested
-4. Check for mock abuse patterns"
+4. Check for mock abuse patterns
+
+INTEGRATION TEST REQUIREMENT FOR API ROUTES (claude-pipeline#25):
+- If ANY changed file is an API route file (matches */routes/*.ts or */routes/*.js), there MUST be
+  an integration test that verifies the actual HTTP response shape (not just unit tests of service methods).
+- Unit tests that mock the service layer are NOT sufficient for route changes — the Fastify response schema
+  can silently strip fields via fast-json-stringify, which unit tests cannot catch.
+- If route files were changed but no integration test exists for the changed endpoint(s), set
+  validation_result to 'failed' and describe which endpoint(s) lack integration test coverage.
+- This is a HARD REQUIREMENT, not a suggestion. Do NOT pass with a note about missing integration tests."
         else
             validation_section="STEP 2 — TEST VALIDATION: SKIPPED
 No changed files detected vs $BASE_BRANCH. Set validation_result to 'skipped'."
@@ -2048,6 +2068,94 @@ $full_scope_failures
     fi
 
     # -------------------------------------------------------------------------
+    # STAGE: ACCEPTANCE TEST (verify fix works against running services)
+    # Runs after unit tests pass.  For issues that change API routes, hits the
+    # actual endpoint in Docker and verifies the response shape matches the
+    # issue's acceptance criteria.  Skips gracefully if Docker is unavailable.
+    # Added in claude-pipeline#25 to prevent "unit tests pass but fix is broken".
+    # -------------------------------------------------------------------------
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "acceptance_test"; then
+        log "Skipping acceptance_test stage (already completed)"
+    else
+        set_stage_started "acceptance_test"
+
+        # Check if any changed files are API route files
+        local changed_route_files
+        changed_route_files=$(git diff "$BASE_BRANCH"...HEAD --name-only -- '*/routes/*.ts' '*/routes/*.js' 2>/dev/null || true)
+
+        if [[ -z "$changed_route_files" ]]; then
+            log "No API route files changed — skipping acceptance test"
+            comment_issue "Acceptance Test: Skipped" "⏭️ No API route files changed. Skipping endpoint verification." "default"
+        elif ! command -v docker &>/dev/null && ! command -v docker-compose &>/dev/null; then
+            log_warn "Docker not available — skipping acceptance test"
+            comment_issue "Acceptance Test: Skipped" "⚠️ Docker not available. Endpoint verification skipped. Manual verification recommended before merge." "default"
+        else
+            log "API route files changed — running acceptance test"
+            log "Changed routes: $changed_route_files"
+
+            local acceptance_prompt="Verify the fix for issue #$ISSUE_NUMBER works against running services.
+
+CHANGED API ROUTE FILES:
+$changed_route_files
+
+ACCEPTANCE CRITERIA (from issue):
+$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body -q '.body' 2>/dev/null | sed -n '/^## Acceptance Criteria/,/^## /p' | sed '\$d')
+
+STEPS:
+1. Check if Docker containers are running (docker compose ps or docker-compose ps)
+2. If containers are not running, try to start them (docker compose up -d) — if this fails, skip with a warning
+3. For each changed route file, identify the endpoint(s) that were modified
+4. Hit each modified endpoint with a real HTTP request (use curl or node http module from inside the container)
+5. Verify the response shape matches what the acceptance criteria expect
+6. If the response is wrong, report 'failed' with details about what was expected vs actual
+
+Output result as 'passed' or 'failed' with a detailed summary."
+
+            local acceptance_result
+            acceptance_result=$(run_stage "acceptance-test" "$acceptance_prompt" "implement-issue-test.json" "default")
+
+            local acceptance_status acceptance_summary
+            acceptance_status=$(printf '%s' "$acceptance_result" | jq -r '.result')
+            acceptance_summary=$(printf '%s' "$acceptance_result" | jq -r '.summary // "Acceptance test completed"')
+
+            local acceptance_icon="✅"
+            [[ "$acceptance_status" == "failed" ]] && acceptance_icon="❌"
+            comment_issue "Acceptance Test" "$acceptance_icon **Result:** $acceptance_status
+
+$acceptance_summary" "default"
+
+            if [[ "$acceptance_status" == "failed" ]]; then
+                log_error "Acceptance test failed — fix does not work against running services"
+
+                # Give the implementation agent a chance to fix
+                local acceptance_fix_prompt="The acceptance test for issue #$ISSUE_NUMBER FAILED. The unit tests passed but the fix does not work when tested against the actual running endpoint.
+
+Failure details:
+$acceptance_summary
+
+Common causes:
+- Response field names don't match what the frontend/consumer expects
+- Fastify response schema strips fields via fast-json-stringify
+- Docker container running stale code (may need rebuild)
+- Database migration not applied
+
+Investigate the root cause and fix the issue. Commit your changes."
+
+                verify_on_feature_branch "$branch" || true
+
+                local acceptance_fix_result
+                acceptance_fix_result=$(run_stage "fix-acceptance-test" "$acceptance_fix_prompt" "implement-issue-fix.json" "$AGENT")
+
+                local acceptance_fix_summary
+                acceptance_fix_summary=$(printf '%s' "$acceptance_fix_result" | jq -r '.summary // "Fix applied"')
+                comment_issue "Acceptance Test Fix" "$acceptance_fix_summary" "$AGENT"
+            fi
+        fi
+
+        set_stage_completed "acceptance_test"
+    fi
+
+    # -------------------------------------------------------------------------
     # STAGE: DOCS
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "docs"; then
@@ -2186,6 +2294,26 @@ Approve or request changes. Output a summary suitable for a GitHub comment."
             end
         ')
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
+
+        # -------------------------------------------------------------------------
+        # MAJOR-ISSUE OVERRIDE: If reviewer said "approved" but flagged major
+        # issues, override to changes_requested.  This prevents the pipeline from
+        # closing issues that are not actually fixed (see claude-pipeline#25).
+        # -------------------------------------------------------------------------
+        if [[ "$review_verdict" == "approved" ]]; then
+            local major_issue_count
+            major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
+            if (( major_issue_count > 0 )); then
+                log_warn "Review verdict was 'approved' but $major_issue_count major issue(s) found — overriding to changes_requested"
+                review_verdict="changes_requested"
+                local major_descriptions
+                major_descriptions=$(printf '%s' "$review_result" | jq -r '[.issues[] | select(.severity == "major") | .description] | join("; ")' 2>/dev/null || echo "")
+                review_summary="${review_summary}
+
+⚠️ **Override:** Reviewer approved but $major_issue_count major issue(s) must be resolved first:
+${major_descriptions}"
+            fi
+        fi
 
         # Comment #11: PR Combined Review Result
         local review_icon="✅"
