@@ -32,6 +32,11 @@ setup_test_env() {
         cp -r "$SCRIPT_DIR/schemas/"* "$TEST_TMP/schemas/" 2>/dev/null || true
     fi
 
+    # Copy model-config.sh for tests that need model resolution
+    if [[ -f "$SCRIPT_DIR/model-config.sh" ]]; then
+        cp "$SCRIPT_DIR/model-config.sh" "$TEST_TMP/model-config.sh"
+    fi
+
     # Change to test directory
     cd "$TEST_TMP" || exit 1
 }
@@ -335,4 +340,9 @@ EOF
 
     # Source it
     source "$func_file"
+
+    # Source model-config for resolve_model() and related functions
+    if [[ -f "$TEST_TMP/model-config.sh" ]]; then
+        source "$TEST_TMP/model-config.sh"
+    fi
 }

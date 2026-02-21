@@ -20,6 +20,7 @@ set -uo pipefail  # Note: not -e, we handle errors explicitly
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
+source "$SCRIPT_DIR/model-config.sh"
 
 # Timeouts and limits
 readonly MAX_QUALITY_ITERATIONS=5
@@ -750,6 +751,7 @@ run_stage() {
     local prompt="$2"
     local schema_file="$3"
     local agent="${4:-}"
+    local complexity="${5:-}"
 
     local stage_log="$LOG_BASE/stages/$(next_stage_log "$stage_name")"
 
@@ -768,6 +770,13 @@ run_stage() {
     log "  Agent: ${agent:-default}"
     log "  Log: $stage_log"
 
+    local model
+    model=$(resolve_model "$stage_name" "$complexity")
+    log "  Model: $model"
+    if [[ -n "$complexity" ]]; then
+        log "  complexity: $complexity"
+    fi
+
     local -a agent_args=()
     if [[ -n "$agent" ]]; then
         agent_args=(--agent "$agent")
@@ -782,6 +791,7 @@ run_stage() {
 
     output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
         ${agent_args[@]+"${agent_args[@]}"} \
+        --model "$model" \
         --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$schema" \
@@ -804,6 +814,7 @@ run_stage() {
         # Retry
         output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
+            --model "$model" \
             --dangerously-skip-permissions \
             --output-format json \
             --json-schema "$schema" \
@@ -1771,8 +1782,16 @@ $task_list_md
             log "Implementing task $task_id: $task_desc (agent: $task_agent)"
             update_task "$task_id" "in_progress"
 
-            # Implement with self-review (eliminates separate task-review invocation)
-            local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
+            local max_attempts
+            max_attempts=$(get_max_review_attempts "$task_size")
+            local review_attempts=0
+            local task_succeeded=false
+
+            while (( review_attempts < max_attempts )); do
+                review_attempts=$((review_attempts + 1))
+
+                # Implement with self-review (eliminates separate task-review invocation)
+                local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
 
 $task_desc
 
@@ -1785,17 +1804,22 @@ After implementing, verify your changes against the task description above:
 Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
 
-            local impl_result
-            impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent")
+                local impl_result
+                impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent")
 
-            local impl_status
-            impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
+                local impl_status
+                impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
 
-            if [[ "$impl_status" != "success" ]]; then
-                log_error "Task $task_id implementation failed"
-                update_task "$task_id" "failed" "0"
-            else
-                update_task "$task_id" "completed" "0"
+                if [[ "$impl_status" == "success" ]]; then
+                    task_succeeded=true
+                    break
+                fi
+
+                log_warn "Task $task_id attempt $review_attempts/$max_attempts failed"
+            done
+
+            if [[ "$task_succeeded" == "true" ]]; then
+                update_task "$task_id" "completed" "$review_attempts"
                 completed_tasks=$((completed_tasks+1))
 
                 local commit_sha
@@ -1818,6 +1842,9 @@ $impl_summary" "$task_agent"
                 else
                     log "Skipping quality loop for task $task_id (S-size task)"
                 fi
+            else
+                log_error "Task $task_id failed after $review_attempts attempts"
+                update_task "$task_id" "failed" "$review_attempts"
             fi
 
             # Update progress
