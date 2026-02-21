@@ -136,6 +136,11 @@ teardown() {
 
     # Should eventually succeed after retrying past the error
     [ "$exit_status" -eq 0 ]
+
+    # Verify the loop went through multiple iterations to recover
+    local iterations
+    iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
+    [ "$iterations" -ge 2 ] || fail "Should have retried after error, got $iterations iterations"
 }
 
 # =============================================================================
@@ -244,6 +249,11 @@ teardown() {
     echo "0" > "$counter_file"
     export counter_file
 
+    # Track fix stage invocations
+    local fix_counter="$TEST_TMP/fix_call_count"
+    echo "0" > "$fix_counter"
+    export fix_counter
+
     # Mock run_stage: review requests changes on first call, approves on second
     run_stage() {
         local stage_name="$1"
@@ -268,6 +278,10 @@ teardown() {
                 fi
                 ;;
             fix-review-*)
+                local fc
+                fc=$(cat "$fix_counter")
+                fc=$((fc + 1))
+                echo "$fc" > "$fix_counter"
                 echo '{"status":"success","summary":"Fixed naming conventions"}'
                 ;;
         esac
@@ -288,6 +302,11 @@ teardown() {
     local iterations
     iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
     [ "$iterations" -ge 2 ]
+
+    # Fix stage should have been invoked at least once (after changes_requested)
+    local fix_count
+    fix_count=$(cat "$fix_counter")
+    [ "$fix_count" -ge 1 ] || fail "Fix stage should have been called after changes_requested"
 }
 
 @test "quality loop has exit 2 for max iterations" {
@@ -351,6 +370,11 @@ teardown() {
     local final_count
     final_count=$(cat "$counter_file")
     [ "$final_count" -ge 2 ]
+
+    # Verify the iteration counter in status file matches
+    local iterations
+    iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
+    [ "$iterations" -ge 2 ] || fail "Status file should show >= 2 iterations, got: $iterations"
 }
 
 # =============================================================================
@@ -636,11 +660,17 @@ HIST_EOF
     entry_count=$(jq 'length' "$history_file")
     [ "$entry_count" -eq 2 ]
 
-    # First entry: iteration 1
+    # First entry: iteration 1, changes_requested
     [ "$(jq '.[0].iteration' "$history_file")" -eq 1 ]
+    [ "$(jq -r '.[0].result' "$history_file")" = "changes_requested" ] || \
+        fail "First entry should be changes_requested, got: $(jq -r '.[0].result' "$history_file")"
+    [ "$(jq '.[0].issues | length' "$history_file")" -eq 1 ] || \
+        fail "First entry should have 1 issue"
 
-    # Second entry: iteration 2
+    # Second entry: iteration 2, approved
     [ "$(jq '.[1].iteration' "$history_file")" -eq 2 ]
+    [ "$(jq -r '.[1].result' "$history_file")" = "approved" ] || \
+        fail "Second entry should be approved, got: $(jq -r '.[1].result' "$history_file")"
 }
 
 # =============================================================================

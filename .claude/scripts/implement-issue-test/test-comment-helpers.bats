@@ -52,8 +52,13 @@ teardown() {
     [ -n "$REPO" ]
 }
 
-@test "REPO points to correct repository" {
+@test "REPO has owner/repo format" {
     [ -n "$REPO" ]
+    # REPO must be in owner/repo format (contains exactly one slash)
+    [[ "$REPO" == *"/"* ]] || fail "REPO should be in owner/repo format, got: $REPO"
+    local slash_count
+    slash_count=$(echo "$REPO" | tr -cd '/' | wc -c | tr -d ' ')
+    [ "$slash_count" -eq 1 ] || fail "REPO should have exactly one slash, got: $REPO"
 }
 
 # =============================================================================

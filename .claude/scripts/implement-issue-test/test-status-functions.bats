@@ -31,9 +31,16 @@ teardown() {
 # INIT_STATUS
 # =============================================================================
 
-@test "init_status creates status file" {
+@test "init_status creates status file with valid JSON" {
     init_status
     [ -f "$STATUS_FILE" ]
+    # Verify it's valid JSON, not an empty or corrupt file
+    jq -e '.' "$STATUS_FILE" >/dev/null 2>&1 || fail "Status file is not valid JSON"
+    # Verify it has the expected top-level structure
+    local keys
+    keys=$(jq -r 'keys[]' "$STATUS_FILE" | sort | tr '\n' ',')
+    [[ "$keys" == *"state,"* ]] || fail "Missing 'state' key in status file"
+    [[ "$keys" == *"stages,"* ]] || fail "Missing 'stages' key in status file"
 }
 
 @test "init_status sets state to initializing" {
@@ -107,13 +114,18 @@ teardown() {
 # UPDATE_STAGE
 # =============================================================================
 
-@test "update_stage changes stage status" {
+@test "update_stage changes stage status and updates current_stage" {
     init_status
     update_stage "setup" "in_progress"
 
     local status
     status=$(jq -r '.stages.setup.status' "$STATUS_FILE")
     [ "$status" = "in_progress" ]
+
+    # Verify current_stage was also updated
+    local current
+    current=$(jq -r '.current_stage' "$STATUS_FILE")
+    [ "$current" = "setup" ]
 }
 
 @test "update_stage with extra field" {
@@ -160,13 +172,15 @@ teardown() {
     [ "$status" = "in_progress" ]
 }
 
-@test "set_stage_started sets started_at timestamp" {
+@test "set_stage_started sets started_at timestamp in ISO format" {
     init_status
     set_stage_started "setup"
 
     local started_at
     started_at=$(jq -r '.stages.setup.started_at' "$STATUS_FILE")
     [ "$started_at" != "null" ]
+    # Verify it looks like a timestamp (starts with a year)
+    [[ "$started_at" =~ ^20[0-9]{2}- ]] || fail "started_at should be ISO timestamp, got: $started_at"
 }
 
 @test "set_stage_started sets state to running" {
@@ -187,13 +201,15 @@ teardown() {
     [ "$status" = "completed" ]
 }
 
-@test "set_stage_completed sets completed_at timestamp" {
+@test "set_stage_completed sets completed_at timestamp in ISO format" {
     init_status
     set_stage_completed "setup"
 
     local completed_at
     completed_at=$(jq -r '.stages.setup.completed_at' "$STATUS_FILE")
     [ "$completed_at" != "null" ]
+    # Verify it looks like a timestamp
+    [[ "$completed_at" =~ ^20[0-9]{2}- ]] || fail "completed_at should be ISO timestamp, got: $completed_at"
 }
 
 # =============================================================================

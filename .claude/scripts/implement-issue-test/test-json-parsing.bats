@@ -171,6 +171,16 @@ teardown() {
 	fi
 
 	[ -n "$structured" ] || fail "Failed to extract structured_output from large payload"
+
+	# Verify the extracted data field is preserved (not truncated or mangled)
+	local extracted_status
+	extracted_status=$(printf '%s' "$structured" | jq -r '.status')
+	[ "$extracted_status" = "success" ] || fail "Expected status=success, got: $extracted_status"
+
+	local extracted_data
+	extracted_data=$(printf '%s' "$structured" | jq -r '.data')
+	[[ "$extracted_data" == *"Item number 1"* ]] || fail "Data was truncated or mangled"
+	[[ "$extracted_data" == *"Item number 500"* ]] || fail "Data was truncated (missing last item)"
 }
 
 @test "REGRESSION: JSON with embedded code blocks" {
@@ -195,6 +205,13 @@ HEREDOC
 	fi
 
 	[ -n "$structured" ] || fail "Failed to extract structured_output with code blocks"
+
+	# Verify the extracted fields are intact
+	local extracted_status files_count
+	extracted_status=$(printf '%s' "$structured" | jq -r '.status')
+	files_count=$(printf '%s' "$structured" | jq '.files | length')
+	[ "$extracted_status" = "success" ] || fail "Expected status=success, got: $extracted_status"
+	[ "$files_count" -eq 1 ] || fail "Expected 1 file entry, got: $files_count"
 }
 
 # =============================================================================
@@ -579,6 +596,15 @@ EOF
 	local task_count
 	task_count=$(printf '%s' "$structured" | jq '.tasks | length')
 	[ "$task_count" -eq 2 ] || fail "Expected 2 tasks, got: $task_count"
+
+	# Verify extracted fields are not corrupted
+	local extracted_status worktree branch
+	extracted_status=$(printf '%s' "$structured" | jq -r '.status')
+	worktree=$(printf '%s' "$structured" | jq -r '.worktree')
+	branch=$(printf '%s' "$structured" | jq -r '.branch')
+	[ "$extracted_status" = "success" ] || fail "Status corrupted: $extracted_status"
+	[ "$worktree" = "/home/developer/.worktrees/issue-123" ] || fail "Worktree corrupted: $worktree"
+	[ "$branch" = "feature/issue-123-user-service" ] || fail "Branch corrupted: $branch"
 }
 
 @test "FIXTURE: parse response with code containing special chars" {
