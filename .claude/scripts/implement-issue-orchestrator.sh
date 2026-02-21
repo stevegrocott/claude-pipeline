@@ -765,9 +765,18 @@ run_stage() {
     local schema
     schema=$(jq -c . "$SCHEMA_DIR/$schema_file")
 
+    # Resolve model and fallback from stage name + complexity hint
+    local model fallback_model
+    model=$(resolve_model "$stage_name" "$complexity")
+    fallback_model=$(_next_model_up "$model")
+
     log "Running stage: $stage_name"
     log "  Schema: $schema_file"
     log "  Agent: ${agent:-default}"
+    log "  Model: $model (fallback: $fallback_model)"
+    if [[ -n "$complexity" ]]; then
+        log "  Complexity: $complexity"
+    fi
     log "  Log: $stage_log"
 
     local model
@@ -786,12 +795,16 @@ run_stage() {
     stage_timeout=$(get_stage_timeout "$stage_name")
     log "  Timeout: ${stage_timeout}s"
 
+    # Always pass --fallback-model for resilience (even when same as primary)
+    local -a fallback_args=(--fallback-model "$fallback_model")
+
     local output
     local exit_code=0
 
     output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
         ${agent_args[@]+"${agent_args[@]}"} \
         --model "$model" \
+        ${fallback_args[@]+"${fallback_args[@]}"} \
         --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$schema" \
@@ -815,6 +828,7 @@ run_stage() {
         output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
             --model "$model" \
+            ${fallback_args[@]+"${fallback_args[@]}"} \
             --dangerously-skip-permissions \
             --output-format json \
             --json-schema "$schema" \
@@ -865,6 +879,7 @@ run_stage() {
 #   $3 - stage prefix for logging (e.g., "task-1" or "pr-fix")
 #   $4 - agent to use for fix stages (optional, falls back to global $AGENT)
 #   $5 - max iterations override (optional, defaults to MAX_QUALITY_ITERATIONS)
+#   $6 - complexity hint for model selection (S/M/L, optional)
 # Returns:
 #   0 on success (approved)
 #   2 on max iterations exceeded (calls exit 2)
@@ -874,6 +889,7 @@ run_quality_loop() {
     local stage_prefix="${3:-main}"
     local loop_agent="${4:-$AGENT}"
     local max_iterations="${5:-$MAX_QUALITY_ITERATIONS}"
+    local loop_complexity="${6:-}"
 
     local loop_approved=false
     local loop_iteration=0  # Per-loop counter (resets each call)
@@ -905,7 +921,7 @@ Simplify code for clarity and consistency without changing functionality.
 Output a summary of changes made."
 
         local simplify_result
-        simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json")
+        simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
 
         local simplify_summary
         simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.summary // "No changes"')
@@ -946,7 +962,7 @@ DO NOT recommend 'approve and merge' - this is not a PR review.
 Simply output 'approved' if code quality is acceptable, or 'changes_requested' with specific issues to fix."
 
         local review_result
-        review_result=$(run_stage "review-${stage_prefix}-iter-$loop_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer")
+        review_result=$(run_stage "review-${stage_prefix}-iter-$loop_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer" "$loop_complexity")
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$review_result"; then
@@ -1023,7 +1039,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             verify_on_feature_branch "$loop_branch" || true
 
             local fix_result
-            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
+            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
@@ -1246,6 +1262,7 @@ detect_change_scope() {
 #   $2 - branch name
 #   $3 - agent to use for fix stages (optional, falls back to global $AGENT)
 #   $4 - pre-computed change scope (optional; computed via detect_change_scope if omitted)
+#   $5 - complexity hint for model selection (S/M/L, optional)
 # Returns:
 #   0 on success (tests pass and validated)
 #   2 on max iterations exceeded (calls exit 2)
@@ -1253,6 +1270,7 @@ run_test_loop() {
     local loop_dir="$1"
     local loop_branch="$2"
     local loop_agent="${3:-$AGENT}"
+    local loop_complexity="${5:-}"
 
     local loop_complete=false
     local test_iteration=0
@@ -1330,7 +1348,7 @@ $test_command
 Report pass/fail, test counts, and any failures. Output a summary suitable for a GitHub comment."
 
         local test_result
-        test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json" "default")
+        test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json" "default" "$loop_complexity")
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$test_result"; then
@@ -1383,7 +1401,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             verify_on_feature_branch "$loop_branch" || true
 
             local fix_result
-            fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
+            fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
@@ -1442,7 +1460,7 @@ Output:
 - summary: suitable for a GitHub comment (note if validation was skipped due to no testable changes)"
 
         local validate_result
-        validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json" "default")
+        validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json" "default" "$loop_complexity")
 
         # Handle timeout: skip validation and retry on next iteration
         if is_stage_timeout "$validate_result"; then
@@ -1480,7 +1498,7 @@ Output a summary of fixes applied."
             verify_on_feature_branch "$loop_branch" || true
 
             local fix_result
-            fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
+            fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
@@ -1499,7 +1517,7 @@ Output a summary of fixes applied."
 
 main() {
     # Declare local variables used throughout main
-    local branch tasks_json task_count completed_tasks
+    local branch tasks_json task_count completed_tasks max_task_size=""
 
     # -------------------------------------------------------------------------
     # RESUME VS FRESH START INITIALIZATION
@@ -1770,6 +1788,15 @@ $task_list_md
                 log_warn "Task $task_id: no size marker found in description — defaulting to max_attempts=3"
             fi
 
+            # Accumulate max-priority complexity: L > M > S.
+            # The test loop runs once after all tasks, so it needs the
+            # heaviest size to select an appropriately capable model.
+            case "$task_size" in
+                L) max_task_size="L" ;;
+                M) [[ "$max_task_size" != "L" ]] && max_task_size="M" ;;
+                S) [[ -z "$max_task_size" ]] && max_task_size="S" ;;
+            esac
+
             # In resume mode, check if this task is already completed
             if [[ -n "$RESUME_MODE" ]]; then
                 task_status=$(jq -r ".tasks[] | select(.id == $task_id) | .status" "$STATUS_FILE" 2>/dev/null)
@@ -1805,7 +1832,7 @@ Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
 
                 local impl_result
-                impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent")
+                impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size")
 
                 local impl_status
                 impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
@@ -1838,7 +1865,7 @@ $impl_summary" "$task_agent"
                     local quality_max
                     quality_max=$(get_max_quality_iterations "$task_desc" "$BASE_BRANCH")
                     log "Running quality loop for task $task_id (size: ${task_size:-unknown}, max_iterations: $quality_max)"
-                    run_quality_loop "." "$branch" "task-$task_id" "$task_agent" "$quality_max"
+                    run_quality_loop "." "$branch" "task-$task_id" "$task_agent" "$quality_max" "$task_size"
                 else
                     log "Skipping quality loop for task $task_id (S-size task)"
                 fi
@@ -1875,7 +1902,7 @@ $impl_summary" "$task_agent"
         set_stage_started "test_loop"
         log "Running test loop after all tasks complete..."
 
-        run_test_loop "." "$branch" "$AGENT" "$branch_scope"
+        run_test_loop "." "$branch" "$AGENT" "$branch_scope" "$max_task_size"
 
         set_stage_completed "test_loop"
         log "Test loop complete."

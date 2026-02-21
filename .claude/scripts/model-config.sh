@@ -159,3 +159,25 @@ resolve_model() {
 
 	printf '%s\n' "$(_tier_to_model "$tier")"
 }
+
+# =============================================================================
+# MODEL ESCALATION (_next_model_up)
+# =============================================================================
+#
+# Given a model name, returns the next model up in the tier hierarchy.
+# Used for --fallback-model to provide resilience when the primary model
+# is unavailable or rate-limited.
+#
+# haiku  -> sonnet
+# sonnet -> opus
+# opus   -> opus (ceiling)
+#
+
+_next_model_up() {
+	case "$1" in
+		haiku)  printf '%s' "sonnet" ;;
+		sonnet) printf '%s' "opus" ;;
+		opus)   printf '%s' "opus" ;;
+		*)      printf '%s' "opus" ;;
+	esac
+}
