@@ -1960,6 +1960,38 @@ $impl_summary" "$task_agent"
 
         run_test_loop "." "$branch" "$AGENT" "$branch_scope" "$max_task_size"
 
+        # ---------------------------------------------------------------------
+        # NON-BLOCKING FULL-SCOPE CHECK (informational only)
+        # After PR tests pass, run jest --changedSince once to surface any
+        # pre-existing failures pulled in by the dependency graph.  This does
+        # NOT block the pipeline — failures are posted as an informational
+        # GitHub comment so maintainers are aware.
+        # ---------------------------------------------------------------------
+        if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" ]]; then
+            log "Running informational full-scope check (non-blocking)..."
+            local full_scope_output full_scope_rc
+            full_scope_output=$(cd "." && npx jest --passWithNoTests --changedSince="$BASE_BRANCH" 2>&1) || true
+            full_scope_rc=$?
+
+            if (( full_scope_rc != 0 )); then
+                local full_scope_failures
+                full_scope_failures=$(printf '%s' "$full_scope_output" | tail -40)
+                comment_issue "Full-Scope Check: Pre-existing Failures (informational)" \
+                    "ℹ️ A full \`jest --changedSince=$BASE_BRANCH\` run found additional failures outside the PR-changed test files. These are **pre-existing** and do **not** block this pipeline.
+
+<details>
+<summary>Failure details (last 40 lines)</summary>
+
+\`\`\`
+$full_scope_failures
+\`\`\`
+</details>" "default"
+                log "INFO: Full-scope check found pre-existing failures (non-blocking)"
+            else
+                log "Full-scope check passed — no additional failures"
+            fi
+        fi
+
         set_stage_completed "test_loop"
         log "Test loop complete."
     fi
