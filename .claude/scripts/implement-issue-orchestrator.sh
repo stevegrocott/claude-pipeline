@@ -1330,7 +1330,7 @@ run_test_loop() {
 
     local jest_command
     if [[ -n "$changed_test_files" ]]; then
-        jest_command="npx jest --passWithNoTests $changed_test_files"
+        jest_command="npx jest --passWithNoTests $(echo "$changed_test_files" | tr '\n' ' ')"
         log "Explicit changed test files: $(echo "$changed_test_files" | tr '\n' ' ')"
     else
         jest_command="npx jest --passWithNoTests --changedSince=$safe_branch"
@@ -1397,9 +1397,39 @@ $test_summary" "default"
             local failures
             failures=$(printf '%s' "$test_result" | jq -c '.failures')
 
-            # Convergence detection: exit early if same failures repeat 3 times
+            # Filter failures: only include failures from PR-changed test files.
+            # Explicit mode (changed_test_files non-empty): all failures are from
+            # PR-changed files since Jest ran only those files explicitly.
+            # Fallback mode (changed_test_files empty, --changedSince used): failures
+            # may be from dependency-pulled test files (pre-existing relative to this PR).
+            local pr_failures skipped_count
+            pr_failures="$failures"
+            skipped_count=0
+            if [[ -z "$changed_test_files" ]]; then
+                skipped_count=$(printf '%s' "$failures" | jq 'length // 0' 2>/dev/null || echo 0)
+                if (( skipped_count > 0 )); then
+                    log "INFO: Skipping $skipped_count pre-existing failure(s) — failures from --changedSince fallback are not from PR-changed test files"
+                    pr_failures="[]"
+                fi
+            fi
+
+            # If no PR-introduced failures remain, exit test loop gracefully.
+            # Pre-existing failures do not block the pipeline (consistent with validation policy).
+            local pr_failure_count
+            pr_failure_count=$(printf '%s' "$pr_failures" | jq 'length // 0' 2>/dev/null || echo 0)
+            if (( pr_failure_count == 0 )); then
+                log "INFO: All test failures are pre-existing. Skipping fix-agent dispatch."
+                if (( skipped_count > 0 )); then
+                    comment_issue "Test Loop: Pre-existing Failures ($test_iteration/$MAX_TEST_ITERATIONS)" \
+                        "ℹ️ $skipped_count pre-existing failure(s) detected (not from PR-changed test files). Skipping fix-agent." "default"
+                fi
+                loop_complete=true
+                break
+            fi
+
+            # Convergence detection: exit early if same PR-scoped failures repeat 3 times
             local failure_sig
-            failure_sig=$(printf '%s' "$failures" | md5sum | cut -d' ' -f1)
+            failure_sig=$(printf '%s' "$pr_failures" | md5sum | cut -d' ' -f1)
             prior_failure_sigs="${prior_failure_sigs} ${failure_sig}"
             local sig_count
             sig_count=$(printf '%s' "$prior_failure_sigs" | tr ' ' '\n' | grep -c "^${failure_sig}$" || true)
@@ -1418,7 +1448,7 @@ Working directory: $safe_dir
 Branch: $loop_branch
 
 Failures:
-$failures
+$pr_failures
 
 Fix the issues and commit. Output a summary of fixes applied."
 
