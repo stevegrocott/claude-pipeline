@@ -1018,6 +1018,16 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             fi
         fi
 
+        # MAJOR-ISSUE OVERRIDE: same logic as PR review (claude-pipeline#25)
+        if [[ "$review_verdict" == "approved" ]]; then
+            local major_issue_count
+            major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
+            if (( major_issue_count > 0 )); then
+                log_warn "Quality review for $stage_prefix approved but $major_issue_count major issue(s) found — overriding to changes_requested"
+                review_verdict="changes_requested"
+            fi
+        fi
+
         if [[ "$review_verdict" == "approved" ]]; then
             loop_approved=true
             log "Quality loop for $stage_prefix approved on iteration $loop_iteration"
@@ -2186,6 +2196,26 @@ Approve or request changes. Output a summary suitable for a GitHub comment."
             end
         ')
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
+
+        # -------------------------------------------------------------------------
+        # MAJOR-ISSUE OVERRIDE: If reviewer said "approved" but flagged major
+        # issues, override to changes_requested.  This prevents the pipeline from
+        # closing issues that are not actually fixed (see claude-pipeline#25).
+        # -------------------------------------------------------------------------
+        if [[ "$review_verdict" == "approved" ]]; then
+            local major_issue_count
+            major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
+            if (( major_issue_count > 0 )); then
+                log_warn "Review verdict was 'approved' but $major_issue_count major issue(s) found — overriding to changes_requested"
+                review_verdict="changes_requested"
+                local major_descriptions
+                major_descriptions=$(printf '%s' "$review_result" | jq -r '[.issues[] | select(.severity == "major") | .description] | join("; ")' 2>/dev/null || echo "")
+                review_summary="${review_summary}
+
+⚠️ **Override:** Reviewer approved but $major_issue_count major issue(s) must be resolved first:
+${major_descriptions}"
+            fi
+        fi
 
         # Comment #11: PR Combined Review Result
         local review_icon="✅"
