@@ -1730,12 +1730,39 @@ Log directory: \`$LOG_BASE\`"
     fi
 
     # -------------------------------------------------------------------------
+    # EARLY SCOPE CHECK: config-only bypass
+    # If all branch changes are config/doc files only, skip implement/test stages
+    # and jump directly to PR creation.
+    # -------------------------------------------------------------------------
+    local early_scope
+    early_scope=$(detect_change_scope "." "$BASE_BRANCH")
+    log "Early scope check: $early_scope"
+
+    if [[ "$early_scope" == "config" ]]; then
+        log "Config-only scope detected — skipping implement/quality/test stages"
+        if [[ -z "$RESUME_MODE" ]]; then
+            comment_issue "Config-Only Changes Detected" "Config-only changes detected — skipping to PR creation."
+        fi
+        # Ensure the branch has at least one commit vs base before PR creation
+        local early_commit_count
+        early_commit_count=$(git rev-list --count "${BASE_BRANCH}..${branch}" 2>/dev/null || echo "0")
+        if (( early_commit_count == 0 )); then
+            log "No commits on branch vs base — creating empty commit to allow PR creation"
+            git commit --allow-empty -m "chore(issue-${ISSUE_NUMBER}): config-only changes"
+        fi
+    fi
+
+    # -------------------------------------------------------------------------
     # STAGE: VALIDATE PLAN (lightweight check)
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "validate_plan"; then
         log "Skipping validate_plan stage (already completed)"
         # Load tasks from status file for implement stage
         tasks_json=$(jq -c '.tasks' "$STATUS_FILE")
+    elif [[ "$early_scope" == "config" ]]; then
+        log "Skipping validate_plan stage (config-only scope)"
+        set_stage_started "validate_plan"
+        set_stage_completed "validate_plan"
     else
         set_stage_started "validate_plan"
 
@@ -1830,6 +1857,11 @@ $task_list_md
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "implement"; then
         log "Skipping implement stage (already completed)"
+    elif [[ "$early_scope" == "config" ]]; then
+        log "Skipping implement stage (config-only scope)"
+        set_stage_started "implement"
+        set_stage_completed "implement"
+        set_stage_completed "quality_loop"
     else
         set_stage_started "implement"
 
@@ -1966,6 +1998,10 @@ $impl_summary" "$task_agent"
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "test_loop"; then
         log "Skipping test_loop stage (already completed)"
+    elif [[ "$early_scope" == "config" ]]; then
+        log "Skipping test_loop stage (config-only scope)"
+        set_stage_started "test_loop"
+        set_stage_completed "test_loop"
     else
         set_stage_started "test_loop"
         log "Running test loop after all tasks complete..."
