@@ -51,9 +51,15 @@ teardown() {
 # QUALITY ITERATION TRACKING
 # =============================================================================
 
-@test "quality loop increments iteration counter" {
+@test "quality loop increments iteration counter and calls stages in order" {
+    # Track stage call sequence
+    local stage_log="$TEST_TMP/stage_call_sequence"
+    : > "$stage_log"
+    export stage_log
+
     # Mock run_stage to return approved immediately (with summary fields)
     run_stage() {
+        echo "$1" >> "$stage_log"
         case "$1" in
             simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
             test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
@@ -71,6 +77,14 @@ teardown() {
     local iterations
     iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
     [ "$iterations" = "1" ]
+
+    # Verify simplify was called before review
+    grep -q "simplify-" "$stage_log" || fail "Expected simplify stage to be called"
+    grep -q "review-" "$stage_log" || fail "Expected review stage to be called"
+    local simplify_line review_line
+    simplify_line=$(grep -n "simplify-" "$stage_log" | head -1 | cut -d: -f1)
+    review_line=$(grep -n "review-" "$stage_log" | head -1 | cut -d: -f1)
+    [ "$simplify_line" -lt "$review_line" ] || fail "Simplify must run before review"
 }
 
 @test "quality loop stage iteration matches counter" {
@@ -98,9 +112,49 @@ teardown() {
 # TEST FAILURE HANDLING
 # =============================================================================
 
-@test "run_quality_loop function is defined" {
-    # Validates the function exists and is properly sourced
-    [ "$(type -t run_quality_loop)" = "function" ]
+@test "quality loop handles review stage error gracefully" {
+    # When review returns an error status, the loop should retry or exit cleanly
+    local counter_file="$TEST_TMP/error_review_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+                if (( count <= 1 )); then
+                    echo '{"status":"error","error":"model_error","summary":"Model error"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    local exit_status=$?
+
+    # Should eventually succeed after retrying past the error
+    [ "$exit_status" -eq 0 ]
+
+    # Verify the loop went through multiple iterations to recover
+    local iterations
+    iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
+    [ "$iterations" -ge 2 ] || fail "Should have retried after error, got $iterations iterations"
 }
 
 # =============================================================================
@@ -209,6 +263,11 @@ teardown() {
     echo "0" > "$counter_file"
     export counter_file
 
+    # Track fix stage invocations
+    local fix_counter="$TEST_TMP/fix_call_count"
+    echo "0" > "$fix_counter"
+    export fix_counter
+
     # Mock run_stage: review requests changes on first call, approves on second
     run_stage() {
         local stage_name="$1"
@@ -233,6 +292,10 @@ teardown() {
                 fi
                 ;;
             fix-review-*)
+                local fc
+                fc=$(cat "$fix_counter")
+                fc=$((fc + 1))
+                echo "$fc" > "$fix_counter"
                 echo '{"status":"success","summary":"Fixed naming conventions"}'
                 ;;
         esac
@@ -253,6 +316,11 @@ teardown() {
     local iterations
     iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
     [ "$iterations" -ge 2 ]
+
+    # Fix stage should have been invoked at least once (after changes_requested)
+    local fix_count
+    fix_count=$(cat "$fix_counter")
+    [ "$fix_count" -ge 1 ] || fail "Fix stage should have been called after changes_requested"
 }
 
 @test "quality loop has exit 2 for max iterations" {
@@ -316,6 +384,11 @@ teardown() {
     local final_count
     final_count=$(cat "$counter_file")
     [ "$final_count" -ge 2 ]
+
+    # Verify the iteration counter in status file matches
+    local iterations
+    iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
+    [ "$iterations" -ge 2 ] || fail "Status file should show >= 2 iterations, got: $iterations"
 }
 
 # =============================================================================
@@ -601,11 +674,17 @@ HIST_EOF
     entry_count=$(jq 'length' "$history_file")
     [ "$entry_count" -eq 2 ]
 
-    # First entry: iteration 1
+    # First entry: iteration 1, changes_requested
     [ "$(jq '.[0].iteration' "$history_file")" -eq 1 ]
+    [ "$(jq -r '.[0].result' "$history_file")" = "changes_requested" ] || \
+        fail "First entry should be changes_requested, got: $(jq -r '.[0].result' "$history_file")"
+    [ "$(jq '.[0].issues | length' "$history_file")" -eq 1 ] || \
+        fail "First entry should have 1 issue"
 
-    # Second entry: iteration 2
+    # Second entry: iteration 2, approved
     [ "$(jq '.[1].iteration' "$history_file")" -eq 2 ]
+    [ "$(jq -r '.[1].result' "$history_file")" = "approved" ] || \
+        fail "Second entry should be approved, got: $(jq -r '.[1].result' "$history_file")"
 }
 
 # =============================================================================
@@ -855,4 +934,114 @@ _setup_git_repo_with_diff() {
     local result
     result=$(extract_task_size "A task with no size marker")
     [ -z "$result" ]
+}
+
+# =============================================================================
+# TIMEOUT HANDLING — is_stage_timeout() and caller behaviour
+# =============================================================================
+
+@test "quality loop retries when review stage times out" {
+    # Track review calls to ensure retry after timeout
+    local counter_file="$TEST_TMP/timeout_review_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        local stage_name="$1"
+
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+
+                if (( count <= 1 )); then
+                    # First review times out
+                    echo '{"status":"error","error":"timeout"}'
+                else
+                    # Second review approves
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    local exit_status=$?
+
+    # Should succeed after retrying past the timeout
+    [ "$exit_status" -eq 0 ]
+
+    # Should have needed at least 2 iterations (timeout + approval)
+    local review_count
+    review_count=$(cat "$counter_file")
+    [ "$review_count" -ge 2 ]
+}
+
+@test "quality loop does not invoke fix stage after review timeout" {
+    # When review times out, the loop should NOT try to extract comments
+    # and run a fix stage — it should continue to the next iteration.
+    local fix_called="$TEST_TMP/fix_called_after_timeout"
+    echo "false" > "$fix_called"
+    export fix_called
+
+    local counter_file="$TEST_TMP/timeout_fix_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        local stage_name="$1"
+
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+
+                if (( count <= 1 )); then
+                    echo '{"status":"error","error":"timeout"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo "true" > "$fix_called"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    # Fix should NOT have been called (timeout should skip to next iteration)
+    local was_fix_called
+    was_fix_called=$(cat "$fix_called")
+    [ "$was_fix_called" = "false" ]
+}
+
+@test "quality loop structure checks timeout before checking review verdict" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # The function must call is_stage_timeout before checking review_verdict
+    [[ "$func_def" == *"is_stage_timeout"* ]]
 }

@@ -3,6 +3,9 @@
 # test-integration.bats
 # Integration tests for the full orchestrator flow
 #
+# Tests the current pipeline: parse-issue → implement (self-review) →
+# quality-loop → test-loop → docs → pr → pr-review → complete
+#
 
 load 'helpers/test-helper.bash'
 
@@ -21,14 +24,8 @@ setup() {
 
     mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
 
-    # Copy real schemas if available
-    if [[ -d "$SCRIPT_DIR/schemas" ]]; then
-        cp -r "$SCRIPT_DIR/schemas/"* "$SCHEMA_DIR/" 2>/dev/null || true
-    fi
-
-    # Create minimal schemas if not copied
-    for schema in implement-issue-setup implement-issue-research implement-issue-evaluate \
-                  implement-issue-plan implement-issue-implement implement-issue-test \
+    # Fallback: create minimal schemas if setup_test_env didn't copy real ones
+    for schema in implement-issue-parse implement-issue-implement implement-issue-test \
                   implement-issue-review implement-issue-fix implement-issue-task-review \
                   implement-issue-pr implement-issue-complete implement-issue-simplify; do
         if [[ ! -f "$SCHEMA_DIR/${schema}.json" ]]; then
@@ -45,32 +42,95 @@ teardown() {
 }
 
 # =============================================================================
-# FULL WORKFLOW STRUCTURE
+# FULL WORKFLOW STRUCTURE — CURRENT STAGES
 # =============================================================================
 
-@test "orchestrator has all required stages" {
+@test "orchestrator has all current stages" {
     local main_def
     main_def=$(declare -f main)
 
-    # Check for all stages via set_stage_started calls
-    [[ "$main_def" == *'set_stage_started "setup"'* ]]
-    [[ "$main_def" == *'set_stage_started "research"'* ]]
-    [[ "$main_def" == *'set_stage_started "evaluate"'* ]]
-    [[ "$main_def" == *'set_stage_started "plan"'* ]]
+    # Current flow stages (no setup/research/evaluate/plan)
+    [[ "$main_def" == *'set_stage_started "parse_issue"'* ]]
+    [[ "$main_def" == *'set_stage_started "validate_plan"'* ]]
     [[ "$main_def" == *'set_stage_started "implement"'* ]]
-    [[ "$main_def" == *'set_stage_started "quality_loop"'* ]]
+    [[ "$main_def" == *'set_stage_started "test_loop"'* ]]
     [[ "$main_def" == *'set_stage_started "docs"'* ]]
     [[ "$main_def" == *'set_stage_started "pr"'* ]]
     [[ "$main_def" == *'set_stage_started "pr_review"'* ]]
     [[ "$main_def" == *'set_stage_started "complete"'* ]]
 }
 
-@test "orchestrator uses correct schema for setup" {
+@test "orchestrator does NOT have removed stages" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"implement-issue-setup.json"* ]]
+    # These stages were removed in the current architecture
+    [[ "$main_def" != *'set_stage_started "setup"'* ]]
+    [[ "$main_def" != *'set_stage_started "research"'* ]]
+    [[ "$main_def" != *'set_stage_started "evaluate"'* ]]
+    [[ "$main_def" != *'set_stage_started "plan"'* ]]
 }
+
+# =============================================================================
+# PARSE-ISSUE SCHEMA
+# =============================================================================
+
+@test "init_status sets parse_issue as first stage" {
+    init_status
+
+    local current_stage
+    current_stage=$(jq -r '.current_stage' "$STATUS_FILE")
+    [ "$current_stage" = "parse_issue" ]
+}
+
+@test "init_status creates all current stage entries" {
+    init_status
+
+    local stages=("parse_issue" "validate_plan" "implement" "quality_loop" "test_loop" "docs" "pr" "pr_review" "complete")
+    for stage in "${stages[@]}"; do
+        local stage_status
+        stage_status=$(jq -r ".stages.${stage}.status" "$STATUS_FILE")
+        [ "$stage_status" = "pending" ] || fail "Stage $stage should be pending, got: $stage_status"
+    done
+}
+
+@test "parse_issue stage extracts tasks from issue body" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # Parse issue reads from GitHub and extracts tasks
+    [[ "$main_def" == *"gh issue view"* ]]
+    [[ "$main_def" == *"Implementation Tasks"* ]]
+    [[ "$main_def" == *"tasks_json"* ]]
+}
+
+@test "parse_issue stage saves context files" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"issue-body.md"* ]]
+    [[ "$main_def" == *"tasks.json"* ]]
+}
+
+@test "parse_issue creates feature branch" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *'feature/issue-'* ]]
+    [[ "$main_def" == *"set_branch_info"* ]]
+}
+
+@test "parse_issue regex matches unchecked task format" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # Matches: - [ ] `[agent-name]` Task description
+    [[ "$main_def" == *'BASH_REMATCH'* ]]
+}
+
+# =============================================================================
+# IMPLEMENT-TASK SCHEMA
+# =============================================================================
 
 @test "orchestrator uses correct schema for implementation" {
     local main_def
@@ -78,81 +138,6 @@ teardown() {
 
     [[ "$main_def" == *"implement-issue-implement.json"* ]]
 }
-
-@test "orchestrator uses correct schema for PR" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"implement-issue-pr.json"* ]]
-}
-
-@test "orchestrator uses correct schema for research" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"implement-issue-research.json"* ]]
-}
-
-@test "orchestrator uses correct schema for evaluate" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"implement-issue-evaluate.json"* ]]
-}
-
-@test "orchestrator uses correct schema for plan" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"implement-issue-plan.json"* ]]
-}
-
-# =============================================================================
-# SETUP STAGE FLOW
-# =============================================================================
-
-@test "setup stage extracts worktree from output" {
-    local main_def
-    main_def=$(declare -f main)
-
-    # Uses printf to safely handle JSON with leading hyphens/special chars
-    [[ "$main_def" == *'worktree=$(printf'* ]] || [[ "$main_def" == *'worktree=$('*'setup_result'* ]]
-}
-
-@test "setup stage extracts branch from output" {
-    local main_def
-    main_def=$(declare -f main)
-
-    # Uses printf to safely handle JSON with leading hyphens/special chars
-    [[ "$main_def" == *'branch=$(printf'* ]] || [[ "$main_def" == *'branch=$('*'setup_result'* ]]
-}
-
-@test "plan stage extracts tasks from output" {
-    local main_def
-    main_def=$(declare -f main)
-
-    # Uses printf to safely handle JSON with leading hyphens/special chars
-    [[ "$main_def" == *'tasks_json=$(printf'* ]] || [[ "$main_def" == *'tasks_json=$('*'plan_result'* ]]
-}
-
-@test "setup stage saves context files" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"setup-output.json"* ]]
-    [[ "$main_def" == *"tasks.json"* ]]
-}
-
-@test "plan stage saves context files" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"plan-output.json"* ]]
-}
-
-# =============================================================================
-# IMPLEMENTATION LOOP
-# =============================================================================
 
 @test "implementation stage loops through tasks" {
     local main_def
@@ -169,33 +154,301 @@ teardown() {
     [[ "$main_def" == *"completed_tasks"* ]]
 }
 
-@test "implementation while-loop guard calls get_max_review_attempts" {
+@test "implementation uses self-review prompt" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"get_max_review_attempts"* ]]
+    # Self-review is embedded in the implementation prompt
+    [[ "$main_def" == *"SELF-REVIEW BEFORE COMMITTING"* ]]
+}
+
+@test "implementation extracts task size from description" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"extract_task_size"* ]]
+}
+
+@test "implementation uses per-task agent" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"task_agent"* ]]
 }
 
 @test "implementation comments on issue after task completion" {
     local main_def
     main_def=$(declare -f main)
 
-    # Uses comment_issue helper function
     [[ "$main_def" == *"comment_issue"* ]]
+}
+
+@test "extract_task_size parses S/M/L markers" {
+    local size
+
+    size=$(extract_task_size '**(S)** Small task description')
+    [ "$size" = "S" ]
+
+    size=$(extract_task_size '**(M)** Medium task description')
+    [ "$size" = "M" ]
+
+    size=$(extract_task_size '**(L)** Large task description')
+    [ "$size" = "L" ]
+}
+
+@test "extract_task_size returns empty for no marker" {
+    local size
+    size=$(extract_task_size 'Task with no size marker')
+    [ -z "$size" ]
+}
+
+@test "extract_task_size returns empty for malformed markers" {
+    local size
+
+    # Lowercase markers should not match
+    size=$(extract_task_size '**(s)** lowercase task')
+    [ -z "$size" ]
+
+    # Missing asterisks
+    size=$(extract_task_size '(S) bare parens')
+    [ -z "$size" ]
+
+    # Extra spaces inside marker
+    size=$(extract_task_size '**( S )** spaced')
+    [ -z "$size" ]
+}
+
+@test "extract_task_size handles empty input" {
+    local size
+    size=$(extract_task_size '')
+    [ -z "$size" ]
+}
+
+# =============================================================================
+# QUALITY-LOOP FLOW
+# =============================================================================
+
+@test "quality loop function exists and accepts required arguments" {
+    [ "$(type -t run_quality_loop)" = "function" ]
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+    # Must accept dir, branch, and stage_prefix arguments
+    [[ "$func_def" == *'loop_dir'* ]]
+    [[ "$func_def" == *'loop_branch'* ]]
+    [[ "$func_def" == *'stage_prefix'* ]]
+}
+
+@test "quality loop runs simplify-review-fix cycle" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    [[ "$func_def" == *"simplify"* ]]
+    [[ "$func_def" == *"review"* ]]
+    [[ "$func_def" == *"fix"* ]]
+}
+
+@test "quality loop uses code-reviewer for reviews" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    [[ "$func_def" == *"code-reviewer"* ]]
+}
+
+@test "quality loop respects max iterations" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    [[ "$func_def" == *"max_iterations"* ]]
+    [[ "$func_def" == *"exit 2"* ]]
+}
+
+@test "quality loop exits 2 on max iterations exceeded" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    [[ "$func_def" == *'set_final_state "max_iterations_quality"'* ]]
+    [[ "$func_def" == *"exit 2"* ]]
+}
+
+@test "quality loop has convergence detection" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    [[ "$func_def" == *"repeat_ratio"* ]] || [[ "$func_def" == *"convergence"* ]]
+}
+
+@test "quality loop tracks review history" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    [[ "$func_def" == *"review-history"* ]]
+}
+
+@test "implementation runs quality loop per task" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"run_quality_loop"* ]]
+    [[ "$main_def" == *"should_run_quality_loop"* ]]
+}
+
+@test "S-size tasks skip quality loop" {
+    # S-size: max_attempts=1, should_run_quality_loop returns 1 (skip)
+    run should_run_quality_loop "S"
+    [ "$status" -eq 1 ]
+}
+
+@test "M-size tasks run quality loop" {
+    run should_run_quality_loop "M"
+    [ "$status" -eq 0 ]
+}
+
+@test "L-size tasks run quality loop" {
+    run should_run_quality_loop "L"
+    [ "$status" -eq 0 ]
+}
+
+@test "get_max_review_attempts returns correct values for S/M/L" {
+    [ "$(get_max_review_attempts "S")" -eq 1 ]
+    [ "$(get_max_review_attempts "M")" -eq 2 ]
+    [ "$(get_max_review_attempts "L")" -eq 3 ]
+}
+
+@test "diff-based max iterations scales by diff size" {
+    [ "$(get_diff_based_max_iterations 10)" -eq 1 ]
+    [ "$(get_diff_based_max_iterations 50)" -eq 2 ]
+    [ "$(get_diff_based_max_iterations 200)" -eq 3 ]
+    [ "$(get_diff_based_max_iterations 500)" -eq 5 ]
+}
+
+# =============================================================================
+# TEST-LOOP FLOW
+# =============================================================================
+
+@test "test loop function exists and accepts arguments" {
+    [ "$(type -t run_test_loop)" = "function" ]
+    local func_def
+    func_def=$(declare -f run_test_loop)
+    # Must accept dir and branch arguments
+    [[ "$func_def" == *'loop_dir'* ]]
+    [[ "$func_def" == *'loop_branch'* ]]
+}
+
+@test "test loop runs after all tasks complete" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"run_test_loop"* ]]
+    [[ "$main_def" == *'set_stage_started "test_loop"'* ]]
+}
+
+@test "test loop uses implement-issue-test schema" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"implement-issue-test.json"* ]]
+}
+
+@test "test loop detects change scope" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"detect_change_scope"* ]] || [[ "$func_def" == *"change_scope"* ]]
+}
+
+@test "test loop skips config-only changes" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"config"* ]]
+    [[ "$func_def" == *"skipping test loop"* ]] || [[ "$func_def" == *"Skipping test loop"* ]]
+}
+
+@test "test loop has convergence detection for repeated failures" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"convergence"* ]]
+    [[ "$func_def" == *"failure_sig"* ]] || [[ "$func_def" == *"sig_count"* ]]
+}
+
+@test "test loop respects MAX_TEST_ITERATIONS" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"MAX_TEST_ITERATIONS"* ]]
+}
+
+@test "test loop exits 2 on max iterations exceeded" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *'set_final_state "max_iterations_test"'* ]]
+    [[ "$func_def" == *"exit 2"* ]]
+}
+
+@test "test loop validates test quality after tests pass" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"validate"* ]] || [[ "$func_def" == *"Validate"* ]]
+    [[ "$func_def" == *"implement-issue-review.json"* ]]
+}
+
+@test "test loop smart targeting routes by scope" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"typescript"* ]]
+    [[ "$func_def" == *"bash"* ]]
+    [[ "$func_def" == *"mixed"* ]]
+}
+
+@test "detect_change_scope function exists and is callable" {
+    [ "$(type -t detect_change_scope)" = "function" ]
+    local func_def
+    func_def=$(declare -f detect_change_scope)
+    # Must reference git diff for scope detection
+    [[ "$func_def" == *"git"* ]]
+}
+
+# =============================================================================
+# PR CREATION FLOW
+# =============================================================================
+
+@test "orchestrator uses correct schema for PR" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"implement-issue-pr.json"* ]]
+}
+
+@test "PR stage creates or updates PR" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"gh pr create"* ]] || [[ "$main_def" == *"pr_result"* ]]
+}
+
+@test "PR stage stores PR number in status" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"pr_number"* ]]
+    [[ "$main_def" == *"stages.pr.pr_number"* ]]
+}
+
+@test "PR stage exits 1 on failure" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"pr_status"* ]]
+    [[ "$main_def" == *"exit 1"* ]]
 }
 
 # =============================================================================
 # PR REVIEW LOOP
 # =============================================================================
-
-@test "task-level review uses spec-reviewer agent" {
-    local main_def
-    main_def=$(declare -f main)
-
-    # spec-reviewer is used in the per-task review loop (task-review stage),
-    # not in the PR review section which uses code-reviewer for combined review.
-    [[ "$main_def" == *"spec-reviewer"* ]]
-}
 
 @test "PR review uses code-reviewer agent" {
     local main_def
@@ -215,10 +468,32 @@ teardown() {
     local main_def
     main_def=$(declare -f main)
 
-    # Quality loop was intentionally removed from PR review (commit 4b0f8da0).
-    # The re-review iteration itself catches remaining issues, cutting PR review
-    # time roughly in half.
+    # Quality loop was intentionally removed from PR review.
+    # The re-review iteration itself catches remaining issues.
     [[ "$main_def" != *'run_quality_loop'*'pr-fix'* ]]
+}
+
+@test "PR review uses combined spec + code review" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # Single review prompt covers both spec and code
+    [[ "$main_def" == *"Spec Review"* ]]
+    [[ "$main_def" == *"Code Review"* ]]
+}
+
+@test "PR review pushes after fixes" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"git push origin"* ]]
+}
+
+@test "PR review loop uses comment_pr" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"comment_pr"* ]]
 }
 
 # =============================================================================
@@ -246,35 +521,50 @@ teardown() {
     [[ "$main_def" == *"exit 0"* ]]
 }
 
+@test "completion stage comments on PR" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *'comment_pr "$pr_number" "Implementation Complete"'* ]]
+}
+
 # =============================================================================
 # ERROR HANDLING
 # =============================================================================
 
-@test "orchestrator exits 1 on setup failure" {
+@test "orchestrator exits 1 on parse_issue failure" {
     local main_def
     main_def=$(declare -f main)
 
-    # Verify main checks setup_status and exits on failure
-    # Use flexible pattern that matches various quote/comparison styles
-    [[ "$main_def" == *"setup_status"* ]] || fail "main should check setup_status"
-    [[ "$main_def" == *"success"* ]] || fail "main should compare against 'success'"
-    [[ "$main_def" == *"exit 1"* ]] || fail "main should exit 1 on failure"
-}
-
-@test "orchestrator exits 1 on PR creation failure" {
-    local main_def
-    main_def=$(declare -f main)
-
-    # Verify main checks pr_status for failure handling
-    [[ "$main_def" == *"pr_status"* ]] || fail "main should check pr_status"
-    [[ "$main_def" == *"success"* ]] || fail "main should compare against 'success'"
+    # Verify the specific parse_issue failure paths exit 1 with error state
+    [[ "$main_def" == *'set_final_state "error"'*'exit 1'* ]]
+    [[ "$main_def" == *"No tasks to implement"*"exit 1"* ]] || \
+    [[ "$main_def" == *"No parseable tasks"*"exit 1"* ]] || \
+    [[ "$main_def" == *"Implementation Tasks"*"exit 1"* ]]
 }
 
 @test "orchestrator exits 2 on max quality iterations" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    [[ "$func_def" == *"exit 2"* ]]
+    [[ "$func_def" == *'set_final_state "max_iterations_quality"'* ]]
+    [[ "$func_def" == *'set_final_state "max_iterations_quality"'*"exit 2"* ]]
+}
+
+@test "orchestrator exits 2 on max test iterations" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *'set_final_state "max_iterations_test"'* ]]
+    [[ "$func_def" == *'set_final_state "max_iterations_test"'*"exit 2"* ]]
+}
+
+@test "orchestrator exits 2 on max PR review iterations" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *'set_final_state "max_iterations_pr_review"'* ]]
+    [[ "$main_def" == *'set_final_state "max_iterations_pr_review"'*"exit 2"* ]]
 }
 
 # =============================================================================
@@ -282,7 +572,6 @@ teardown() {
 # =============================================================================
 
 @test "orchestrator creates log directory structure" {
-    # After init, check expected directories
     init_status
 
     [ -d "$LOG_BASE/stages" ]
@@ -298,62 +587,21 @@ teardown() {
 }
 
 # =============================================================================
-# GIT OPERATIONS
-# =============================================================================
-
-@test "orchestrator pushes after PR review fixes" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"git -C"* ]]
-    [[ "$main_def" == *"push origin"* ]]
-}
-
-# =============================================================================
-# AGENT SELECTION
-# =============================================================================
-
-@test "orchestrator uses fastify-backend-developer for fixes" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"fastify-backend-developer"* ]]
-}
-
-@test "orchestrator uses code-reviewer in quality loop" {
-    local func_def
-    func_def=$(declare -f run_quality_loop)
-
-    [[ "$func_def" == *"code-reviewer"* ]]
-}
-
-@test "orchestrator uses code-reviewer for reviews" {
-    local main_def
-    main_def=$(declare -f main)
-
-    [[ "$main_def" == *"code-reviewer"* ]]
-}
-
-# =============================================================================
-# BEHAVIORAL TESTS - TASK FAILURE HANDLING
+# BEHAVIORAL TESTS — TASK FAILURE HANDLING
 # =============================================================================
 
 @test "task failure updates status correctly" {
     init_status
 
-    # Set up tasks - update_task matches on .id field, not array index
     local tasks='[{"id":1,"title":"Task 1"},{"id":2,"title":"Task 2"}]'
     set_tasks "$tasks"
 
-    # Simulate task failure (use task id, not array index)
     update_task 1 "failed" 3
 
-    # Verify task status
     local task_status
     task_status=$(jq -r '.tasks[0].status' "$STATUS_FILE")
     [ "$task_status" = "failed" ]
 
-    # Verify review attempts tracked
     local review_attempts
     review_attempts=$(jq -r '.tasks[0].review_attempts' "$STATUS_FILE")
     [ "$review_attempts" = "3" ]
@@ -362,15 +610,12 @@ teardown() {
 @test "failed task does not block subsequent tasks" {
     init_status
 
-    # Set up multiple tasks with numeric IDs
     local tasks='[{"id":1,"title":"Task 1"},{"id":2,"title":"Task 2"}]'
     set_tasks "$tasks"
 
-    # Mark first task as failed, second as completed (by task id)
     update_task 1 "failed" 3
     update_task 2 "completed" 1
 
-    # Verify both statuses are tracked independently
     local task1_status task2_status
     task1_status=$(jq -r '.tasks[0].status' "$STATUS_FILE")
     task2_status=$(jq -r '.tasks[1].status' "$STATUS_FILE")
@@ -403,13 +648,12 @@ teardown() {
 }
 
 # =============================================================================
-# BEHAVIORAL TESTS - PR REVIEW MAX ITERATIONS
+# BEHAVIORAL TESTS — PR REVIEW MAX ITERATIONS
 # =============================================================================
 
 @test "PR review iteration counter increments correctly" {
     init_status
 
-    # Increment PR review iterations
     increment_pr_review_iteration
     increment_pr_review_iteration
 
@@ -433,13 +677,11 @@ teardown() {
 @test "PR review max iterations sets correct exit state" {
     init_status
 
-    # Simulate reaching max iterations
     local i
     for i in $(seq 1 "$MAX_PR_REVIEW_ITERATIONS"); do
         increment_pr_review_iteration
     done
 
-    # Set final state for max iterations
     set_final_state "max_iterations_pr_review"
 
     local state
@@ -448,22 +690,20 @@ teardown() {
 }
 
 # =============================================================================
-# BEHAVIORAL TESTS - END-TO-END MOCK FLOW
+# BEHAVIORAL TESTS — END-TO-END MOCK FLOW
 # =============================================================================
 
 @test "complete workflow updates all stage statuses" {
     init_status
 
-    # Simulate full workflow by updating stages in order (including new stages)
-    local stages=("setup" "research" "evaluate" "plan" "implement" "quality_loop" "docs" "pr" "pr_review" "complete")
+    # Current stages only (no setup/research/evaluate/plan)
+    local stages=("parse_issue" "validate_plan" "implement" "quality_loop" "test_loop" "docs" "pr" "pr_review" "complete")
 
     for stage in "${stages[@]}"; do
         set_stage_started "$stage"
         set_stage_completed "$stage"
     done
 
-    # Verify all stages completed
-    local stage
     for stage in "${stages[@]}"; do
         local stage_status
         stage_status=$(jq -r ".stages.${stage}.status" "$STATUS_FILE")
@@ -474,14 +714,13 @@ teardown() {
 @test "workflow tracks timing for each stage" {
     init_status
 
-    set_stage_started "setup"
-    # Small delay to ensure timestamps differ
+    set_stage_started "parse_issue"
     sleep 0.1
-    set_stage_completed "setup"
+    set_stage_completed "parse_issue"
 
     local started_at completed_at
-    started_at=$(jq -r '.stages.setup.started_at' "$STATUS_FILE")
-    completed_at=$(jq -r '.stages.setup.completed_at' "$STATUS_FILE")
+    started_at=$(jq -r '.stages.parse_issue.started_at' "$STATUS_FILE")
+    completed_at=$(jq -r '.stages.parse_issue.completed_at' "$STATUS_FILE")
 
     [ -n "$started_at" ] && [ "$started_at" != "null" ]
     [ -n "$completed_at" ] && [ "$completed_at" != "null" ]
@@ -491,17 +730,18 @@ teardown() {
 # COMMENT HELPER FUNCTIONS
 # =============================================================================
 
-@test "comment_issue function is defined" {
+@test "comment_issue function is defined and uses gh" {
     [ "$(type -t comment_issue)" = "function" ]
+    local func_def
+    func_def=$(declare -f comment_issue)
+    [[ "$func_def" == *"gh issue comment"* ]]
 }
 
-@test "comment_pr function is defined" {
+@test "comment_pr function is defined and uses gh" {
     [ "$(type -t comment_pr)" = "function" ]
-}
-
-@test "REPO constant is defined" {
-    [ -n "$REPO" ]
-    [ -n "$REPO" ]
+    local func_def
+    func_def=$(declare -f comment_pr)
+    [[ "$func_def" == *"gh pr comment"* ]]
 }
 
 @test "comment_issue uses gh issue comment" {
@@ -518,41 +758,57 @@ teardown() {
     [[ "$func_def" == *"gh pr comment"* ]]
 }
 
-@test "PR review loop uses comment_pr" {
+@test "validate_plan stage comments on issue" {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"comment_pr"* ]]
+    [[ "$main_def" == *'comment_issue "Implementation Plan Confirmed"'* ]]
 }
 
-@test "evaluate stage comments on issue" {
+# =============================================================================
+# DOCS STAGE
+# =============================================================================
+
+@test "docs stage checks change scope before running" {
     local main_def
     main_def=$(declare -f main)
 
-    # Check for comment after evaluate stage
-    [[ "$main_def" == *'comment_issue "Evaluation'* ]] || [[ "$main_def" == *'comment_issue "Eval'* ]]
+    [[ "$main_def" == *"should_run_docs_stage"* ]]
 }
 
-@test "plan stage comments implementation plan on issue" {
-    local main_def
-    main_def=$(declare -f main)
-
-    # Check for plan comment
-    [[ "$main_def" == *'comment_issue "Implementation Plan"'* ]]
+@test "should_run_docs_stage skips for bash-only changes" {
+    run should_run_docs_stage "bash"
+    [ "$status" -eq 1 ]
 }
 
-@test "plan stage comments task list on issue" {
-    local main_def
-    main_def=$(declare -f main)
-
-    # Check for task list comment
-    [[ "$main_def" == *'comment_issue "Task List"'* ]]
+@test "should_run_docs_stage skips for config changes" {
+    run should_run_docs_stage "config"
+    [ "$status" -eq 1 ]
 }
 
-@test "complete stage comments on PR" {
+@test "should_run_docs_stage runs for typescript changes" {
+    run should_run_docs_stage "typescript"
+    [ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# TIMEOUT-AS-SUCCESS BUG — is_stage_timeout() in callers
+# =============================================================================
+
+@test "is_stage_timeout helper function is defined" {
+    [ "$(type -t is_stage_timeout)" = "function" ]
+}
+
+@test "test loop checks for stage timeout before inspecting result" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    [[ "$func_def" == *"is_stage_timeout"* ]]
+}
+
+@test "PR review loop checks for stage timeout before inspecting result" {
     local main_def
     main_def=$(declare -f main)
 
-    # Check for completion comment on PR
-    [[ "$main_def" == *'comment_pr "$pr_number" "Implementation Complete"'* ]]
+    [[ "$main_def" == *"is_stage_timeout"* ]]
 }

@@ -20,9 +20,9 @@ set -uo pipefail  # Note: not -e, we handle errors explicitly
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
+source "$SCRIPT_DIR/model-config.sh"
 
 # Timeouts and limits
-readonly STAGE_TIMEOUT=3600  # 1 hour per stage
 readonly MAX_QUALITY_ITERATIONS=5
 readonly MAX_TEST_ITERATIONS=10
 # Cap at 2: merged spec+code review per iteration makes each pass thorough
@@ -49,6 +49,56 @@ if ! command -v timeout &>/dev/null; then
         ' "$duration" "$@"
     }
 fi
+
+# =============================================================================
+# STAGE-TYPE-BASED TIMEOUTS
+# =============================================================================
+#
+# Replaces the flat STAGE_TIMEOUT constant with per-stage timeouts.
+# Compound prefixes (test-validate, pr-review) are matched first to avoid
+# being swallowed by their shorter generic siblings (test, pr).
+#
+
+get_stage_timeout() {
+    local stage_name="${1:-}"
+
+    case "$stage_name" in
+        test-validate*) printf '%s' 900 ;;
+        pr-review*)     printf '%s' 1800 ;;
+        test*|docs*|pr*) printf '%s' 600 ;;
+        task-review*)    printf '%s' 900 ;;
+        implement*|fix*) printf '%s' 1800 ;;
+        *)               printf '%s' 1800 ;;
+    esac
+}
+
+# =============================================================================
+# BRANCH VERIFICATION
+# =============================================================================
+#
+# Guards fix stages against committing on the wrong branch.  Called before
+# each fix-* stage invocation so that a stale checkout or unexpected HEAD
+# is caught early rather than silently committing to the wrong ref.
+#
+
+verify_on_feature_branch() {
+    local expected="${1:-}"
+
+    if [[ -z "$expected" ]]; then
+        log_error "verify_on_feature_branch: no expected branch provided"
+        return 1
+    fi
+
+    local actual
+    actual=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+    if [[ "$actual" != "$expected" ]]; then
+        log_error "Expected branch '$expected' but HEAD is on '$actual'"
+        return 1
+    fi
+
+    return 0
+}
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -426,6 +476,19 @@ is_stage_completed() {
     [[ "$status" == "completed" ]]
 }
 
+# Check if a stage result is a timeout error
+# Arguments:
+#   $1 - JSON string from run_stage output
+# Returns 0 if timeout, 1 if not
+is_stage_timeout() {
+    local result="${1:-}"
+    [[ -z "$result" ]] && return 1
+    local err_status err_type
+    err_status=$(printf '%s' "$result" | jq -r '.status // empty' 2>/dev/null)
+    err_type=$(printf '%s' "$result" | jq -r '.error // empty' 2>/dev/null)
+    [[ "$err_status" == "error" && "$err_type" == "timeout" ]]
+}
+
 # Get count of completed tasks
 get_completed_task_count() {
     jq '[.tasks[] | select(.status == "completed")] | length' "$STATUS_FILE" 2>/dev/null || echo "0"
@@ -688,6 +751,7 @@ run_stage() {
     local prompt="$2"
     local schema_file="$3"
     local agent="${4:-}"
+    local complexity="${5:-}"
 
     local stage_log="$LOG_BASE/stages/$(next_stage_log "$stage_name")"
 
@@ -706,16 +770,28 @@ run_stage() {
     log "  Agent: ${agent:-default}"
     log "  Log: $stage_log"
 
+    local model
+    model=$(resolve_model "$stage_name" "$complexity")
+    log "  Model: $model"
+    if [[ -n "$complexity" ]]; then
+        log "  complexity: $complexity"
+    fi
+
     local -a agent_args=()
     if [[ -n "$agent" ]]; then
         agent_args=(--agent "$agent")
     fi
 
+    local stage_timeout
+    stage_timeout=$(get_stage_timeout "$stage_name")
+    log "  Timeout: ${stage_timeout}s"
+
     local output
     local exit_code=0
 
-    output=$(timeout "$STAGE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+    output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
         ${agent_args[@]+"${agent_args[@]}"} \
+        --model "$model" \
         --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$schema" \
@@ -727,7 +803,7 @@ run_stage() {
 
     # Check timeout
     if (( exit_code == 124 )); then
-        log_error "Stage $stage_name timed out after ${STAGE_TIMEOUT}s"
+        log_error "Stage $stage_name timed out after ${stage_timeout}s"
         echo '{"status":"error","error":"timeout"}'
         return 1
     fi
@@ -736,8 +812,9 @@ run_stage() {
     if detect_rate_limit "$output"; then
         handle_rate_limit "$output"
         # Retry
-        output=$(timeout "$STAGE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+        output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
+            --model "$model" \
             --dangerously-skip-permissions \
             --output-format json \
             --json-schema "$schema" \
@@ -871,6 +948,12 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         local review_result
         review_result=$(run_stage "review-${stage_prefix}-iter-$loop_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer")
 
+        # Handle timeout: skip result inspection and retry on next iteration
+        if is_stage_timeout "$review_result"; then
+            log_warn "Review stage timed out on iteration $loop_iteration — retrying next iteration"
+            continue
+        fi
+
         local review_verdict review_summary
         review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
@@ -936,6 +1019,8 @@ $(if [[ -n "$cumulative_findings" ]]; then
 fi)
 
 Fix the issues and commit. Output a summary of fixes applied."
+
+            verify_on_feature_branch "$loop_branch" || true
 
             local fix_result
             fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
@@ -1247,6 +1332,13 @@ Report pass/fail, test counts, and any failures. Output a summary suitable for a
         local test_result
         test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json" "default")
 
+        # Handle timeout: skip result inspection and retry on next iteration
+        if is_stage_timeout "$test_result"; then
+            log_warn "Test stage timed out on iteration $test_iteration — retrying next iteration"
+            comment_issue "Test Loop: Timeout ($test_iteration/$MAX_TEST_ITERATIONS)" "⏱️ Test stage timed out. Retrying on next iteration." "default"
+            continue
+        fi
+
         local test_status test_summary
         test_status=$(printf '%s' "$test_result" | jq -r '.result')
         test_summary=$(printf '%s' "$test_result" | jq -r '.summary // "Tests completed"')
@@ -1278,12 +1370,17 @@ $test_summary" "default"
                 exit 2
             fi
 
-            local fix_prompt="Fix test failures in working directory $safe_dir on branch $loop_branch:
+            local fix_prompt="Fix ONLY the specific test failures listed below. Do NOT rewrite test files, introduce new dependencies, or modify pre-existing test code. Only fix the failing assertions.
+
+Working directory: $safe_dir
+Branch: $loop_branch
 
 Failures:
 $failures
 
 Fix the issues and commit. Output a summary of fixes applied."
+
+            verify_on_feature_branch "$loop_branch" || true
 
             local fix_result
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
@@ -1301,15 +1398,35 @@ Fix the issues and commit. Output a summary of fixes applied."
         # -------------------------------------------------------------------------
         log "Tests passed. Running test validation for issue #$ISSUE_NUMBER..."
 
+        # Compute explicit changed-file list (three-dot merge-base diff, not
+        # Jest's --changedSince dependency graph) so the validate agent
+        # operates on a deterministic, pre-computed scope.
+        local changed_files
+        changed_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+
+        if [[ -z "$changed_files" ]]; then
+            log "No changed files detected for validation — skipping"
+            comment_issue "Test Loop: Validation Skipped ($test_iteration/$MAX_TEST_ITERATIONS)" \
+                "⏭️ No changed files detected vs $BASE_BRANCH. Skipping validation." "default"
+            loop_complete=true
+            break
+        fi
+
         local validate_prompt="Validate test comprehensiveness and integrity for issue #$ISSUE_NUMBER in working directory $safe_dir.
 
-SCOPE: Only validate tests related to this issue's implementation. Get modified TypeScript files with:
-git -C $safe_dir diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx' | grep -E '^(apps|packages)/'
+CHANGED FILES (computed via git diff $safe_branch...HEAD --name-only):
+$changed_files
+
+ONLY validate tests for these specific files. Do NOT expand scope beyond this list.
 
 IMPORTANT SCOPE CONSTRAINTS:
-- If NO testable TypeScript code was modified (e.g., config-only, style-only changes), output 'passed' immediately. Do NOT request new tests for non-logic changes.
-- Only validate tests for modified TypeScript files in apps/ or packages/ (services, routes, components, hooks)
+- If NONE of the changed files contain testable code (e.g., config-only, style-only, docs-only changes), output 'passed' immediately. Do NOT request new tests for non-logic changes.
+- Only validate tests for modified code files (services, routes, components, hooks, scripts)
 - Do NOT request tests for config files, static assets, or type-only changes
+
+PRE-EXISTING ISSUES POLICY:
+- If a test file has pre-existing quality issues NOT introduced by this PR, report 'passed' and note them separately under a 'pre_existing_issues' key.
+- Only report 'failed' for quality issues that are directly related to the changed files in this PR.
 
 For each modified implementation file that warrants testing, identify the corresponding test file and audit:
 1. Run the test suite: $test_command
@@ -1319,12 +1436,20 @@ For each modified implementation file that warrants testing, identify the corres
 5. Check for mock abuse patterns
 
 Output:
-- result: 'passed' if tests are comprehensive OR if no testable TypeScript was modified, 'failed' if issues found
-- issues: array of issues found (if any)
+- result: 'passed' if tests are comprehensive OR if no testable code was modified, 'failed' if issues found in PR-related code
+- issues: array of issues found (if any) — only for code changed in this PR
+- pre_existing_issues: array of pre-existing quality issues found in test files not introduced by this PR (informational only)
 - summary: suitable for a GitHub comment (note if validation was skipped due to no testable changes)"
 
         local validate_result
         validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json" "default")
+
+        # Handle timeout: skip validation and retry on next iteration
+        if is_stage_timeout "$validate_result"; then
+            log_warn "Test validation timed out on iteration $test_iteration — retrying next iteration"
+            comment_issue "Test Loop: Validation Timeout ($test_iteration/$MAX_TEST_ITERATIONS)" "⏱️ Validation stage timed out. Retrying on next iteration." "default"
+            continue
+        fi
 
         local validate_status validate_summary
         validate_status=$(printf '%s' "$validate_result" | jq -r '.result')
@@ -1351,6 +1476,8 @@ $validate_comments
 
 Fix the test quality issues (add missing assertions, remove TODOs, add edge case tests, etc.) and commit.
 Output a summary of fixes applied."
+
+            verify_on_feature_branch "$loop_branch" || true
 
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent")
@@ -1655,8 +1782,16 @@ $task_list_md
             log "Implementing task $task_id: $task_desc (agent: $task_agent)"
             update_task "$task_id" "in_progress"
 
-            # Implement with self-review (eliminates separate task-review invocation)
-            local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
+            local max_attempts
+            max_attempts=$(get_max_review_attempts "$task_size")
+            local review_attempts=0
+            local task_succeeded=false
+
+            while (( review_attempts < max_attempts )); do
+                review_attempts=$((review_attempts + 1))
+
+                # Implement with self-review (eliminates separate task-review invocation)
+                local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
 
 $task_desc
 
@@ -1669,17 +1804,22 @@ After implementing, verify your changes against the task description above:
 Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
 
-            local impl_result
-            impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent")
+                local impl_result
+                impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent")
 
-            local impl_status
-            impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
+                local impl_status
+                impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
 
-            if [[ "$impl_status" != "success" ]]; then
-                log_error "Task $task_id implementation failed"
-                update_task "$task_id" "failed" "0"
-            else
-                update_task "$task_id" "completed" "0"
+                if [[ "$impl_status" == "success" ]]; then
+                    task_succeeded=true
+                    break
+                fi
+
+                log_warn "Task $task_id attempt $review_attempts/$max_attempts failed"
+            done
+
+            if [[ "$task_succeeded" == "true" ]]; then
+                update_task "$task_id" "completed" "$review_attempts"
                 completed_tasks=$((completed_tasks+1))
 
                 local commit_sha
@@ -1702,6 +1842,9 @@ $impl_summary" "$task_agent"
                 else
                     log "Skipping quality loop for task $task_id (S-size task)"
                 fi
+            else
+                log_error "Task $task_id failed after $review_attempts attempts"
+                update_task "$task_id" "failed" "$review_attempts"
             fi
 
             # Update progress
@@ -1849,6 +1992,13 @@ Approve or request changes. Output a summary suitable for a GitHub comment."
         local review_result
         review_result=$(run_stage "pr-review-iter-$pr_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer")
 
+        # Handle timeout: skip result inspection and retry on next iteration
+        if is_stage_timeout "$review_result"; then
+            log_warn "PR review timed out on iteration $pr_iteration — retrying next iteration"
+            comment_pr "$pr_number" "PR Review: Timeout (Iteration $pr_iteration)" "⏱️ Review stage timed out. Retrying on next iteration." "code-reviewer"
+            continue
+        fi
+
         local review_verdict review_summary
         review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
@@ -1876,6 +2026,8 @@ Review feedback:
 $review_comments
 
 Fix the issues and commit. Output a summary of fixes applied."
+
+            verify_on_feature_branch "$branch" || true
 
             local fix_result
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")

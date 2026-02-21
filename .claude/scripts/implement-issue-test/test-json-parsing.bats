@@ -90,7 +90,6 @@ teardown() {
 }
 
 @test "ECHO_BUG: detect_rate_limit fails with hyphen-prefixed JSON" {
-	# DOCUMENTATION-ONLY TEST: Demonstrates edge case behavior, not asserting specific outcome
 	# The actual function uses: echo "$output" | jq -r '.structured_output.status // empty'
 	# If output starts with -, echo treats it as a flag
 
@@ -100,24 +99,19 @@ teardown() {
 	# This should work but may fail due to echo mangling
 	run detect_rate_limit "$output"
 
-	# If echo mangles the input, jq will fail to parse
-	# The function might return unexpected results
-	# We expect this to potentially fail or behave incorrectly
-	# Document actual behavior for awareness
-	echo "# detect_rate_limit with hyphen-prefixed JSON: status=$status" >&3
+	# The function must not crash regardless of mangling — it should return 0 or 1
+	[[ "$status" -eq 0 || "$status" -eq 1 ]]
 }
 
 @test "ECHO_BUG: extract_wait_time with backslash sequences" {
-	# DOCUMENTATION-ONLY TEST: Demonstrates edge case behavior, not asserting specific outcome
 	# echo can interpret \n, \t, etc. in some shells/modes
 	local output='{"result":"wait\n30\nminutes"}'
 
 	run extract_wait_time "$output"
 
-	# If echo interprets \n as newline, the JSON structure breaks
-	# and jq fails to parse, returning empty or error
-	# Document actual behavior for awareness
-	echo "# extract_wait_time with backslash sequences: status=$status, output=$output" >&3
+	# The function must not crash — it returns a numeric wait time or the default (3600)
+	[ "$status" -eq 0 ]
+	[[ "$output" =~ ^[0-9]+$ ]]
 }
 
 # =============================================================================
@@ -177,6 +171,16 @@ teardown() {
 	fi
 
 	[ -n "$structured" ] || fail "Failed to extract structured_output from large payload"
+
+	# Verify the extracted data field is preserved (not truncated or mangled)
+	local extracted_status
+	extracted_status=$(printf '%s' "$structured" | jq -r '.status')
+	[ "$extracted_status" = "success" ] || fail "Expected status=success, got: $extracted_status"
+
+	local extracted_data
+	extracted_data=$(printf '%s' "$structured" | jq -r '.data')
+	[[ "$extracted_data" == *"Item number 1"* ]] || fail "Data was truncated or mangled"
+	[[ "$extracted_data" == *"Item number 500"* ]] || fail "Data was truncated (missing last item)"
 }
 
 @test "REGRESSION: JSON with embedded code blocks" {
@@ -201,6 +205,13 @@ HEREDOC
 	fi
 
 	[ -n "$structured" ] || fail "Failed to extract structured_output with code blocks"
+
+	# Verify the extracted fields are intact
+	local extracted_status files_count
+	extracted_status=$(printf '%s' "$structured" | jq -r '.status')
+	files_count=$(printf '%s' "$structured" | jq '.files | length')
+	[ "$extracted_status" = "success" ] || fail "Expected status=success, got: $extracted_status"
+	[ "$files_count" -eq 1 ] || fail "Expected 1 file entry, got: $files_count"
 }
 
 # =============================================================================
@@ -429,8 +440,8 @@ EOF
 # SHELL COMPATIBILITY TESTS
 # =============================================================================
 
-@test "echo behavior varies by shell: test with current shell" {
-	# Document current shell's echo behavior
+@test "printf always preserves strings that echo may mangle" {
+	# Verify printf '%s' is safe for all strings that echo may misinterpret
 	local test_strings=(
 		"-n test"
 		"-e test"
@@ -440,21 +451,12 @@ EOF
 	)
 
 	for str in "${test_strings[@]}"; do
-		local echo_out
 		local printf_out
-
-		echo_out=$(echo "$str" | cat)
 		printf_out=$(printf '%s' "$str")
 
-		if [[ "$echo_out" != "$printf_out" ]]; then
-			echo "# Shell echo differs from printf for: $str" >&3
-			echo "#   echo:   '$echo_out'" >&3
-			echo "#   printf: '$printf_out'" >&3
-		fi
+		# printf '%s' must always reproduce the exact input string
+		[ "$printf_out" = "$str" ] || fail "printf mangled string: input='$str' output='$printf_out'"
 	done
-
-	# This test always passes - it's for documentation
-	true
 }
 
 # =============================================================================
@@ -594,6 +596,15 @@ EOF
 	local task_count
 	task_count=$(printf '%s' "$structured" | jq '.tasks | length')
 	[ "$task_count" -eq 2 ] || fail "Expected 2 tasks, got: $task_count"
+
+	# Verify extracted fields are not corrupted
+	local extracted_status worktree branch
+	extracted_status=$(printf '%s' "$structured" | jq -r '.status')
+	worktree=$(printf '%s' "$structured" | jq -r '.worktree')
+	branch=$(printf '%s' "$structured" | jq -r '.branch')
+	[ "$extracted_status" = "success" ] || fail "Status corrupted: $extracted_status"
+	[ "$worktree" = "/home/developer/.worktrees/issue-123" ] || fail "Worktree corrupted: $worktree"
+	[ "$branch" = "feature/issue-123-user-service" ] || fail "Branch corrupted: $branch"
 }
 
 @test "FIXTURE: parse response with code containing special chars" {
@@ -795,52 +806,40 @@ FIXTURE_EOF
 # These verify the script uses safe patterns
 # =============================================================================
 
-@test "CODECHECK: run_stage uses echo for JSON extraction" {
-	# Verify the current (buggy) implementation uses echo
-	# This test will PASS if the bug exists, documenting it needs fixing
-
+@test "CODECHECK: run_stage does not use bare echo for JSON extraction" {
 	local func_def
 	func_def=$(declare -f run_stage)
 
-	# Check if run_stage uses the problematic pattern
+	# run_stage must not use 'echo "$output" | jq' — it should use printf or here-string
 	if [[ "$func_def" == *'echo "$output" | jq'* ]]; then
-		echo "# WARNING: run_stage uses 'echo \"\$output\" | jq' pattern" >&3
-		echo "# This is vulnerable to echo mangling JSON data" >&3
-		echo "# FIX: Use 'printf \"%s\" \"\$output\" | jq' or '<<< \"\$output\"'" >&3
+		fail "run_stage uses 'echo \"\$output\" | jq' which is vulnerable to echo mangling. Use printf or here-string."
 	fi
-
-	# This test passes to document the issue exists
-	true
 }
 
-@test "CODECHECK: detect_rate_limit uses echo for JSON parsing" {
+@test "CODECHECK: detect_rate_limit does not use bare echo for JSON parsing" {
 	local func_def
 	func_def=$(declare -f detect_rate_limit)
 
-	# Count uses of problematic echo pattern
-	local echo_count
-	echo_count=$(echo "$func_def" | grep -c 'echo "\$' || true)
+	# Count uses of problematic 'echo "$var" | jq' pattern
+	local echo_jq_count
+	echo_jq_count=$(echo "$func_def" | grep -c 'echo "\$.*| jq' || true)
 
-	if ((echo_count > 0)); then
-		echo "# WARNING: detect_rate_limit uses echo with variables $echo_count times" >&3
-		echo "# Recommend using printf or here-strings for JSON data" >&3
+	if ((echo_jq_count > 0)); then
+		fail "detect_rate_limit pipes echo into jq $echo_jq_count time(s). Use printf or here-string instead."
 	fi
-
-	true
 }
 
-@test "CODECHECK: extract_wait_time uses echo for JSON parsing" {
+@test "CODECHECK: extract_wait_time does not use bare echo for JSON parsing" {
 	local func_def
 	func_def=$(declare -f extract_wait_time)
 
-	local echo_count
-	echo_count=$(echo "$func_def" | grep -c 'echo "\$' || true)
+	# Count uses of problematic 'echo "$var" | jq' pattern
+	local echo_jq_count
+	echo_jq_count=$(echo "$func_def" | grep -c 'echo "\$.*| jq' || true)
 
-	if ((echo_count > 0)); then
-		echo "# WARNING: extract_wait_time uses echo with variables $echo_count times" >&3
+	if ((echo_jq_count > 0)); then
+		fail "extract_wait_time pipes echo into jq $echo_jq_count time(s). Use printf or here-string instead."
 	fi
-
-	true
 }
 
 # =============================================================================

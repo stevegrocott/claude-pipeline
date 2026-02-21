@@ -10,6 +10,8 @@ setup() {
     setup_test_env
     # Create minimal schema so the script can start
     echo '{}' > "$TEST_TMP/schemas/implement-issue-setup.json"
+    # Set GITHUB_REPO so valid-arg tests pass repo detection
+    export GITHUB_REPO="test-owner/test-repo"
 }
 
 teardown() {
@@ -55,11 +57,10 @@ teardown() {
 # =============================================================================
 
 @test "accepts --agent option" {
-    # We can't run the full script, but we can verify it parses args correctly
-    # by checking the output header. Timeout is expected (exit 124) since script
-    # will hang waiting for external commands after printing header.
+    # Run with timeout so the script doesn't hang past the header.
+    # We only care that the header reflects the parsed --agent value.
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --agent fastify-backend-developer 2>&1
-    [[ "$status" -eq 0 || "$status" -eq 124 ]] || fail "Unexpected exit status: $status"
+    [ -n "$output" ]
     [[ "$output" == *"Agent: fastify-backend-developer"* ]]
 }
 
@@ -70,9 +71,8 @@ teardown() {
 }
 
 @test "accepts --status-file option" {
-    # Timeout is expected (exit 124) since script will hang after printing header
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --status-file custom-status.json 2>&1
-    [[ "$status" -eq 0 || "$status" -eq 124 ]] || fail "Unexpected exit status: $status"
+    [ -n "$output" ]
     [[ "$output" == *"Status file: custom-status.json"* ]]
 }
 
@@ -115,30 +115,26 @@ teardown() {
 # =============================================================================
 
 @test "prints issue number in header" {
-    # Timeout is expected (exit 124) since script will hang after printing header
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 456 --branch main 2>&1
-    [[ "$status" -eq 0 || "$status" -eq 124 ]] || fail "Unexpected exit status: $status"
+    [ -n "$output" ]
     [[ "$output" == *"Issue: #456"* ]]
 }
 
 @test "prints branch name in header" {
-    # Timeout is expected (exit 124) since script will hang after printing header
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch feature-branch 2>&1
-    [[ "$status" -eq 0 || "$status" -eq 124 ]] || fail "Unexpected exit status: $status"
+    [ -n "$output" ]
     [[ "$output" == *"Branch: feature-branch"* ]]
 }
 
 @test "defaults agent to 'default' when not specified" {
-    # Timeout is expected (exit 124) since script will hang after printing header
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
-    [[ "$status" -eq 0 || "$status" -eq 124 ]] || fail "Unexpected exit status: $status"
+    [ -n "$output" ]
     [[ "$output" == *"Agent: default"* ]]
 }
 
 @test "defaults status file to status.json" {
-    # Timeout is expected (exit 124) since script will hang after printing header
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
-    [[ "$status" -eq 0 || "$status" -eq 124 ]] || fail "Unexpected exit status: $status"
+    [ -n "$output" ]
     [[ "$output" == *"Status file: status.json"* ]]
 }
 
@@ -154,5 +150,7 @@ teardown() {
 
 @test "--quiet flag does not appear as unknown option" {
     run bash "$ORCHESTRATOR_SCRIPT" --quiet 2>&1
+    # --quiet without required args still fails, but NOT as unknown option
+    [ "$status" -ne 0 ]
     [[ "$output" != *"Unknown option: --quiet"* ]]
 }

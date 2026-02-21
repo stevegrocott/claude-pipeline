@@ -198,15 +198,17 @@ teardown() {
     [ "$scope" = "mixed" ]
 }
 
-@test "detect_change_scope returns 0 exit status on success" {
+@test "detect_change_scope returns 0 exit status and valid scope on success" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-exit-status
     echo "export const x = 1;" > app.ts
     git add app.ts
     git commit -q -m "add ts"
 
-    detect_change_scope "." "main"
+    local scope
+    scope=$(detect_change_scope "." "main")
     [ "$?" -eq 0 ]
+    [ "$scope" = "typescript" ]
 }
 
 # =============================================================================
@@ -315,5 +317,34 @@ teardown() {
 @test "should_run_quality_loop returns 0 (run) for empty size — safe default" {
     run should_run_quality_loop ""
     [ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# is_stage_timeout() — timeout detection helper
+# =============================================================================
+
+@test "is_stage_timeout returns 0 (true) for timeout error JSON" {
+    run is_stage_timeout '{"status":"error","error":"timeout"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "is_stage_timeout returns 1 (false) for successful result" {
+    run is_stage_timeout '{"status":"success","result":"passed","summary":"All tests passed"}'
+    [ "$status" -eq 1 ]
+}
+
+@test "is_stage_timeout returns 1 (false) for non-timeout error" {
+    run is_stage_timeout '{"status":"error","error":"no structured output"}'
+    [ "$status" -eq 1 ]
+}
+
+@test "is_stage_timeout returns 1 (false) for empty string" {
+    run is_stage_timeout ''
+    [ "$status" -eq 1 ]
+}
+
+@test "is_stage_timeout returns 1 (false) for schema-not-found error" {
+    run is_stage_timeout '{"status":"error","error":"schema not found"}'
+    [ "$status" -eq 1 ]
 }
 

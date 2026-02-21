@@ -32,6 +32,11 @@ setup_test_env() {
         cp -r "$SCRIPT_DIR/schemas/"* "$TEST_TMP/schemas/" 2>/dev/null || true
     fi
 
+    # Copy model-config.sh for tests that need model resolution
+    if [[ -f "$SCRIPT_DIR/model-config.sh" ]]; then
+        cp "$SCRIPT_DIR/model-config.sh" "$TEST_TMP/model-config.sh"
+    fi
+
     # Change to test directory
     cd "$TEST_TMP" || exit 1
 }
@@ -42,6 +47,26 @@ teardown_test_env() {
         rm -rf "$TEST_TMP"
     fi
 }
+
+# =============================================================================
+# PORTABLE TIMEOUT (macOS does not ship GNU timeout)
+# =============================================================================
+
+if ! command -v timeout &>/dev/null; then
+    timeout() {
+        local duration="$1"; shift
+        perl -e '
+            use POSIX ":sys_wait_h";
+            alarm shift @ARGV;
+            $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
+            $pid = fork // die "fork: $!";
+            if ($pid == 0) { exec @ARGV; die "exec: $!" }
+            waitpid($pid, 0);
+            exit ($? >> 8);
+        ' "$duration" "$@"
+    }
+    export -f timeout
+fi
 
 # =============================================================================
 # MOCK FUNCTIONS
@@ -315,4 +340,9 @@ EOF
 
     # Source it
     source "$func_file"
+
+    # Source model-config for resolve_model() and related functions
+    if [[ -f "$TEST_TMP/model-config.sh" ]]; then
+        source "$TEST_TMP/model-config.sh"
+    fi
 }

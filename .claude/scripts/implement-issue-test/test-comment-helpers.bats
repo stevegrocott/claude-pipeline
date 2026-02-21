@@ -13,6 +13,10 @@ setup() {
     # Set required variables
     export ISSUE_NUMBER=123
     export BASE_BRANCH=test
+    # REPO is set via a conditional block in the orchestrator (if/elif/else)
+    # which the awk filter in source_orchestrator_functions() cannot extract.
+    # Mock it directly, matching the pattern used by test-argument-parsing.bats.
+    export REPO="test-owner/test-repo"
     export STATUS_FILE="$TEST_TMP/status.json"
     export LOG_BASE="$TEST_TMP/logs/test"
     export LOG_FILE="$LOG_BASE/orchestrator.log"
@@ -48,8 +52,13 @@ teardown() {
     [ -n "$REPO" ]
 }
 
-@test "REPO points to correct repository" {
+@test "REPO has owner/repo format" {
     [ -n "$REPO" ]
+    # REPO must be in owner/repo format (contains exactly one slash)
+    [[ "$REPO" == *"/"* ]] || fail "REPO should be in owner/repo format, got: $REPO"
+    local slash_count
+    slash_count=$(echo "$REPO" | tr -cd '/' | wc -c | tr -d ' ')
+    [ "$slash_count" -eq 1 ] || fail "REPO should have exactly one slash, got: $REPO"
 }
 
 # =============================================================================
@@ -135,12 +144,20 @@ teardown() {
 # BEHAVIORAL TESTS
 # =============================================================================
 
-@test "comment_issue calls gh with correct arguments" {
-    # Track gh calls
+@test "comment_issue calls gh with correct arguments and body content" {
+    # Track gh calls including the full body
     local gh_calls="$TEST_TMP/gh-calls.txt"
+    local gh_body="$TEST_TMP/gh-body.txt"
     cat > "$TEST_TMP/bin/gh" << EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$gh_calls"
+# Capture --body argument content
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --body) echo "\$2" >> "$gh_body"; shift 2 ;;
+        *) shift ;;
+    esac
+done
 exit 0
 EOF
     chmod +x "$TEST_TMP/bin/gh"
@@ -151,14 +168,26 @@ EOF
     grep -q "issue" "$gh_calls" || fail "Expected 'issue' in gh call"
     grep -q "comment" "$gh_calls" || fail "Expected 'comment' in gh call"
     grep -q "$ISSUE_NUMBER" "$gh_calls" || fail "Expected issue number in gh call"
+    # Verify the comment body includes the title and body content
+    [ -f "$gh_body" ] || fail "Expected --body argument to gh"
+    grep -q "Test Title" "$gh_body" || fail "Expected title in comment body"
+    grep -q "Test body content" "$gh_body" || fail "Expected body content in comment body"
 }
 
-@test "comment_pr calls gh with correct arguments" {
-    # Track gh calls
+@test "comment_pr calls gh with correct arguments and body content" {
+    # Track gh calls including the full body
     local gh_calls="$TEST_TMP/gh-calls.txt"
+    local gh_body="$TEST_TMP/gh-body.txt"
     cat > "$TEST_TMP/bin/gh" << EOF
 #!/usr/bin/env bash
 echo "\$@" >> "$gh_calls"
+# Capture --body argument content
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --body) echo "\$2" >> "$gh_body"; shift 2 ;;
+        *) shift ;;
+    esac
+done
 exit 0
 EOF
     chmod +x "$TEST_TMP/bin/gh"
@@ -169,6 +198,10 @@ EOF
     grep -q "pr" "$gh_calls" || fail "Expected 'pr' in gh call"
     grep -q "comment" "$gh_calls" || fail "Expected 'comment' in gh call"
     grep -q "456" "$gh_calls" || fail "Expected PR number in gh call"
+    # Verify the comment body includes the title and body content
+    [ -f "$gh_body" ] || fail "Expected --body argument to gh"
+    grep -q "Test Title" "$gh_body" || fail "Expected title in PR comment body"
+    grep -q "Test body content" "$gh_body" || fail "Expected body content in PR comment body"
 }
 
 @test "comment_issue handles gh failure gracefully" {
