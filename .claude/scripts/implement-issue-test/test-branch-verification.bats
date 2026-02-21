@@ -106,8 +106,9 @@ teardown() {
 
     run verify_on_feature_branch
     [ "$status" -eq 1 ]
-    # Should produce some error output explaining the failure
+    # Should produce an error explaining the expected vs actual branch
     [ -n "$output" ] || fail "Expected error message when no argument provided"
+    [[ "$output" == *"Expected branch"* ]] || [[ "$output" == *"branch"* ]]
 }
 
 @test "verify_on_feature_branch fails with empty string argument" {
@@ -115,8 +116,9 @@ teardown() {
 
     run verify_on_feature_branch ""
     [ "$status" -eq 1 ]
-    # Should produce some error output explaining the failure
+    # Should produce an error explaining the expected vs actual branch
     [ -n "$output" ] || fail "Expected error message for empty branch name"
+    [[ "$output" == *"Expected branch"* ]] || [[ "$output" == *"branch"* ]]
 }
 
 # =============================================================================

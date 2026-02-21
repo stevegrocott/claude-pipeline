@@ -198,15 +198,17 @@ teardown() {
     [ "$scope" = "mixed" ]
 }
 
-@test "detect_change_scope returns 0 exit status on success" {
+@test "detect_change_scope returns 0 exit status and valid scope on success" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-exit-status
     echo "export const x = 1;" > app.ts
     git add app.ts
     git commit -q -m "add ts"
 
-    detect_change_scope "." "main"
+    local scope
+    scope=$(detect_change_scope "." "main")
     [ "$?" -eq 0 ]
+    [ "$scope" = "typescript" ]
 }
 
 # =============================================================================

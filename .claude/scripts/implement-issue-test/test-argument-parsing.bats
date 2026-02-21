@@ -60,6 +60,7 @@ teardown() {
     # Run with timeout so the script doesn't hang past the header.
     # We only care that the header reflects the parsed --agent value.
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --agent fastify-backend-developer 2>&1
+    [ -n "$output" ]
     [[ "$output" == *"Agent: fastify-backend-developer"* ]]
 }
 
@@ -71,6 +72,7 @@ teardown() {
 
 @test "accepts --status-file option" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --status-file custom-status.json 2>&1
+    [ -n "$output" ]
     [[ "$output" == *"Status file: custom-status.json"* ]]
 }
 
@@ -114,21 +116,25 @@ teardown() {
 
 @test "prints issue number in header" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 456 --branch main 2>&1
+    [ -n "$output" ]
     [[ "$output" == *"Issue: #456"* ]]
 }
 
 @test "prints branch name in header" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch feature-branch 2>&1
+    [ -n "$output" ]
     [[ "$output" == *"Branch: feature-branch"* ]]
 }
 
 @test "defaults agent to 'default' when not specified" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
+    [ -n "$output" ]
     [[ "$output" == *"Agent: default"* ]]
 }
 
 @test "defaults status file to status.json" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
+    [ -n "$output" ]
     [[ "$output" == *"Status file: status.json"* ]]
 }
 
@@ -144,5 +150,7 @@ teardown() {
 
 @test "--quiet flag does not appear as unknown option" {
     run bash "$ORCHESTRATOR_SCRIPT" --quiet 2>&1
+    # --quiet without required args still fails, but NOT as unknown option
+    [ "$status" -ne 0 ]
     [[ "$output" != *"Unknown option: --quiet"* ]]
 }

@@ -133,8 +133,9 @@ teardown() {
 # SCRIPT PATHS
 # =============================================================================
 
-@test "SCRIPT_DIR is defined" {
+@test "SCRIPT_DIR is defined and points to a valid directory" {
     [ -n "$SCRIPT_DIR" ]
+    [ -d "$SCRIPT_DIR" ] || fail "SCRIPT_DIR ($SCRIPT_DIR) is not a valid directory"
 }
 
 @test "SCHEMA_DIR is under SCRIPT_DIR" {

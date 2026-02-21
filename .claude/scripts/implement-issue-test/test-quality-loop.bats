@@ -51,9 +51,15 @@ teardown() {
 # QUALITY ITERATION TRACKING
 # =============================================================================
 
-@test "quality loop increments iteration counter" {
+@test "quality loop increments iteration counter and calls stages in order" {
+    # Track stage call sequence
+    local stage_log="$TEST_TMP/stage_call_sequence"
+    : > "$stage_log"
+    export stage_log
+
     # Mock run_stage to return approved immediately (with summary fields)
     run_stage() {
+        echo "$1" >> "$stage_log"
         case "$1" in
             simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
             test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
@@ -71,6 +77,14 @@ teardown() {
     local iterations
     iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
     [ "$iterations" = "1" ]
+
+    # Verify simplify was called before review
+    grep -q "simplify-" "$stage_log" || fail "Expected simplify stage to be called"
+    grep -q "review-" "$stage_log" || fail "Expected review stage to be called"
+    local simplify_line review_line
+    simplify_line=$(grep -n "simplify-" "$stage_log" | head -1 | cut -d: -f1)
+    review_line=$(grep -n "review-" "$stage_log" | head -1 | cut -d: -f1)
+    [ "$simplify_line" -lt "$review_line" ] || fail "Simplify must run before review"
 }
 
 @test "quality loop stage iteration matches counter" {

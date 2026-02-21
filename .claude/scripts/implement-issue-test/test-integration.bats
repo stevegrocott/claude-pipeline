@@ -228,8 +228,14 @@ teardown() {
 # QUALITY-LOOP FLOW
 # =============================================================================
 
-@test "quality loop function exists" {
+@test "quality loop function exists and accepts required arguments" {
     [ "$(type -t run_quality_loop)" = "function" ]
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+    # Must accept dir, branch, and stage_prefix arguments
+    [[ "$func_def" == *'loop_dir'* ]]
+    [[ "$func_def" == *'loop_branch'* ]]
+    [[ "$func_def" == *'stage_prefix'* ]]
 }
 
 @test "quality loop runs simplify-review-fix cycle" {
@@ -319,8 +325,13 @@ teardown() {
 # TEST-LOOP FLOW
 # =============================================================================
 
-@test "test loop function exists" {
+@test "test loop function exists and accepts arguments" {
     [ "$(type -t run_test_loop)" = "function" ]
+    local func_def
+    func_def=$(declare -f run_test_loop)
+    # Must accept dir and branch arguments
+    [[ "$func_def" == *'loop_dir'* ]]
+    [[ "$func_def" == *'loop_branch'* ]]
 }
 
 @test "test loop runs after all tasks complete" {
@@ -393,8 +404,12 @@ teardown() {
     [[ "$func_def" == *"mixed"* ]]
 }
 
-@test "detect_change_scope function exists" {
+@test "detect_change_scope function exists and is callable" {
     [ "$(type -t detect_change_scope)" = "function" ]
+    local func_def
+    func_def=$(declare -f detect_change_scope)
+    # Must reference git diff for scope detection
+    [[ "$func_def" == *"git"* ]]
 }
 
 # =============================================================================
@@ -715,12 +730,18 @@ teardown() {
 # COMMENT HELPER FUNCTIONS
 # =============================================================================
 
-@test "comment_issue function is defined" {
+@test "comment_issue function is defined and uses gh" {
     [ "$(type -t comment_issue)" = "function" ]
+    local func_def
+    func_def=$(declare -f comment_issue)
+    [[ "$func_def" == *"gh issue comment"* ]]
 }
 
-@test "comment_pr function is defined" {
+@test "comment_pr function is defined and uses gh" {
     [ "$(type -t comment_pr)" = "function" ]
+    local func_def
+    func_def=$(declare -f comment_pr)
+    [[ "$func_def" == *"gh pr comment"* ]]
 }
 
 @test "comment_issue uses gh issue comment" {
