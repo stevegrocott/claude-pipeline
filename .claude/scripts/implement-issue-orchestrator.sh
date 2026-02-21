@@ -974,12 +974,18 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         fi
 
         local review_verdict review_summary
-        review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+        review_verdict=$(printf '%s' "$review_result" | jq -r '
+            if .result then .result
+            elif .status == "success" then "approved"
+            elif .status == "passed" then "passed"
+            else "changes_requested"
+            end
+        ')
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
 
         # Append current iteration findings to review history
         local current_issues
-        current_issues=$(printf '%s' "$review_result" | jq -c "{iteration: $loop_iteration, issues: (.issues // []), result: .result}" 2>/dev/null)
+        current_issues=$(printf '%s' "$review_result" | jq -c "{iteration: $loop_iteration, issues: (.issues // []), result: (.result // .status // \"unknown\")}" 2>/dev/null)
         if [[ -n "$current_issues" ]]; then
             if [[ -f "$review_history_file" ]]; then
                 local existing
@@ -1526,7 +1532,13 @@ Output:
         fi
 
         local validate_status validate_summary
-        validate_status=$(printf '%s' "$validate_result" | jq -r '.result')
+        validate_status=$(printf '%s' "$validate_result" | jq -r '
+            if .result then .result
+            elif .status == "success" then "passed"
+            elif .status == "passed" then "passed"
+            else "changes_requested"
+            end
+        ')
         validate_summary=$(printf '%s' "$validate_result" | jq -r '.summary // "Validation completed"')
 
         # Comment: Validation results
@@ -2115,7 +2127,13 @@ Approve or request changes. Output a summary suitable for a GitHub comment."
         fi
 
         local review_verdict review_summary
-        review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+        review_verdict=$(printf '%s' "$review_result" | jq -r '
+            if .result then .result
+            elif .status == "success" then "approved"
+            elif .status == "passed" then "passed"
+            else "changes_requested"
+            end
+        ')
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
 
         # Comment #11: PR Combined Review Result
