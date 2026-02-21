@@ -35,10 +35,10 @@ teardown() {
     [ "$(type -t get_stage_timeout)" = "function" ]
 }
 
-@test "get_stage_timeout returns 600 for test stages" {
+@test "get_stage_timeout returns 900 for test-iter stages" {
     local result
-    result=$(get_stage_timeout "test-loop-iter-1")
-    [ "$result" -eq 600 ]
+    result=$(get_stage_timeout "test-iter-1")
+    [ "$result" -eq 900 ]
 }
 
 @test "get_stage_timeout returns 600 for docs stage" {
@@ -59,10 +59,10 @@ teardown() {
     [ "$result" -eq 900 ]
 }
 
-@test "get_stage_timeout returns 900 for test-validate stages" {
+@test "get_stage_timeout returns 600 for generic test stages" {
     local result
-    result=$(get_stage_timeout "test-validate-iter-1")
-    [ "$result" -eq 900 ]
+    result=$(get_stage_timeout "test-something")
+    [ "$result" -eq 600 ]
 }
 
 @test "get_stage_timeout returns 1800 for implement stages" {
@@ -89,12 +89,12 @@ teardown() {
     [ "$result" -eq 1800 ]
 }
 
-@test "get_stage_timeout distinguishes test-validate from test" {
-    local test_timeout validate_timeout
-    test_timeout=$(get_stage_timeout "test-loop-iter-1")
-    validate_timeout=$(get_stage_timeout "test-validate-iter-1")
-    [ "$test_timeout" -eq 600 ]
-    [ "$validate_timeout" -eq 900 ]
+@test "get_stage_timeout distinguishes test-iter from generic test" {
+    local combined_timeout generic_timeout
+    combined_timeout=$(get_stage_timeout "test-iter-1")
+    generic_timeout=$(get_stage_timeout "test-something")
+    [ "$combined_timeout" -eq 900 ]
+    [ "$generic_timeout" -eq 600 ]
 }
 
 @test "get_stage_timeout distinguishes pr-review from pr" {

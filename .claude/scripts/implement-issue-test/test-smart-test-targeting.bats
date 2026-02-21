@@ -347,12 +347,9 @@ teardown() {
         local stage_name="$1"
         local prompt="$2"
         case "$stage_name" in
-            test-loop-*)
+            test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
-                ;;
-            test-validate-*)
-                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
                 ;;
         esac
     }
@@ -386,12 +383,9 @@ teardown() {
         local stage_name="$1"
         local prompt="$2"
         case "$stage_name" in
-            test-loop-*)
+            test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
-                ;;
-            test-validate-*)
-                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
                 ;;
         esac
     }
@@ -425,12 +419,9 @@ teardown() {
         local stage_name="$1"
         local prompt="$2"
         case "$stage_name" in
-            test-loop-*)
+            test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
-                ;;
-            test-validate-*)
-                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
                 ;;
         esac
     }
@@ -445,8 +436,11 @@ teardown() {
     captured=$(< "$prompt_file")
     # Should contain the regular test file
     [[ "$captured" == *"auth.test.ts"* ]]
-    # Should NOT contain the integration test file
-    [[ "$captured" != *"integration.test.ts"* ]]
+    # The jest command line (npx jest) should NOT contain the integration test file
+    # (the CHANGED FILES section may list it for validation, but jest must not run it)
+    local jest_line
+    jest_line=$(echo "$captured" | grep "npx jest" || true)
+    [[ "$jest_line" != *"integration.test.ts"* ]]
 }
 
 @test "run_test_loop falls back to changedSince when only integration test files changed" {
@@ -466,12 +460,9 @@ teardown() {
         local stage_name="$1"
         local prompt="$2"
         case "$stage_name" in
-            test-loop-*)
+            test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
-                ;;
-            test-validate-*)
-                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
                 ;;
         esac
     }
@@ -507,12 +498,9 @@ teardown() {
         local stage_name="$1"
         local prompt="$2"
         case "$stage_name" in
-            test-loop-*)
+            test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
-                ;;
-            test-validate-*)
-                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
                 ;;
         esac
     }
@@ -630,16 +618,13 @@ teardown() {
     run_stage() {
         local stage_name="$1"
         case "$stage_name" in
-            test-loop-*)
+            test-iter-*)
                 echo "true" > "$test_loop_reached"
-                echo '{"status":"success","result":"failed","failures":[{"test":"PreExisting.test","message":"pre-existing failure"}],"summary":"1 pre-existing failure"}'
+                echo '{"result":"failed","failures":[{"test":"PreExisting.test","message":"pre-existing failure"}],"summary":"1 pre-existing failure","validation_result":"skipped"}'
                 ;;
             fix-tests-*)
                 echo "true" > "$fix_called"
                 echo '{"status":"success","summary":"Fixed"}'
-                ;;
-            test-validate-*)
-                echo '{"status":"success","result":"passed","summary":"Validated"}'
                 ;;
         esac
     }
@@ -652,7 +637,7 @@ teardown() {
     local exit_status=$?
 
     # Verify the test loop stage was actually reached
-    [ "$(cat "$test_loop_reached")" = "true" ] || fail "run_stage test-loop was never called"
+    [ "$(cat "$test_loop_reached")" = "true" ] || fail "run_stage test-iter was never called"
     # Verify run_test_loop exited successfully (pre-existing failures don't block)
     [ "$exit_status" -eq 0 ] || fail "run_test_loop should exit 0 when all failures are pre-existing"
     # Verify fix-agent was NOT dispatched
@@ -679,23 +664,20 @@ teardown() {
     run_stage() {
         local stage_name="$1"
         case "$stage_name" in
-            test-loop-*)
+            test-iter-*)
                 local count
                 count=$(cat "$call_count_file")
                 count=$((count + 1))
                 echo "$count" > "$call_count_file"
                 if (( count <= 1 )); then
-                    echo '{"status":"success","result":"failed","failures":[{"test":"failing.test","message":"PR introduced failure"}],"summary":"1 PR failure"}'
+                    echo '{"result":"failed","failures":[{"test":"failing.test","message":"PR introduced failure"}],"summary":"1 PR failure","validation_result":"skipped"}'
                 else
-                    echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                    echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
                 fi
                 ;;
             fix-tests-*)
                 echo "true" > "$fix_called"
                 echo '{"status":"success","summary":"Fixed"}'
-                ;;
-            test-validate-*)
-                echo '{"status":"success","result":"passed","summary":"Validated"}'
                 ;;
         esac
     }
@@ -733,16 +715,13 @@ teardown() {
     run_stage() {
         local stage_name="$1"
         case "$stage_name" in
-            test-loop-*)
+            test-iter-*)
                 # Failed result but with empty failures array
-                echo '{"status":"success","result":"failed","failures":[],"summary":"0 failures"}'
+                echo '{"result":"failed","failures":[],"summary":"0 failures","validation_result":"skipped"}'
                 ;;
             fix-tests-*)
                 echo "true" > "$fix_called"
                 echo '{"status":"success","summary":"Fixed"}'
-                ;;
-            test-validate-*)
-                echo '{"status":"success","result":"passed","summary":"Validated"}'
                 ;;
         esac
     }

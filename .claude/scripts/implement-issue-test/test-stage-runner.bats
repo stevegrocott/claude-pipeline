@@ -263,7 +263,7 @@ teardown() {
     }
     export -f timeout
 
-    run_stage "test-loop-iter-1" "prompt" "test-schema.json" "" ""
+    run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--model haiku" "$claude_calls" || \

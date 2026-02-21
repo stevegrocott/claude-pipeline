@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "properties": {
+    "result": {"enum": ["passed", "failed"]},
+    "total_tests": {"type": "integer"},
+    "passed_tests": {"type": "integer"},
+    "failed_tests": {"type": "integer"},
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "test": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      }
+    },
+    "summary": {"type": "string"},
+    "validation_result": {"enum": ["passed", "failed", "skipped"]},
+    "validation_issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {"enum": ["major", "minor"]},
+          "description": {"type": "string"},
+          "file": {"type": "string"}
+        }
+      }
+    },
+    "pre_existing_issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": {"type": "string"},
+          "file": {"type": "string"}
+        }
+      }
+    },
+    "validation_summary": {"type": "string"}
+  },
+  "required": ["result", "summary", "validation_result"]
+}
