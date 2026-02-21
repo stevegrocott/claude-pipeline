@@ -202,6 +202,28 @@ teardown() {
     [ -z "$size" ]
 }
 
+@test "extract_task_size returns empty for malformed markers" {
+    local size
+
+    # Lowercase markers should not match
+    size=$(extract_task_size '**(s)** lowercase task')
+    [ -z "$size" ]
+
+    # Missing asterisks
+    size=$(extract_task_size '(S) bare parens')
+    [ -z "$size" ]
+
+    # Extra spaces inside marker
+    size=$(extract_task_size '**( S )** spaced')
+    [ -z "$size" ]
+}
+
+@test "extract_task_size handles empty input" {
+    local size
+    size=$(extract_task_size '')
+    [ -z "$size" ]
+}
+
 # =============================================================================
 # QUALITY-LOOP FLOW
 # =============================================================================

@@ -98,9 +98,44 @@ teardown() {
 # TEST FAILURE HANDLING
 # =============================================================================
 
-@test "run_quality_loop function is defined" {
-    # Validates the function exists and is properly sourced
-    [ "$(type -t run_quality_loop)" = "function" ]
+@test "quality loop handles review stage error gracefully" {
+    # When review returns an error status, the loop should retry or exit cleanly
+    local counter_file="$TEST_TMP/error_review_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+                if (( count <= 1 )); then
+                    echo '{"status":"error","error":"model_error","summary":"Model error"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    local exit_status=$?
+
+    # Should eventually succeed after retrying past the error
+    [ "$exit_status" -eq 0 ]
 }
 
 # =============================================================================
