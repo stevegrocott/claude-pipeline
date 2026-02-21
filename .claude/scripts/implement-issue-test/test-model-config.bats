@@ -573,10 +573,10 @@ run_with_config() {
 }
 
 @test "resolve_model with composite stage and M complexity" {
-	# test-iter-1 defaults to haiku, M overrides to opus
+	# test-iter-1 defaults to haiku (light tier), M complexity is ignored
 	run_with_config 'resolve_model "test-iter-1" "M"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "haiku" ]]
 }
 
 @test "resolve_model unknown composite stage with complexity hint" {
@@ -621,37 +621,39 @@ run_with_config() {
 }
 
 # =============================================================================
-# resolve_model() - COMPLEXITY HINT UPGRADES LIGHT STAGES
+# resolve_model() - LIGHT STAGES IGNORE COMPLEXITY HINTS
+#
+# Stages with a "light" default tier (test, parse-issue, validate-plan, pr,
+# complete, docs) always use haiku regardless of task complexity.  These are
+# mechanical stages (parsing, running commands, filling templates) where model
+# quality does not scale with problem size.
 # =============================================================================
 
-@test "complexity S upgrades parse-issue from light to standard" {
-	# parse-issue defaults to light (haiku)
-	# S complexity maps to standard (sonnet) — upgrades the stage
+@test "complexity S does not override parse-issue light stage" {
+	# parse-issue defaults to light (haiku) and must stay haiku
 	run_with_config 'resolve_model "parse-issue" "S"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "sonnet" ]]
+	[[ "$output" == "haiku" ]]
 }
 
-@test "complexity M upgrades test stage from light to advanced" {
-	# test defaults to light (haiku)
-	# M complexity maps to advanced (opus) — significant upgrade
+@test "complexity M does not override test stage light tier" {
+	# test defaults to light (haiku) and must stay haiku
 	run_with_config 'resolve_model "test" "M"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "haiku" ]]
 }
 
-@test "complexity L upgrades pr stage from light to advanced" {
-	# pr defaults to light (haiku)
-	# L complexity maps to advanced (opus)
+@test "complexity L does not override pr stage light tier" {
+	# pr defaults to light (haiku) and must stay haiku
 	run_with_config 'resolve_model "pr" "L"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "opus" ]]
+	[[ "$output" == "haiku" ]]
 }
 
-@test "complexity S upgrades validate-plan from light to standard" {
+@test "complexity S does not override validate-plan light stage" {
 	run_with_config 'resolve_model "validate-plan" "S"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "sonnet" ]]
+	[[ "$output" == "haiku" ]]
 }
 
 # =============================================================================

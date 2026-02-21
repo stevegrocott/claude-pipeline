@@ -145,10 +145,12 @@ resolve_model() {
 		tier="advanced"
 	fi
 
-	# Apply complexity hint — overrides stage default when provided
+	# Apply complexity hint — overrides stage default when provided.
+	# Light-tier stages (test, parse-issue, validate-plan, pr, complete, docs)
+	# are mechanical and always use haiku; complexity hints are ignored for them.
 	# The quality loop forwards task-level complexity to implement, simplify,
-	# review, and fix stages so model selection scales with task size
-	if [[ -n "$complexity" ]]; then
+	# review, and fix stages so model selection scales with task size.
+	if [[ -n "$complexity" && "$tier" != "light" ]]; then
 		local complexity_tier
 		complexity_tier=$(_complexity_to_tier "$complexity")
 
