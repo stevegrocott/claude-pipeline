@@ -449,6 +449,47 @@ teardown() {
     [[ "$captured" != *"integration.test.ts"* ]]
 }
 
+@test "run_test_loop falls back to changedSince when only integration test files changed" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-only-integration
+
+    # Add ONLY an integration test file (no regular test files)
+    echo "test('int', () => {});" > db.integration.test.ts
+    echo "export const connect = () => {};" > db.ts
+    git add db.integration.test.ts db.ts
+    git commit -q -m "add only integration test"
+
+    local prompt_file="$TEST_TMP/only_integration_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-ts-only-integration" "" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    # Should NOT contain the integration test file
+    [[ "$captured" != *"integration.test.ts"* ]]
+    # Should fall back to --changedSince since no non-integration test files exist
+    [[ "$captured" == *"changedSince"* ]]
+}
+
 @test "run_test_loop handles mixed scope with explicit test files" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-mixed-testfiles
