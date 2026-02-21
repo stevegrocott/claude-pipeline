@@ -294,7 +294,7 @@ teardown() {
     [ "$calls" -eq 0 ]
 }
 
-@test "run_test_loop uses jest --changedSince for typescript scope" {
+@test "run_test_loop falls back to jest --changedSince when no test files changed" {
     local func_def
     func_def=$(declare -f run_test_loop)
 
@@ -306,6 +306,227 @@ teardown() {
     func_def=$(declare -f run_test_loop)
 
     [[ "$func_def" == *"bats"* ]] || [[ "$func_def" == *"BATS"* ]] || [[ "$func_def" == *".bats"* ]]
+}
+
+# =============================================================================
+# EXPLICIT CHANGED-FILE TEST EXECUTION
+# =============================================================================
+
+@test "run_test_loop computes explicit changed test files via git diff" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Must grep for test/spec file patterns in changed files
+    [[ "$func_def" == *'\.test\.'* ]]
+    [[ "$func_def" == *'\.spec\.'* ]]
+}
+
+@test "run_test_loop excludes .integration.test files from explicit list" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Must filter out integration test files
+    [[ "$func_def" == *'integration'* ]]
+}
+
+@test "run_test_loop passes explicit test files to jest when test files changed" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-testfiles
+
+    # Add an implementation file and a test file
+    echo "export const add = (a, b) => a + b;" > math.ts
+    echo "test('adds', () => expect(1+1).toBe(2));" > math.test.ts
+    git add math.ts math.test.ts
+    git commit -q -m "add ts with test"
+
+    # Track the test command passed to run_stage
+    local prompt_file="$TEST_TMP/test_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-ts-testfiles" "" "typescript"
+
+    # The prompt should contain the test file directly
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"math.test.ts"* ]]
+}
+
+@test "run_test_loop uses changedSince fallback when only impl files changed" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-no-testfiles
+
+    # Only add an implementation file (no test files)
+    echo "export const sub = (a, b) => a - b;" > utils.ts
+    git add utils.ts
+    git commit -q -m "add ts without test"
+
+    # Track the test command passed to run_stage
+    local prompt_file="$TEST_TMP/fallback_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-ts-no-testfiles" "" "typescript"
+
+    # The prompt should use --changedSince fallback
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"changedSince"* ]]
+}
+
+@test "run_test_loop excludes integration test files from explicit jest list" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-integration
+
+    # Add an integration test file and a regular test file
+    echo "test('int', () => {});" > auth.integration.test.ts
+    echo "test('unit', () => {});" > auth.test.ts
+    git add auth.integration.test.ts auth.test.ts
+    git commit -q -m "add tests with integration"
+
+    local prompt_file="$TEST_TMP/integration_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-ts-integration" "" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    # Should contain the regular test file
+    [[ "$captured" == *"auth.test.ts"* ]]
+    # Should NOT contain the integration test file
+    [[ "$captured" != *"integration.test.ts"* ]]
+}
+
+@test "run_test_loop falls back to changedSince when only integration test files changed" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-only-integration
+
+    # Add ONLY an integration test file (no regular test files)
+    echo "test('int', () => {});" > db.integration.test.ts
+    echo "export const connect = () => {};" > db.ts
+    git add db.integration.test.ts db.ts
+    git commit -q -m "add only integration test"
+
+    local prompt_file="$TEST_TMP/only_integration_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-ts-only-integration" "" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    # Should NOT contain the integration test file
+    [[ "$captured" != *"integration.test.ts"* ]]
+    # Should fall back to --changedSince since no non-integration test files exist
+    [[ "$captured" == *"changedSince"* ]]
+}
+
+@test "run_test_loop handles mixed scope with explicit test files" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-mixed-testfiles
+
+    # Add TS test file and bash script
+    echo "test('adds', () => expect(1+1).toBe(2));" > math.test.ts
+    echo "#!/bin/bash" > deploy.sh
+    git add math.test.ts deploy.sh
+    git commit -q -m "add mixed with test"
+
+    local prompt_file="$TEST_TMP/mixed_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-mixed-testfiles" "" "mixed"
+
+    # Should contain the explicit test file and bats
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"math.test.ts"* ]]
 }
 
 # =============================================================================
@@ -362,4 +583,179 @@ teardown() {
 @test "should_run_docs_stage returns 0 (run) for unknown scope (safe default)" {
     run should_run_docs_stage "unknown"
     [ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# PRE-EXISTING FAILURE FILTERING — Task 2 (#20)
+# =============================================================================
+
+@test "run_test_loop uses pr_failures variable for pre-existing failure filtering" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Must declare pr_failures (assignment, not just a mention in a comment)
+    [[ "$func_def" == *'pr_failures='* ]]
+    # Must use pr_failures for the failure count check
+    [[ "$func_def" == *'pr_failures'*'jq'*'length'* ]]
+}
+
+@test "run_test_loop logs informational message when skipping pre-existing failures" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Must log a message specifically about skipping pre-existing failures
+    # using the log function (not just in a comment or echo)
+    [[ "$func_def" == *'log'*'pre-existing failure'* ]]
+    # Must also log when all failures are pre-existing
+    [[ "$func_def" == *'All test failures are pre-existing'* ]]
+}
+
+@test "fix-agent not dispatched when all failures are pre-existing in fallback mode" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-fallback-preexisting
+
+    # Only add an implementation file (no test files → fallback --changedSince mode)
+    echo "export const foo = () => {};" > src.ts
+    git add src.ts
+    git commit -q -m "impl without tests"
+
+    local fix_called="$TEST_TMP/fix_preexist_called"
+    echo "false" > "$fix_called"
+    export fix_called
+
+    local test_loop_reached="$TEST_TMP/test_loop_reached"
+    echo "false" > "$test_loop_reached"
+    export test_loop_reached
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            test-loop-*)
+                echo "true" > "$test_loop_reached"
+                echo '{"status":"success","result":"failed","failures":[{"test":"PreExisting.test","message":"pre-existing failure"}],"summary":"1 pre-existing failure"}'
+                ;;
+            fix-tests-*)
+                echo "true" > "$fix_called"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-fallback-preexisting" "" "typescript"
+    local exit_status=$?
+
+    # Verify the test loop stage was actually reached
+    [ "$(cat "$test_loop_reached")" = "true" ] || fail "run_stage test-loop was never called"
+    # Verify run_test_loop exited successfully (pre-existing failures don't block)
+    [ "$exit_status" -eq 0 ] || fail "run_test_loop should exit 0 when all failures are pre-existing"
+    # Verify fix-agent was NOT dispatched
+    [ "$(cat "$fix_called")" = "false" ] || fail "Fix-agent should not be dispatched for pre-existing failures in fallback mode"
+}
+
+@test "fix-agent dispatched when failures are from PR-changed test files in explicit mode" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-pr-test-failures
+
+    # Add a test file (so explicit mode is used)
+    echo "test('fails', () => { throw new Error('PR introduced failure'); });" > failing.test.ts
+    git add failing.test.ts
+    git commit -q -m "add failing PR test"
+
+    local fix_called="$TEST_TMP/fix_explicit_called"
+    echo "false" > "$fix_called"
+    export fix_called
+
+    local call_count_file="$TEST_TMP/test_loop_count"
+    echo "0" > "$call_count_file"
+    export call_count_file
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            test-loop-*)
+                local count
+                count=$(cat "$call_count_file")
+                count=$((count + 1))
+                echo "$count" > "$call_count_file"
+                if (( count <= 1 )); then
+                    echo '{"status":"success","result":"failed","failures":[{"test":"failing.test","message":"PR introduced failure"}],"summary":"1 PR failure"}'
+                else
+                    echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                fi
+                ;;
+            fix-tests-*)
+                echo "true" > "$fix_called"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-pr-test-failures" "" "typescript"
+    local exit_status=$?
+
+    # Verify run_test_loop completed successfully
+    [ "$exit_status" -eq 0 ] || fail "run_test_loop should exit 0 after fix-agent resolves failures"
+    # Verify fix-agent WAS dispatched for PR-changed test file failures
+    [ "$(cat "$fix_called")" = "true" ] || fail "Fix-agent should be dispatched for PR-changed test file failures"
+    # Verify test loop ran more than once (first fail, then pass after fix)
+    local final_count
+    final_count=$(cat "$call_count_file")
+    [ "$final_count" -ge 2 ] || fail "Test loop should have iterated at least twice (fail then pass)"
+}
+
+@test "run_test_loop exits gracefully when fallback mode returns failed with empty failures array" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-empty-failures
+
+    # Only impl file → fallback mode
+    echo "export const bar = () => {};" > lib.ts
+    git add lib.ts
+    git commit -q -m "impl only"
+
+    local fix_called="$TEST_TMP/fix_empty_failures"
+    echo "false" > "$fix_called"
+    export fix_called
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            test-loop-*)
+                # Failed result but with empty failures array
+                echo '{"status":"success","result":"failed","failures":[],"summary":"0 failures"}'
+                ;;
+            fix-tests-*)
+                echo "true" > "$fix_called"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-empty-failures" "" "typescript"
+    local exit_status=$?
+
+    # Should exit gracefully — zero failures means nothing to fix
+    [ "$exit_status" -eq 0 ] || fail "run_test_loop should exit 0 when failures array is empty"
+    # Fix-agent should NOT be dispatched for empty failures
+    [ "$(cat "$fix_called")" = "false" ] || fail "Fix-agent should not be dispatched when failures array is empty"
 }
