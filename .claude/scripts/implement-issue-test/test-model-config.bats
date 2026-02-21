@@ -332,8 +332,8 @@ run_with_config() {
 	[[ "$output" == "sonnet" ]]
 }
 
-@test "resolve_model matches test prefix in test-loop-iter-1" {
-	run_with_config 'resolve_model "test-loop-iter-1"'
+@test "resolve_model matches test prefix in test-iter-1" {
+	run_with_config 'resolve_model "test-iter-1"'
 	[ "$status" -eq 0 ]
 	[[ "$output" == "haiku" ]]
 }
@@ -392,8 +392,8 @@ run_with_config() {
 	[[ "$output" == "sonnet" ]]
 }
 
-@test "resolve_model matches test prefix in test-validate-iter-1" {
-	run_with_config 'resolve_model "test-validate-iter-1"'
+@test "resolve_model matches test prefix in test-iter-2" {
+	run_with_config 'resolve_model "test-iter-2"'
 	[ "$status" -eq 0 ]
 	[[ "$output" == "haiku" ]]
 }
@@ -573,8 +573,8 @@ run_with_config() {
 }
 
 @test "resolve_model with composite stage and M complexity" {
-	# test-loop-iter-1 defaults to haiku, M overrides to opus
-	run_with_config 'resolve_model "test-loop-iter-1" "M"'
+	# test-iter-1 defaults to haiku, M overrides to opus
+	run_with_config 'resolve_model "test-iter-1" "M"'
 	[ "$status" -eq 0 ]
 	[[ "$output" == "opus" ]]
 }

@@ -55,7 +55,7 @@ fi
 # =============================================================================
 #
 # Replaces the flat STAGE_TIMEOUT constant with per-stage timeouts.
-# Compound prefixes (test-validate, pr-review) are matched first to avoid
+# Compound prefixes (test-iter, pr-review) are matched first to avoid
 # being swallowed by their shorter generic siblings (test, pr).
 #
 
@@ -63,7 +63,7 @@ get_stage_timeout() {
     local stage_name="${1:-}"
 
     case "$stage_name" in
-        test-validate*) printf '%s' 900 ;;
+        test-iter*)     printf '%s' 900 ;;
         pr-review*)     printf '%s' 1800 ;;
         test*|docs*|pr*) printf '%s' 600 ;;
         task-review*)    printf '%s' 900 ;;
@@ -1258,14 +1258,13 @@ detect_change_scope() {
     return 0
 }
 
-# Run the test loop (test -> validate -> fix, repeat until pass)
+# Run the test loop (test+validate -> fix, repeat until pass)
 # Called once after all tasks complete
 # Flow:
-#   1. Run tests (default agent)
+#   1. Run tests AND validate comprehensiveness in a single stage (default agent)
 #   2. If tests fail: fix with task agent, loop
-#   3. If tests pass: validate test quality (default, scoped to issue)
-#   4. If validation fails: fix with task agent, loop
-#   5. If validation passes: done
+#   3. If tests pass but validation fails: fix with task agent, loop
+#   4. If tests pass and validation passes: done
 # Arguments:
 #   $1 - working directory
 #   $2 - branch name
@@ -1368,17 +1367,69 @@ run_test_loop() {
 
         log "Test loop iteration $test_iteration/$MAX_TEST_ITERATIONS (scope: $change_scope)"
 
-        # -------------------------------------------------------------------------
-        # TEST EXECUTION → Issue comment
-        # -------------------------------------------------------------------------
-        local test_prompt="Run the test suite in working directory $safe_dir:
+        # =========================================================================
+        # COMBINED TEST EXECUTION + VALIDATION → single stage
+        # =========================================================================
 
+        # Compute explicit changed-file list (three-dot merge-base diff) for
+        # validation scope. Recomputed each iteration since fix stages may
+        # add commits.
+        local changed_files
+        changed_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+
+        # Build validation section for the combined prompt
+        local validation_section=""
+        if [[ -n "$changed_files" ]]; then
+            validation_section="STEP 2 — TEST VALIDATION (only if all tests passed in Step 1)
+If tests failed in Step 1, set validation_result to 'skipped' and skip this step.
+
+Validate test comprehensiveness for issue #$ISSUE_NUMBER.
+
+CHANGED FILES (computed via git diff $safe_branch...HEAD --name-only):
+$changed_files
+
+ONLY validate tests for these specific files. Do NOT expand scope beyond this list.
+
+IMPORTANT SCOPE CONSTRAINTS:
+- If NONE of the changed files contain testable code (e.g., config-only, style-only, docs-only changes), set validation_result to 'passed' immediately. Do NOT request new tests for non-logic changes.
+- Only validate tests for modified code files (services, routes, components, hooks, scripts)
+- Do NOT request tests for config files, static assets, or type-only changes
+
+PRE-EXISTING ISSUES POLICY:
+- If a test file has pre-existing quality issues NOT introduced by this PR, set validation_result to 'passed' and note them under 'pre_existing_issues'.
+- Only set validation_result to 'failed' for quality issues directly related to changed files in this PR.
+
+For each modified implementation file that warrants testing, identify the corresponding test file and audit:
+1. Check for TODO/FIXME/incomplete tests
+2. Check for hollow assertions (expect(true).toBe(true), no assertions)
+3. Verify edge cases and error conditions are tested
+4. Check for mock abuse patterns"
+        else
+            validation_section="STEP 2 — TEST VALIDATION: SKIPPED
+No changed files detected vs $BASE_BRANCH. Set validation_result to 'skipped'."
+        fi
+
+        local test_prompt="Run the test suite and validate test comprehensiveness in working directory $safe_dir.
+
+STEP 1 — TEST EXECUTION
+Run the following command:
 $test_command
 
-Report pass/fail, test counts, and any failures. Output a summary suitable for a GitHub comment."
+Report pass/fail with test counts and failure details.
+If tests fail, set validation_result to 'skipped' (no point validating failing tests).
+
+$validation_section
+
+Output both test results and validation findings in one structured response.
+- result: 'passed' or 'failed' (from test execution)
+- summary: overall summary suitable for a GitHub comment
+- validation_result: 'passed', 'failed', or 'skipped'
+- validation_issues: array of issues found (if any)
+- pre_existing_issues: array of pre-existing quality issues (informational only)
+- validation_summary: summary of validation findings"
 
         local test_result
-        test_result=$(run_stage "test-loop-iter-$test_iteration" "$test_prompt" "implement-issue-test.json" "default" "$loop_complexity")
+        test_result=$(run_stage "test-iter-$test_iteration" "$test_prompt" "implement-issue-test-validate.json" "default" "$loop_complexity")
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$test_result"; then
@@ -1391,14 +1442,17 @@ Report pass/fail, test counts, and any failures. Output a summary suitable for a
         test_status=$(printf '%s' "$test_result" | jq -r '.result')
         test_summary=$(printf '%s' "$test_result" | jq -r '.summary // "Tests completed"')
 
-        # Comment: Test results
-        local test_icon="✅"
-        [[ "$test_status" == "failed" ]] && test_icon="❌"
-        comment_issue "Test Loop: Tests ($test_iteration/$MAX_TEST_ITERATIONS)" "$test_icon **Result:** $test_status
+        local validate_status validate_summary
+        validate_status=$(printf '%s' "$test_result" | jq -r '.validation_result // "skipped"')
+        validate_summary=$(printf '%s' "$test_result" | jq -r '.validation_summary // ""')
+
+        # -----------------------------------------------------------------
+        # HANDLE TEST FAILURES
+        # -----------------------------------------------------------------
+        if [[ "$test_status" == "failed" ]]; then
+            comment_issue "Test Loop: Tests ($test_iteration/$MAX_TEST_ITERATIONS)" "❌ **Result:** $test_status
 
 $test_summary" "default"
-
-        if [[ "$test_status" == "failed" ]]; then
             log "Tests failed. Getting failures and fixing..."
             local failures
             failures=$(printf '%s' "$test_result" | jq -c '.failures')
@@ -1473,92 +1527,38 @@ Fix the issues and commit. Output a summary of fixes applied."
             continue
         fi
 
-        # -------------------------------------------------------------------------
-        # TEST VALIDATION → Issue comment (only if tests passed)
-        # -------------------------------------------------------------------------
-        log "Tests passed. Running test validation for issue #$ISSUE_NUMBER..."
+        # -----------------------------------------------------------------
+        # TESTS PASSED — check validation result
+        # -----------------------------------------------------------------
+        if [[ "$validate_status" == "passed" || "$validate_status" == "skipped" ]]; then
+            comment_issue "Test Loop: Results ($test_iteration/$MAX_TEST_ITERATIONS)" "✅ **Tests:** passed
+✅ **Validation:** $validate_status
 
-        # Compute explicit changed-file list (three-dot merge-base diff, not
-        # Jest's --changedSince dependency graph) so the validate agent
-        # operates on a deterministic, pre-computed scope.
-        local changed_files
-        changed_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+$test_summary" "default"
 
-        if [[ -z "$changed_files" ]]; then
-            log "No changed files detected for validation — skipping"
-            comment_issue "Test Loop: Validation Skipped ($test_iteration/$MAX_TEST_ITERATIONS)" \
-                "⏭️ No changed files detected vs $BASE_BRANCH. Skipping validation." "default"
             loop_complete=true
-            break
-        fi
+            log "Test loop complete on iteration $test_iteration (tests passed, validation: $validate_status)"
+        else
+            # Validation failed — fix quality issues
+            comment_issue "Test Loop: Results ($test_iteration/$MAX_TEST_ITERATIONS)" "✅ **Tests:** passed
+🔄 **Validation:** $validate_status
 
-        local validate_prompt="Validate test comprehensiveness and integrity for issue #$ISSUE_NUMBER in working directory $safe_dir.
-
-CHANGED FILES (computed via git diff $safe_branch...HEAD --name-only):
-$changed_files
-
-ONLY validate tests for these specific files. Do NOT expand scope beyond this list.
-
-IMPORTANT SCOPE CONSTRAINTS:
-- If NONE of the changed files contain testable code (e.g., config-only, style-only, docs-only changes), output 'passed' immediately. Do NOT request new tests for non-logic changes.
-- Only validate tests for modified code files (services, routes, components, hooks, scripts)
-- Do NOT request tests for config files, static assets, or type-only changes
-
-PRE-EXISTING ISSUES POLICY:
-- If a test file has pre-existing quality issues NOT introduced by this PR, report 'passed' and note them separately under a 'pre_existing_issues' key.
-- Only report 'failed' for quality issues that are directly related to the changed files in this PR.
-
-For each modified implementation file that warrants testing, identify the corresponding test file and audit:
-1. Run the test suite: $test_command
-2. Check for TODO/FIXME/incomplete tests
-3. Check for hollow assertions (expect(true).toBe(true), no assertions)
-4. Verify edge cases and error conditions are tested
-5. Check for mock abuse patterns
-
-Output:
-- result: 'passed' if tests are comprehensive OR if no testable code was modified, 'failed' if issues found in PR-related code
-- issues: array of issues found (if any) — only for code changed in this PR
-- pre_existing_issues: array of pre-existing quality issues found in test files not introduced by this PR (informational only)
-- summary: suitable for a GitHub comment (note if validation was skipped due to no testable changes)"
-
-        local validate_result
-        validate_result=$(run_stage "test-validate-iter-$test_iteration" "$validate_prompt" "implement-issue-review.json" "default" "$loop_complexity")
-
-        # Handle timeout: skip validation and retry on next iteration
-        if is_stage_timeout "$validate_result"; then
-            log_warn "Test validation timed out on iteration $test_iteration — retrying next iteration"
-            comment_issue "Test Loop: Validation Timeout ($test_iteration/$MAX_TEST_ITERATIONS)" "⏱️ Validation stage timed out. Retrying on next iteration." "default"
-            continue
-        fi
-
-        local validate_status validate_summary
-        validate_status=$(printf '%s' "$validate_result" | jq -r '
-            if .result then .result
-            elif .status == "success" then "passed"
-            elif .status == "passed" then "passed"
-            else "changes_requested"
-            end
-        ')
-        validate_summary=$(printf '%s' "$validate_result" | jq -r '.summary // "Validation completed"')
-
-        # Comment: Validation results
-        local validate_icon="✅"
-        [[ "$validate_status" == "changes_requested" || "$validate_status" == "failed" ]] && validate_icon="🔄"
-        comment_issue "Test Loop: Validation ($test_iteration/$MAX_TEST_ITERATIONS)" "$validate_icon **Result:** $validate_status
+$test_summary
 
 $validate_summary" "default"
 
-        if [[ "$validate_status" == "approved" || "$validate_status" == "passed" ]]; then
-            loop_complete=true
-            log "Test loop complete on iteration $test_iteration (tests passed and validated)"
-        else
             log "Test validation found issues. Fixing..."
-            local validate_comments
-            validate_comments=$(printf '%s' "$validate_result" | jq -r '.comments // .summary // "Fix test quality issues"')
+            local validate_issues
+            validate_issues=$(printf '%s' "$test_result" | jq -r '
+                if .validation_issues then (.validation_issues | tostring)
+                elif .validation_summary then .validation_summary
+                else "Fix test quality issues"
+                end
+            ')
 
             local fix_prompt="Address test quality issues in working directory $safe_dir on branch $loop_branch:
 
-$validate_comments
+$validate_issues
 
 Fix the test quality issues (add missing assertions, remove TODOs, add edge case tests, etc.) and commit.
 Output a summary of fixes applied."

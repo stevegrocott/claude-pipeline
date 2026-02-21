@@ -342,11 +342,11 @@ teardown() {
     [[ "$main_def" == *'set_stage_started "test_loop"'* ]]
 }
 
-@test "test loop uses implement-issue-test schema" {
+@test "test loop uses implement-issue-test-validate schema" {
     local func_def
     func_def=$(declare -f run_test_loop)
 
-    [[ "$func_def" == *"implement-issue-test.json"* ]]
+    [[ "$func_def" == *"implement-issue-test-validate.json"* ]]
 }
 
 @test "test loop detects change scope" {
@@ -392,7 +392,7 @@ teardown() {
     func_def=$(declare -f run_test_loop)
 
     [[ "$func_def" == *"validate"* ]] || [[ "$func_def" == *"Validate"* ]]
-    [[ "$func_def" == *"implement-issue-review.json"* ]]
+    [[ "$func_def" == *"validation_result"* ]]
 }
 
 @test "test loop smart targeting routes by scope" {
