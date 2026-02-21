@@ -1316,15 +1316,36 @@ run_test_loop() {
     safe_dir=$(printf '%q' "$loop_dir")
     safe_branch=$(printf '%q' "$BASE_BRANCH")
 
+    # Compute explicit changed test files (three-dot merge-base diff).
+    # Pass them directly to Jest instead of relying on --changedSince's
+    # dependency graph, which can miss or over-include files.
+    # Exclude .integration.test.ts files (run separately).
+    local changed_test_files=""
+    if [[ "$change_scope" == "typescript" || "$change_scope" == "mixed" ]]; then
+        changed_test_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null \
+            | grep -E '\.test\.[jt]sx?$|\.spec\.[jt]sx?$' \
+            | grep -v '\.integration\.test\.' \
+            || true)
+    fi
+
+    local jest_command
+    if [[ -n "$changed_test_files" ]]; then
+        jest_command="npx jest --passWithNoTests $changed_test_files"
+        log "Explicit changed test files: $(echo "$changed_test_files" | tr '\n' ' ')"
+    else
+        jest_command="npx jest --passWithNoTests --changedSince=$safe_branch"
+        log "No changed test files found — falling back to --changedSince=$safe_branch"
+    fi
+
     case "$change_scope" in
         typescript)
-            test_command="cd $safe_dir && npx jest --passWithNoTests --changedSince=$safe_branch"
+            test_command="cd $safe_dir && $jest_command"
             ;;
         bash)
             test_command="cd $safe_dir && $bash_test_command"
             ;;
         mixed)
-            test_command="cd $safe_dir && npx jest --passWithNoTests --changedSince=$safe_branch && $bash_test_command"
+            test_command="cd $safe_dir && $jest_command && $bash_test_command"
             ;;
     esac
 

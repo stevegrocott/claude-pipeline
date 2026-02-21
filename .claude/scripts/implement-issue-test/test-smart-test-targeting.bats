@@ -294,7 +294,7 @@ teardown() {
     [ "$calls" -eq 0 ]
 }
 
-@test "run_test_loop uses jest --changedSince for typescript scope" {
+@test "run_test_loop falls back to jest --changedSince when no test files changed" {
     local func_def
     func_def=$(declare -f run_test_loop)
 
@@ -306,6 +306,186 @@ teardown() {
     func_def=$(declare -f run_test_loop)
 
     [[ "$func_def" == *"bats"* ]] || [[ "$func_def" == *"BATS"* ]] || [[ "$func_def" == *".bats"* ]]
+}
+
+# =============================================================================
+# EXPLICIT CHANGED-FILE TEST EXECUTION
+# =============================================================================
+
+@test "run_test_loop computes explicit changed test files via git diff" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Must grep for test/spec file patterns in changed files
+    [[ "$func_def" == *'\.test\.'* ]]
+    [[ "$func_def" == *'\.spec\.'* ]]
+}
+
+@test "run_test_loop excludes .integration.test files from explicit list" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Must filter out integration test files
+    [[ "$func_def" == *'integration'* ]]
+}
+
+@test "run_test_loop passes explicit test files to jest when test files changed" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-testfiles
+
+    # Add an implementation file and a test file
+    echo "export const add = (a, b) => a + b;" > math.ts
+    echo "test('adds', () => expect(1+1).toBe(2));" > math.test.ts
+    git add math.ts math.test.ts
+    git commit -q -m "add ts with test"
+
+    # Track the test command passed to run_stage
+    local prompt_file="$TEST_TMP/test_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-ts-testfiles" "" "typescript"
+
+    # The prompt should contain the test file directly
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"math.test.ts"* ]]
+}
+
+@test "run_test_loop uses changedSince fallback when only impl files changed" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-no-testfiles
+
+    # Only add an implementation file (no test files)
+    echo "export const sub = (a, b) => a - b;" > utils.ts
+    git add utils.ts
+    git commit -q -m "add ts without test"
+
+    # Track the test command passed to run_stage
+    local prompt_file="$TEST_TMP/fallback_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-ts-no-testfiles" "" "typescript"
+
+    # The prompt should use --changedSince fallback
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"changedSince"* ]]
+}
+
+@test "run_test_loop excludes integration test files from explicit jest list" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-integration
+
+    # Add an integration test file and a regular test file
+    echo "test('int', () => {});" > auth.integration.test.ts
+    echo "test('unit', () => {});" > auth.test.ts
+    git add auth.integration.test.ts auth.test.ts
+    git commit -q -m "add tests with integration"
+
+    local prompt_file="$TEST_TMP/integration_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-ts-integration" "" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    # Should contain the regular test file
+    [[ "$captured" == *"auth.test.ts"* ]]
+    # Should NOT contain the integration test file
+    [[ "$captured" != *"integration.test.ts"* ]]
+}
+
+@test "run_test_loop handles mixed scope with explicit test files" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-mixed-testfiles
+
+    # Add TS test file and bash script
+    echo "test('adds', () => expect(1+1).toBe(2));" > math.test.ts
+    echo "#!/bin/bash" > deploy.sh
+    git add math.test.ts deploy.sh
+    git commit -q -m "add mixed with test"
+
+    local prompt_file="$TEST_TMP/mixed_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-loop-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","result":"passed","summary":"Tests passed"}'
+                ;;
+            test-validate-*)
+                echo '{"status":"success","result":"passed","summary":"Tests validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-mixed-testfiles" "" "mixed"
+
+    # Should contain the explicit test file and bats
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"math.test.ts"* ]]
 }
 
 # =============================================================================
