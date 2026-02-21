@@ -1733,22 +1733,25 @@ Log directory: \`$LOG_BASE\`"
     # EARLY SCOPE CHECK: config-only bypass
     # If all branch changes are config/doc files only, skip implement/test stages
     # and jump directly to PR creation.
+    # Only applies when the branch already has commits (e.g., resuming a branch
+    # with config-only changes). A fresh branch with zero commits must proceed
+    # to implementation regardless of scope.
     # -------------------------------------------------------------------------
-    local early_scope
-    early_scope=$(detect_change_scope "." "$BASE_BRANCH")
-    log "Early scope check: $early_scope"
+    local early_scope="code"
+    local early_commit_count
+    early_commit_count=$(git rev-list --count "${BASE_BRANCH}..${branch}" 2>/dev/null || echo "0")
+
+    if (( early_commit_count > 0 )); then
+        early_scope=$(detect_change_scope "." "$BASE_BRANCH")
+        log "Early scope check: $early_scope (${early_commit_count} commits on branch)"
+    else
+        log "Early scope check: skipped (fresh branch, 0 commits)"
+    fi
 
     if [[ "$early_scope" == "config" ]]; then
         log "Config-only scope detected — skipping implement/quality/test stages"
         if [[ -z "$RESUME_MODE" ]]; then
             comment_issue "Config-Only Changes Detected" "Config-only changes detected — skipping to PR creation."
-        fi
-        # Ensure the branch has at least one commit vs base before PR creation
-        local early_commit_count
-        early_commit_count=$(git rev-list --count "${BASE_BRANCH}..${branch}" 2>/dev/null || echo "0")
-        if (( early_commit_count == 0 )); then
-            log "No commits on branch vs base — creating empty commit to allow PR creation"
-            git commit --allow-empty -m "chore(issue-${ISSUE_NUMBER}): config-only changes"
         fi
     fi
 
@@ -2107,6 +2110,18 @@ Include 'Closes #$ISSUE_NUMBER' in the body."
             log_error "PR creation failed"
             set_final_state "error"
             exit 1
+        fi
+
+        # Validate pr_number is a positive integer; recover via gh pr list if missing
+        if [[ -z "$pr_number" || "$pr_number" == "null" || ! "$pr_number" =~ ^[0-9]+$ ]]; then
+            log_warn "PR number missing or invalid from structured output (got: '$pr_number') — recovering via gh pr list"
+            pr_number=$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[0].number' 2>/dev/null || true)
+            if [[ -z "$pr_number" || "$pr_number" == "null" || ! "$pr_number" =~ ^[0-9]+$ ]]; then
+                log_error "Could not recover PR number from gh pr list for branch '$branch'"
+                set_final_state "error"
+                exit 1
+            fi
+            log "Recovered PR #$pr_number from gh pr list"
         fi
 
         log "PR #$pr_number created/updated"

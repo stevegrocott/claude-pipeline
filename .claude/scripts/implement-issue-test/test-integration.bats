@@ -820,12 +820,14 @@ teardown() {
 # stages entirely and jumps directly to PR creation.
 # =============================================================================
 
-@test "main performs early scope check and sets early_scope variable" {
+@test "main performs early scope check only when branch has commits" {
     local main_def
     main_def=$(declare -f main)
 
     [[ "$main_def" == *"early_scope"* ]]
     [[ "$main_def" == *"detect_change_scope"* ]]
+    # Must check commit count before calling detect_change_scope
+    [[ "$main_def" == *"early_commit_count > 0"* ]]
 }
 
 @test "validate_plan stage is bypassed when early_scope is config" {
@@ -857,12 +859,39 @@ teardown() {
     [[ "$main_def" == *"Config-Only Changes Detected"* ]]
 }
 
-@test "config-only early exit has empty-commit guard before PR creation" {
+@test "config-only early exit only triggers when branch has commits" {
     local main_def
     main_def=$(declare -f main)
 
-    # Ensures branch has at least one commit vs base before gh pr create
-    [[ "$main_def" == *"--allow-empty"* ]]
+    # Fresh branches (0 commits) must NOT trigger config-only bypass
+    [[ "$main_def" == *"early_commit_count"* ]]
+    [[ "$main_def" == *"early_commit_count > 0"* ]]
+}
+
+# =============================================================================
+# PR NUMBER RECOVERY
+# =============================================================================
+
+@test "create_and_review_pr validates pr_number is a positive integer" {
+    local main_def
+    main_def=$(declare -f create_and_review_pr)
+
+    [[ "$main_def" == *'pr_number" =~ ^[0-9]+$'* ]]
+}
+
+@test "create_and_review_pr recovers PR number via gh pr list when missing" {
+    local main_def
+    main_def=$(declare -f create_and_review_pr)
+
+    [[ "$main_def" == *"gh pr list"* ]]
+    [[ "$main_def" == *"recovering via gh pr list"* ]]
+}
+
+@test "create_and_review_pr exits cleanly when PR number unrecoverable" {
+    local main_def
+    main_def=$(declare -f create_and_review_pr)
+
+    [[ "$main_def" == *"Could not recover PR number"* ]]
 }
 
 # =============================================================================

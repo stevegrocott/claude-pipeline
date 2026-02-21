@@ -6,5 +6,5 @@
     "pr_url": {"type": "string"},
     "error": {"type": ["string", "null"]}
   },
-  "required": ["status"]
+  "required": ["status", "pr_number"]
 }
