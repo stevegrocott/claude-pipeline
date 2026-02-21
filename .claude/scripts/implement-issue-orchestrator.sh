@@ -795,8 +795,11 @@ run_stage() {
     stage_timeout=$(get_stage_timeout "$stage_name")
     log "  Timeout: ${stage_timeout}s"
 
-    # Always pass --fallback-model for resilience (even when same as primary)
-    local -a fallback_args=(--fallback-model "$fallback_model")
+    # Pass --fallback-model for resilience (skip if same as primary — CLI rejects duplicates)
+    local -a fallback_args=()
+    if [[ "$fallback_model" != "$model" ]]; then
+        fallback_args=(--fallback-model "$fallback_model")
+    fi
 
     local output
     local exit_code=0
