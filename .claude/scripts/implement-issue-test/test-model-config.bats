@@ -656,6 +656,32 @@ run_with_config() {
 	[[ "$output" == "haiku" ]]
 }
 
+@test "complexity M does not override complete stage light tier" {
+	# complete defaults to light (haiku) and must stay haiku even for M tasks
+	run_with_config 'resolve_model "complete" "M"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
+@test "complexity L does not override docs stage light tier" {
+	# docs defaults to light (haiku) and must stay haiku even for L tasks
+	run_with_config 'resolve_model "docs" "L"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
+@test "complexity M does not override complete-issue suffixed light stage" {
+	run_with_config 'resolve_model "complete-issue" "M"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
+@test "complexity L does not override docs-generate suffixed light stage" {
+	run_with_config 'resolve_model "docs-generate-iter-1" "L"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
 # =============================================================================
 # resolve_model() - COMPLEXITY HINT CASE SENSITIVITY
 #

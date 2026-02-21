@@ -395,6 +395,27 @@ teardown() {
     [[ "$func_def" == *"validation_result"* ]]
 }
 
+@test "test loop uses single combined test-iter stage not separate test-validate-iter" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Combined stage name is test-iter-* (single call per iteration)
+    [[ "$func_def" == *'test-iter-'* ]]
+    # Must NOT have a separate test-validate-iter stage (old two-call pattern)
+    [[ "$func_def" != *'test-validate-iter'* ]]
+}
+
+@test "test loop reads validation_result from the same stage output as test result" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Both fields come from the same test_result variable (combined response)
+    [[ "$func_def" == *'test_result'* ]]
+    [[ "$func_def" == *'.validation_result'* ]]
+    # validate_status is derived from test_result, not a second stage call
+    [[ "$func_def" == *"validate_status"* ]]
+}
+
 @test "test loop smart targeting routes by scope" {
     local func_def
     func_def=$(declare -f run_test_loop)
@@ -789,6 +810,59 @@ teardown() {
 @test "should_run_docs_stage runs for typescript changes" {
     run should_run_docs_stage "typescript"
     [ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# CONFIG-ONLY EARLY EXIT — PIPELINE BYPASS
+#
+# When detect_change_scope returns "config" (only .md/.json/.yaml/etc changes),
+# the orchestrator skips validate_plan, implement, quality_loop, and test_loop
+# stages entirely and jumps directly to PR creation.
+# =============================================================================
+
+@test "main performs early scope check and sets early_scope variable" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"early_scope"* ]]
+    [[ "$main_def" == *"detect_change_scope"* ]]
+}
+
+@test "validate_plan stage is bypassed when early_scope is config" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *'Skipping validate_plan stage (config-only scope)'* ]]
+}
+
+@test "implement stage is bypassed when early_scope is config" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *'Skipping implement stage (config-only scope)'* ]]
+}
+
+@test "test_loop stage is bypassed when early_scope is config" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *'Skipping test_loop stage (config-only scope)'* ]]
+}
+
+@test "config-only early exit posts a GitHub comment about skipping to PR" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"Config-only changes detected"* ]] || \
+    [[ "$main_def" == *"Config-Only Changes Detected"* ]]
+}
+
+@test "config-only early exit has empty-commit guard before PR creation" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # Ensures branch has at least one commit vs base before gh pr create
+    [[ "$main_def" == *"--allow-empty"* ]]
 }
 
 # =============================================================================
