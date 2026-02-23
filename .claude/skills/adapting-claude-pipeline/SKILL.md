@@ -163,6 +163,15 @@ Categorize every `.claude/` file into one of four buckets:
 |--------|-----------------|
 | frontend audit/refactor | Delete if not web, replace if different frontend |
 
+#### Token Efficiency Audit
+
+Context size compounds across every message in every conversation. Audit these during adaptation:
+
+- [ ] CLAUDE.md under 200 lines (re-read on every message in every conversation — each line multiplies)
+- [ ] Each agent file body under 40 lines (loaded globally; move technology checklists to `.claude/prompts/`)
+- [ ] No technology-specific checklists in agent definitions (put in stage-specific prompts, loaded once per invocation)
+- [ ] Rarely-used CLAUDE.md sections moved to separate files that are read on-demand
+
 ### Phase 4: Write the Plan
 
 **REQUIRED:** Use the `writing-plans` skill.
