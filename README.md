@@ -191,6 +191,35 @@ Other preserved principles:
 - **Quality gates over trust** — every implementation goes through multiple reviews
 - **Delete aggressively** — remove what you don't need
 
+## Token Efficiency
+
+Over 99% of token usage is Claude **reading** context, not writing. These practices reduce consumption significantly.
+
+### Conversation Hygiene
+
+- **One conversation per task.** Long conversations compound cost — message #80 costs 2x more than message #5 because the entire history is re-read each turn.
+- **Be specific.** "Fix the bug in `src/auth.js` line 42" triggers far fewer tool calls than "fix the login bug". Specificity reduces exploratory reading.
+- **Start fresh when switching topics.** Paste a short summary in your first message instead of carrying forward hundreds of messages.
+
+### Model Selection
+
+- **Use `/model` to switch tiers.** Haiku handles simple tasks (run tests, format code, quick questions) at a fraction of Opus cost.
+- **The pipeline auto-selects models** via `model-config.sh`: haiku for mechanical stages (parse, test, simplify, PR creation), sonnet for reviews, opus for complex implementation.
+- **S-complexity tasks use haiku.** Small mechanical tasks don't need heavy reasoning.
+
+### CLAUDE.md Size
+
+Your CLAUDE.md is re-read on every message in every conversation. Each line compounds across the entire session.
+
+- Keep it under 200 lines. Move rarely-needed sections to separate files.
+- Remove technology checklists from agent definitions — put them in stage-specific prompts loaded only when needed.
+
+### Pipeline-Specific
+
+- **Agent definitions are loaded globally.** Keep `.claude/agents/*.md` files focused on role identity (under 40 lines). Technology checklists belong in `.claude/prompts/` — loaded once per stage, not every invocation.
+- **Light-tier stages cap at 5 turns** via `--max-turns` to prevent open-ended exploration.
+- **Parallel subagents** reduce wall-clock time and prevent context accumulation in a single session.
+
 ## License
 
 MIT — see [LICENSE](LICENSE)

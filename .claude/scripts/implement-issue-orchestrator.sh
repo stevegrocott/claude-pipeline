@@ -802,6 +802,14 @@ run_stage() {
         fallback_args=(--fallback-model "$fallback_model")
     fi
 
+    # Cap exploration for light-tier (haiku) stages — these are mechanical and
+    # should complete in a few turns rather than open-endedly exploring.
+    local -a turns_args=()
+    if [[ "$model" == "haiku" ]]; then
+        turns_args=(--max-turns 5)
+        log "  Max turns: 5 (light-tier cap)"
+    fi
+
     local output
     local exit_code=0
 
@@ -809,6 +817,7 @@ run_stage() {
         ${agent_args[@]+"${agent_args[@]}"} \
         --model "$model" \
         ${fallback_args[@]+"${fallback_args[@]}"} \
+        ${turns_args[@]+"${turns_args[@]}"} \
         --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$schema" \
@@ -833,6 +842,7 @@ run_stage() {
             ${agent_args[@]+"${agent_args[@]}"} \
             --model "$model" \
             ${fallback_args[@]+"${fallback_args[@]}"} \
+            ${turns_args[@]+"${turns_args[@]}"} \
             --dangerously-skip-permissions \
             --output-format json \
             --json-schema "$schema" \

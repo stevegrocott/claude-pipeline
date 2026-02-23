@@ -33,27 +33,28 @@ _tier_to_model() {
 #
 # Each orchestrator stage maps to a tier based on its cognitive demands.
 #
-# light    — mechanical: parse markdown, run commands, fill templates
-# standard — judgment: reviews, simple implementations, pattern matching
+# light    — mechanical: parse markdown, run commands, fill templates, simplify
+# standard — judgment: reviews, fixes, pattern matching
 # advanced — deep reasoning: complex implementation, root cause analysis
 #
 
 _stage_to_tier() {
 	case "$1" in
-		parse-issue)   printf '%s' "light" ;;
-		validate-plan) printf '%s' "light" ;;
-		implement)     printf '%s' "advanced" ;;
-		task-review)   printf '%s' "standard" ;;
-		fix)           printf '%s' "advanced" ;;
-		test)          printf '%s' "light" ;;
-		review)        printf '%s' "standard" ;;
-		simplify)      printf '%s' "standard" ;;
-		pr)            printf '%s' "light" ;;
-		spec-review)   printf '%s' "standard" ;;
-		code-review)   printf '%s' "standard" ;;
-		complete)      printf '%s' "light" ;;
-		docs)          printf '%s' "light" ;;
-		*)             printf '%s' "" ;;
+		parse-issue)    printf '%s' "light" ;;
+		validate-plan)  printf '%s' "light" ;;
+		implement)      printf '%s' "advanced" ;;
+		task-review)    printf '%s' "standard" ;;
+		fix)            printf '%s' "standard" ;;
+		test)           printf '%s' "light" ;;
+		review)         printf '%s' "standard" ;;
+		simplify)       printf '%s' "light" ;;
+		pr)             printf '%s' "light" ;;
+		spec-review)    printf '%s' "standard" ;;
+		code-review)    printf '%s' "standard" ;;
+		complete)       printf '%s' "light" ;;
+		docs)           printf '%s' "light" ;;
+		acceptance-test) printf '%s' "light" ;;
+		*)              printf '%s' "" ;;
 	esac
 }
 
@@ -67,8 +68,8 @@ _stage_to_tier() {
 
 _complexity_to_tier() {
 	case "$1" in
-		S) printf '%s' "standard" ;;
-		M) printf '%s' "advanced" ;;
+		S) printf '%s' "light" ;;
+		M) printf '%s' "standard" ;;
 		L) printf '%s' "advanced" ;;
 		*) printf '%s' "" ;;
 	esac
@@ -88,7 +89,7 @@ _complexity_to_tier() {
 # All known stage prefixes, ordered longest-first for greedy matching
 if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
 	readonly -a _STAGE_PREFIXES=(
-		spec-review code-review task-review validate-plan
+		acceptance-test spec-review code-review task-review validate-plan
 		parse-issue implement simplify complete review test docs fix pr
 	)
 fi
@@ -146,10 +147,11 @@ resolve_model() {
 	fi
 
 	# Apply complexity hint — overrides stage default when provided.
-	# Light-tier stages (test, parse-issue, validate-plan, pr, complete, docs)
-	# are mechanical and always use haiku; complexity hints are ignored for them.
-	# The quality loop forwards task-level complexity to implement, simplify,
-	# review, and fix stages so model selection scales with task size.
+	# Light-tier stages (test, parse-issue, validate-plan, pr, complete, docs,
+	# simplify, acceptance-test) are mechanical and always use haiku;
+	# complexity hints are ignored for them.
+	# The quality loop forwards task-level complexity to implement, review,
+	# and fix stages so model selection scales with task size.
 	if [[ -n "$complexity" && "$tier" != "light" ]]; then
 		local complexity_tier
 		complexity_tier=$(_complexity_to_tier "$complexity")
