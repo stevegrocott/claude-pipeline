@@ -85,3 +85,11 @@ The skill itself tells you which.
 ## User Instructions
 
 Instructions say WHAT, not HOW. "Add X" or "Fix Y" doesn't mean skip workflows.
+
+## Token Awareness
+
+Over 99% of token usage is reading, not writing. These practices reduce cost significantly:
+
+- **Conversation length:** If a conversation exceeds ~40 messages, suggest starting a fresh conversation with a brief summary. Long conversations cost 2x+ more per message due to context re-reading.
+- **Model selection:** For simple tasks (run tests, format files, quick questions), suggest `/model haiku`. Save opus for complex multi-file changes and architecture decisions.
+- **Be specific:** "Fix the bug in `src/auth.js` line 42" triggers far fewer tool calls than "fix the login bug". File paths and line numbers reduce exploratory reading.

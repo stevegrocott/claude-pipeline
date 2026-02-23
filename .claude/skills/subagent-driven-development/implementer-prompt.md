@@ -4,6 +4,15 @@ Use this template when dispatching an implementer subagent.
 
 **CRITICAL:** Always include the feature branch name. Subagents have no memory of branch context.
 
+## Context Minimization
+
+Every token in the subagent prompt is re-read on each tool call the subagent makes. Keep prompts lean:
+
+- **Include ONLY the task description and directly affected file paths** — not the full issue body.
+- **Do NOT paste the full issue body** — the subagent can `gh issue view` if it needs broader context.
+- **Reference specific files and line numbers** rather than "find the relevant code" — this prevents broad exploratory searches.
+- **Shorter prompts = fewer input tokens re-read on every tool call** within the subagent session.
+
 **Agent selection:** Choose the appropriate `subagent_type` based on task:
 - `laravel-backend-developer` — Backend tasks (PHP, Laravel, APIs, database)
 - `bulletproof-frontend-developer` — Frontend tasks (CSS, HTML, Blade, JS, accessibility)

@@ -386,6 +386,9 @@ Test edge cases:
 - [ ] Persona is specific, not generic
 - [ ] Anti-patterns are actionable, not vague
 - [ ] No process summary in description
+- [ ] Agent file body under 40 lines (move checklists to `.claude/prompts/`)
+- [ ] No technology-specific checklists in agent body (loaded globally every invocation — put in stage prompts instead)
+- [ ] Model tier matches agent complexity (haiku for simple tasks, sonnet for reviews, opus for complex reasoning)
 
 **Deployment:**
 - [ ] Agent file written to `.claude/agents/[name].md`

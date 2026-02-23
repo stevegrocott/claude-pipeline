@@ -133,6 +133,15 @@ The `## Implementation Tasks` section must use this parseable convention:
 - **YAGNI** — only plan what's needed, don't gold-plate
 - **Minimal questions** — if the description is clear enough, proceed without asking
 
+## Token Efficiency
+
+Task sizing directly controls model cost via `model-config.sh`:
+
+- **Prefer S-complexity tasks** — they use haiku (cheapest model). Only use M/L when the work genuinely requires it.
+- **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps.
+- **Point tasks to specific files and line numbers** — vague descriptions cause subagents to explore broadly, triggering 19x more tool calls.
+- **Each task's affected file list reduces subagent exploration cost** — include file paths in the task description.
+
 ## Integration
 
 **Produces:** A GitHub Issue ready for `/implement-issue N main`
