@@ -7,7 +7,7 @@ description: Use when adapting the generic .claude pipeline folder to a specific
 
 ## Overview
 
-Adapt the generic `.claude/` pipeline folder to a specific project's tech stack, domain, and workflows. This means modifying, replacing, or removing every skill, agent, hook, script, prompt, and setting so they serve the target codebase — not the original Laravel/web template.
+Adapt the generic `.claude/` pipeline folder to a specific project's tech stack, domain, and workflows. This means modifying, replacing, or removing every skill, agent, hook, script, prompt, and setting so they serve the target codebase — not the template defaults.
 
 **Core principle:** Every file in `.claude/` must earn its place. If it doesn't serve the target project, delete it. If it needs modification, modify it. If new capabilities are needed, create them.
 
@@ -51,6 +51,18 @@ Focus questions on:
 - **Pain points:** What does the team struggle with that agents could help?
 - **Existing tooling:** Linters, formatters, test runners, build systems
 - **Scope:** Full adaptation or partial (e.g., keep orchestration, replace agents)?
+- **Platform & workflow:**
+  - **Issue tracker:** GitHub Issues or Jira? If Jira: project key, preferred CLI (acli recommended), workflow transitions (what are the states, what's the "done" transition name?)
+  - **Git host:** GitHub or GitLab? Merge strategy preference (squash/merge/rebase)?
+  - **CI/CD:** What runs in CI? How are tests triggered?
+- **Testing:**
+  - **Unit tests:** What test runner? What command?
+  - **E2E tests:** Does the project have or need browser-based testing? If yes: Playwright already configured or needs setup? Base URL for test environment?
+  - **Manual QA:** Is there a manual testing process that could be automated with Playwright?
+- **MCP tools:**
+  - **Context7:** Available? What frameworks/libraries should agents look up via Context7?
+  - **Serena:** Available? Useful for codebase navigation in this project?
+  - **Other MCP servers:** Any project-specific MCP integrations?
 
 Key decisions to reach:
 1. Which existing skills/agents/hooks are **relevant** (keep/modify)?
@@ -93,43 +105,46 @@ Categorize every `.claude/` file into one of four buckets:
 
 #### Inventory Checklist
 
-**Skills (19 in template):**
+**Skills (21 in template):**
 
 | Skill | Category | Typical Decision |
 |-------|----------|-----------------|
 | brainstorming | Process | Keep as-is |
-| bulletproof-frontend | Domain (web/CSS) | Delete if not web |
+| bulletproof-frontend | Domain (web/CSS) | Keep if web project with CSS focus; delete otherwise |
 | dispatching-parallel-agents | Process | Keep as-is |
 | executing-plans | Process | Keep as-is |
-| handle-issues | Workflow (GitHub) | Keep if using GitHub Issues |
-| implement-issue | Workflow (GitHub) | Keep if using GitHub Issues |
+| handle-issues | Workflow | Keep as-is — platform-agnostic via wrappers |
+| implement-issue | Workflow | Keep as-is — platform-agnostic via wrappers |
 | investigating-codebase-for-user-stories | Process | Keep as-is |
-| process-pr | Workflow (GitHub) | Keep if using GitHub PRs |
-| review-ui | Domain (web/CSS) | Delete if not web |
+| mcp-tools | Reference (MCP) | Keep if using Context7/Serena; delete if no MCP servers |
+| playwright-testing | Domain (E2E) | Keep if project has browser UI to test; delete for CLI/API-only |
+| process-pr | Workflow | Keep as-is — platform-agnostic via wrappers |
+| review-ui | Domain (web/CSS) | Keep if web project; delete otherwise |
 | subagent-driven-development | Process | Keep as-is |
 | systematic-debugging | Process | Keep as-is |
 | test-driven-development | Process | Keep as-is |
-| ui-design-fundamentals | Domain (web/CSS) | Delete if not web |
+| ui-design-fundamentals | Domain (web/CSS) | Keep if web project; delete otherwise |
 | using-git-worktrees | Process | Keep as-is |
 | using-skills | Meta | Keep as-is |
-| write-docblocks | Domain (PHP) | Replace with language-specific docblock skill |
+| write-docblocks | Domain (PHP) | Replace with language-specific doc skill, or delete |
 | writing-agents | Meta | Keep as-is |
 | writing-plans | Process | Keep as-is |
 | writing-skills | Meta | Keep as-is |
 
-**Agents (10 in template):**
+**Agents (11 in template):**
 
 | Agent | Category | Typical Decision |
 |-------|----------|-----------------|
 | bash-script-craftsman | Domain (bash) | Keep if project uses bash |
 | bats-test-validator | Domain (bash) | Keep if project uses bash |
-| bulletproof-frontend-developer | Domain (web) | Delete or replace |
+| bulletproof-frontend-developer | Domain (web) | Replace or delete based on project frontend needs |
 | cc-orchestration-writer | Meta | Keep as-is |
 | code-reviewer | Process | Modify (update tech stack refs) |
-| code-simplifier | Domain (PHP) | Replace with language-specific |
-| laravel-backend-developer | Domain (Laravel) | Replace with project-specific |
+| code-simplifier | Domain (PHP) | Replace with language-specific version |
+| laravel-backend-developer | Domain (Laravel) | Replace with project-specific developer agent |
 | phpdoc-writer | Domain (PHP) | Replace or delete |
-| php-test-validator | Domain (PHP) | Replace with language-specific |
+| php-test-validator | Domain (PHP) | Replace with language-specific test validator |
+| playwright-test-developer | Domain (E2E) | Keep if keeping playwright-testing skill |
 | spec-reviewer | Process | Keep as-is (tech-agnostic) |
 
 **Hooks:**
@@ -156,6 +171,23 @@ Categorize every `.claude/` file into one of four buckets:
 | batch-orchestrator.sh | Modify (agent references) |
 | JSON schemas | Modify if stages change |
 | BATS tests | Modify to match script changes |
+
+**Platform wrappers (`scripts/platform/`):**
+
+| Script | Typical Decision |
+|--------|-----------------|
+| All platform wrapper scripts | Keep as-is — they are platform-agnostic. Just configure `config/platform.sh` during brainstorming. |
+
+**Platform config (`config/platform.sh`):**
+
+| Setting | Typical Decision |
+|---------|-----------------|
+| TRACKER / TRACKER_CLI | Set during brainstorming: github+gh or jira+acli |
+| GIT_HOST / GIT_CLI | Set during brainstorming: github+gh or gitlab+glab |
+| JIRA_PROJECT / transitions | Set if using Jira |
+| MERGE_STYLE | Set during brainstorming |
+| TEST_UNIT_CMD / TEST_E2E_CMD | Set based on project stack |
+| LINT_CMD / FORMAT_CMD | Set based on project tooling |
 
 **Prompts:**
 
@@ -209,6 +241,13 @@ Route tasks to the correct agent/skill:
 | **Modify orchestration scripts** | Dispatch `cc-orchestration-writer` agent via Task tool |
 | **Modify hooks/settings** | Direct edit |
 | **Create new hooks** | `bash-script-craftsman` agent via Task tool |
+
+**Platform configuration task:**
+Based on brainstorming answers, modify `.claude/config/platform.sh`:
+- Set TRACKER, TRACKER_CLI, GIT_HOST, GIT_CLI
+- Set JIRA_PROJECT, JIRA_DONE_TRANSITION, JIRA_IN_PROGRESS_TRANSITION if Jira
+- Set MERGE_STYLE
+- Set TEST_UNIT_CMD, TEST_E2E_CMD, LINT_CMD, FORMAT_CMD based on project stack
 
 **Parallel execution:** Tasks in different workstreams with no shared files can run in parallel using `dispatching-parallel-agents`.
 
