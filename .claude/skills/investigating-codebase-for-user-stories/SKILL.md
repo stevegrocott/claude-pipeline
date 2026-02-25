@@ -239,17 +239,18 @@ graph LR
 - [Create Notification](notifications/user-create-notification.md)
 ```
 
-## GitHub Issue Output
+## Issue Creation
 
-Generate stories as GitHub issues for sprint planning:
+Generate stories as issues for sprint planning:
 
 ### Single Issue Creation
 
 ```bash
-gh issue create \
+PLATFORM_DIR=".claude/scripts/platform"
+"$PLATFORM_DIR/create-issue.sh" \
   --title "As a guest, I want to sign up" \
   --body "$(cat docs/user-stories/authentication/guest-signup.md)" \
-  --label "user-story,feature-area:auth,size:M"
+  --labels "user-story,feature-area:auth,size:M"
 ```
 
 ### Batch Issue Creation Script
@@ -259,15 +260,15 @@ Generate `create-issues.sh` alongside stories:
 ```bash
 #!/bin/bash
 # Auto-generated from user stories
+PLATFORM_DIR=".claude/scripts/platform"
 
-gh issue create --title "Guest Signup" \
-  --body-file docs/user-stories/authentication/guest-signup.md \
-  --label "user-story,auth,size:S"
+"$PLATFORM_DIR/create-issue.sh" --title "Guest Signup" \
+  --body "$(cat docs/user-stories/authentication/guest-signup.md)" \
+  --labels "user-story,auth,size:S"
 
-gh issue create --title "User Create Notification" \
-  --body-file docs/user-stories/notifications/user-create-notification.md \
-  --label "user-story,notifications,size:M" \
-  --milestone "Sprint 2"
+"$PLATFORM_DIR/create-issue.sh" --title "User Create Notification" \
+  --body "$(cat docs/user-stories/notifications/user-create-notification.md)" \
+  --labels "user-story,notifications,size:M"
 ```
 
 ### Recommended Labels

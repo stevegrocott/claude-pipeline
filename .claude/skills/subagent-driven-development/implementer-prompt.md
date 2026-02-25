@@ -9,16 +9,14 @@ Use this template when dispatching an implementer subagent.
 Every token in the subagent prompt is re-read on each tool call the subagent makes. Keep prompts lean:
 
 - **Include ONLY the task description and directly affected file paths** — not the full issue body.
-- **Do NOT paste the full issue body** — the subagent can `gh issue view` if it needs broader context.
+- **Do NOT paste the full issue body** — the subagent can use `.claude/scripts/platform/read-issue.sh` if it needs broader context.
 - **Reference specific files and line numbers** rather than "find the relevant code" — this prevents broad exploratory searches.
 - **Shorter prompts = fewer input tokens re-read on every tool call** within the subagent session.
 
-**Agent selection:** Choose the appropriate `subagent_type` based on task:
-- `laravel-backend-developer` — Backend tasks (PHP, Laravel, APIs, database)
-- `bulletproof-frontend-developer` — Frontend tasks (CSS, HTML, Blade, JS, accessibility)
+**Agent selection:** Choose the appropriate `subagent_type` based on task, using the agents configured in `.claude/agents/` for this project.
 
 ```
-Task tool (subagent_type: laravel-backend-developer OR bulletproof-frontend-developer):
+Task tool (subagent_type: <project-specific agent>):
   description: "Implement Task N: [task name]"
   prompt: |
     You are implementing Task N: [task name]

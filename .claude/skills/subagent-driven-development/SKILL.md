@@ -41,7 +41,7 @@ digraph when_to_use {
 
 **CRITICAL: Track the feature branch name.** Subagents have no memory of branch context. You must include the branch name in every implementer dispatch.
 
-If the GH issue body includes a `**Feature Branch:**` line, use that branch name. Otherwise, derive from issue number: `feature/issue-N-short-description`.
+If the issue body includes a `**Feature Branch:**` line, use that branch name. Otherwise, derive from issue number: `feature/issue-N-short-description`.
 
 ```dot
 digraph process {
@@ -65,12 +65,12 @@ digraph process {
     }
 
     "Note feature branch name from plan or git" [shape=box style=filled fillcolor=yellow];
-    "Read GH issue body, extract all tasks with full text, note context, create TodoWrite" [shape=box];
+    "Read issue body, extract all tasks with full text, note context, create TodoWrite" [shape=box];
     "More tasks remain?" [shape=diamond];
     "Dispatch final code reviewer subagent for entire implementation" [shape=box];
     "Use finishing-a-development-branch" [shape=box style=filled fillcolor=lightgreen];
 
-    "Read GH issue body, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./implementer-prompt.md)";
+    "Read issue body, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./implementer-prompt.md)";
     "Dispatch implementer subagent (./implementer-prompt.md)" -> "Implementer subagent asks questions?";
     "Implementer subagent asks questions?" -> "Answer questions, provide context" [label="yes"];
     "Answer questions, provide context" -> "Dispatch implementer subagent (./implementer-prompt.md)";
@@ -101,17 +101,17 @@ digraph process {
 
 ## Agent Selection
 
-Route tasks to the appropriate implementer agent based on task type:
+Route tasks to the appropriate implementer agent based on task type. Use the agents configured in `.claude/agents/` for this project (created during `/adapting-claude-pipeline`).
 
 | Task Type | Agent | Examples |
 |-----------|-------|----------|
-| **Backend** | `laravel-backend-developer` | PHP, Laravel controllers, services, models, middleware, API endpoints, database migrations, Eloquent queries, authentication, business logic |
-| **Frontend** | `bulletproof-frontend-developer` | CSS, styling, responsive design, accessibility, Blade templates (layout focus), JavaScript, Alpine.js, design tokens, component CSS architecture |
+| **Backend** | project-specific backend agent | API endpoints, database, business logic, server-side code |
+| **Frontend** | project-specific frontend agent | CSS, styling, responsive design, accessibility, UI components |
 | **Mixed** | Split into subtasks | If a task has both backend and frontend work, split it and dispatch sequentially to appropriate agents |
 
 **Decision criteria:**
-- Does the task primarily involve PHP/Laravel code? → `laravel-backend-developer`
-- Does the task primarily involve styling, CSS, HTML structure, or JS interactions? → `bulletproof-frontend-developer`
+- Does the task primarily involve server-side/API code? → backend agent
+- Does the task primarily involve styling, UI, or client-side interactions? → frontend agent
 - Does the task touch both? → Split it, backend first (data layer), then frontend (presentation layer)
 
 ## Example Workflow
@@ -119,7 +119,7 @@ Route tasks to the appropriate implementer agent based on task type:
 ```
 You: I'm using Subagent-Driven Development to execute this plan.
 
-[Read GH issue body: gh issue view N --json body]
+[Read issue body: .claude/scripts/platform/read-issue.sh N | jq -r '.body']
 [Parse ## Implementation Tasks section into task list]
 [Create TodoWrite with all tasks]
 

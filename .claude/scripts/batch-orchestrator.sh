@@ -31,6 +31,8 @@ set -uo pipefail  # Note: not -e, we handle errors explicitly
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
+source "$SCRIPT_DIR/../config/platform.sh"
+PLATFORM_DIR="$SCRIPT_DIR/platform"
 LOG_BASE="logs/batch-$(date +%Y%m%d-%H%M%S)"
 STATUS_FILE="status.json"
 LOCK_FILE="logs/.batch-orchestrator.lock"
@@ -191,7 +193,7 @@ log_error() {
 init_status() {
     local issues_json="[]"
     for issue in "${ISSUE_ARRAY[@]}"; do
-        issues_json=$(printf '%s' "$issues_json" | jq --argjson num "$issue" '. + [{
+        issues_json=$(printf '%s' "$issues_json" | jq --arg num "$issue" '. + [{
             "number": $num,
             "status": "pending",
             "stage": null,
@@ -241,14 +243,14 @@ update_issue_field() {
     local is_json="${4:-false}"
 
     if [[ "$is_json" == "true" ]]; then
-        jq --argjson num "$issue_num" \
+        jq --arg num "$issue_num" \
            --arg field "$field" \
            --argjson val "$value" \
            '(.issues[] | select(.number == $num))[$field] = $val |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     else
-        jq --argjson num "$issue_num" \
+        jq --arg num "$issue_num" \
            --arg field "$field" \
            --arg val "$value" \
            '(.issues[] | select(.number == $num))[$field] = $val |
@@ -268,7 +270,7 @@ update_progress() {
 
 set_current_issue() {
     local issue_num="$1"
-    jq --argjson num "$issue_num" '.current_issue = $num | .last_update = (now | todate)' \
+    jq --arg num "$issue_num" '.current_issue = $num | .last_update = (now | todate)' \
         "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
 
@@ -626,7 +628,7 @@ exit_code=0
 
 for issue in "${ISSUE_ARRAY[@]}"; do
     # Check idempotency - skip if already completed in a previous run
-    current_status=$(jq -r --argjson num "$issue" '.issues[] | select(.number == $num) | .status' "$STATUS_FILE")
+    current_status=$(jq -r --arg num "$issue" '.issues[] | select(.number == $num) | .status' "$STATUS_FILE")
 
     if [[ "$current_status" == "completed" ]]; then
         log "Skipping issue #$issue (already completed)"

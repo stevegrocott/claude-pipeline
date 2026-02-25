@@ -57,6 +57,17 @@ teardown() {
     [ "$issue" = "123" ]
 }
 
+@test "init_status stores issue as string type (supports Jira keys like KIN-123)" {
+    export ISSUE_NUMBER="KIN-456"
+    init_status
+    local issue_type
+    issue_type=$(jq -r '.issue | type' "$STATUS_FILE")
+    [ "$issue_type" = "string" ]
+    local issue_val
+    issue_val=$(jq -r '.issue' "$STATUS_FILE")
+    [ "$issue_val" = "KIN-456" ]
+}
+
 @test "init_status initializes all stages as pending" {
     init_status
     local parse_issue_status validate_plan_status impl_status quality_status

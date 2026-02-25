@@ -98,8 +98,8 @@ teardown() {
     local main_def
     main_def=$(declare -f main)
 
-    # Parse issue reads from GitHub and extracts tasks
-    [[ "$main_def" == *"gh issue view"* ]]
+    # Parse issue reads from issue tracker via platform wrapper and extracts tasks
+    [[ "$main_def" == *"read-issue.sh"* ]]
     [[ "$main_def" == *"Implementation Tasks"* ]]
     [[ "$main_def" == *"tasks_json"* ]]
 }
@@ -448,7 +448,7 @@ teardown() {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"gh pr create"* ]] || [[ "$main_def" == *"pr_result"* ]]
+    [[ "$main_def" == *"create-mr.sh"* ]] || [[ "$main_def" == *"pr_result"* ]]
 }
 
 @test "PR stage stores PR number in status" {
@@ -751,32 +751,32 @@ teardown() {
 # COMMENT HELPER FUNCTIONS
 # =============================================================================
 
-@test "comment_issue function is defined and uses gh" {
+@test "comment_issue function is defined and uses platform wrapper" {
     [ "$(type -t comment_issue)" = "function" ]
     local func_def
     func_def=$(declare -f comment_issue)
-    [[ "$func_def" == *"gh issue comment"* ]]
+    [[ "$func_def" == *"comment-issue.sh"* ]]
 }
 
-@test "comment_pr function is defined and uses gh" {
+@test "comment_pr function is defined and uses platform wrapper" {
     [ "$(type -t comment_pr)" = "function" ]
     local func_def
     func_def=$(declare -f comment_pr)
-    [[ "$func_def" == *"gh pr comment"* ]]
+    [[ "$func_def" == *"comment-mr.sh"* ]]
 }
 
-@test "comment_issue uses gh issue comment" {
+@test "comment_issue uses platform comment-issue wrapper" {
     local func_def
     func_def=$(declare -f comment_issue)
 
-    [[ "$func_def" == *"gh issue comment"* ]]
+    [[ "$func_def" == *"comment-issue.sh"* ]]
 }
 
-@test "comment_pr uses gh pr comment" {
+@test "comment_pr uses platform comment-mr wrapper" {
     local func_def
     func_def=$(declare -f comment_pr)
 
-    [[ "$func_def" == *"gh pr comment"* ]]
+    [[ "$func_def" == *"comment-mr.sh"* ]]
 }
 
 @test "validate_plan stage comments on issue" {
@@ -879,19 +879,19 @@ teardown() {
     [[ "$main_def" == *'pr_number" =~ ^[0-9]+$'* ]]
 }
 
-@test "create_and_review_pr recovers PR number via gh pr list when missing" {
+@test "create_and_review_pr recovers PR number via find-mr.sh when missing" {
     local main_def
     main_def=$(declare -f create_and_review_pr)
 
-    [[ "$main_def" == *"gh pr list"* ]]
-    [[ "$main_def" == *"recovering via gh pr list"* ]]
+    [[ "$main_def" == *"find-mr.sh"* ]]
+    [[ "$main_def" == *"recovering via find-mr.sh"* ]]
 }
 
 @test "create_and_review_pr exits cleanly when PR number unrecoverable" {
     local main_def
     main_def=$(declare -f create_and_review_pr)
 
-    [[ "$main_def" == *"Could not recover PR number"* ]]
+    [[ "$main_def" == *"Could not recover PR/MR number"* ]]
 }
 
 # =============================================================================
@@ -914,4 +914,52 @@ teardown() {
     main_def=$(declare -f main)
 
     [[ "$main_def" == *"is_stage_timeout"* ]]
+}
+
+# =============================================================================
+# RUN_TESTS FUNCTION
+# =============================================================================
+
+@test "run_tests function is defined" {
+    [ "$(type -t run_tests)" = "function" ]
+}
+
+@test "run_tests uses TEST_UNIT_CMD from platform config" {
+    local func_def
+    func_def=$(declare -f run_tests)
+
+    [[ "$func_def" == *"TEST_UNIT_CMD"* ]]
+}
+
+@test "run_tests uses TEST_E2E_CMD from platform config" {
+    local func_def
+    func_def=$(declare -f run_tests)
+
+    [[ "$func_def" == *"TEST_E2E_CMD"* ]]
+}
+
+@test "run_tests skips E2E when unit tests fail" {
+    local func_def
+    func_def=$(declare -f run_tests)
+
+    # Should check exit_code before running E2E
+    [[ "$func_def" == *"exit_code -eq 0"* ]]
+}
+
+# =============================================================================
+# PLATFORM CONFIG SOURCING
+# =============================================================================
+
+@test "orchestrator sources platform config" {
+    local script_content
+    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
+
+    [[ "$script_content" == *'source "$SCRIPT_DIR/../config/platform.sh"'* ]]
+}
+
+@test "orchestrator sets PLATFORM_DIR" {
+    local script_content
+    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
+
+    [[ "$script_content" == *'PLATFORM_DIR="$SCRIPT_DIR/platform"'* ]]
 }

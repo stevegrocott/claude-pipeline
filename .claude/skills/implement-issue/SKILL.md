@@ -1,17 +1,17 @@
 ---
 name: implement-issue
-description: Use when given a GitHub issue number and base branch to implement end-to-end
+description: Use when given an issue number/key and base branch to implement end-to-end
 argument-hint: "[issue-number] [base-branch]"
 ---
 
 # Implement Issue
 
-End-to-end issue implementation — reads plan from GitHub Issue, implements with quality gates.
+End-to-end issue implementation — reads plan from issue tracker, implements with quality gates.
 
 **Announce at start:** "Using implement-issue to run orchestrator for #$ISSUE against $BRANCH"
 
 **Arguments:**
-- `$1` — GitHub issue number (required)
+- `$1` — Issue number or key (required, e.g., "123" or "KIN-123")
 - `$2` — Base branch name (required)
 
 ## Invocation
@@ -51,7 +51,7 @@ watch -n 5 'jq -c "{state,stage:.current_stage,task:.current_task,quality:.quali
 
 | Stage | Agent | Description |
 |-------|-------|-------------|
-| parse-issue | default | read GH issue body, extract implementation tasks |
+| parse-issue | default | read issue body, extract implementation tasks |
 | validate-plan | default | verify referenced files/patterns still exist |
 | implement | per-task | execute each task from GH issue task list |
 | task-review | spec-reviewer | verify task achieved goal |

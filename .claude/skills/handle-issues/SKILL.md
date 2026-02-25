@@ -1,6 +1,6 @@
 ---
 name: handle-issues
-description: Batch process GitHub issues via batch-orchestrator.sh with rate limit handling and session resumption
+description: Batch process issues via batch-orchestrator.sh with rate limit handling and session resumption
 argument-hint: "[context query]"
 ---
 
@@ -25,14 +25,13 @@ The orchestrator uses specialized agents via `--agent` flag to ensure the right 
 
 | Stage | Agent | Purpose |
 |-------|-------|---------|
-| implement-issue | `bulletproof-frontend-developer` | CSS, HTML, Blade templates, frontend styling |
-| implement-issue | `laravel-backend-developer` | PHP, Laravel, controllers, services, models |
+| implement-issue | project-specific agent | Use the agent matching the issue's domain (configured during /adapting-claude-pipeline) |
 | implement-issue | (default) | General implementation |
-| process-pr | `code-reviewer` | **Always** - reviews PR for quality and standards |
+| process-pr | `code-reviewer` | **Always** - reviews PR/MR for quality and standards |
 
 **Determine agent based on issue content:**
-- **Frontend issues** (CSS, Tailwind, styling, UI, HTML, Blade): Use `bulletproof-frontend-developer`
-- **Backend issues** (PHP, Laravel, API, database, auth): Use `laravel-backend-developer`
+- Check which agents are configured in `.claude/agents/` for this project
+- Match the issue's domain to the appropriate agent
 - **Mixed or unclear**: Use default (no agent specified)
 
 **Ask user during confirmation** which agent to use if issue type is ambiguous.
@@ -42,7 +41,7 @@ The orchestrator uses specialized agents via `--agent` flag to ensure the right 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ handle-issues (this skill)                                      │
-│  • Gathers issues via gh CLI                                    │
+│  • Gathers issues via platform wrappers                          │
 │  • Determines appropriate agent for issue type                  │
 │  • Confirms with user (ONLY interaction point)                  │
 │  • Writes manifest.json (includes agent)                        │
@@ -146,18 +145,16 @@ Extract from the user's context query:
 Build and execute `gh` command based on parsed criteria:
 
 ```bash
+PLATFORM_DIR=".claude/scripts/platform"
+
 # Example: issues assigned to user
-gh issue list --repo OWNER/REPO \
-  --assignee @me \
-  --state open \
-  --json number,title,labels,milestone,createdAt \
-  --limit 100
+"$PLATFORM_DIR/list-issues.sh" --assignee "@me" --state open
 
 # Example: critical bugs
-gh issue list --repo OWNER/REPO \
-  --label "bug,critical" \
-  --state open \
-  --json number,title,labels,milestone,createdAt
+"$PLATFORM_DIR/list-issues.sh" --labels "bug,critical" --state open
+
+# Example: Jira issues (when TRACKER=jira)
+"$PLATFORM_DIR/list-issues.sh" --jql "project = KIN AND assignee = currentUser() ORDER BY priority DESC"
 ```
 
 **Sort by priority** (if requested): Order by label priority:
@@ -199,16 +196,16 @@ MANIFEST="logs/handle-issues/manifest-$(date +%Y%m%d-%H%M%S).json"
 mkdir -p logs/handle-issues
 
 # Build issues array from fetched list
-# $ISSUE_NUMBERS is a comma-separated list like "123,456,789"
 # $AGENT is determined from issue type (frontend/backend/default)
 
+# $ISSUE_IDS is a comma-separated list like "123,456,789" or "KIN-1,KIN-2,KIN-3"
 jq -n \
-  --argjson issues "[$ISSUE_NUMBERS]" \
+  --arg issues "$ISSUE_IDS" \
   --arg branch "$BASE_BRANCH" \
   --arg query "$CONTEXT" \
   --arg agent "$AGENT" \
   '{
-    issues: $issues,
+    issues: ($issues | split(",") | map(gsub("^\\s+|\\s+$"; ""))),
     base_branch: $branch,
     agent: (if $agent == "" then null else $agent end),
     query: $query,
@@ -219,8 +216,7 @@ echo "Manifest written to: $MANIFEST"
 ```
 
 **Agent values:**
-- `bulletproof-frontend-developer` — CSS, Tailwind removal, UI, Blade templates
-- `laravel-backend-developer` — PHP, Laravel, API, database
+- Use project-specific agents configured in `.claude/agents/` during `/adapting-claude-pipeline`
 - `null` or omitted — Default behavior
 
 ### Step 5: Launch Orchestrator
@@ -367,7 +363,7 @@ echo "**Logs:** $LOG_DIR"
 - `.claude/scripts/schemas/*.json` (JSON schemas)
 - `implement-issue` skill (invoked by orchestrator)
 - `process-pr` skill (invoked by orchestrator)
-- `gh` CLI authenticated
+- Platform CLI authenticated (gh, glab, or acli — configured in .claude/config/platform.sh)
 - `jq` for JSON parsing
 - Claude Code CLI installed
 
@@ -401,14 +397,14 @@ Found 3 issues:
 3. #125 - Update docs [priority:low]
 
 Base branch: aw-next
-Agent: laravel-backend-developer (backend/auth issues detected)
+Agent: (determined from issue content and configured agents)
 Proceed with batch processing? (yes/no)
 
 User: yes
 
 Claude: Launching batch orchestrator...
 Orchestrator launched (PID: 12345)
-Implement agent: laravel-backend-developer
+Implement agent: (project-specific)
 Process-PR agent: code-reviewer
 ...
 ```
@@ -426,14 +422,14 @@ Found 3 issues:
 3. #308 - Tailwind Removal: Auth, Account, Landing Components
 
 Base branch: aw-next
-Agent: bulletproof-frontend-developer (CSS/frontend issues detected)
+Agent: (determined from issue content and configured agents)
 Proceed with batch processing? (yes/no)
 
 User: yes
 
 Claude: Launching batch orchestrator...
 Orchestrator launched (PID: 12345)
-Implement agent: bulletproof-frontend-developer
+Implement agent: (project-specific)
 Process-PR agent: code-reviewer
 
 Monitoring progress (checking every 5 minutes)...

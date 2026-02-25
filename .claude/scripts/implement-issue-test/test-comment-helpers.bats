@@ -65,11 +65,11 @@ teardown() {
 # COMMENT_ISSUE STRUCTURE
 # =============================================================================
 
-@test "comment_issue uses gh issue comment" {
+@test "comment_issue uses platform comment-issue wrapper" {
     local func_def
     func_def=$(declare -f comment_issue)
 
-    [[ "$func_def" == *"gh issue comment"* ]]
+    [[ "$func_def" == *"comment-issue.sh"* ]]
 }
 
 @test "comment_issue uses ISSUE_NUMBER variable" {
@@ -104,11 +104,11 @@ teardown() {
 # COMMENT_PR STRUCTURE
 # =============================================================================
 
-@test "comment_pr uses gh pr comment" {
+@test "comment_pr uses platform comment-mr wrapper" {
     local func_def
     func_def=$(declare -f comment_pr)
 
-    [[ "$func_def" == *"gh pr comment"* ]]
+    [[ "$func_def" == *"comment-mr.sh"* ]]
 }
 
 @test "comment_pr takes pr_num as first argument" {

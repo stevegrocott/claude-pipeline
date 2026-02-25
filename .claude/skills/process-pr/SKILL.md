@@ -1,18 +1,18 @@
 ---
 name: process-pr
-description: Process PR based on code review - if approved, create follow-up issues, merge, close; if changes requested, re-run implement-issue
+description: Process PR/MR based on code review - if approved, create follow-up issues, merge, close; if changes requested, re-run implement-issue
 argument-hint: "<pr_number> <issue_number> <base_branch>"
 ---
 
-# Process PR
+# Process PR/MR
 
-Read PR review comments and act accordingly: if approved, create follow-up issues and merge; if changes requested, re-run implementation.
+Read PR/MR review comments and act accordingly: if approved, create follow-up issues and merge; if changes requested, re-run implementation.
 
-**Announce at start:** "Using process-pr to process PR #$1 for issue #$2"
+**Announce at start:** "Using process-pr to process PR/MR #$1 for issue #$2"
 
 **Arguments:**
-- `$1` — PR number (required)
-- `$2` — Issue number that the PR addresses (required)
+- `$1` — PR/MR number (required)
+- `$2` — Issue number that the PR/MR addresses (required)
 - `$3` — Base branch for re-implementation if needed (required)
 
 **Examples:**
@@ -27,13 +27,13 @@ digraph process_pr {
     node [shape=box];
 
     validate [label="1. Validate inputs"];
-    fetch [label="2. Fetch PR & review comments"];
+    fetch [label="2. Fetch PR/MR & review comments"];
     check [label="3. Check review status"];
 
     approved [label="Approved path"];
     changes [label="Changes requested path"];
 
-    merge [label="4a. Squash merge PR"];
+    merge [label="4a. Merge PR/MR"];
     comment [label="4b. Comment on issue"];
     close [label="4c. Close issue"];
     delete [label="4d. Delete branch"];
@@ -59,38 +59,38 @@ digraph process_pr {
 ### Step 1: Validate Inputs
 
 ```bash
-# Verify PR exists and is open
-gh pr view $PR_NUMBER --json state,number,title,headRefName,reviews
+# Verify PR/MR exists and is open
+PLATFORM_DIR=".claude/scripts/platform"
+"$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER"
 
 # Verify issue exists and is open
-gh issue view $ISSUE_NUMBER --json state,number,title
+"$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER"
 ```
 
 **If validation fails:** Stop and report error.
 
-### Step 2: Fetch PR & Comments
+### Step 2: Fetch PR/MR & Comments
 
 ```bash
-# Get PR with comments
-gh pr view $PR_NUMBER --json number,title,state,headRefName,comments
-
-# Also get the full PR view with comments for parsing
-gh pr view $PR_NUMBER --repo OWNER/REPO --comments
+# Get PR/MR comments
+PLATFORM_DIR=".claude/scripts/platform"
+"$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER"
 ```
 
 **Extract:**
-- All PR comments (for review status and follow-up issue extraction)
-- PR metadata (title, branch, state)
+- All PR/MR comments (for review status and follow-up issue extraction)
+- PR/MR metadata (title, branch, state)
 
 ### Step 3: Parse Review Status from Comments
 
-**IMPORTANT:** Review status is embedded in PR comments by the `implement-issue` skill. Use this explicit algorithm:
+**IMPORTANT:** Review status is embedded in PR/MR comments by the `implement-issue` skill. Use this explicit algorithm:
 
-**Step 3a: Fetch all PR comments**
+**Step 3a: Fetch all PR/MR comments**
 
 ```bash
 # Get comments as JSON array
-COMMENTS=$(gh pr view $PR_NUMBER --json comments --jq '.comments[].body')
+PLATFORM_DIR=".claude/scripts/platform"
+COMMENTS=$("$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER" | jq -r '.[]')
 ```
 
 **Step 3b: Extract status from comments (most recent wins)**
@@ -126,7 +126,7 @@ REVIEW_STATUS=$(parse_review_status "$COMMENTS")
 
 ```bash
 if [ -z "$REVIEW_STATUS" ]; then
-    echo "ERROR: No review status found in PR #$PR_NUMBER comments"
+    echo "ERROR: No review status found in PR/MR #$PR_NUMBER comments"
     echo "Expected: Comment containing '**Status: APPROVED**' or '**Status: CHANGES_REQUESTED**'"
     exit 1
 fi
@@ -146,12 +146,11 @@ echo "Review status: $REVIEW_STATUS"
 
 ## If Approved: Merge Path
 
-### Step 4a: Squash Merge PR
+### Step 4a: Merge PR/MR
 
 ```bash
-gh pr merge $PR_NUMBER \
-  --squash \
-  --delete-branch
+PLATFORM_DIR=".claude/scripts/platform"
+"$PLATFORM_DIR/merge-mr.sh" "$PR_NUMBER"
 ```
 
 **If merge fails:**
@@ -162,10 +161,11 @@ gh pr merge $PR_NUMBER \
 ### Step 4b: Comment on Issue
 
 ```bash
-gh issue comment $ISSUE_NUMBER --body "$(cat <<'EOF'
+PLATFORM_DIR=".claude/scripts/platform"
+"$PLATFORM_DIR/comment-issue.sh" "$ISSUE_NUMBER" "$(cat <<'EOF'
 ## Completed
 
-Resolved via PR #$PR_NUMBER (squash merged).
+Resolved via PR/MR #$PR_NUMBER (merged).
 
 ### Follow-up issues created:
 - #XXX - Description
@@ -179,17 +179,13 @@ EOF
 ### Step 4c: Close Issue
 
 ```bash
-gh issue close $ISSUE_NUMBER
-```
-
-Verify closure:
-```bash
-gh issue view $ISSUE_NUMBER --json state
+PLATFORM_DIR=".claude/scripts/platform"
+"$PLATFORM_DIR/transition-issue.sh" "$ISSUE_NUMBER"
 ```
 
 ### Step 4d: Delete Branch
 
-The `--delete-branch` flag handles this. Verify:
+The merge script may handle branch deletion. Verify:
 
 ```bash
 git ls-remote --heads origin $BRANCH_NAME
@@ -224,23 +220,20 @@ Scan all review comments for indicators of follow-up work:
 For each extracted issue:
 
 ```bash
-gh issue create \
-  --repo OWNER/REPO \
-  --title "$ISSUE_TITLE" \
-  --body "$(cat <<'EOF'
+PLATFORM_DIR=".claude/scripts/platform"
+"$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
 ## Context
-Created from code review of PR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
+Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
 
 ## Description
 $EXTRACTED_DESCRIPTION
 
 ## References
 - Parent Issue: #$ISSUE_NUMBER
-- PR: #$PR_NUMBER
+- PR/MR: #$PR_NUMBER
 - Reviewer: @$REVIEWER
 EOF
-)" \
-  --label "$LABELS"
+)" --labels "$LABELS"
 ```
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`
@@ -262,15 +255,15 @@ claude --dangerously-skip-permissions \
 
 **Notes:**
 - The implement-issue skill will:
-  - Read the existing PR and review comments
+  - Read the existing PR/MR and review comments
   - Address the requested changes
-  - Push to the same branch (updating the PR)
+  - Push to the same branch (updating the PR/MR)
   - Run code review again
 - After implement-issue completes, call `/process-pr` again to check the new review
 
 **Log:**
 ```
-Changes requested on PR #$PR_NUMBER. Re-running implementation for issue #$ISSUE_NUMBER...
+Changes requested on PR/MR #$PR_NUMBER. Re-running implementation for issue #$ISSUE_NUMBER...
 ```
 
 ---
@@ -280,16 +273,16 @@ Changes requested on PR #$PR_NUMBER. Re-running implementation for issue #$ISSUE
 ### Success (Approved & Merged)
 
 ```
-## Process PR Complete
+## Process PR/MR Complete
 
-**PR:** #$PR_NUMBER
+**PR/MR:** #$PR_NUMBER
 **Issue:** #$ISSUE_NUMBER
 **Status:** ✅ Merged
 
 ### Actions Taken
 - [x] Review status: APPROVED
 - [x] Created N follow-up issues
-- [x] PR squash merged
+- [x] PR/MR merged
 - [x] Issue #$ISSUE_NUMBER closed
 - [x] Branch deleted
 
@@ -302,9 +295,9 @@ Changes requested on PR #$PR_NUMBER. Re-running implementation for issue #$ISSUE
 ### Re-implementation (Changes Requested)
 
 ```
-## Process PR: Changes Requested
+## Process PR/MR: Changes Requested
 
-**PR:** #$PR_NUMBER
+**PR/MR:** #$PR_NUMBER
 **Issue:** #$ISSUE_NUMBER
 **Status:** 🔄 Re-implementing
 
@@ -330,35 +323,35 @@ Re-running /implement-issue $ISSUE_NUMBER $BASE_BRANCH to address requested chan
 ## Integration
 
 **Called by:**
-- `handle-issues` skill (after implement-issue creates PR)
+- `handle-issues` skill (after implement-issue creates PR/MR)
 - User directly via `/process-pr <pr> <issue> <branch>`
 
 **Calls:**
 - `/implement-issue` (when changes requested)
 
 **Requires:**
-- `gh` CLI authenticated
-- PR must exist with a code review comment containing `**Status: APPROVED**` or `**Status: CHANGES_REQUESTED**`
+- Platform CLI authenticated (gh, glab, or acli — configured in .claude/config/platform.sh)
+- PR/MR must exist with a code review comment containing `**Status: APPROVED**` or `**Status: CHANGES_REQUESTED**`
 - Issue must exist and be open
 
 ## Example Sessions
 
-### Approved PR
+### Approved PR/MR
 
 ```
 User: /process-pr 142 130 aw-next
 
-Claude: Using process-pr to process PR #142 for issue #130
+Claude: Using process-pr to process PR/MR #142 for issue #130
 
-Validating... PR #142 open, Issue #130 open
+Validating... PR/MR #142 open, Issue #130 open
 Parsing comments... Status: APPROVED, 1 follow-up found
 Creating issue #145: "Add rate limiting to auth endpoint"
-Merging PR #142... Squash merge successful
+Merging PR/MR #142... Merge successful
 Closing issue #130... done
 Deleting branch issue-130-auth-redirect... done
 
-## Process PR Complete
-PR: #142 | Issue: #130 | Status: Merged
+## Process PR/MR Complete
+PR/MR: #142 | Issue: #130 | Status: Merged
 Follow-up: #145 - Add rate limiting to auth endpoint
 ```
 
@@ -367,9 +360,9 @@ Follow-up: #145 - Add rate limiting to auth endpoint
 ```
 User: /process-pr 142 130 aw-next
 
-Claude: Using process-pr to process PR #142 for issue #130
+Claude: Using process-pr to process PR/MR #142 for issue #130
 
-Validating... PR #142 open, Issue #130 open
+Validating... PR/MR #142 open, Issue #130 open
 Parsing comments... Status: CHANGES_REQUESTED
 Feedback: "Need to handle edge case when session expires"
 
@@ -421,7 +414,7 @@ Error: Merge failed - conflict with base branch
 ## Result
 
 Status: rate_limit
-Error: GitHub API rate limit exceeded
+Error: Platform API rate limit exceeded
 ```
 
 ### Result Schema
@@ -433,7 +426,7 @@ The `batch-orchestrator.sh` uses this JSON schema to extract results:
   "type": "object",
   "properties": {
     "status": {"enum": ["merged", "changes_requested", "error", "rate_limit"]},
-    "follow_up_issues": {"type": "array", "items": {"type": "integer"}},
+    "follow_up_issues": {"type": "array", "items": {"type": "string"}},
     "error": {"type": "string"}
   },
   "required": ["status"]

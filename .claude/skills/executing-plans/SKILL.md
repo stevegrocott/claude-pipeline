@@ -20,7 +20,7 @@ Load plan from a file path or a GitHub Issue number, review critically, execute 
 
 **Input sources:**
 - **Plan file:** Read from specified file path
-- **GH issue:** Fetch via `gh issue view N --json body -q '.body'` and parse the `## Implementation Tasks` section
+- **Issue:** Fetch via `.claude/scripts/platform/read-issue.sh N | jq -r '.body'` and parse the `## Implementation Tasks` section
 
 1. Read plan file or fetch GH issue body
 2. Review critically - identify any questions or concerns about the plan

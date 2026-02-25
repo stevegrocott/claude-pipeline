@@ -37,6 +37,17 @@ setup_test_env() {
         cp "$SCRIPT_DIR/model-config.sh" "$TEST_TMP/model-config.sh"
     fi
 
+    # Copy platform config (sourced by orchestrator functions)
+    if [[ -f "$SCRIPT_DIR/../config/platform.sh" ]]; then
+        mkdir -p "$TEST_TMP/config"
+        cp "$SCRIPT_DIR/../config/platform.sh" "$TEST_TMP/config/platform.sh"
+    fi
+
+    # Copy platform wrapper scripts
+    if [[ -d "$SCRIPT_DIR/platform" ]]; then
+        cp -r "$SCRIPT_DIR/platform" "$TEST_TMP/platform"
+    fi
+
     # Change to test directory
     cd "$TEST_TMP" || exit 1
 }
@@ -318,9 +329,13 @@ HEADER
         # Extract function definitions (function_name() { ... })
         /^[a-z_]+\(\) \{$/,/^\}$/ { print; next }
 
-        # Extract SCRIPT_DIR, SCHEMA_DIR, and REPO
+        # Skip platform config sourcing (test setup creates platform.sh in the right place)
+        /^source "\$SCRIPT_DIR\/\.\.\/config\/platform\.sh"/ { next }
+
+        # Extract SCRIPT_DIR, SCHEMA_DIR, PLATFORM_DIR, and REPO
         /^SCRIPT_DIR=/ { print; next }
         /^SCHEMA_DIR=/ { print; next }
+        /^PLATFORM_DIR=/ { print; next }
         /^REPO=/ { print; next }
     ' "$ORCHESTRATOR_SCRIPT" >> "$func_file"
 
@@ -341,6 +356,11 @@ EOF
     # Source model-config.sh first (provides resolve_model, _next_model_up)
     if [[ -f "$TEST_TMP/model-config.sh" ]]; then
         source "$TEST_TMP/model-config.sh"
+    fi
+
+    # Source platform config (provides TRACKER, GIT_HOST, etc.)
+    if [[ -f "$TEST_TMP/config/platform.sh" ]]; then
+        source "$TEST_TMP/config/platform.sh"
     fi
 
     # Source it

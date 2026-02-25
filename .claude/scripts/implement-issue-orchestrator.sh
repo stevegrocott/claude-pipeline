@@ -21,6 +21,8 @@ set -uo pipefail  # Note: not -e, we handle errors explicitly
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 source "$SCRIPT_DIR/model-config.sh"
+source "$SCRIPT_DIR/../config/platform.sh"
+PLATFORM_DIR="$SCRIPT_DIR/platform"
 
 # Timeouts and limits
 readonly MAX_QUALITY_ITERATIONS=5
@@ -244,7 +246,7 @@ next_stage_log() {
 init_status() {
     jq -n \
         --arg state "initializing" \
-        --argjson issue "$ISSUE_NUMBER" \
+        --arg issue "$ISSUE_NUMBER" \
         --arg base_branch "$BASE_BRANCH" \
         --arg branch "" \
         --arg current_stage "parse_issue" \
@@ -587,14 +589,12 @@ sync_status_to_log() {
 # GITHUB COMMENT HELPERS
 # =============================================================================
 
-# Auto-detect repository: env var > gh CLI > git remote
+# Auto-detect repository from env var or git remote
 if [[ -n "${GITHUB_REPO:-}" ]]; then
 	REPO="$GITHUB_REPO"
-elif REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) && [[ -n "$REPO" ]]; then
-	: # REPO already set by command substitution
 else
 	# Parse from git remote (handles both HTTPS and SSH URLs)
-	REPO=$(git remote get-url origin 2>/dev/null | sed -E 's|.*github\.com[:/]||; s|\.git$||')
+	REPO=$(git remote get-url origin 2>/dev/null | sed -E 's|.*[:/]([^/]+/[^/]+?)(\.git)?$|\1|')
 fi
 
 if [[ -z "$REPO" ]]; then
@@ -631,7 +631,7 @@ EOF
 )
 
 	log "Commenting on issue #$ISSUE_NUMBER: $title"
-	if ! gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
+	if ! "$PLATFORM_DIR/comment-issue.sh" "$ISSUE_NUMBER" "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
 		log_error "Failed to comment on issue #$ISSUE_NUMBER"
 	fi
 }
@@ -662,9 +662,29 @@ EOF
 )
 
 	log "Commenting on PR #$pr_num: $title"
-	if ! gh pr comment "$pr_num" --repo "$REPO" --body "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
+	if ! "$PLATFORM_DIR/comment-mr.sh" "$pr_num" "$comment" 2>>"${LOG_FILE:-/dev/stderr}"; then
 		log_error "Failed to comment on PR #$pr_num"
 	fi
+}
+
+# =============================================================================
+# TEST RUNNER
+# =============================================================================
+
+run_tests() {
+    local exit_code=0
+
+    if [[ -n "${TEST_UNIT_CMD:-}" ]]; then
+        log "Running unit tests: $TEST_UNIT_CMD"
+        eval "$TEST_UNIT_CMD" || exit_code=$?
+    fi
+
+    if [[ $exit_code -eq 0 ]] && [[ -n "${TEST_E2E_CMD:-}" ]]; then
+        log "Running E2E tests: $TEST_E2E_CMD"
+        eval "$TEST_E2E_CMD" || exit_code=$?
+    fi
+
+    return $exit_code
 }
 
 # =============================================================================
@@ -1686,7 +1706,7 @@ Log directory: \`$LOG_BASE\`"
 
         log "Fetching issue #$ISSUE_NUMBER from GitHub..."
         local issue_body
-        issue_body=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body -q '.body' 2>>"${LOG_FILE:-/dev/stderr}")
+        issue_body=$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>>"${LOG_FILE:-/dev/stderr}" | jq -r '.body')
 
         if [[ -z "$issue_body" ]]; then
             log_error "Failed to fetch issue #$ISSUE_NUMBER body"
@@ -2109,7 +2129,7 @@ CHANGED API ROUTE FILES:
 $changed_route_files
 
 ACCEPTANCE CRITERIA (from issue):
-$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body -q '.body' 2>/dev/null | sed -n '/^## Acceptance Criteria/,/^## /p' | sed '\$d')
+$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>/dev/null | jq -r '.body' | sed -n '/^## Acceptance Criteria/,/^## /p' | sed '\$d')
 
 STEPS:
 1. Check if Docker containers are running (docker compose ps or docker-compose ps)
@@ -2211,7 +2231,8 @@ Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSU
         local pr_prompt="Create or update PR for issue #$ISSUE_NUMBER.
 
 If no PR exists, create one:
-gh pr create --base $BASE_BRANCH --title 'feat(issue-$ISSUE_NUMBER): <description>'
+Use the platform wrapper to create a PR/MR:
+$PLATFORM_DIR/create-mr.sh --source "\$branch" --target "$BASE_BRANCH" --title 'feat(issue-$ISSUE_NUMBER): <description>' --body '<body with Closes #$ISSUE_NUMBER>'
 
 If PR exists, push and comment.
 
@@ -2230,16 +2251,16 @@ Include 'Closes #$ISSUE_NUMBER' in the body."
             exit 1
         fi
 
-        # Validate pr_number is a positive integer; recover via gh pr list if missing
+        # Validate pr_number is present; recover via find-mr.sh if missing
         if [[ -z "$pr_number" || "$pr_number" == "null" || ! "$pr_number" =~ ^[0-9]+$ ]]; then
-            log_warn "PR number missing or invalid from structured output (got: '$pr_number') — recovering via gh pr list"
-            pr_number=$(gh pr list --repo "$REPO" --head "$branch" --state open --json number --jq '.[0].number' 2>/dev/null || true)
-            if [[ -z "$pr_number" || "$pr_number" == "null" || ! "$pr_number" =~ ^[0-9]+$ ]]; then
-                log_error "Could not recover PR number from gh pr list for branch '$branch'"
+            log_warn "PR number missing or invalid from structured output (got: '$pr_number') — recovering via find-mr.sh"
+            pr_number=$("$PLATFORM_DIR/find-mr.sh" --branch "$branch" 2>/dev/null || true)
+            if [[ -z "$pr_number" || "$pr_number" == "null" ]]; then
+                log_error "Could not recover PR/MR number from find-mr.sh for branch '$branch'"
                 set_final_state "error"
                 exit 1
             fi
-            log "Recovered PR #$pr_number from gh pr list"
+            log "Recovered PR/MR #$pr_number from find-mr.sh"
         fi
 
         log "PR #$pr_number created/updated"
