@@ -1,6 +1,6 @@
 ---
 name: explore
-description: Turn a vague idea or bug observation into a fully-planned GitHub Issue with research, evaluation, implementation tasks, and acceptance criteria
+description: Turn a vague idea or bug observation into a fully-planned issue with research, evaluation, implementation tasks, and acceptance criteria
 argument-hint: "<description of idea or problem>"
 ---
 
@@ -8,9 +8,9 @@ argument-hint: "<description of idea or problem>"
 
 ## Overview
 
-Turn a vague idea, bug observation, or feature request into a fully-researched, implementation-ready GitHub Issue. This is Phase 1 of a two-phase workflow where GitHub Issues are the single source of truth.
+Turn a vague idea, bug observation, or feature request into a fully-researched, implementation-ready issue. This is Phase 1 of a two-phase workflow where issues are the single source of truth.
 
-**Phase 1 (this skill):** idea → research → evaluate → plan → GH issue
+**Phase 1 (this skill):** idea → research → evaluate → plan → issue
 **Phase 2 (`/implement-issue`):** GH issue → parse tasks → implement → test → review → PR
 
 **Announce at start:** "Using explore to investigate and plan: $DESCRIPTION"
@@ -53,14 +53,18 @@ Break the chosen approach into implementable tasks:
 - If a task requires reading more than 3 files or modifying more than 2 files, split it
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
+- **E2E tests:** When the issue affects user-facing flows and `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E test task after implementation tasks:
+  `- [ ] \`[playwright-test-developer]\` **(S)** Write Playwright E2E test for [flow description]`
+  E2E tasks reference the `playwright-testing` skill and come after all implementation tasks so the feature exists before the test runs.
 - Include acceptance criteria for the overall issue
 
-### Step 5: Create GitHub Issue
+### Step 5: Create Issue
 
-Create the issue using `gh issue create` with the structured body format:
+Create the issue using the platform wrapper with the structured body format:
 
 ```bash
-gh issue create --title "$TITLE" --body "$(cat <<'EOF'
+PLATFORM_DIR=".claude/scripts/platform"
+"$PLATFORM_DIR/create-issue.sh" --title "$TITLE" --body "$(cat <<'EOF'
 ## Context
 [What was discovered and why it matters — 2-3 sentences]
 
@@ -91,6 +95,7 @@ gh issue create --title "$TITLE" --body "$(cat <<'EOF'
 - [ ] `[agent-name]` **(M)** Description of task 2
 - [ ] `[agent-name]` **(L)** Description of task 3
 - [ ] `[default]` **(S)** Description of general task (e.g., tests, config)
+- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured)
 
 ## Acceptance Criteria
 - [ ] AC1: [measurable criterion]
@@ -120,7 +125,8 @@ The `## Implementation Tasks` section must use this parseable convention:
 
 **Agent values** (adapt to your project's agents):
 - Use whatever agent names are configured in `.claude/agents/`
-- Common patterns: `[backend-developer]`, `[frontend-developer]`, `[default]`
+- Common patterns: `[backend-developer]`, `[frontend-developer]`, `[playwright-test-developer]`, `[default]`
+- `[playwright-test-developer]` for E2E tests (when `TEST_E2E_CMD` is configured)
 - `[default]` for general tasks (config, tests, documentation, mixed)
 
 **Parsing rule:** Regex `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description. Task IDs assigned sequentially.
@@ -144,7 +150,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 
 ## Integration
 
-**Produces:** A GitHub Issue ready for `/implement-issue N main`
+**Produces:** An issue ready for `/implement-issue N main`
 **Consumes:** Vague natural language descriptions
 **Followed by:** `/implement-issue` skill (Phase 2)
 
@@ -153,7 +159,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Temptation | Why It Fails |
 |------------|--------------|
 | Skip research, jump to planning | Plan won't account for existing patterns |
-| Create local plan files | GH issue IS the plan — single source of truth |
+| Create local plan files | The issue IS the plan — single source of truth |
 | Over-plan with 20+ tasks | Keep it focused; split into multiple issues if needed |
 | Combine multiple concerns in one issue | One issue = one problem = one PR |
 | Ask too many clarifying questions | 0-2 questions max; research answers most questions |
