@@ -800,13 +800,6 @@ run_stage() {
     fi
     log "  Log: $stage_log"
 
-    local model
-    model=$(resolve_model "$stage_name" "$complexity")
-    log "  Model: $model"
-    if [[ -n "$complexity" ]]; then
-        log "  complexity: $complexity"
-    fi
-
     local -a agent_args=()
     if [[ -n "$agent" ]]; then
         agent_args=(--agent "$agent")
