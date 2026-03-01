@@ -758,6 +758,8 @@ run_stage() {
     local schema_file="$3"
     local agent="${4:-}"
     local complexity="${5:-}"
+    local timeout_override="${6:-}"   # optional: override stage timeout (seconds)
+    local model_override="${7:-}"    # optional: override model (haiku|sonnet|opus)
 
     local stage_log="$LOG_BASE/stages/$(next_stage_log "$stage_name")"
 
@@ -773,7 +775,11 @@ run_stage() {
 
     # Resolve model and fallback from stage name + complexity hint
     local model fallback_model
-    model=$(resolve_model "$stage_name" "$complexity")
+    if [[ -n "$model_override" ]]; then
+        model="$model_override"
+    else
+        model=$(resolve_model "$stage_name" "$complexity")
+    fi
     fallback_model=$(_next_model_up "$model")
 
     log "Running stage: $stage_name"
@@ -791,7 +797,11 @@ run_stage() {
     fi
 
     local stage_timeout
-    stage_timeout=$(get_stage_timeout "$stage_name")
+    if [[ -n "$timeout_override" ]]; then
+        stage_timeout="$timeout_override"
+    else
+        stage_timeout=$(get_stage_timeout "$stage_name")
+    fi
     log "  Timeout: ${stage_timeout}s"
 
     # Pass --fallback-model for resilience (skip if same as primary — CLI rejects duplicates)
@@ -814,6 +824,9 @@ run_stage() {
     elif [[ "$model" == "haiku" ]]; then
         turns_args=(--max-turns 15)
         log "  Max turns: 15 (haiku via complexity override)"
+    elif [[ "$model" == "sonnet" ]]; then
+        turns_args=(--max-turns 25)
+        log "  Max turns: 25 (sonnet cap)"
     fi
 
     local output
@@ -833,8 +846,16 @@ run_stage() {
     printf '%s\n' "$output" >> "$stage_log"
     printf '%s\n' "=== exit code: $exit_code ===" >> "$stage_log"
 
-    # Check timeout
+    # Check timeout — but still try to extract structured output first.
+    # The agent may have produced valid output before the timeout killed the CLI.
     if (( exit_code == 124 )); then
+        local timeout_structured
+        timeout_structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
+        if [[ -n "$timeout_structured" ]]; then
+            log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced structured output — using it"
+            printf '%s\n' "$timeout_structured"
+            return 0
+        fi
         log_error "Stage $stage_name timed out after ${stage_timeout}s"
         echo '{"status":"error","error":"timeout"}'
         return 1
@@ -1097,6 +1118,38 @@ should_run_docs_stage() {
         bash|config) return 1 ;;
         *)            return 0 ;;
     esac
+}
+
+# Check if all tasks in status.json are S-complexity.
+# Returns:
+#   0 if all tasks are S-complexity (docs can be skipped)
+#   1 if any task is M, L, or unknown complexity
+all_tasks_s_complexity() {
+    local tasks_json
+    tasks_json=$(jq -r '.tasks[]?.description // empty' "$STATUS_FILE" 2>/dev/null)
+    [[ -z "$tasks_json" ]] && return 1
+    while IFS= read -r desc; do
+        local size
+        size=$(extract_task_size "$desc")
+        [[ "$size" != "S" ]] && return 1
+    done <<< "$tasks_json"
+    return 0
+}
+
+# Get PR review configuration based on diff size.
+# Returns JSON: { "model": "...", "timeout": N, "max_iterations": N }
+# Small diffs get haiku/300s/1 iter; medium get sonnet/900s/2; large get sonnet/1800s/2.
+get_pr_review_config() {
+    local diff_lines
+    diff_lines=$(get_diff_line_count "$BASE_BRANCH")
+
+    if (( diff_lines < 20 )); then
+        printf '{"model":"haiku","timeout":300,"max_iterations":1}'
+    elif (( diff_lines < 100 )); then
+        printf '{"model":"sonnet","timeout":900,"max_iterations":2}'
+    else
+        printf '{"model":"sonnet","timeout":1800,"max_iterations":2}'
+    fi
 }
 
 # Determines whether the quality loop should run for a given task size.
@@ -2183,6 +2236,11 @@ Investigate the root cause and fix the issue. Commit your changes."
             set_stage_started "docs"
             comment_issue "Docs Stage: Skipped" "⏭️ No TypeScript/React files changed (scope: \`$branch_scope\`). Skipping docs stage."
             set_stage_completed "docs"
+        elif all_tasks_s_complexity; then
+            log "Skipping docs stage: all tasks are S-complexity"
+            set_stage_started "docs"
+            comment_issue "Docs Stage: Skipped" "⏭️ All tasks are S-complexity. Skipping docs stage."
+            set_stage_completed "docs"
         else
             set_stage_started "docs"
 
@@ -2268,13 +2326,24 @@ The command will output the MR number. Use that as pr_number in your response."
 
         local pr_approved=false
 
+        # Scale PR review by diff size
+        local pr_review_config
+        pr_review_config=$(get_pr_review_config)
+        local pr_review_model pr_review_timeout pr_review_max_iter
+        pr_review_model=$(printf '%s' "$pr_review_config" | jq -r '.model')
+        pr_review_timeout=$(printf '%s' "$pr_review_config" | jq -r '.timeout')
+        pr_review_max_iter=$(printf '%s' "$pr_review_config" | jq -r '.max_iterations')
+        local diff_lines
+        diff_lines=$(get_diff_line_count "$BASE_BRANCH")
+        log "PR review config: model=$pr_review_model, timeout=${pr_review_timeout}s, max_iter=$pr_review_max_iter (diff: ${diff_lines} lines)"
+
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
         local pr_iteration
         pr_iteration=$(jq -r '.pr_review_iterations' "$STATUS_FILE")
 
-        if (( pr_iteration > MAX_PR_REVIEW_ITERATIONS )); then
-            log_error "PR review loop exceeded max iterations ($MAX_PR_REVIEW_ITERATIONS)"
+        if (( pr_iteration > pr_review_max_iter )); then
+            log_error "PR review loop exceeded max iterations ($pr_review_max_iter)"
             set_final_state "max_iterations_pr_review"
             exit 2
         fi
@@ -2292,7 +2361,7 @@ Part 2 — Code Review: Review code quality, patterns, standards, and security.
 Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
-        review_result=$(run_stage "pr-review-iter-$pr_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer")
+        review_result=$(run_stage "pr-review-iter-$pr_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer" "" "$pr_review_timeout" "$pr_review_model")
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$review_result"; then

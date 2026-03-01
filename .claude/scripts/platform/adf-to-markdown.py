@@ -6,7 +6,27 @@ outputs JSON { title, body, status } with body as markdown text.
 """
 
 import json
+import re
 import sys
+
+
+def wiki_to_md(text):
+    """Convert Jira wiki markup fragments to markdown.
+
+    Handles common patterns that appear when acli stores description text
+    as a single ADF paragraph containing wiki markup rather than structured nodes.
+    """
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        # h1. through h6. headings
+        m = re.match(r"^h([1-6])\.\s+(.*)", line)
+        if m:
+            level = int(m.group(1))
+            result.append("#" * level + " " + m.group(2))
+        else:
+            result.append(line)
+    return "\n".join(result)
 
 
 def adf_to_md(node):
@@ -76,6 +96,11 @@ def main():
         body = desc
     else:
         body = ""
+
+    # Post-process: convert any remaining wiki markup to markdown.
+    # This handles cases where acli stores wiki markup as raw text
+    # inside ADF paragraph nodes rather than as structured heading nodes.
+    body = wiki_to_md(body)
 
     result = {
         "title": fields.get("summary", ""),
