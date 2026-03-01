@@ -22,6 +22,15 @@ TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpuni
 TEST_E2E_CMD="${TEST_E2E_CMD:-}"          # e.g., "npx playwright test" — empty if no E2E
 TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
 
+# Claude CLI (resolve path for non-interactive shells where aliases aren't available)
+if [[ -z "${CLAUDE_CLI:-}" ]]; then
+  if [[ -x "$HOME/.claude/local/claude" ]]; then
+    CLAUDE_CLI="$HOME/.claude/local/claude"
+  else
+    CLAUDE_CLI="claude"
+  fi
+fi
+
 # Lint and format (set during /adapt)
 LINT_CMD="${LINT_CMD:-}"
 FORMAT_CMD="${FORMAT_CMD:-}"

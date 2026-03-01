@@ -121,11 +121,11 @@ Usage: $0 --issue <number> --branch <name> [options]
        $0 --resume-from <log-dir>
 
 Options:
-  --issue <number>       GitHub issue number (required for new runs)
+  --issue <number>       Issue number or key (required for new runs)
   --branch <name>        Base branch for PR (required for new runs)
   --agent <name>         Default agent for setup stage (optional)
   --status-file <path>   Custom status file path (optional)
-  --quiet                Suppress all issue comments (no GitHub issue noise)
+  --quiet                Suppress all issue comments (no tracker noise)
   --resume               Resume from existing status.json
   --resume-from <dir>    Resume from specific log directory
 
@@ -586,28 +586,13 @@ sync_status_to_log() {
 }
 
 # =============================================================================
-# GITHUB COMMENT HELPERS
+# ISSUE/PR COMMENT HELPERS
 # =============================================================================
-
-# Auto-detect repository from env var or git remote
-if [[ -n "${GITHUB_REPO:-}" ]]; then
-	REPO="$GITHUB_REPO"
-else
-	# Parse from git remote (handles both HTTPS and SSH URLs)
-	REPO=$(git remote get-url origin 2>/dev/null | sed -E 's|.*[:/]([^/]+/[^/]+?)(\.git)?$|\1|')
-fi
-
-if [[ -z "$REPO" ]]; then
-	echo "ERROR: Could not determine GitHub repository." >&2
-	echo "Set GITHUB_REPO=owner/repo or run from a repo with a GitHub remote." >&2
-	exit 3
-fi
-log "Using GitHub repository: $REPO"
 
 # comment_issue <title> <body> [agent]
 # If agent is provided, shows "Written by `agent`", otherwise "Posted by orchestrator"
 # When QUIET=true, this is a no-op — ALL issue comments are suppressed (use --quiet
-# for automated runs where GitHub issue noise should be eliminated entirely).
+# for automated runs where issue tracker noise should be eliminated entirely).
 comment_issue() {
 	[[ "${QUIET:-false}" == "true" ]] && return 0
 	local title="$1"
@@ -815,18 +800,26 @@ run_stage() {
         fallback_args=(--fallback-model "$fallback_model")
     fi
 
-    # Cap exploration for light-tier (haiku) stages — these are mechanical and
-    # should complete in a few turns rather than open-endedly exploring.
+    # Cap exploration for inherently light-tier stages (parse, pr, complete, etc.)
+    # These are mechanical and should complete in a few turns.
+    # Do NOT cap implement/review/fix stages that use haiku via S-complexity override —
+    # those still need enough turns to read files, make edits, and produce output.
     local -a turns_args=()
-    if [[ "$model" == "haiku" ]]; then
-        turns_args=(--max-turns 5)
-        log "  Max turns: 5 (light-tier cap)"
+    local _matched_prefix _inherent_tier
+    _matched_prefix=$(_match_stage_prefix "$stage_name") || true
+    _inherent_tier=$(_stage_to_tier "${_matched_prefix:-}")
+    if [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
+        turns_args=(--max-turns 10)
+        log "  Max turns: 10 (inherently light stage)"
+    elif [[ "$model" == "haiku" ]]; then
+        turns_args=(--max-turns 15)
+        log "  Max turns: 15 (haiku via complexity override)"
     fi
 
     local output
     local exit_code=0
 
-    output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
+    output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
         ${agent_args[@]+"${agent_args[@]}"} \
         --model "$model" \
         ${fallback_args[@]+"${fallback_args[@]}"} \
@@ -851,7 +844,7 @@ run_stage() {
     if detect_rate_limit "$output"; then
         handle_rate_limit "$output"
         # Retry
-        output=$(timeout "$stage_timeout" env -u CLAUDECODE claude -p "$prompt" \
+        output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
             --model "$model" \
             ${fallback_args[@]+"${fallback_args[@]}"} \
@@ -1465,7 +1458,7 @@ $validation_section
 
 Output both test results and validation findings in one structured response.
 - result: 'passed' or 'failed' (from test execution)
-- summary: overall summary suitable for a GitHub comment
+- summary: overall summary suitable for an issue comment
 - validation_result: 'passed', 'failed', or 'skipped'
 - validation_issues: array of issues found (if any)
 - pre_existing_issues: array of pre-existing quality issues (informational only)
@@ -1697,7 +1690,7 @@ Log directory: \`$LOG_BASE\`"
     else
         set_stage_started "parse_issue"
 
-        log "Fetching issue #$ISSUE_NUMBER from GitHub..."
+        log "Fetching issue #$ISSUE_NUMBER..."
         local issue_body
         issue_body=$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>>"${LOG_FILE:-/dev/stderr}" | jq -r '.body')
 
@@ -1723,16 +1716,17 @@ Log directory: \`$LOG_BASE\`"
         fi
 
         # Parse tasks into JSON array
-        # Regex matches only unchecked boxes: - [ ] `[agent]` description
-        # This is intentional — checked boxes [x] are considered already
-        # complete and are skipped during parsing.
+        # Regex matches both GitHub checkboxes and plain Jira bullets:
+        #   - [ ] `[agent]` description   (GitHub — unchecked only)
+        #   - `[agent]` description        (Jira — no checkbox syntax)
+        # Checked boxes [x] are considered already complete and skipped.
         local task_id=0
         tasks_json="[]"
         while IFS= read -r line; do
-            if [[ "$line" =~ ^-\ \[\ \]\ \`\[([^\]]+)\]\`\ (.+)$ ]]; then
+            if [[ "$line" =~ ^-\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ (.+)$ ]]; then
                 task_id=$((task_id + 1))
-                local agent="${BASH_REMATCH[1]}"
-                local desc="${BASH_REMATCH[2]}"
+                local agent="${BASH_REMATCH[2]}"
+                local desc="${BASH_REMATCH[3]}"
                 tasks_json=$(printf '%s' "$tasks_json" | jq \
                     --argjson id "$task_id" \
                     --arg desc "$desc" \
@@ -2059,7 +2053,7 @@ $impl_summary" "$task_agent"
         # After PR tests pass, run jest --changedSince once to surface any
         # pre-existing failures pulled in by the dependency graph.  This does
         # NOT block the pipeline — failures are posted as an informational
-        # GitHub comment so maintainers are aware.
+        # issue comment so maintainers are aware.
         # ---------------------------------------------------------------------
         if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" ]]; then
             log "Running informational full-scope check (non-blocking)..."
@@ -2221,15 +2215,13 @@ Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSU
     else
         set_stage_started "pr"
 
-        local pr_prompt="Create or update PR for issue #$ISSUE_NUMBER.
+        local pr_prompt="Create a merge request for issue #$ISSUE_NUMBER.
 
-If no PR exists, create one:
-Use the platform wrapper to create a PR/MR:
-$PLATFORM_DIR/create-mr.sh --source "\$branch" --target "$BASE_BRANCH" --title 'feat(issue-$ISSUE_NUMBER): <description>' --body '<body with Closes #$ISSUE_NUMBER>'
+Run this exact command (substitute a short description for <description>):
 
-If PR exists, push and comment.
+git push -u origin $branch 2>/dev/null; $PLATFORM_DIR/create-mr.sh --source '$branch' --target '$BASE_BRANCH' --title 'feat(issue-$ISSUE_NUMBER): <description>' --body 'Closes #$ISSUE_NUMBER'
 
-Include 'Closes #$ISSUE_NUMBER' in the body."
+The command will output the MR number. Use that as pr_number in your response."
 
         local pr_result
         pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json")
@@ -2297,7 +2289,7 @@ Include 'Closes #$ISSUE_NUMBER' in the body."
 Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
 
-Approve or request changes. Output a summary suitable for a GitHub comment."
+Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
         review_result=$(run_stage "pr-review-iter-$pr_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer")
@@ -2399,7 +2391,7 @@ Include:
 - Reviews passed
 - Final status
 
-Output a summary suitable for a GitHub PR comment."
+Output a summary suitable for a PR/MR comment."
 
         local complete_result
         complete_result=$(run_stage "complete" "$complete_prompt" "implement-issue-complete.json")

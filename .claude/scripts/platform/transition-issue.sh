@@ -11,5 +11,5 @@ TRANSITION="${2:-$JIRA_DONE_TRANSITION}"
 
 case "$TRACKER" in
   github) gh issue close "$ISSUE" ;;
-  jira) acli jira transition-issue --issue "$ISSUE" --transition "$TRANSITION" ;;
+  jira) acli jira workitem transition --key "$ISSUE" --status "$TRANSITION" ;;
 esac

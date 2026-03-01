@@ -8,5 +8,5 @@ ISSUE="$1" COMMENT="$2"
 
 case "$TRACKER" in
   github) gh issue comment "$ISSUE" --body "$COMMENT" ;;
-  jira) acli jira add-comment --issue "$ISSUE" --comment "$COMMENT" ;;
+  jira) acli jira workitem comment create --key "$ISSUE" --body "$COMMENT" ;;
 esac
