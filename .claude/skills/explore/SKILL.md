@@ -60,18 +60,23 @@ Break the chosen approach into implementable tasks:
 - If a task requires reading more than 3 files or modifying more than 2 files, split it
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
-- **E2E tests:** When the issue affects user-facing flows and `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E test task after implementation tasks:
+- **E2E tests (REQUIRED for UI changes):** If `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E task for ANY issue touching user-visible UI — CSS, components, layouts, forms, navigation, visual regressions. This is NOT optional for UI work.
   `- [ ] \`[playwright-test-developer]\` **(S)** Write Playwright E2E test for [flow description]`
   E2E tasks reference the `playwright-testing` skill and come after all implementation tasks so the feature exists before the test runs.
+  **When to include:** Changes to components, pages, hooks, CSS, layouts, forms, navigation, or any file matching `FRONTEND_PATH_PATTERNS`.
+  **When to skip:** Backend-only changes, config changes, documentation, CI/CD scripts.
+  **Task descriptions must specify:** The page/component under test, the user action to perform, and the expected visual/behavioral outcome.
 - Include acceptance criteria for the overall issue
 
 ### Step 5: Create Issue
 
-Create the issue using the platform wrapper with the structured body format:
+**Before creating the issue, ask the user which epic to parent it under** using `AskUserQuestion`. Look up open epics in the project to offer relevant options. For Precis/KIKS, all issues must sit under KIKS-410 (the Precis initiative) within an appropriate epic. Present the most likely epics as options based on the research context (e.g., if the work is UI-related, suggest "KIKS-546 UI Enhancements").
+
+Create the issue using the platform wrapper with `--parent` set to the chosen epic:
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
-"$PLATFORM_DIR/create-issue.sh" --title "$TITLE" --body "$(cat <<'EOF'
+"$PLATFORM_DIR/create-issue.sh" --title "$TITLE" --parent "$EPIC_KEY" --body "$(cat <<'EOF'
 ## Context
 [What was discovered and why it matters — 2-3 sentences]
 

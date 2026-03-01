@@ -738,3 +738,324 @@ teardown() {
     # Fix-agent should NOT be dispatched for empty failures
     [ "$(cat "$fix_called")" = "false" ] || fail "Fix-agent should not be dispatched when failures array is empty"
 }
+
+# =============================================================================
+# _matches_frontend_pattern() TESTS
+# =============================================================================
+
+@test "_matches_frontend_pattern function is defined" {
+    [ "$(type -t _matches_frontend_pattern)" = "function" ]
+}
+
+@test "_matches_frontend_pattern matches configured patterns" {
+    export FRONTEND_PATH_PATTERNS="web/src/components/*|web/src/pages/*|web/e2e/*"
+
+    run _matches_frontend_pattern "web/src/components/Button.tsx"
+    [ "$status" -eq 0 ]
+
+    run _matches_frontend_pattern "web/src/pages/Home.tsx"
+    [ "$status" -eq 0 ]
+
+    run _matches_frontend_pattern "web/e2e/login.spec.ts"
+    [ "$status" -eq 0 ]
+}
+
+@test "_matches_frontend_pattern rejects non-matching paths" {
+    export FRONTEND_PATH_PATTERNS="web/src/components/*|web/src/pages/*"
+
+    run _matches_frontend_pattern "src/api/routes/users.ts"
+    [ "$status" -eq 1 ]
+
+    run _matches_frontend_pattern "server/index.ts"
+    [ "$status" -eq 1 ]
+}
+
+@test "_matches_frontend_pattern returns 1 when FRONTEND_PATH_PATTERNS is empty" {
+    export FRONTEND_PATH_PATTERNS=""
+
+    run _matches_frontend_pattern "web/src/components/Button.tsx"
+    [ "$status" -eq 1 ]
+}
+
+@test "_matches_frontend_pattern returns 1 when FRONTEND_PATH_PATTERNS is unset" {
+    unset FRONTEND_PATH_PATTERNS
+
+    run _matches_frontend_pattern "web/src/components/Button.tsx"
+    [ "$status" -eq 1 ]
+}
+
+# =============================================================================
+# detect_change_scope() FRONTEND SCOPE TESTS
+# =============================================================================
+
+@test "detect_change_scope returns 'frontend' for CSS-only changes with frontend patterns" {
+    export FRONTEND_PATH_PATTERNS="web/src/components/*|web/src/*.css"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-css-frontend
+    mkdir -p web/src
+    echo "body { color: red; }" > web/src/style.css
+    git add web/src/style.css
+    git commit -q -m "add css in frontend path"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "frontend" ]
+}
+
+@test "detect_change_scope returns 'ts-frontend' for TSX changes matching frontend patterns" {
+    export FRONTEND_PATH_PATTERNS="web/src/components/*|web/src/pages/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-tsx-frontend
+    mkdir -p web/src/components
+    echo "export default () => <div/>;" > web/src/components/Button.tsx
+    git add web/src/components/Button.tsx
+    git commit -q -m "add tsx component"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "ts-frontend" ]
+}
+
+@test "detect_change_scope returns 'typescript' for TS changes when FRONTEND_PATH_PATTERNS is empty" {
+    export FRONTEND_PATH_PATTERNS=""
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-no-patterns
+    mkdir -p web/src/components
+    echo "export default () => <div/>;" > web/src/components/Button.tsx
+    git add web/src/components/Button.tsx
+    git commit -q -m "add tsx without patterns"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "typescript" ]
+}
+
+@test "detect_change_scope returns 'typescript' for non-frontend TS changes" {
+    export FRONTEND_PATH_PATTERNS="web/src/components/*|web/src/pages/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-backend
+    mkdir -p src/api
+    echo "export const handler = () => {};" > src/api/handler.ts
+    git add src/api/handler.ts
+    git commit -q -m "add backend ts"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "typescript" ]
+}
+
+@test "detect_change_scope returns 'mixed' when ts + bash even with frontend patterns" {
+    export FRONTEND_PATH_PATTERNS="web/src/components/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-mixed-frontend
+    mkdir -p web/src/components
+    echo "export default () => <div/>;" > web/src/components/App.tsx
+    echo "#!/bin/bash" > deploy.sh
+    git add web/src/components/App.tsx deploy.sh
+    git commit -q -m "add tsx and sh"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    # mixed takes precedence (ts + bash = mixed regardless of frontend)
+    [ "$scope" = "mixed" ]
+}
+
+# =============================================================================
+# E2E PROMPT INJECTION TESTS
+# =============================================================================
+
+@test "run_test_loop includes E2E section in prompt for ts-frontend scope" {
+    export TEST_E2E_CMD="cd web && npx playwright test"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-e2e-prompt
+    mkdir -p web/src/components
+    echo "export default () => <div/>;" > web/src/components/Button.tsx
+    git add web/src/components/Button.tsx
+    git commit -q -m "add component"
+
+    local prompt_file="$TEST_TMP/e2e_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-e2e-prompt" "" "ts-frontend"
+
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"E2E TEST EXECUTION"* ]]
+    [[ "$captured" == *"playwright test"* ]]
+}
+
+@test "run_test_loop omits E2E section for typescript scope" {
+    export TEST_E2E_CMD="cd web && npx playwright test"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-no-e2e-prompt
+    echo "export const x = 1;" > app.ts
+    git add app.ts
+    git commit -q -m "add ts"
+
+    local prompt_file="$TEST_TMP/no_e2e_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-no-e2e-prompt" "" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" != *"E2E TEST EXECUTION"* ]]
+}
+
+@test "run_test_loop omits E2E section when TEST_E2E_CMD is empty" {
+    export TEST_E2E_CMD=""
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-no-e2e-cmd
+    mkdir -p web/src/components
+    echo "export default () => <div/>;" > web/src/components/Button.tsx
+    git add web/src/components/Button.tsx
+    git commit -q -m "add component"
+
+    local prompt_file="$TEST_TMP/no_cmd_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-no-e2e-cmd" "" "ts-frontend"
+
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" != *"E2E TEST EXECUTION"* ]]
+}
+
+@test "run_test_loop includes E2E section for frontend scope" {
+    export TEST_E2E_CMD="cd web && npx playwright test"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-e2e-frontend-only
+    mkdir -p web/src
+    echo "body { color: blue; }" > web/src/app.css
+    git add web/src/app.css
+    git commit -q -m "add css"
+
+    local prompt_file="$TEST_TMP/frontend_e2e_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-e2e-frontend-only" "" "frontend"
+
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"E2E TEST EXECUTION"* ]]
+}
+
+# =============================================================================
+# run_test_loop() scope validation accepts new scopes
+# =============================================================================
+
+@test "run_test_loop accepts 'frontend' as valid pre-computed scope" {
+    export TEST_E2E_CMD=""
+    export FRONTEND_PATH_PATTERNS="web/src/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-frontend-scope
+    mkdir -p web/src
+    echo "body {}" > web/src/style.css
+    git add web/src/style.css
+    git commit -q -m "css only"
+
+    run_stage() {
+        echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"OK"}'
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Should not fail or recompute — "frontend" is a valid scope
+    run run_test_loop "$TEST_TMP/repo" "feature-frontend-scope" "" "frontend"
+    [ "$status" -eq 0 ]
+}
+
+@test "run_test_loop accepts 'ts-frontend' as valid pre-computed scope" {
+    export TEST_E2E_CMD=""
+    export FRONTEND_PATH_PATTERNS="web/src/components/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-ts-frontend-scope
+    mkdir -p web/src/components
+    echo "export default () => <div/>;" > web/src/components/App.tsx
+    git add web/src/components/App.tsx
+    git commit -q -m "add component"
+
+    run_stage() {
+        echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"OK"}'
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run run_test_loop "$TEST_TMP/repo" "feature-ts-frontend-scope" "" "ts-frontend"
+    [ "$status" -eq 0 ]
+}

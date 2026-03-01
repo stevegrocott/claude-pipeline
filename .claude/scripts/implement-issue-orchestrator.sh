@@ -5,7 +5,7 @@
 #
 # Usage:
 #   ./implement-issue-orchestrator.sh --issue 123 --branch test
-#   ./implement-issue-orchestrator.sh --issue 123 --branch test --agent fastify-backend-developer
+#   ./implement-issue-orchestrator.sh --issue 123 --branch test --agent precis-backend-developer
 #
 # Outputs:
 #   - status.json: Real-time progress
@@ -67,6 +67,8 @@ get_stage_timeout() {
     case "$stage_name" in
         test-iter*)     printf '%s' 900 ;;
         pr-review*)     printf '%s' 1800 ;;
+        e2e-verify*)    printf '%s' 600 ;;
+        fix-e2e*)       printf '%s' 900 ;;
         test*|docs*|pr*) printf '%s' 600 ;;
         task-review*)    printf '%s' 900 ;;
         implement*|fix*) printf '%s' 1800 ;;
@@ -265,6 +267,7 @@ init_status() {
                 implement: {status: "pending", task_progress: "0/0"},
                 quality_loop: {status: "pending", iteration: 0},
                 test_loop: {status: "pending", iteration: 0},
+                e2e_verify: {status: "pending"},
                 acceptance_test: {status: "pending"},
                 docs: {status: "pending"},
                 pr: {status: "pending"},
@@ -1282,13 +1285,39 @@ get_max_quality_iterations() {
 # TEST LOOP HELPER
 # =============================================================================
 
+# Check whether a file path matches any pattern in FRONTEND_PATH_PATTERNS.
+# Each pattern is a simple glob matched via bash case (supports * and ?).
+# Arguments:
+#   $1 - file path to check
+# Returns:
+#   0 if the file matches a frontend pattern
+#   1 if no match or FRONTEND_PATH_PATTERNS is empty
+_matches_frontend_pattern() {
+    local file="$1"
+
+    if [[ -z "${FRONTEND_PATH_PATTERNS:-}" ]]; then
+        return 1
+    fi
+
+    local pattern
+    local IFS='|'
+    for pattern in $FRONTEND_PATH_PATTERNS; do
+        # shellcheck disable=SC2254
+        case "$file" in
+            $pattern) return 0 ;;
+        esac
+    done
+
+    return 1
+}
+
 # Detect the scope of changes on the current branch vs the base branch.
 # Classifies changed files by extension to determine which test suite to run.
 # Arguments:
 #   $1 - working directory
 #   $2 - base branch to diff against
 # Outputs:
-#   One of: typescript | bash | config | mixed
+#   One of: typescript | bash | config | mixed | frontend | ts-frontend
 detect_change_scope() {
     local work_dir="$1"
     local base="$2"
@@ -1308,8 +1337,14 @@ detect_change_scope() {
     local has_ts=false
     local has_bash=false
     local has_other_code=false
+    local has_frontend=false
 
     while IFS= read -r file; do
+        # Check frontend pattern match (before extension classification)
+        if _matches_frontend_pattern "$file"; then
+            has_frontend=true
+        fi
+
         case "$file" in
             *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) has_ts=true ;;
             *.sh|*.bats) has_bash=true ;;
@@ -1324,8 +1359,13 @@ detect_change_scope() {
 
     if [[ "$has_ts" == "true" && "$has_bash" == "true" ]]; then
         echo "mixed"
+    elif [[ "$has_ts" == "true" && "$has_frontend" == "true" ]]; then
+        echo "ts-frontend"
     elif [[ "$has_ts" == "true" ]]; then
         echo "typescript"
+    elif [[ "$has_frontend" == "true" ]]; then
+        # Only frontend files (CSS, etc.) without TS — still need E2E
+        echo "frontend"
     elif [[ "$has_bash" == "true" ]]; then
         echo "bash"
     elif [[ "$has_other_code" == "true" ]]; then
@@ -1372,7 +1412,7 @@ run_test_loop() {
     local change_scope
     if [[ -n "${4:-}" ]]; then
         case "${4}" in
-            typescript|bash|config|mixed) change_scope="$4" ;;
+            typescript|bash|config|mixed|frontend|ts-frontend) change_scope="$4" ;;
             *) log_warn "Invalid pre-computed scope '${4}'; recomputing"
                change_scope=$(detect_change_scope "$loop_dir" "$BASE_BRANCH") ;;
         esac
@@ -1406,7 +1446,7 @@ run_test_loop() {
     # dependency graph, which can miss or over-include files.
     # Exclude .integration.test.ts files (run separately).
     local changed_test_files=""
-    if [[ "$change_scope" == "typescript" || "$change_scope" == "mixed" ]]; then
+    if [[ "$change_scope" == "typescript" || "$change_scope" == "mixed" || "$change_scope" == "ts-frontend" ]]; then
         changed_test_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null \
             | grep -E '\.test\.[jt]sx?$|\.spec\.[jt]sx?$' \
             | grep -v '\.integration\.test\.' \
@@ -1426,6 +1466,13 @@ run_test_loop() {
         typescript)
             test_command="cd $safe_dir && $jest_command"
             ;;
+        ts-frontend)
+            test_command="cd $safe_dir && $jest_command"
+            ;;
+        frontend)
+            # Frontend-only (CSS etc.) — Jest with --passWithNoTests handles gracefully
+            test_command="cd $safe_dir && $jest_command"
+            ;;
         bash)
             test_command="cd $safe_dir && $bash_test_command"
             ;;
@@ -1433,6 +1480,13 @@ run_test_loop() {
             test_command="cd $safe_dir && $jest_command && $bash_test_command"
             ;;
     esac
+
+    # Build E2E command when configured and scope includes frontend
+    local e2e_command=""
+    if [[ -n "${TEST_E2E_CMD:-}" ]] && [[ "$change_scope" == "frontend" || "$change_scope" == "ts-frontend" ]]; then
+        e2e_command="$TEST_E2E_CMD"
+        log "E2E testing enabled for $change_scope scope: $e2e_command"
+    fi
 
     local prior_failure_sigs=""
     while [[ "$loop_complete" != "true" ]]; do
@@ -1498,6 +1552,21 @@ INTEGRATION TEST REQUIREMENT FOR API ROUTES (claude-pipeline#25):
 No changed files detected vs $BASE_BRANCH. Set validation_result to 'skipped'."
         fi
 
+        # Build E2E section if applicable
+        local e2e_section=""
+        if [[ -n "$e2e_command" ]]; then
+            e2e_section="STEP 1b — E2E TEST EXECUTION (only if unit tests passed in Step 1)
+If tests failed in Step 1, skip this step entirely.
+
+Run the E2E test suite:
+$e2e_command
+
+Report pass/fail. E2E failures count as overall test failure (set result to 'failed').
+Include e2e_result ('passed', 'failed', or 'skipped') and e2e_summary in output.
+
+"
+        fi
+
         local test_prompt="Run the test suite and validate test comprehensiveness in working directory $safe_dir.
 
 STEP 1 — TEST EXECUTION
@@ -1507,7 +1576,7 @@ $test_command
 Report pass/fail with test counts and failure details.
 If tests fail, set validation_result to 'skipped' (no point validating failing tests).
 
-$validation_section
+${e2e_section}$validation_section
 
 Output both test results and validation findings in one structured response.
 - result: 'passed' or 'failed' (from test execution)
@@ -1515,7 +1584,9 @@ Output both test results and validation findings in one structured response.
 - validation_result: 'passed', 'failed', or 'skipped'
 - validation_issues: array of issues found (if any)
 - pre_existing_issues: array of pre-existing quality issues (informational only)
-- validation_summary: summary of validation findings"
+- validation_summary: summary of validation findings
+- e2e_result: 'passed', 'failed', or 'skipped' (from E2E execution, if applicable)
+- e2e_summary: summary of E2E test findings (if applicable)"
 
         local test_result
         test_result=$(run_stage "test-iter-$test_iteration" "$test_prompt" "implement-issue-test-validate.json" "default" "$loop_complexity")
@@ -1724,7 +1795,7 @@ Log directory: \`$LOG_BASE\`"
         comment_issue "Starting Automated Processing" "Processing issue #$ISSUE_NUMBER against branch \`$BASE_BRANCH\`.
 
 **Stages:**
-1. Parse issue (extract tasks from GH issue body)
+1. Parse issue (extract tasks from issue body)
 2. Validate plan (verify references exist)
 3. Implement tasks with self-review (per-task quality loop: simplify, review)
 4. Test loop (run tests, fix failures)
@@ -1736,7 +1807,7 @@ Log directory: \`$LOG_BASE\`"
     fi
 
     # -------------------------------------------------------------------------
-    # STAGE: PARSE ISSUE (extract tasks from GH issue body)
+    # STAGE: PARSE ISSUE (extract tasks from issue body)
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "parse_issue"; then
         log "Skipping parse_issue stage (already completed)"
@@ -1769,9 +1840,9 @@ Log directory: \`$LOG_BASE\`"
         fi
 
         # Parse tasks into JSON array
-        # Regex matches both GitHub checkboxes and plain Jira bullets:
-        #   - [ ] `[agent]` description   (GitHub — unchecked only)
-        #   - `[agent]` description        (Jira — no checkbox syntax)
+        # Matches two formats:
+        #   GitHub:  - [ ] `[agent]` description  (checkbox syntax)
+        #   Jira:    - `[agent]` description       (plain bullet from ADF)
         # Checked boxes [x] are considered already complete and skipped.
         local task_id=0
         tasks_json="[]"
@@ -2108,7 +2179,7 @@ $impl_summary" "$task_agent"
         # NOT block the pipeline — failures are posted as an informational
         # issue comment so maintainers are aware.
         # ---------------------------------------------------------------------
-        if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" ]]; then
+        if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" || "$branch_scope" == "ts-frontend" ]]; then
             log "Running informational full-scope check (non-blocking)..."
             local full_scope_output full_scope_rc
             full_scope_output=$(cd "." && npx jest --passWithNoTests --changedSince="$BASE_BRANCH" 2>&1) || true
@@ -2135,6 +2206,78 @@ $full_scope_failures
 
         set_stage_completed "test_loop"
         log "Test loop complete."
+    fi
+
+    # -------------------------------------------------------------------------
+    # STAGE: E2E VERIFY (Playwright visual/behavioral verification)
+    # Runs after unit tests pass. For issues that change frontend UI, dispatches
+    # playwright-test-developer to run E2E tests and verify visual/behavioral
+    # correctness. Skips when TEST_E2E_CMD is not configured or scope is not
+    # frontend/ts-frontend.
+    # -------------------------------------------------------------------------
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "e2e_verify"; then
+        log "Skipping e2e_verify stage (already completed)"
+    elif [[ -z "${TEST_E2E_CMD:-}" ]]; then
+        log "Skipping e2e_verify stage (TEST_E2E_CMD not configured)"
+        set_stage_started "e2e_verify"
+        set_stage_completed "e2e_verify"
+    elif [[ "$branch_scope" != "frontend" && "$branch_scope" != "ts-frontend" ]]; then
+        log "Skipping e2e_verify stage (scope '$branch_scope' is not frontend)"
+        set_stage_started "e2e_verify"
+        set_stage_completed "e2e_verify"
+    else
+        set_stage_started "e2e_verify"
+        log "Running E2E verification for frontend changes..."
+
+        local e2e_verify_prompt="Run E2E tests to verify the frontend changes for issue #$ISSUE_NUMBER.
+
+TEST COMMAND:
+$TEST_E2E_CMD
+
+BASE URL: ${TEST_E2E_BASE_URL:-http://localhost:5173}
+
+INSTRUCTIONS:
+1. Run the E2E test suite using the command above
+2. If tests fail, report the failures with details about what visual/behavioral issues were found
+3. Focus on verifying user-visible behavior: layout, interactions, navigation, visual regressions
+
+Report result as 'passed' or 'failed' with a detailed summary."
+
+        local e2e_verify_result
+        e2e_verify_result=$(run_stage "e2e-verify" "$e2e_verify_prompt" "implement-issue-test.json" "playwright-test-developer")
+
+        local e2e_verify_status e2e_verify_summary
+        e2e_verify_status=$(printf '%s' "$e2e_verify_result" | jq -r '.result')
+        e2e_verify_summary=$(printf '%s' "$e2e_verify_result" | jq -r '.summary // "E2E verification completed"')
+
+        local e2e_icon="✅"
+        [[ "$e2e_verify_status" == "failed" ]] && e2e_icon="❌"
+        comment_issue "E2E Verification" "$e2e_icon **Result:** $e2e_verify_status
+
+$e2e_verify_summary" "playwright-test-developer"
+
+        if [[ "$e2e_verify_status" == "failed" ]]; then
+            log_error "E2E verification failed — dispatching implementation agent to fix"
+
+            local e2e_fix_prompt="E2E tests for issue #$ISSUE_NUMBER FAILED. The unit tests passed but E2E tests found visual/behavioral issues.
+
+Failure details:
+$e2e_verify_summary
+
+Fix the frontend code to resolve these E2E failures. Do NOT modify the test files — fix the implementation code.
+Commit your changes."
+
+            verify_on_feature_branch "$branch" || true
+
+            local e2e_fix_result
+            e2e_fix_result=$(run_stage "fix-e2e" "$e2e_fix_prompt" "implement-issue-fix.json" "$AGENT")
+
+            local e2e_fix_summary
+            e2e_fix_summary=$(printf '%s' "$e2e_fix_result" | jq -r '.summary // "Fix applied"')
+            comment_issue "E2E Fix" "$e2e_fix_summary" "$AGENT"
+        fi
+
+        set_stage_completed "e2e_verify"
     fi
 
     # -------------------------------------------------------------------------
