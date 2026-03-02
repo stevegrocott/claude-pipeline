@@ -1376,11 +1376,6 @@ _is_playwright_spec() {
     case "$file" in
         tests/e2e/*.spec.*|test/e2e/*.spec.*|e2e/*.spec.*|**/e2e/*.spec.*) return 0 ;;
     esac
-    # Also check if it's a .spec.ts file (not .test.ts) — Playwright convention
-    # Only flag as Playwright if in a known E2E directory
-    if [[ "$file" == *"/e2e/"*".spec."* ]]; then
-        return 0
-    fi
     return 1
 }
 
@@ -1552,32 +1547,22 @@ run_test_loop() {
     if [[ -n "$jest_test_files" ]]; then
         jest_command="npx jest --passWithNoTests $(echo "$jest_test_files" | tr '\n' ' ')"
         log "Explicit Jest test files: $(echo "$jest_test_files" | tr '\n' ' ')"
-    elif [[ -n "$changed_test_files" && -z "$jest_test_files" ]]; then
-        # All changed test files were Playwright specs — use changedSince fallback for Jest
-        jest_command="npx jest --passWithNoTests --changedSince=$safe_branch"
-        log "All changed test files are Playwright specs — falling back to --changedSince=$safe_branch for Jest"
     else
         jest_command="npx jest --passWithNoTests --changedSince=$safe_branch"
-        log "No changed test files found — falling back to --changedSince=$safe_branch"
+        if [[ -n "$changed_test_files" ]]; then
+            log "All changed test files are Playwright specs — falling back to --changedSince=$safe_branch for Jest"
+        else
+            log "No changed test files found — falling back to --changedSince=$safe_branch"
+        fi
     fi
 
     case "$change_scope" in
-        typescript)
-            test_command="cd $safe_dir && $jest_command"
-            ;;
-        ts-frontend)
-            test_command="cd $safe_dir && $jest_command"
-            ;;
-        frontend)
-            # Frontend-only (CSS etc.) — Jest with --passWithNoTests handles gracefully
-            test_command="cd $safe_dir && $jest_command"
-            ;;
         bash)
             test_command="cd $safe_dir && $bash_test_command"
             ;;
-        mixed)
-            # Mixed scope: run Jest for app code. BATS pipeline tests run
-            # separately as non-blocking (see bats_section below).
+        *)
+            # typescript, ts-frontend, frontend, mixed: run Jest.
+            # Mixed BATS pipeline tests run separately as non-blocking (see bats_section below).
             test_command="cd $safe_dir && $jest_command"
             ;;
     esac
