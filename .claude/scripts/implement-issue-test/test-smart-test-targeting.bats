@@ -1059,3 +1059,293 @@ teardown() {
     run run_test_loop "$TEST_TMP/repo" "feature-ts-frontend-scope" "" "ts-frontend"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# .claude/ PIPELINE FILES EXCLUDED FROM SCOPE (claude-pipeline#41)
+# =============================================================================
+
+@test "detect_change_scope excludes .claude/*.sh from bash scope" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-claude-sh
+    mkdir -p .claude/scripts
+    echo "#!/bin/bash" > .claude/scripts/helper.sh
+    git add .claude/scripts/helper.sh
+    git commit -q -m "add pipeline script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    # .claude/ shell scripts should NOT trigger bash scope
+    [ "$scope" = "config" ]
+}
+
+@test "detect_change_scope excludes .claude/*.bats from bash scope" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-claude-bats
+    mkdir -p .claude/scripts/implement-issue-test
+    echo "@test 'hello' { true; }" > .claude/scripts/implement-issue-test/test-new.bats
+    git add .claude/scripts/implement-issue-test/test-new.bats
+    git commit -q -m "add pipeline test"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    # .claude/ bats files should NOT trigger bash scope
+    [ "$scope" = "config" ]
+}
+
+@test "detect_change_scope returns 'typescript' when .claude/ and app TS files both change" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-claude-plus-ts
+    mkdir -p .claude/scripts
+    echo "#!/bin/bash" > .claude/scripts/helper.sh
+    echo "export const x = 1;" > app.ts
+    git add .claude/scripts/helper.sh app.ts
+    git commit -q -m "add both"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    # Should be typescript, NOT mixed (because .claude/ bash is excluded)
+    [ "$scope" = "typescript" ]
+}
+
+@test "detect_change_scope still returns 'bash' for non-.claude/ sh files" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-app-sh
+    echo "#!/bin/bash" > deploy.sh
+    git add deploy.sh
+    git commit -q -m "add app script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "bash" ]
+}
+
+# =============================================================================
+# filter_implementation_files() TESTS (claude-pipeline#41)
+# =============================================================================
+
+@test "filter_implementation_files function is defined" {
+    [ "$(type -t filter_implementation_files)" = "function" ]
+}
+
+@test "filter_implementation_files excludes .claude/ files" {
+    local result
+    result=$(printf '%s\n' ".claude/scripts/orchestrator.sh" "src/app.ts" ".claude/config/platform.sh" | filter_implementation_files)
+    [[ "$result" == *"src/app.ts"* ]]
+    [[ "$result" != *".claude/"* ]]
+}
+
+@test "filter_implementation_files excludes docs/ files" {
+    local result
+    result=$(printf '%s\n' "docs/README.md" "src/index.ts" "docs/architecture.md" | filter_implementation_files)
+    [[ "$result" == *"src/index.ts"* ]]
+    [[ "$result" != *"docs/"* ]]
+}
+
+@test "filter_implementation_files excludes config file extensions" {
+    local result
+    result=$(printf '%s\n' "package.json" "config.yaml" "src/app.ts" "README.md" "docker-compose.yml" | filter_implementation_files)
+    [[ "$result" == *"src/app.ts"* ]]
+    [[ "$result" != *".json"* ]]
+    [[ "$result" != *".yaml"* ]]
+    [[ "$result" != *".md"* ]]
+    [[ "$result" != *".yml"* ]]
+}
+
+@test "filter_implementation_files preserves source code files" {
+    local result
+    result=$(printf '%s\n' "src/routes/api.ts" "tests/unit/api.test.ts" "lib/utils.js" | filter_implementation_files)
+    [[ "$result" == *"src/routes/api.ts"* ]]
+    [[ "$result" == *"tests/unit/api.test.ts"* ]]
+    [[ "$result" == *"lib/utils.js"* ]]
+}
+
+# =============================================================================
+# _is_playwright_spec() TESTS (claude-pipeline#41)
+# =============================================================================
+
+@test "_is_playwright_spec function is defined" {
+    [ "$(type -t _is_playwright_spec)" = "function" ]
+}
+
+@test "_is_playwright_spec identifies tests/e2e/ specs" {
+    run _is_playwright_spec "tests/e2e/login.spec.ts"
+    [ "$status" -eq 0 ]
+}
+
+@test "_is_playwright_spec identifies nested e2e/ specs" {
+    run _is_playwright_spec "tests/e2e/bugs/test-killingworth.spec.ts"
+    [ "$status" -eq 0 ]
+}
+
+@test "_is_playwright_spec rejects Jest test files" {
+    run _is_playwright_spec "src/services/auth.test.ts"
+    [ "$status" -eq 1 ]
+}
+
+@test "_is_playwright_spec rejects non-e2e spec files" {
+    run _is_playwright_spec "src/components/Button.spec.ts"
+    [ "$status" -eq 1 ]
+}
+
+# =============================================================================
+# PLAYWRIGHT SPEC EXCLUSION FROM JEST (claude-pipeline#41)
+# =============================================================================
+
+@test "run_test_loop excludes Playwright specs from Jest command" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-playwright-split
+
+    # Add both a Jest test and a Playwright spec
+    echo "test('unit', () => {});" > math.test.ts
+    mkdir -p tests/e2e
+    echo "import { test } from '@playwright/test';" > tests/e2e/login.spec.ts
+    git add math.test.ts tests/e2e/login.spec.ts
+    git commit -q -m "add mixed test types"
+
+    local prompt_file="$TEST_TMP/playwright_split_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"OK"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-playwright-split" "" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    # Jest command should contain the unit test
+    local jest_line
+    jest_line=$(echo "$captured" | grep "npx jest" || true)
+    [[ "$jest_line" == *"math.test.ts"* ]]
+    # Jest command should NOT contain the Playwright spec
+    [[ "$jest_line" != *"login.spec.ts"* ]]
+}
+
+@test "run_test_loop logs Playwright specs as excluded from Jest" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-playwright-log
+
+    mkdir -p tests/e2e
+    echo "import { test } from '@playwright/test';" > tests/e2e/smoke.spec.ts
+    echo "test('unit', () => {});" > util.test.ts
+    git add tests/e2e/smoke.spec.ts util.test.ts
+    git commit -q -m "add e2e and unit test"
+
+    run_stage() {
+        echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"OK"}'
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-playwright-log" "" "typescript"
+
+    # Check log for Playwright exclusion message
+    grep -q "Playwright specs detected" "$LOG_FILE"
+}
+
+# =============================================================================
+# BATS NON-BLOCKING IN MIXED SCOPE (claude-pipeline#41)
+# =============================================================================
+
+@test "run_test_loop does not include BATS in main test_command for mixed scope" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-mixed-no-bats
+
+    echo "export const x = 1;" > app.ts
+    echo "#!/bin/bash" > deploy.sh
+    git add app.ts deploy.sh
+    git commit -q -m "mixed changes"
+
+    local prompt_file="$TEST_TMP/mixed_no_bats_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"OK","bats_result":"passed","bats_summary":"OK"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-mixed-no-bats" "" "mixed"
+
+    local captured
+    captured=$(< "$prompt_file")
+    # STEP 1 (Jest) should NOT contain run-tests.sh or bats
+    local step1_cmd
+    step1_cmd=$(echo "$captured" | grep -A1 "STEP 1 —" | grep -v "STEP 1" || true)
+    [[ "$step1_cmd" != *"run-tests.sh"* ]] || [[ "$step1_cmd" != *"bats"* ]]
+    # But BATS should appear as STEP 1c (informational)
+    [[ "$captured" == *"STEP 1c"* ]]
+    [[ "$captured" == *"informational only"* ]]
+}
+
+@test "run_test_loop includes BATS section as non-blocking for mixed scope" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Must reference bats_section or bats_result
+    [[ "$func_def" == *"bats_section"* ]]
+    [[ "$func_def" == *"bats_result"* ]]
+}
+
+# =============================================================================
+# FILTERED CHANGED FILES IN VALIDATION (claude-pipeline#41)
+# =============================================================================
+
+@test "run_test_loop filters .claude/ files from validation scope" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-filtered-validation
+
+    echo "export const x = 1;" > app.ts
+    mkdir -p .claude/scripts
+    echo "#!/bin/bash" > .claude/scripts/helper.sh
+    git add app.ts .claude/scripts/helper.sh
+    git commit -q -m "app + pipeline"
+
+    local prompt_file="$TEST_TMP/filtered_validation_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"OK"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-filtered-validation" "" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    # Validation scope should contain app.ts but NOT .claude/ files
+    [[ "$captured" == *"app.ts"* ]]
+    [[ "$captured" != *".claude/scripts/helper.sh"* ]]
+}

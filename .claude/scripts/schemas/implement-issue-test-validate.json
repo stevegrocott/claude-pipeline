@@ -40,7 +40,9 @@
     },
     "validation_summary": {"type": "string"},
     "e2e_result": {"enum": ["passed", "failed", "skipped"]},
-    "e2e_summary": {"type": "string"}
+    "e2e_summary": {"type": "string"},
+    "bats_result": {"enum": ["passed", "failed", "skipped"]},
+    "bats_summary": {"type": "string"}
   },
   "required": ["result", "summary", "validation_result"]
 }

@@ -1352,6 +1352,38 @@ _matches_frontend_pattern() {
     return 1
 }
 
+# Filter a newline-delimited file list to only implementation-relevant files.
+# Excludes .claude/ pipeline files, docs/, and non-code config files from the
+# list passed to the test validation prompt.
+# Arguments:
+#   stdin - newline-delimited file list
+# Outputs:
+#   Filtered file list (newline-delimited)
+filter_implementation_files() {
+    grep -v -E '^\.claude/' \
+    | grep -v -E '^docs/' \
+    | grep -v -E '\.(md|json|yaml|yml|toml|lock|gitignore)$' \
+    || true
+}
+
+# Check if a file is a Playwright spec (lives in tests/e2e/ or similar E2E directories).
+# Arguments:
+#   $1 - file path
+# Returns:
+#   0 if Playwright spec, 1 otherwise
+_is_playwright_spec() {
+    local file="$1"
+    case "$file" in
+        tests/e2e/*.spec.*|test/e2e/*.spec.*|e2e/*.spec.*|**/e2e/*.spec.*) return 0 ;;
+    esac
+    # Also check if it's a .spec.ts file (not .test.ts) — Playwright convention
+    # Only flag as Playwright if in a known E2E directory
+    if [[ "$file" == *"/e2e/"*".spec."* ]]; then
+        return 0
+    fi
+    return 1
+}
+
 # Detect the scope of changes on the current branch vs the base branch.
 # Classifies changed files by extension to determine which test suite to run.
 # Arguments:
@@ -1388,6 +1420,8 @@ detect_change_scope() {
 
         case "$file" in
             *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) has_ts=true ;;
+            # Pipeline files (.claude/) are not application bash — skip them
+            .claude/*.sh|.claude/*.bats) ;;
             *.sh|*.bats) has_bash=true ;;
             # Config/docs: no tests needed
             *.md|*.json|*.yaml|*.yml|*.toml|*.env|*.lock|*.gitignore) ;;
@@ -1486,18 +1520,42 @@ run_test_loop() {
     # Pass them directly to Jest instead of relying on --changedSince's
     # dependency graph, which can miss or over-include files.
     # Exclude .integration.test.ts files (run separately).
+    # Split into Jest unit tests vs Playwright E2E specs.
     local changed_test_files=""
+    local jest_test_files=""
+    local playwright_test_files=""
     if [[ "$change_scope" == "typescript" || "$change_scope" == "mixed" || "$change_scope" == "ts-frontend" ]]; then
         changed_test_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null \
             | grep -E '\.test\.[jt]sx?$|\.spec\.[jt]sx?$' \
             | grep -v '\.integration\.test\.' \
             || true)
+
+        # Split: Playwright specs (in e2e/ directories) vs Jest unit tests
+        local file
+        while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            if _is_playwright_spec "$file"; then
+                playwright_test_files="${playwright_test_files:+$playwright_test_files
+}$file"
+            else
+                jest_test_files="${jest_test_files:+$jest_test_files
+}$file"
+            fi
+        done <<< "$changed_test_files"
+
+        if [[ -n "$playwright_test_files" ]]; then
+            log "Playwright specs detected (excluded from Jest): $(echo "$playwright_test_files" | tr '\n' ' ')"
+        fi
     fi
 
     local jest_command
-    if [[ -n "$changed_test_files" ]]; then
-        jest_command="npx jest --passWithNoTests $(echo "$changed_test_files" | tr '\n' ' ')"
-        log "Explicit changed test files: $(echo "$changed_test_files" | tr '\n' ' ')"
+    if [[ -n "$jest_test_files" ]]; then
+        jest_command="npx jest --passWithNoTests $(echo "$jest_test_files" | tr '\n' ' ')"
+        log "Explicit Jest test files: $(echo "$jest_test_files" | tr '\n' ' ')"
+    elif [[ -n "$changed_test_files" && -z "$jest_test_files" ]]; then
+        # All changed test files were Playwright specs — use changedSince fallback for Jest
+        jest_command="npx jest --passWithNoTests --changedSince=$safe_branch"
+        log "All changed test files are Playwright specs — falling back to --changedSince=$safe_branch for Jest"
     else
         jest_command="npx jest --passWithNoTests --changedSince=$safe_branch"
         log "No changed test files found — falling back to --changedSince=$safe_branch"
@@ -1518,15 +1576,20 @@ run_test_loop() {
             test_command="cd $safe_dir && $bash_test_command"
             ;;
         mixed)
-            test_command="cd $safe_dir && $jest_command && $bash_test_command"
+            # Mixed scope: run Jest for app code. BATS pipeline tests run
+            # separately as non-blocking (see bats_section below).
+            test_command="cd $safe_dir && $jest_command"
             ;;
     esac
 
-    # Build E2E command when configured and scope includes frontend
+    # Build E2E command when configured and scope includes frontend,
+    # OR when Playwright specs were found in the changed files
     local e2e_command=""
-    if [[ -n "${TEST_E2E_CMD:-}" ]] && [[ "$change_scope" == "frontend" || "$change_scope" == "ts-frontend" ]]; then
+    if [[ -n "${TEST_E2E_CMD:-}" ]] && { [[ "$change_scope" == "frontend" || "$change_scope" == "ts-frontend" ]] || [[ -n "$playwright_test_files" ]]; }; then
         e2e_command="$TEST_E2E_CMD"
         log "E2E testing enabled for $change_scope scope: $e2e_command"
+    elif [[ -n "$playwright_test_files" && -z "${TEST_E2E_CMD:-}" ]]; then
+        log "WARNING: Playwright specs found but TEST_E2E_CMD not configured — Playwright specs will be skipped"
     fi
 
     local prior_failure_sigs=""
@@ -1548,9 +1611,25 @@ run_test_loop() {
 
         # Compute explicit changed-file list (three-dot merge-base diff) for
         # validation scope. Recomputed each iteration since fix stages may
-        # add commits.
-        local changed_files
-        changed_files=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+        # add commits. Filter to implementation-relevant files only —
+        # exclude .claude/ pipeline files, docs, and non-code configs.
+        local changed_files_raw changed_files
+        changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+        changed_files=$(printf '%s\n' "$changed_files_raw" | filter_implementation_files)
+
+        # Build BATS section for mixed scope (informational only, non-blocking)
+        local bats_section=""
+        if [[ "$change_scope" == "mixed" || "$change_scope" == "bash" ]]; then
+            bats_section="STEP 1c — PIPELINE BATS TESTS (informational only, non-blocking)
+Run the pipeline BATS tests:
+cd $safe_dir && $bash_test_command
+
+Report pass/fail. BATS failures are INFORMATIONAL ONLY — they do NOT count as overall test failure.
+Include bats_result ('passed', 'failed', or 'skipped') and bats_summary in output.
+Do NOT set result to 'failed' based on BATS test failures alone.
+
+"
+        fi
 
         # Build validation section for the combined prompt
         local validation_section=""
@@ -1560,7 +1639,7 @@ If tests failed in Step 1, set validation_result to 'skipped' and skip this step
 
 Validate test comprehensiveness for issue #$ISSUE_NUMBER.
 
-CHANGED FILES (computed via git diff $safe_branch...HEAD --name-only):
+CHANGED FILES (implementation-relevant only, .claude/ and docs excluded):
 $changed_files
 
 ONLY validate tests for these specific files. Do NOT expand scope beyond this list.
@@ -1608,26 +1687,38 @@ Include e2e_result ('passed', 'failed', or 'skipped') and e2e_summary in output.
 "
         fi
 
+        # Build Playwright skip notice if specs were found but no E2E runner configured
+        local playwright_notice=""
+        if [[ -n "$playwright_test_files" && -z "${TEST_E2E_CMD:-}" ]]; then
+            playwright_notice="
+NOTE: The following Playwright E2E specs were found in changed files but TEST_E2E_CMD is not configured.
+These files are NOT run by Jest — they require a Playwright runner. Skipping them.
+Files: $(echo "$playwright_test_files" | tr '\n' ', ')
+"
+        fi
+
         local test_prompt="Run the test suite and validate test comprehensiveness in working directory $safe_dir.
 
-STEP 1 — TEST EXECUTION
+STEP 1 — TEST EXECUTION (Jest unit tests)
 Run the following command:
 $test_command
 
 Report pass/fail with test counts and failure details.
 If tests fail, set validation_result to 'skipped' (no point validating failing tests).
-
-${e2e_section}$validation_section
+${playwright_notice}
+${e2e_section}${bats_section}$validation_section
 
 Output both test results and validation findings in one structured response.
-- result: 'passed' or 'failed' (from test execution)
+- result: 'passed' or 'failed' (from Jest test execution — BATS failures do NOT affect this)
 - summary: overall summary suitable for an issue comment
 - validation_result: 'passed', 'failed', or 'skipped'
 - validation_issues: array of issues found (if any)
 - pre_existing_issues: array of pre-existing quality issues (informational only)
 - validation_summary: summary of validation findings
 - e2e_result: 'passed', 'failed', or 'skipped' (from E2E execution, if applicable)
-- e2e_summary: summary of E2E test findings (if applicable)"
+- e2e_summary: summary of E2E test findings (if applicable)
+- bats_result: 'passed', 'failed', or 'skipped' (from BATS pipeline tests, informational only)
+- bats_summary: summary of BATS test findings (informational only)"
 
         local test_result
         test_result=$(run_stage "test-iter-$test_iteration" "$test_prompt" "implement-issue-test-validate.json" "default" "$loop_complexity")
