@@ -26,7 +26,7 @@ PLATFORM_DIR="$SCRIPT_DIR/platform"
 
 # Timeouts and limits
 readonly MAX_QUALITY_ITERATIONS=5
-readonly MAX_TEST_ITERATIONS=10
+readonly MAX_TEST_ITERATIONS=7
 # Cap at 2: merged spec+code review per iteration makes each pass thorough
 # enough that a 3rd iteration rarely finds new issues, while saving ~15 min.
 readonly MAX_PR_REVIEW_ITERATIONS=2
@@ -1808,7 +1808,7 @@ $test_summary" "default"
             prior_failure_sigs="${prior_failure_sigs} ${failure_sig}"
             local sig_count
             sig_count=$(printf '%s' "$prior_failure_sigs" | tr ' ' '\n' | grep -c "^${failure_sig}$" || true)
-            if (( sig_count >= 3 )); then
+            if (( sig_count >= 2 )); then
                 log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Exiting loop."
                 comment_issue "Test Loop: Convergence Failure" "⚠️ Same test failures repeated $sig_count times. Aborting test-fix loop to prevent waste.
 
