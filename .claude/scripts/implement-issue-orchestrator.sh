@@ -1121,7 +1121,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             local cumulative_findings=""
             if [[ -f "$review_history_file" ]]; then
                 cumulative_findings=$(jq -r '
-                    [.[] | .issues[]? | .description] | unique | join("\n- ")
+                    [.[-2:] | .[] | .issues[]? | .description] | unique | join("\n- ")
                 ' "$review_history_file" 2>/dev/null || printf '')
             fi
 
