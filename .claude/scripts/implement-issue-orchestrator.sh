@@ -1182,7 +1182,11 @@ all_tasks_s_complexity() {
 
 # Get PR review configuration based on diff size.
 # Returns JSON: { "model": "...", "timeout": N, "max_iterations": N }
-# Small diffs get haiku/300s/1 iter; medium get sonnet/900s/2; large get sonnet/1800s/2.
+# Four tiers by diff line count:
+#   <20  lines  → haiku,  300s timeout, 1 iteration  (tiny)
+#   <50  lines  → haiku,  600s timeout, 1 iteration  (small)
+#   <200 lines  → sonnet, 900s timeout, 2 iterations (medium)
+#   200+ lines  → sonnet, 1800s timeout, 2 iterations (large)
 get_pr_review_config() {
     local diff_lines
     diff_lines=$(get_diff_line_count "$BASE_BRANCH")
