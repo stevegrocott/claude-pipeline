@@ -1018,7 +1018,7 @@ Output a summary of changes made."
 
             # If simplify reported no changes, skip it on the next iteration until a
             # fix stage runs (which may introduce new simplification opportunities).
-            if [[ "${simplify_summary,,}" == *"no changes"* ]]; then
+            if echo "$simplify_summary" | grep -qi "no changes"; then
                 skip_simplify=true
                 log "Simplify reported no changes — will skip simplify on next iteration"
             else
