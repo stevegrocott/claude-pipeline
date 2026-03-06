@@ -55,6 +55,7 @@ _stage_to_tier() {
 		code-review)    printf '%s' "standard" ;;
 		e2e-verify)     printf '%s' "light" ;;
 		fix-e2e)        printf '%s' "standard" ;;
+		fix-acceptance-test) printf '%s' "standard" ;;
 		complete)       printf '%s' "light" ;;
 		docs)           printf '%s' "light" ;;
 		acceptance-test) printf '%s' "light" ;;
@@ -94,7 +95,7 @@ _complexity_to_tier() {
 if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
 	readonly -a _STAGE_PREFIXES=(
 		acceptance-test spec-review code-review task-review validate-plan
-		parse-issue e2e-verify fix-e2e implement simplify complete pr-review pr-fix review test docs fix pr
+		parse-issue e2e-verify fix-e2e fix-acceptance-test implement simplify complete pr-review pr-fix review test docs fix pr
 	)
 fi
 
