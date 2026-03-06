@@ -30,6 +30,7 @@ readonly MAX_TEST_ITERATIONS=7
 # Cap at 2: merged spec+code review per iteration makes each pass thorough
 # enough that a 3rd iteration rarely finds new issues, while saving ~15 min.
 readonly MAX_PR_REVIEW_ITERATIONS=2
+readonly MAX_VALIDATION_FIX_ITERATIONS=2
 readonly RATE_LIMIT_BUFFER=60
 readonly RATE_LIMIT_DEFAULT_WAIT=3600
 
@@ -1510,6 +1511,7 @@ run_test_loop() {
 
     local loop_complete=false
     local test_iteration=0
+    local validation_fix_iteration=0
 
     log "Starting test loop after all tasks complete"
 
@@ -1855,6 +1857,14 @@ $test_summary" "default"
             log "Test loop complete on iteration $test_iteration (tests passed, validation: $validate_status)"
         else
             # Validation failed — fix quality issues
+            validation_fix_iteration=$((validation_fix_iteration + 1))
+
+            if (( validation_fix_iteration > MAX_VALIDATION_FIX_ITERATIONS )); then
+                log_error "Validation fix loop exceeded max iterations ($MAX_VALIDATION_FIX_ITERATIONS)"
+                set_final_state "max_iterations_validation_fix"
+                exit 2
+            fi
+
             comment_issue "Test Loop: Results ($test_iteration/$MAX_TEST_ITERATIONS)" "✅ **Tests:** passed
 🔄 **Validation:** $validate_status
 
@@ -1862,7 +1872,7 @@ $test_summary
 
 $validate_summary" "default"
 
-            log "Test validation found issues. Fixing..."
+            log "Test validation found issues. Fixing... (validation fix iteration $validation_fix_iteration/$MAX_VALIDATION_FIX_ITERATIONS)"
             local validate_issues
             validate_issues=$(printf '%s' "$test_result" | jq -r '
                 if .validation_issues then (.validation_issues | tostring)
