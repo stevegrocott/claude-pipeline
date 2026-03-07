@@ -72,6 +72,8 @@ Break the chosen approach into implementable tasks:
 
 **Before creating the issue, ask the user which epic to parent it under** using `AskUserQuestion`. Look up open epics in the project to offer relevant options. For Precis/KIKS, all issues must sit under KIKS-410 (the Precis initiative) within an appropriate epic. Present the most likely epics as options based on the research context (e.g., if the work is UI-related, suggest "KIKS-546 UI Enhancements").
 
+**Deploy Verification section (optional):** Include a `## Deploy Verification` section if the issue involves environment-specific bugs or requires deployment testing. This section guides the deploy-verify stage by specifying target environment, health endpoint, and custom verification logic. Include this for bugs that only reproduce in test/staging/production but not locally.
+
 Create the issue using the platform wrapper with `--parent` set to the chosen epic:
 
 ```bash
@@ -108,6 +110,12 @@ PLATFORM_DIR=".claude/scripts/platform"
 - [ ] `[agent-name]` **(L)** Description of task 3
 - [ ] `[default]` **(S)** Description of general task (e.g., tests, config)
 - [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured)
+
+## Deploy Verification
+[Include if this issue involves bugs in specific environments or requires deployment testing]
+- **Target environment:** [staging|test|nas|production]
+- **Health endpoint:** [full URL to health check endpoint, e.g., https://example.com/health]
+- **Verification command:** [optional — custom shell command to verify deployment, e.g., "curl -s https://example.com/api/status | jq .status"]
 
 ## Acceptance Criteria
 - [ ] AC1: [measurable criterion]
