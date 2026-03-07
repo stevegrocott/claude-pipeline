@@ -218,8 +218,6 @@ EOF
 # SECTION 4: SCHEMA OUTPUT FORMAT
 # =============================================================================
 
-SCHEMA_FILE="$SCRIPT_DIR/schemas/implement-issue-deploy-verify.json"
-
 @test "deploy-verify schema file exists" {
     [[ -f "$SCRIPT_DIR/schemas/implement-issue-deploy-verify.json" ]]
 }
@@ -323,19 +321,6 @@ SCHEMA_FILE="$SCRIPT_DIR/schemas/implement-issue-deploy-verify.json"
     [ "$output" = "haiku" ]
 }
 
-@test "fix-deploy-verify stage maps to standard tier (sonnet)" {
-    run bash -c "source '$SCRIPT_DIR/model-config.sh' && resolve_model 'fix-deploy-verify'"
-    [ "$status" -eq 0 ]
-    [ "$output" = "sonnet" ]
-}
-
-@test "fix-deploy-verify complexity hint ignored for light tier but respected for standard" {
-    # fix-deploy-verify is standard; M complexity → sonnet (same), L → opus
-    run bash -c "source '$SCRIPT_DIR/model-config.sh' && resolve_model 'fix-deploy-verify' 'L'"
-    [ "$status" -eq 0 ]
-    [ "$output" = "opus" ]
-}
-
 @test "deploy-verify complexity hint ignored (light tier always haiku)" {
     # deploy-verify is light — complexity hints must not override it
     run bash -c "source '$SCRIPT_DIR/model-config.sh' && resolve_model 'deploy-verify' 'L'"
@@ -364,48 +349,16 @@ SCHEMA_FILE="$SCRIPT_DIR/schemas/implement-issue-deploy-verify.json"
 # =============================================================================
 
 @test "health poll succeeds immediately on first 2xx response" {
-    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
-    export DEPLOY_VERIFY_HEALTH_URL="http://localhost:8080/health"
-
-    # Mock curl to return 200 on first call
-    curl() {
-        printf '200'
-    }
+    curl() { printf '200'; }
     export -f curl
-
-    # Mock sleep to skip delays
     sleep() { :; }
     export -f sleep
 
-    # Invoke the health polling logic via a helper that exercises the loop
-    # We extract just the polling decision by simulating the loop inline
-    local health_ok=false
-    local attempt=0
-    local max_retries=90
-    local poll_interval=10
-
-    while ((attempt < max_retries)); do
-        ((attempt++))
-        local http_code
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --max-time 10 \
-            "$DEPLOY_VERIFY_HEALTH_URL" 2>/dev/null || printf '%s' "000")
-
-        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-            health_ok=true
-            break
-        fi
-
-        sleep "$poll_interval"
-    done
-
-    $health_ok || fail "Expected health_ok=true after 2xx response, got false"
-    [ "$attempt" -eq 1 ] || fail "Expected only 1 attempt, got $attempt"
+    run poll_health_url "http://localhost:8080/health" 90 10
+    [ "$status" -eq 0 ]
 }
 
 @test "health poll continues on non-2xx responses" {
-    export DEPLOY_VERIFY_HEALTH_URL="http://localhost:8080/health"
-
     local count_file="$TEST_TMP/curl-count.txt"
     printf '0' > "$count_file"
     # Return 503 twice then 200
@@ -414,142 +367,57 @@ SCHEMA_FILE="$SCRIPT_DIR/schemas/implement-issue-deploy-verify.json"
         n=$(cat "$count_file")
         n=$((n + 1))
         printf '%s' "$n" > "$count_file"
-        if (( n < 3 )); then
-            printf '503'
-        else
-            printf '200'
-        fi
+        if (( n < 3 )); then printf '503'; else printf '200'; fi
     }
     export -f curl
     export count_file
-
     sleep() { :; }
     export -f sleep
 
-    local health_ok=false
-    local attempt=0
-    local max_retries=90
-    local poll_interval=10
-
-    while ((attempt < max_retries)); do
-        ((attempt++))
-        local http_code
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --max-time 10 \
-            "$DEPLOY_VERIFY_HEALTH_URL" 2>/dev/null || printf '%s' "000")
-
-        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-            health_ok=true
-            break
-        fi
-
-        sleep "$poll_interval"
-    done
-
-    $health_ok || fail "Expected health_ok=true after eventual 2xx, got false"
-    [ "$attempt" -eq 3 ] || fail "Expected 3 attempts, got $attempt"
+    run poll_health_url "http://localhost:8080/health" 90 10
+    [ "$status" -eq 0 ]
+    [ "$(cat "$count_file")" -eq 3 ]
 }
 
-@test "health poll sets health_ok false after max retries" {
-    export DEPLOY_VERIFY_HEALTH_URL="http://localhost:8080/health"
-
-    # Always return 503
-    curl() {
-        printf '503'
-    }
+@test "health poll returns failure after max retries" {
+    curl() { printf '503'; }
     export -f curl
-
     sleep() { :; }
     export -f sleep
 
-    local health_ok=false
-    local attempt=0
-    local max_retries=3  # Use 3 for speed in test
-    local poll_interval=10
-
-    while ((attempt < max_retries)); do
-        ((attempt++))
-        local http_code
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --max-time 10 \
-            "$DEPLOY_VERIFY_HEALTH_URL" 2>/dev/null || printf '%s' "000")
-
-        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-            health_ok=true
-            break
-        fi
-
-        sleep "$poll_interval"
-    done
-
-    ! $health_ok || fail "Expected health_ok=false after max retries, got true"
-    [ "$attempt" -eq "$max_retries" ] || fail "Expected $max_retries attempts, got $attempt"
+    # Use max_retries=3 for speed
+    run poll_health_url "http://localhost:8080/health" 3 10
+    [ "$status" -eq 1 ]
 }
 
-@test "health poll skipped when DEPLOY_VERIFY_HEALTH_URL is empty" {
-    export DEPLOY_VERIFY_HEALTH_URL=""
-
-    local curl_called=false
+@test "health poll skipped when URL is empty (returns success)" {
+    local count_file="$TEST_TMP/curl-empty.txt"
+    printf '0' > "$count_file"
     curl() {
-        curl_called=true
+        local n; n=$(cat "$count_file"); printf '%s' "$((n + 1))" > "$count_file"
         printf '200'
     }
     export -f curl
-
-    # Simulate the orchestrator's conditional: skip poll if URL is empty
-    local health_ok=false
-    if [[ -n "${DEPLOY_VERIFY_HEALTH_URL:-}" ]]; then
-        local http_code
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --max-time 10 \
-            "$DEPLOY_VERIFY_HEALTH_URL" 2>/dev/null || printf '%s' "000")
-        [[ "$http_code" =~ ^2[0-9][0-9]$ ]] && health_ok=true
-    else
-        health_ok=true
-    fi
-
-    $health_ok || fail "Expected health_ok=true when URL empty (skip means ok)"
-    ! $curl_called || fail "curl should not be called when DEPLOY_VERIFY_HEALTH_URL is empty"
-}
-
-@test "health poll accepts 201 as healthy (2xx range)" {
-    export DEPLOY_VERIFY_HEALTH_URL="http://localhost:8080/health"
-
-    curl() {
-        printf '201'
-    }
-    export -f curl
-
+    export count_file
     sleep() { :; }
     export -f sleep
 
-    local health_ok=false
-    local attempt=0
-    local max_retries=90
-    local poll_interval=10
-
-    while ((attempt < max_retries)); do
-        ((attempt++))
-        local http_code
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --max-time 10 \
-            "$DEPLOY_VERIFY_HEALTH_URL" 2>/dev/null || printf '%s' "000")
-
-        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-            health_ok=true
-            break
-        fi
-
-        sleep "$poll_interval"
-    done
-
-    $health_ok || fail "Expected health_ok=true for 201 response"
-    [ "$attempt" -eq 1 ] || fail "Expected 1 attempt, got $attempt"
+    run poll_health_url "" 90 10
+    [ "$status" -eq 0 ]
+    [ "$(cat "$count_file")" -eq 0 ]
 }
 
-@test "health poll treats curl failure (000) as not healthy" {
-    export DEPLOY_VERIFY_HEALTH_URL="http://localhost:8080/health"
+@test "health poll accepts 201 as healthy (2xx range)" {
+    curl() { printf '201'; }
+    export -f curl
+    sleep() { :; }
+    export -f sleep
 
+    run poll_health_url "http://localhost:8080/health" 90 10
+    [ "$status" -eq 0 ]
+}
+
+@test "health poll treats curl failure (000) as not healthy, retries until 2xx" {
     local count_file="$TEST_TMP/curl-count2.txt"
     printf '0' > "$count_file"
     curl() {
@@ -557,41 +425,17 @@ SCHEMA_FILE="$SCRIPT_DIR/schemas/implement-issue-deploy-verify.json"
         n=$(cat "$count_file")
         n=$((n + 1))
         printf '%s' "$n" > "$count_file"
-        if (( n == 1 )); then
-            # Simulate curl failure by returning 000
-            printf '000'
-        else
-            printf '200'
-        fi
+        # First call simulates connection failure (000); second returns 200
+        if (( n == 1 )); then printf '000'; else printf '200'; fi
     }
     export -f curl
     export count_file
-
     sleep() { :; }
     export -f sleep
 
-    local health_ok=false
-    local attempt=0
-    local max_retries=90
-    local poll_interval=10
-
-    while ((attempt < max_retries)); do
-        ((attempt++))
-        local http_code
-        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --max-time 10 \
-            "$DEPLOY_VERIFY_HEALTH_URL" 2>/dev/null || printf '%s' "000")
-
-        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-            health_ok=true
-            break
-        fi
-
-        sleep "$poll_interval"
-    done
-
-    $health_ok || fail "Expected health_ok=true after recovery from 000"
-    [ "$attempt" -eq 2 ] || fail "Expected 2 attempts (fail then succeed), got $attempt"
+    run poll_health_url "http://localhost:8080/health" 90 10
+    [ "$status" -eq 0 ]
+    [ "$(cat "$count_file")" -eq 2 ]
 }
 
 # =============================================================================

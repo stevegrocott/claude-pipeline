@@ -1406,6 +1406,47 @@ should_run_deploy_verify() {
     return 1
 }
 
+# Poll a health URL until a 2xx response is received or max_retries are exhausted.
+# Returns 0 on success (2xx received, or URL is empty — skip means healthy).
+# Returns 1 when all retries are exhausted without a 2xx.
+#
+# Arguments:
+#   $1 - health URL (empty string = skip poll, return 0 immediately)
+#   $2 - max retries (default: 90)
+#   $3 - poll interval in seconds (default: 10)
+poll_health_url() {
+    local url="$1"
+    local max_retries="${2:-90}"
+    local poll_interval="${3:-10}"
+
+    # Empty URL means no health check configured — treat as healthy
+    if [[ -z "$url" ]]; then
+        return 0
+    fi
+
+    local attempt=0
+    while ((attempt < max_retries)); do
+        ((attempt++))
+        local http_code
+        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            --max-time 10 \
+            "$url" 2>/dev/null || printf '%s' "000")
+
+        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+            log "Health check passed (HTTP $http_code) on attempt $attempt"
+            return 0
+        fi
+
+        if ((attempt % 6 == 0)); then
+            log "Health poll attempt $attempt/$max_retries — HTTP $http_code"
+        fi
+
+        sleep "$poll_interval"
+    done
+
+    return 1
+}
+
 # Check if all tasks in status.json are S-complexity.
 # Returns:
 #   0 if all tasks are S-complexity (docs can be skipped)
@@ -2925,48 +2966,31 @@ Investigate the root cause and fix the issue. Commit your changes."
                 comment_issue "Deploy Verify: Failed" \
                     "❌ Deploy command \`$DEPLOY_VERIFY_CMD\` exited with code $deploy_exit. Skipping health poll and verification." \
                     "default"
+                # Deploy failure is intentionally non-blocking: the pipeline continues
+                # to the PR stage so the work is not lost. The failure surfaces via
+                # the issue comment above; no retry loop is triggered.
                 set_stage_completed "deploy_verify"
             else
                 log "Deploy command succeeded"
 
-                # Poll health URL if configured
+                # Poll health URL if configured; poll_health_url returns 0 if the
+                # URL is empty (skip = healthy) or a 2xx response is received.
+                local max_retries=90
+                local poll_interval=10
                 local health_ok=false
                 if [[ -n "${DEPLOY_VERIFY_HEALTH_URL:-}" ]]; then
-                    log "Polling health URL: $DEPLOY_VERIFY_HEALTH_URL (10s intervals, 90 retries max)"
-                    local attempt=0
-                    local max_retries=90
-                    local poll_interval=10
-
-                    while ((attempt < max_retries)); do
-                        ((attempt++))
-                        local http_code
-                        http_code=$(curl -s -o /dev/null -w '%{http_code}' \
-                            --max-time 10 \
-                            "$DEPLOY_VERIFY_HEALTH_URL" 2>/dev/null || printf '%s' "000")
-
-                        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
-                            log "Health check passed (HTTP $http_code) on attempt $attempt"
-                            health_ok=true
-                            break
-                        fi
-
-                        if ((attempt % 6 == 0)); then
-                            log "Health poll attempt $attempt/$max_retries — HTTP $http_code"
-                        fi
-
-                        sleep "$poll_interval"
-                    done
-
-                    if ! $health_ok; then
-                        log_error "Health check failed after $max_retries attempts ($(( max_retries * poll_interval / 60 )) min)"
-                        comment_issue "Deploy Verify: Health Timeout" \
-                            "❌ Health endpoint \`$DEPLOY_VERIFY_HEALTH_URL\` did not return 2xx after $max_retries attempts ($(( max_retries * poll_interval / 60 )) min). Deployment may have failed." \
-                            "default"
-                        set_stage_completed "deploy_verify"
-                    fi
+                    log "Polling health URL: $DEPLOY_VERIFY_HEALTH_URL (${poll_interval}s intervals, $max_retries retries max)"
                 else
                     log "No DEPLOY_VERIFY_HEALTH_URL configured — skipping health poll"
+                fi
+                if poll_health_url "${DEPLOY_VERIFY_HEALTH_URL:-}" "$max_retries" "$poll_interval"; then
                     health_ok=true
+                else
+                    log_error "Health check failed after $max_retries attempts ($(( max_retries * poll_interval / 60 )) min)"
+                    comment_issue "Deploy Verify: Health Timeout" \
+                        "❌ Health endpoint \`$DEPLOY_VERIFY_HEALTH_URL\` did not return 2xx after $max_retries attempts ($(( max_retries * poll_interval / 60 )) min). Deployment may have failed." \
+                        "default"
+                    set_stage_completed "deploy_verify"
                 fi
 
                 # Run verification prompt if health is OK
