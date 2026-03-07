@@ -29,6 +29,7 @@ TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
 # the orchestrator polls it at 10 s intervals for up to 15 min (90 retries).
 DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD:-}"
 DEPLOY_VERIFY_HEALTH_URL="${DEPLOY_VERIFY_HEALTH_URL:-}"
+DEPLOY_VERIFY_TIMEOUT_SECS="${DEPLOY_VERIFY_TIMEOUT_SECS:-900}"  # Max seconds to poll health URL (default 15 min)
 
 # Claude CLI (resolve path for non-interactive shells where aliases aren't available)
 if [[ -z "${CLAUDE_CLI:-}" ]]; then

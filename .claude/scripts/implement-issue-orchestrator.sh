@@ -2349,7 +2349,7 @@ Log directory: \`$LOG_BASE\`"
         # Format: - [ ] `[agent-name]` Task description
         log "Parsing implementation tasks from issue body..."
         local tasks_section
-        tasks_section=$(printf '%s' "$issue_body" | sed -n '/^## Implementation Tasks/,/^## /p' | sed '$d')
+        tasks_section=$(printf '%s' "$issue_body" | awk '/^## Implementation Tasks/{found=1; next} found && /^## /{exit} found{print}')
 
         if [[ -z "$tasks_section" ]]; then
             log_error "No '## Implementation Tasks' section found in issue #$ISSUE_NUMBER"
@@ -2872,7 +2872,7 @@ CHANGED API ROUTE FILES:
 $changed_route_files
 
 ACCEPTANCE CRITERIA (from issue):
-$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>/dev/null | jq -r '.body' | sed -n '/^## Acceptance Criteria/,/^## /p' | sed '\$d')
+$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>/dev/null | jq -r '.body' | awk '/^## Acceptance Criteria/{found=1; next} found && /^## /{exit} found{print}')
 
 STEPS:
 1. Check if Docker containers are running (docker compose ps or docker-compose ps)
@@ -2944,9 +2944,11 @@ Investigate the root cause and fix the issue. Commit your changes."
         if ! should_run_deploy_verify "$ISSUE_NUMBER"; then
             log "Skipping deploy_verify stage: gate conditions not met"
             set_stage_started "deploy_verify"
-            comment_issue "Deploy Verify: Skipped" \
-                "⏭️ Deploy verification skipped (no \`DEPLOY_VERIFY_CMD\` configured or no \`env:*\` label / \`## Deploy Verification\` section)." \
-                "default"
+            if [[ -n "${DEPLOY_VERIFY_CMD:-}" ]]; then
+                comment_issue "Deploy Verify: Skipped" \
+                    "⏭️ Deploy verification skipped (no \`env:*\` label or \`## Deploy Verification\` section found)." \
+                    "default"
+            fi
             set_stage_completed "deploy_verify"
         else
             set_stage_started "deploy_verify"
@@ -2975,8 +2977,8 @@ Investigate the root cause and fix the issue. Commit your changes."
 
                 # Poll health URL if configured; poll_health_url returns 0 if the
                 # URL is empty (skip = healthy) or a 2xx response is received.
-                local max_retries=90
                 local poll_interval=10
+                local max_retries=$(( ${DEPLOY_VERIFY_TIMEOUT_SECS:-900} / poll_interval ))
                 local health_ok=false
                 if [[ -n "${DEPLOY_VERIFY_HEALTH_URL:-}" ]]; then
                     log "Polling health URL: $DEPLOY_VERIFY_HEALTH_URL (${poll_interval}s intervals, $max_retries retries max)"
@@ -3001,7 +3003,7 @@ Investigate the root cause and fix the issue. Commit your changes."
                     local deploy_verify_section=""
                     local issue_body_file="$LOG_BASE/context/issue-body.md"
                     if [[ -f "$issue_body_file" ]]; then
-                        deploy_verify_section=$(sed -n '/^## Deploy Verification/,/^## /p' "$issue_body_file" | sed '$d')
+                        deploy_verify_section=$(awk '/^## Deploy Verification/{found=1; next} found && /^## /{exit} found{print}' "$issue_body_file")
                     fi
 
                     local deploy_verify_prompt="Verify the deployment for issue #$ISSUE_NUMBER against the live environment.
@@ -3012,7 +3014,7 @@ DEPLOYED ENVIRONMENT:
 - Health status: passed
 
 ISSUE ACCEPTANCE CRITERIA:
-$(sed -n '/^## Acceptance Criteria/,/^## /p' "$issue_body_file" 2>/dev/null | sed '$d' || printf '%s' '(not found)')
+$(awk '/^## Acceptance Criteria/{found=1; next} found && /^## /{exit} found{print}' "$issue_body_file" 2>/dev/null || printf '%s' '(not found)')
 
 DEPLOY VERIFICATION INSTRUCTIONS:
 ${deploy_verify_section:-No specific deploy verification instructions in the issue. Verify the deployment is functional by checking health endpoints and basic functionality.}

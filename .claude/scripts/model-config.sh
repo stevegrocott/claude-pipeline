@@ -56,6 +56,7 @@ _stage_to_tier() {
 		e2e-verify)     printf '%s' "light" ;;
 		fix-e2e)        printf '%s' "standard" ;;
 		fix-acceptance-test) printf '%s' "standard" ;;
+		fix-deploy-verify) printf '%s' "standard" ;;
 		deploy-verify)  printf '%s' "light" ;;
 		complete)       printf '%s' "light" ;;
 		docs)           printf '%s' "light" ;;
@@ -96,7 +97,7 @@ _complexity_to_tier() {
 if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
 	readonly -a _STAGE_PREFIXES=(
 		fix-acceptance-test acceptance-test validate-plan
-		deploy-verify spec-review code-review task-review parse-issue e2e-verify
+		fix-deploy-verify deploy-verify spec-review code-review task-review parse-issue e2e-verify
 		pr-review implement simplify complete pr-fix fix-e2e review test docs fix pr
 	)
 fi
