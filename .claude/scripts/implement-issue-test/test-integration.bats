@@ -72,6 +72,77 @@ teardown() {
 }
 
 # =============================================================================
+# PR NUMBER RECOVERY — find-mr.sh + gh pr list FALLBACK
+# =============================================================================
+
+@test "orchestrator has gh pr list fallback for PR number recovery" {
+    local main_def
+    main_def=$(declare -f main)
+    [[ "$main_def" == *"gh pr list"* ]] || \
+        fail "gh pr list fallback not found in orchestrator main"
+}
+
+@test "orchestrator tries find-mr.sh before gh pr list for PR number recovery" {
+    local main_def
+    main_def=$(declare -f main)
+    [[ "$main_def" == *"find-mr.sh"* ]] || \
+        fail "find-mr.sh primary PR recovery not found in orchestrator"
+    [[ "$main_def" == *"gh pr list"* ]] || \
+        fail "gh pr list fallback not found in orchestrator"
+    # find-mr.sh must appear before gh pr list (primary before fallback)
+    local find_pos gh_pos
+    find_pos=$(printf '%s' "$main_def" | grep -b -o "find-mr.sh" | head -1 | cut -d: -f1)
+    gh_pos=$(printf '%s' "$main_def" | grep -b -o "gh pr list" | head -1 | cut -d: -f1)
+    (( find_pos < gh_pos )) || \
+        fail "find-mr.sh (pos $find_pos) should appear before gh pr list (pos $gh_pos)"
+}
+
+@test "orchestrator validates pr_number before accepting it from structured output" {
+    local main_def
+    main_def=$(declare -f main)
+    # The validation regex must reject non-numeric pr_number values
+    [[ "$main_def" == *'^[0-9]+'* ]] || \
+        fail "Numeric pr_number validation regex not found in orchestrator"
+}
+
+# =============================================================================
+# GRADUATED RETRY MODEL ESCALATION (implement task loop)
+# =============================================================================
+
+@test "orchestrator implements graduated model escalation on task retry" {
+    local main_def
+    main_def=$(declare -f main)
+    [[ "$main_def" == *"_next_model_up"* ]] || \
+        fail "Model escalation (_next_model_up) not found in implement task retry"
+    [[ "$main_def" == *"review_attempts"* ]] || \
+        fail "Retry attempt counter (review_attempts) not found in implement task loop"
+}
+
+@test "orchestrator escalates timeout by 20% on implement task retry" {
+    local main_def
+    main_def=$(declare -f main)
+    # The 20% timeout increase: base_timeout * 120 / 100
+    [[ "$main_def" == *"120 / 100"* ]] || \
+        fail "20%% timeout escalation formula (base_timeout * 120 / 100) not found in main"
+}
+
+@test "orchestrator only escalates model on retry not on first attempt" {
+    local main_def
+    main_def=$(declare -f main)
+    # review_attempts > 1 guards the escalation so first attempt uses base model
+    [[ "$main_def" == *"review_attempts > 1"* ]] || \
+        fail "Guard condition (review_attempts > 1) for model escalation not found"
+}
+
+@test "orchestrator logs model escalation on task retry" {
+    local main_def
+    main_def=$(declare -f main)
+    # A log message must accompany the escalation for observability
+    [[ "$main_def" == *"escalating"* ]] || \
+        fail "Escalation log message not found in implement task retry"
+}
+
+# =============================================================================
 # PARSE-ISSUE SCHEMA
 # =============================================================================
 

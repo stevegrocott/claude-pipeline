@@ -450,3 +450,128 @@ teardown() {
     grep -q "Complexity: L" "$LOG_FILE" || \
         fail "Complexity hint was not logged. Log: $(cat "$LOG_FILE")"
 }
+
+# =============================================================================
+# TIMEOUT ESCALATION — STRUCTURED OUTPUT RECOVERY ON FIRST TIMEOUT
+# =============================================================================
+
+@test "run_stage uses structured output from timed-out first call without retrying" {
+    # When the first call exits 124 but already emitted structured_output,
+    # run_stage must use it and return 0 without making a second call.
+    local calls_file="$TEST_TMP/timeout-calls.txt"
+    timeout() {
+        local t="$1"; shift
+        printf 'CALLED\n' >> "$calls_file"
+        echo '{"result":"partial","structured_output":{"status":"success","data":"early"}}'
+        return 124
+    }
+    export -f timeout
+    export calls_file
+
+    local result
+    result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
+    [ -n "$result" ] || fail "run_stage returned no JSON output"
+
+    local status_val
+    status_val=$(printf '%s' "$result" | jq -r '.status')
+    [ "$status_val" = "success" ] || \
+        fail "Expected status=success, got: $status_val (result: $result)"
+
+    # Only one timeout call — no retry should have happened
+    local call_count
+    call_count=$(wc -l < "$calls_file")
+    (( call_count == 1 )) || \
+        fail "Expected 1 timeout call (no retry), got $call_count"
+}
+
+# =============================================================================
+# MODEL ESCALATION — error_max_turns
+# =============================================================================
+
+@test "run_stage escalates model when output subtype is error_max_turns" {
+    # BATS runs each @test in a forked subprocess — re-source model-config to
+    # make readonly arrays available (same pattern as MODEL SELECTION tests).
+    source "$TEST_TMP/model-config.sh"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    # test-iter-1 resolves to haiku; haiku escalates to sonnet on error_max_turns
+    run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || fail "Expected 2 claude calls, got $final_count"
+
+    # Second call must use escalated model (sonnet)
+    local second_call_args
+    second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
+    [[ "$second_call_args" == *"--model sonnet"* ]] || \
+        fail "Expected --model sonnet in escalated retry. Args: $second_call_args"
+}
+
+@test "run_stage fails with max_turns_exhausted_at_ceiling when opus hits error_max_turns" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        # Always return error_max_turns — opus is at ceiling, cannot escalate
+        echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+    }
+    export -f timeout
+
+    # implement stage resolves to opus (ceiling model)
+    run run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"max_turns_exhausted_at_ceiling"* ]] || \
+        fail "Expected ceiling error in output. Got: $output"
+}
+
+@test "run_stage does not include max-turns cap on error_max_turns escalation retry" {
+    source "$TEST_TMP/model-config.sh"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    # haiku test stage gets --max-turns on first call; escalated retry must omit it
+    run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
+
+    local second_call_args
+    second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
+    [[ -n "$second_call_args" ]] || fail "No second call was made"
+    [[ "$second_call_args" != *"--max-turns"* ]] || \
+        fail "Escalated retry should not include --max-turns. Args: $second_call_args"
+}
