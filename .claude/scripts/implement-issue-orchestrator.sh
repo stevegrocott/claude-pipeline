@@ -1226,7 +1226,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
                     [$root.issues[] | .description] as $current |
                     [$history[0][] | .issues[]? | .description] as $prior |
                     [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
-                    ($repeats | length * 100 / $current_count | floor)
+                    ($repeats | length * 100 / $current_count)
                 end
             ' 2>/dev/null || echo 0)
             repeat_issues=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
