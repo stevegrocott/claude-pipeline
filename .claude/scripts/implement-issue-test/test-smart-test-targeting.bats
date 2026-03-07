@@ -1349,3 +1349,92 @@ teardown() {
     [[ "$captured" == *"app.ts"* ]]
     [[ "$captured" != *".claude/scripts/helper.sh"* ]]
 }
+
+# =============================================================================
+# COMPLEXITY PASSTHROUGH TO FIX STAGES IN TEST LOOP
+# =============================================================================
+
+@test "run_test_loop passes complexity arg to fix-tests run_stage call" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-fix-tests-complexity
+
+    # Add a test file so scope is 'typescript' (not config-only)
+    echo "test('x', () => expect(1).toBe(1));" > app.test.ts
+    git add app.test.ts
+    git commit -q -m "add test file"
+
+    local complexity_file="$TEST_TMP/fix_tests_complexity"
+    export complexity_file
+
+    run_stage() {
+        local stage_name="$1"
+        local complexity_arg="$5"
+        case "$stage_name" in
+            test-iter-*)
+                # Return failed with a PR-introduced failure to trigger fix-tests path
+                echo '{"result":"failed","summary":"1 test failed","failures":[{"test":"app.test.ts > x","error":"Expected 2"}],"validation_result":"skipped","validation_summary":""}'
+                ;;
+            fix-tests-iter-*)
+                # Capture the complexity arg passed to run_stage
+                printf '%s' "$complexity_arg" > "$complexity_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Pass complexity "L" as arg 5 to run_test_loop.
+    # Run in a subshell so exit 2 (convergence detection) does not kill the test.
+    # The fix-tests stage runs before convergence triggers, so the complexity file is written.
+    ( run_test_loop "$TEST_TMP/repo" "feature-fix-tests-complexity" "" "typescript" "L" ) || true
+
+    [[ -f "$complexity_file" ]] || fail "fix-tests stage was not called"
+    local captured_complexity
+    captured_complexity=$(< "$complexity_file")
+    [ "$captured_complexity" = "L" ] || fail "Expected complexity 'L' passed to fix-tests run_stage, got '$captured_complexity'"
+}
+
+@test "run_test_loop passes complexity arg to fix-test-quality run_stage call" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-fix-test-quality-complexity
+
+    # Add a test file so scope is 'typescript' (not config-only)
+    echo "test('y', () => expect(1).toBe(1));" > svc.test.ts
+    git add svc.test.ts
+    git commit -q -m "add test file"
+
+    local complexity_file="$TEST_TMP/fix_test_quality_complexity"
+    export complexity_file
+
+    run_stage() {
+        local stage_name="$1"
+        local complexity_arg="$5"
+        case "$stage_name" in
+            test-iter-*)
+                # Tests passed but validation failed — triggers fix-test-quality path
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"failed","validation_summary":"Missing assertions","validation_issues":"Add assertion coverage"}'
+                ;;
+            fix-test-quality-iter-*)
+                # Capture the complexity arg passed to run_stage
+                printf '%s' "$complexity_arg" > "$complexity_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Pass complexity "M" as arg 5 to run_test_loop.
+    # Run in a subshell so exit 2 (max iterations) does not kill the test.
+    ( run_test_loop "$TEST_TMP/repo" "feature-fix-test-quality-complexity" "" "typescript" "M" ) || true
+
+    [[ -f "$complexity_file" ]] || fail "fix-test-quality stage was not called"
+    local captured_complexity
+    captured_complexity=$(< "$complexity_file")
+    [ "$captured_complexity" = "M" ] || fail "Expected complexity 'M' passed to fix-test-quality run_stage, got '$captured_complexity'"
+}

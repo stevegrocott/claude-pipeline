@@ -1252,6 +1252,8 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             verify_on_feature_branch "$loop_branch" || true
 
+            # Pass loop_complexity so run_stage can route model selection by task
+            # size: S→haiku, M→sonnet, L→opus (via resolve_model in run_stage).
             local fix_result
             fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
@@ -2036,6 +2038,8 @@ Output a summary of fixes applied."
 
             verify_on_feature_branch "$loop_branch" || true
 
+            # Pass loop_complexity so run_stage can route model selection by
+            # task size: S→haiku, M→sonnet, L→opus (via resolve_model).
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
