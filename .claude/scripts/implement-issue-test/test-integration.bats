@@ -455,6 +455,15 @@ teardown() {
     [[ "$func_def" != *'set_final_state "test_convergence_failure"'* ]]
 }
 
+@test "test loop convergence log_warn includes specific failure descriptions not just count" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # The log_warn call must reference failure_summaries (specific descriptions)
+    # not just sig_count (the repeat count)
+    grep -q 'log_warn.*failure_summaries' <<< "$func_def"
+}
+
 @test "test loop respects MAX_TEST_ITERATIONS" {
     local func_def
     func_def=$(declare -f run_test_loop)

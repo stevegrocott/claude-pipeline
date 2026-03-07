@@ -1212,21 +1212,33 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
 
         # Convergence detection: check if >50% of issues are repeats from prior iterations
         if [[ -f "$review_history_file" ]] && (( loop_iteration > 1 )); then
-            local repeat_ratio
-            repeat_ratio=$(printf '%s' "$review_result" | jq --slurpfile history "$review_history_file" '
+            local repeat_ratio repeat_issues
+            read -r repeat_ratio repeat_issues < <(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
                 . as $root |
                 ($root.issues // []) | length as $current_count |
-                if $current_count == 0 then 0
+                if $current_count == 0 then "0 "
                 else
                     [$root.issues[] | .description] as $current |
                     [$history[0][] | .issues[]? | .description] as $prior |
-                    [$current[] | select(. as $c | $prior | any(. == $c))] | length as $repeats |
-                    ($repeats * 100 / $current_count)
+                    [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
+                    ($repeats | length * 100 / $current_count | floor) as $ratio |
+                    ($repeats | join("\n- ")) as $repeat_list |
+                    "\($ratio) \($repeat_list)"
                 end
-            ' 2>/dev/null || printf '0')
+            ' 2>/dev/null || printf '0 ')
 
             if (( repeat_ratio > 33 )); then
-                log_warn "Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Exiting loop."
+                log_warn "Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Exiting loop.${repeat_issues:+ Repeating: ${repeat_issues}}"
+
+                local convergence_body="⚠️ Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Breaking loop to prevent waste."
+                if [[ -n "$repeat_issues" ]]; then
+                    convergence_body+="
+
+**Repeating Issues:**
+- $repeat_issues"
+                fi
+
+                comment_issue "Quality Loop: Convergence Failure ($stage_prefix)" "$convergence_body" "code-reviewer"
                 loop_approved=true
                 break
             fi
@@ -1991,8 +2003,15 @@ $test_summary" "default"
             local sig_count
             sig_count=$(printf '%s' "$prior_failure_sigs" | tr ' ' '\n' | grep -c "^${failure_sig}$" || true)
             if (( sig_count >= 2 )); then
-                log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Breaking loop (soft exit)."
+                # Extract failure descriptions for both log and comment message
+                local failure_summaries
+                failure_summaries=$(printf '%s' "$pr_failures" | jq -r '.[] | "- \(.title): \(.description)"' 2>/dev/null || printf '')
+                log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Breaking loop (soft exit).${failure_summaries:+ Failures: ${failure_summaries}}"
+
                 comment_issue "Test Loop: Convergence Failure (soft exit)" "⚠️ Same test failures repeated $sig_count times. Breaking test-fix loop to prevent waste. Pipeline will continue to docs/PR/complete stages.
+
+**Repeated Failures:**
+${failure_summaries}
 
 $test_summary" "default"
                 set_final_state "test_convergence_soft_exit"
