@@ -1650,6 +1650,7 @@ all_failures_environment_related() {
 #   $5 - complexity hint for model selection (S/M/L, optional)
 # Returns:
 #   0 on success (tests pass and validated)
+#   0 on convergence soft exit (loop_complete=true, pipeline continues)
 #   2 on max iterations exceeded (calls exit 2)
 run_test_loop() {
     local loop_dir="$1"
@@ -1979,12 +1980,13 @@ $test_summary" "default"
             local sig_count
             sig_count=$(printf '%s' "$prior_failure_sigs" | tr ' ' '\n' | grep -c "^${failure_sig}$" || true)
             if (( sig_count >= 2 )); then
-                log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Exiting loop."
-                comment_issue "Test Loop: Convergence Failure" "⚠️ Same test failures repeated $sig_count times. Aborting test-fix loop to prevent waste.
+                log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Breaking loop (soft exit)."
+                comment_issue "Test Loop: Convergence Failure (soft exit)" "⚠️ Same test failures repeated $sig_count times. Breaking test-fix loop to prevent waste. Pipeline will continue to docs/PR/complete stages.
 
 $test_summary" "default"
-                set_final_state "test_convergence_failure"
-                exit 2
+                set_final_state "test_convergence_soft_exit"
+                loop_complete=true
+                break
             fi
 
             local fix_prompt="ENVIRONMENT NOTE: If failures mention Redis/database connection errors, HTTP 500 from route handlers, or similar infrastructure issues, these are environment issues not code bugs. Do NOT attempt to fix these — note them as environment-dependent and focus only on code-level failures.

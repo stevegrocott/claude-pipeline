@@ -443,6 +443,18 @@ teardown() {
     [[ "$func_def" == *"failure_sig"* ]] || [[ "$func_def" == *"sig_count"* ]]
 }
 
+@test "test loop convergence uses soft exit not hard exit 2" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Convergence sets test_convergence_soft_exit, not test_convergence_failure
+    [[ "$func_def" == *'set_final_state "test_convergence_soft_exit"'* ]]
+    # Convergence sets loop_complete=true instead of exit 2
+    [[ "$func_def" == *"loop_complete=true"* ]]
+    # Must NOT contain the old hard exit pattern for convergence
+    [[ "$func_def" != *'set_final_state "test_convergence_failure"'* ]]
+}
+
 @test "test loop respects MAX_TEST_ITERATIONS" {
     local func_def
     func_def=$(declare -f run_test_loop)
