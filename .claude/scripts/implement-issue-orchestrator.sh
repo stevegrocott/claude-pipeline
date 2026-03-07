@@ -941,6 +941,53 @@ run_stage() {
 
         if [[ -n "$fallback_result" ]]; then
             log "WARNING: No .structured_output from $stage_name — using .result fallback"
+
+            # Field-aware recovery: extract known fields from .result text
+            local result_text
+            result_text=$(printf '%s' "$output" \
+                | jq -r '.result // empty' 2>/dev/null)
+
+            if [[ -n "$result_text" ]]; then
+                # Extract pr_number from "PR #N", "MR #N", "!N", "#N"
+                local pr_re='[PpMm][Rr] *#([0-9]+)'
+                local bang_re='!([0-9]+)'
+                local hash_re='#([0-9]+)'
+                if [[ "$result_text" =~ $pr_re ]] \
+                    || [[ "$result_text" =~ $bang_re ]] \
+                    || [[ "$result_text" =~ $hash_re ]]; then
+                    local pr_num="${BASH_REMATCH[1]}"
+                    fallback_result=$(printf '%s' "$fallback_result" \
+                        | jq -c --argjson n "$pr_num" \
+                            '.pr_number = $n')
+                fi
+
+                # Extract branch from common patterns
+                local branch_re='[Bb]ranch[: ]+([a-zA-Z0-9/_.-]+)'
+                if [[ "$result_text" =~ $branch_re ]]; then
+                    local br="${BASH_REMATCH[1]}"
+                    fallback_result=$(printf '%s' "$fallback_result" \
+                        | jq -c --arg b "$br" \
+                            '.branch = $b')
+                fi
+
+                # Extract tasks JSON array embedded in text
+                local tasks_match
+                tasks_match=$(printf '%s' "$result_text" \
+                    | grep -oE '\[[ ]*\{[^]]+\]' \
+                    | head -1)
+                if [[ -n "$tasks_match" ]]; then
+                    local valid_tasks
+                    valid_tasks=$(printf '%s' "$tasks_match" \
+                        | jq -c 'if type == "array" then . else empty end' \
+                            2>/dev/null)
+                    if [[ -n "$valid_tasks" ]]; then
+                        fallback_result=$(printf '%s' "$fallback_result" \
+                            | jq -c --argjson t "$valid_tasks" \
+                                '.tasks = $t')
+                    fi
+                fi
+            fi
+
             printf '%s\n' "$fallback_result"
             return 0
         fi

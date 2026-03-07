@@ -163,6 +163,82 @@ teardown() {
 }
 
 # =============================================================================
+# FIELD-AWARE STRUCTURED OUTPUT RECOVERY
+# =============================================================================
+
+@test "run_stage fallback extracts pr_number from result text" {
+	# No .structured_output, but .result contains PR number text
+	timeout() {
+		echo '{"result":"Created PR #42 successfully","is_error":false}'
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "pr" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local pr_number
+	pr_number=$(printf '%s' "$result" | jq -r '.pr_number // empty')
+	[ "$pr_number" = "42" ] || \
+		fail "Expected pr_number=42, got: $pr_number (full output: $result)"
+}
+
+@test "run_stage fallback extracts branch from result text" {
+	# No .structured_output, but .result contains branch name
+	timeout() {
+		echo '{"result":"Working on branch feature/issue-52 completed","is_error":false}'
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "implement" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local branch
+	branch=$(printf '%s' "$result" | jq -r '.branch // empty')
+	[ "$branch" = "feature/issue-52" ] || \
+		fail "Expected branch=feature/issue-52, got: $branch (full output: $result)"
+}
+
+@test "run_stage fallback extracts tasks array from result text" {
+	# No .structured_output, but .result contains embedded JSON tasks array
+	local tasks_json='[{"id":1,"description":"Setup","agent":"dev"},{"id":2,"description":"Implement","agent":"dev"}]'
+	local mock_file="$TEST_TMP/tasks-mock.json"
+	jq -n --arg t "Tasks: $tasks_json" \
+		'{result: $t, is_error: false}' > "$mock_file"
+	timeout() {
+		cat "$TEST_TMP/tasks-mock.json"
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "parse" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local tasks_count
+	tasks_count=$(printf '%s' "$result" | jq -r 'if .tasks then (.tasks | length) else 0 end')
+	[ "$tasks_count" = "2" ] || \
+		fail "Expected 2 tasks, got: $tasks_count (full output: $result)"
+}
+
+@test "run_stage fallback with no extractable fields still succeeds" {
+	# No .structured_output, .result is plain text with no parseable fields
+	timeout() {
+		echo '{"result":"Task completed successfully","is_error":false}'
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "implement" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local status_val
+	status_val=$(printf '%s' "$result" | jq -r '.status')
+	[ "$status_val" = "success" ] || \
+		fail "Expected status=success, got: $status_val (full output: $result)"
+}
+
+# =============================================================================
 # TIMEOUT HANDLING
 # =============================================================================
 
