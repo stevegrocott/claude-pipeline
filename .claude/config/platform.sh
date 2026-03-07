@@ -22,6 +22,15 @@ TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpuni
 TEST_E2E_CMD="${TEST_E2E_CMD:-}"          # e.g., "npx playwright test" — empty if no E2E
 TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
 
+# Deploy verification (configure during /adapt if project has a test environment)
+# Set DEPLOY_VERIFY_CMD to a shell command that triggers a deploy to the target
+# environment (e.g., "./scripts/deploy-test.sh").  Leave empty to skip the stage.
+# Set DEPLOY_VERIFY_HEALTH_URL to the health-check endpoint of that environment;
+# the orchestrator polls it at 10 s intervals for up to 15 min (90 retries).
+DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD:-}"
+DEPLOY_VERIFY_HEALTH_URL="${DEPLOY_VERIFY_HEALTH_URL:-}"
+DEPLOY_VERIFY_TIMEOUT_SECS="${DEPLOY_VERIFY_TIMEOUT_SECS:-900}"  # Max seconds to poll health URL (default 15 min)
+
 # Claude CLI (resolve path for non-interactive shells where aliases aren't available)
 if [[ -z "${CLAUDE_CLI:-}" ]]; then
   if [[ -x "$HOME/.claude/local/claude" ]]; then
