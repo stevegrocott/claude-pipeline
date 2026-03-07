@@ -571,10 +571,11 @@ teardown() {
 }
 
 @test "PR review respects MAX_PR_REVIEW_ITERATIONS" {
-    local main_def
-    main_def=$(declare -f main)
+    # MAX_PR_REVIEW_ITERATIONS is used in get_pr_review_config, which main() calls
+    local config_def
+    config_def=$(declare -f get_pr_review_config)
 
-    [[ "$main_def" == *"MAX_PR_REVIEW_ITERATIONS"* ]]
+    [[ "$config_def" == *"MAX_PR_REVIEW_ITERATIONS"* ]]
 }
 
 @test "PR review skips quality loop — re-review catches remaining issues" {
@@ -965,7 +966,7 @@ teardown() {
 # =============================================================================
 
 @test "PR number regex validation exists in orchestrator main body" {
-    grep -q 'pr_number" =~ \^[0-9]\+\$' "$ORCHESTRATOR_SCRIPT"
+    grep -qF '"$pr_number" =~ ^[0-9]+$' "$ORCHESTRATOR_SCRIPT"
 }
 
 @test "find-mr.sh recovery path exists with log message recovering via find-mr.sh" {
