@@ -964,26 +964,21 @@ teardown() {
 # PR NUMBER RECOVERY
 # =============================================================================
 
-@test "create_and_review_pr validates pr_number is a positive integer" {
-    local main_def
-    main_def=$(declare -f create_and_review_pr)
-
-    [[ "$main_def" == *'pr_number" =~ ^[0-9]+$'* ]]
+@test "PR number regex validation exists in orchestrator main body" {
+    grep -q 'pr_number" =~ \^[0-9]\+\$' "$ORCHESTRATOR_SCRIPT"
 }
 
-@test "create_and_review_pr recovers PR number via find-mr.sh when missing" {
-    local main_def
-    main_def=$(declare -f create_and_review_pr)
-
-    [[ "$main_def" == *"find-mr.sh"* ]]
-    [[ "$main_def" == *"recovering via find-mr.sh"* ]]
+@test "find-mr.sh recovery path exists with log message recovering via find-mr.sh" {
+    grep -q 'recovering via find-mr.sh' "$ORCHESTRATOR_SCRIPT"
+    grep -q 'find-mr.sh' "$ORCHESTRATOR_SCRIPT"
 }
 
-@test "create_and_review_pr exits cleanly when PR number unrecoverable" {
-    local main_def
-    main_def=$(declare -f create_and_review_pr)
+@test "gh pr list fallback exists with log message gh pr list fallback" {
+    grep -q 'gh pr list fallback' "$ORCHESTRATOR_SCRIPT"
+}
 
-    [[ "$main_def" == *"Could not recover PR/MR number"* ]]
+@test "error exit with Could not recover PR/MR number message" {
+    grep -q 'Could not recover PR/MR number' "$ORCHESTRATOR_SCRIPT"
 }
 
 # =============================================================================
