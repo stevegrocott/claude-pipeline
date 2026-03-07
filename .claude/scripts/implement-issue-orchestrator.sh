@@ -2730,11 +2730,17 @@ The command will output the MR number. Use that as pr_number in your response."
             log_warn "PR number missing or invalid from structured output (got: '$pr_number') — recovering via find-mr.sh"
             pr_number=$("$PLATFORM_DIR/find-mr.sh" --branch "$branch" 2>/dev/null || true)
             if [[ -z "$pr_number" || "$pr_number" == "null" ]]; then
-                log_error "Could not recover PR/MR number from find-mr.sh for branch '$branch'"
-                set_final_state "error"
-                exit 1
+                log_warn "find-mr.sh recovery failed — trying gh pr list fallback"
+                pr_number=$(gh pr list --head "$branch" --json number -q '.[0].number' 2>/dev/null || true)
+                if [[ -z "$pr_number" || "$pr_number" == "null" ]]; then
+                    log_error "Could not recover PR/MR number from find-mr.sh or gh pr list for branch '$branch'"
+                    set_final_state "error"
+                    exit 1
+                fi
+                log "Recovered PR/MR #$pr_number from gh pr list"
+            else
+                log "Recovered PR/MR #$pr_number from find-mr.sh"
             fi
-            log "Recovered PR/MR #$pr_number from find-mr.sh"
         fi
 
         log "PR #$pr_number created/updated"
