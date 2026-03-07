@@ -1521,6 +1521,35 @@ get_max_quality_iterations() {
 }
 
 # =============================================================================
+# PROMPT FILE-LIST BUILDER
+# =============================================================================
+#
+# Formats a list of file paths into the "LIKELY AFFECTED FILES:" block that
+# is injected into the implement-task prompt.  Keeping this in a named
+# function makes it testable in isolation.
+#
+# Arguments:
+#   $@ - zero or more file paths
+# Outputs:
+#   A leading newline when no files are provided (preserves blank-line
+#   separator in prompt).  A "LIKELY AFFECTED FILES:" section listing
+#   deduplicated, sorted file paths when one or more are provided.
+#
+build_files_block() {
+    local block=$'\n'
+    if [[ $# -gt 0 ]]; then
+        local deduped
+        deduped=$(printf '%s\n' "$@" | sort -u)
+        block=$'\nLIKELY AFFECTED FILES:\n'
+        local f
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && block+="- $f"$'\n'
+        done <<< "$deduped"
+    fi
+    printf '%s' "$block"
+}
+
+# =============================================================================
 # TEST LOOP HELPER
 # =============================================================================
 
@@ -2500,15 +2529,8 @@ $task_list_md
             done < <(
                 git diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true
             )
-            local files_block=$'\n'
-            if [[ ${#affected_files[@]} -gt 0 ]]; then
-                local deduped_files
-                deduped_files=$(printf '%s\n' "${affected_files[@]}" | sort -u)
-                files_block=$'\nLIKELY AFFECTED FILES:\n'
-                while IFS= read -r f; do
-                    [[ -n "$f" ]] && files_block+="- $f"$'\n'
-                done <<< "$deduped_files"
-            fi
+            local files_block
+            files_block=$(build_files_block "${affected_files[@]+"${affected_files[@]}"}")
 
             while (( review_attempts < max_attempts )); do
                 review_attempts=$((review_attempts + 1))
