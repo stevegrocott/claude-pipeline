@@ -375,8 +375,26 @@ teardown() {
 	run_stage "stage-2" "prompt" "test-schema.json" \
 		>/dev/null 2>/dev/null || true
 
-	grep -q "increasing the stage timeout\|task complexity" "$LOG_FILE" || \
+	grep -q "increasing timeout\|reducing complexity" "$LOG_FILE" || \
 		fail "Expected suggestion in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "cascade timeout: warning includes timed-out stage names" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	_TIMED_OUT_STAGE_NAMES=""
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	run_stage "stage-2" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+
+	grep -q "stage-1, stage-2" "$LOG_FILE" || \
+		fail "Expected stage names in cascade warning. Log: $(cat "$LOG_FILE")"
 }
 
 @test "cascade timeout: counter resets to 0 after successful stage" {
