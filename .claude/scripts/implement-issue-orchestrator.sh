@@ -2482,14 +2482,41 @@ $task_list_md
             local base_model
             base_model=$(resolve_model "implement-task-$task_id" "$task_size")
 
+            # Build list of likely affected files for the implement prompt.
+            # Sources: (1) paths extracted from task description via regex,
+            #          (2) files already modified in this branch.
+            local -a affected_files=()
+            local f
+            while IFS= read -r f; do
+                [[ -n "$f" ]] && affected_files+=("$f")
+            done < <(
+                printf '%s' "$task_desc" \
+                    | grep -oE \
+                        '[a-zA-Z0-9_.][a-zA-Z0-9_./-]*(/[a-zA-Z0-9_./-]+)+' \
+                    2>/dev/null || true
+            )
+            while IFS= read -r f; do
+                [[ -n "$f" ]] && affected_files+=("$f")
+            done < <(
+                git diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true
+            )
+            local files_block=$'\n'
+            if [[ ${#affected_files[@]} -gt 0 ]]; then
+                local deduped_files
+                deduped_files=$(printf '%s\n' "${affected_files[@]}" | sort -u)
+                files_block=$'\nLIKELY AFFECTED FILES:\n'
+                while IFS= read -r f; do
+                    [[ -n "$f" ]] && files_block+="- $f"$'\n'
+                done <<< "$deduped_files"
+            fi
+
             while (( review_attempts < max_attempts )); do
                 review_attempts=$((review_attempts + 1))
 
                 # Implement with self-review (eliminates separate task-review invocation)
                 local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
 
-$task_desc
-
+$task_desc${files_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
