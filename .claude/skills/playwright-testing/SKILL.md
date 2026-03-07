@@ -135,6 +135,8 @@ e2e/
 | `npx playwright show-report` | View HTML report |
 | `npx playwright test --update-snapshots` | Update screenshot baselines |
 
+**Output management:** Playwright test runs produce verbose output. Use `npx playwright test 2>&1 | tail -20` for pass/fail checks. For full test suites, use `run_in_background: true` and read the summary. Only request full output when debugging specific failures.
+
 ## Integration
 
 **Used by:** `playwright-test-developer` agent

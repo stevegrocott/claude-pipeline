@@ -12,6 +12,7 @@ Every token in the subagent prompt is re-read on each tool call the subagent mak
 - **Do NOT paste the full issue body** — the subagent can use `.claude/scripts/platform/read-issue.sh` if it needs broader context.
 - **Reference specific files and line numbers** rather than "find the relevant code" — this prevents broad exploratory searches.
 - **Shorter prompts = fewer input tokens re-read on every tool call** within the subagent session.
+- **When running builds or test suites, use `| tail -10` to truncate output. Use `run_in_background: true` for builds >30s.** Full build logs in context are re-read on every subsequent tool call.
 
 **Agent selection:** Choose the appropriate `subagent_type` based on task, using the agents configured in `.claude/agents/` for this project.
 

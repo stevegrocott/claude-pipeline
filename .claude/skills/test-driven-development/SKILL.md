@@ -115,8 +115,10 @@ Vague name, tests mock not code
 **MANDATORY. Never skip.**
 
 ```bash
-npm test path/to/test.test.ts
+npm test path/to/test.test.ts 2>&1 | tail -10
 ```
+
+Truncate test output to last 10 lines — you only need pass/fail and error summary. If test fails unexpectedly, re-run without truncation to see full output.
 
 Confirm:
 - Test fails (not errors)
@@ -170,8 +172,10 @@ Don't add features, refactor other code, or "improve" beyond the test.
 **MANDATORY.**
 
 ```bash
-npm test path/to/test.test.ts
+npm test path/to/test.test.ts 2>&1 | tail -10
 ```
+
+Truncate test output to last 10 lines — you only need pass/fail and error summary. If test fails unexpectedly, re-run without truncation to see full output.
 
 Confirm:
 - Test passes
