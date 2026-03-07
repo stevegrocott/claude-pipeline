@@ -212,6 +212,7 @@ fi
 LOG_FILE=""
 STAGE_COUNTER=0
 _CONSECUTIVE_TIMEOUTS=0
+_TIMED_OUT_STAGE_NAMES=""
 
 log() {
     local msg="[$(date -Iseconds)] $*"
@@ -573,6 +574,7 @@ mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
 LOG_FILE="$LOG_BASE/orchestrator.log"
 STAGE_COUNTER=0
 _CONSECUTIVE_TIMEOUTS=0
+_TIMED_OUT_STAGE_NAMES=""
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
@@ -773,6 +775,7 @@ run_stage() {
     if [[ ! -f "$SCHEMA_DIR/$schema_file" ]]; then
         log_error "Schema file not found: $SCHEMA_DIR/$schema_file"
         _CONSECUTIVE_TIMEOUTS=0
+        _TIMED_OUT_STAGE_NAMES=""
         echo '{"status":"error","error":"schema not found"}'
         return 1
     fi
@@ -900,11 +903,11 @@ run_stage() {
 
         if (( exit_code == 124 )); then
             log_error "Stage $stage_name timed out again after ${retry_timeout}s"
+            _TIMED_OUT_STAGE_NAMES="${_TIMED_OUT_STAGE_NAMES:+$_TIMED_OUT_STAGE_NAMES, }$stage_name"
             (( _CONSECUTIVE_TIMEOUTS++ )) || true
             if (( _CONSECUTIVE_TIMEOUTS >= 2 )); then
-                log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS" \
-                    "consecutive stage(s) timed out." \
-                    "Consider increasing the stage timeout or reducing task complexity."
+                log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
+                    "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
             fi
             echo '{"status":"error","error":"timeout"}'
             return 1
@@ -1061,11 +1064,13 @@ for m in re.finditer(r'\[\s*\{', t):
 
         log_error "No structured output from $stage_name"
         _CONSECUTIVE_TIMEOUTS=0
+        _TIMED_OUT_STAGE_NAMES=""
         echo '{"status":"error","error":"no structured output"}'
         return 1
     fi
 
     _CONSECUTIVE_TIMEOUTS=0
+    _TIMED_OUT_STAGE_NAMES=""
     printf '%s\n' "$structured"
 }
 
@@ -1213,19 +1218,28 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         # Convergence detection: check if >50% of issues are repeats from prior iterations
         if [[ -f "$review_history_file" ]] && (( loop_iteration > 1 )); then
             local repeat_ratio repeat_issues
-            read -r repeat_ratio repeat_issues < <(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
+            repeat_ratio=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
                 . as $root |
                 ($root.issues // []) | length as $current_count |
-                if $current_count == 0 then "0 "
+                if $current_count == 0 then 0
                 else
                     [$root.issues[] | .description] as $current |
                     [$history[0][] | .issues[]? | .description] as $prior |
                     [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
-                    ($repeats | length * 100 / $current_count | floor) as $ratio |
-                    ($repeats | join("\n- ")) as $repeat_list |
-                    "\($ratio) \($repeat_list)"
+                    ($repeats | length * 100 / $current_count | floor)
                 end
-            ' 2>/dev/null || printf '0 ')
+            ' 2>/dev/null || echo 0)
+            repeat_issues=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
+                . as $root |
+                ($root.issues // []) | length as $current_count |
+                if $current_count == 0 then ""
+                else
+                    [$root.issues[] | .description] as $current |
+                    [$history[0][] | .issues[]? | .description] as $prior |
+                    [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
+                    ($repeats | join("\n- "))
+                end
+            ' 2>/dev/null || echo '')
 
             if (( repeat_ratio > 33 )); then
                 log_warn "Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Exiting loop.${repeat_issues:+ Repeating: ${repeat_issues}}"
