@@ -1543,6 +1543,109 @@ HIST_EOF
     [[ "$func_def" == *'select(.severity == "major")'* ]]
 }
 
+# =============================================================================
+# COMPLEXITY PASSTHROUGH TO FIX STAGES
+# =============================================================================
+
+@test "run_quality_loop passes complexity arg to fix-review run_stage call" {
+    local complexity_file="$TEST_TMP/fix_review_complexity"
+    export complexity_file
+
+    run_stage() {
+        local stage_name="$1"
+        local complexity_arg="$5"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                echo '{"status":"success","result":"changes_requested","comments":"Fix this","summary":"1 issue"}'
+                ;;
+            fix-review-*)
+                # Capture the complexity arg (5th positional arg to run_stage)
+                printf '%s' "$complexity_arg" > "$complexity_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Pass complexity "M" as arg 6 to run_quality_loop.
+    # Run in a subshell so exit 2 (max iterations exceeded) does not kill the test.
+    # The fix-review stage runs before the exit, so the complexity file is written.
+    ( run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "M" ) || true
+
+    [[ -f "$complexity_file" ]] || fail "fix-review stage was not called"
+    local captured_complexity
+    captured_complexity=$(< "$complexity_file")
+    [ "$captured_complexity" = "M" ] || fail "Expected complexity 'M' passed to fix-review run_stage, got '$captured_complexity'"
+}
+
+@test "run_quality_loop passes complexity arg to simplify run_stage call" {
+    local simplify_complexity_file="$TEST_TMP/simplify_complexity"
+    export simplify_complexity_file
+
+    run_stage() {
+        local stage_name="$1"
+        local complexity_arg="$5"
+        case "$stage_name" in
+            simplify-*)
+                printf '%s' "$complexity_arg" > "$simplify_complexity_file"
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                echo '{"status":"success","result":"approved","summary":"Approved"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Pass complexity "L" as arg 6 to run_quality_loop
+    run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "L"
+
+    [[ -f "$simplify_complexity_file" ]] || fail "simplify stage was not called"
+    local captured_complexity
+    captured_complexity=$(< "$simplify_complexity_file")
+    [ "$captured_complexity" = "L" ] || fail "Expected complexity 'L' passed to simplify run_stage, got '$captured_complexity'"
+}
+
+@test "run_quality_loop passes complexity arg to review run_stage call" {
+    local review_complexity_file="$TEST_TMP/review_complexity"
+    export review_complexity_file
+
+    run_stage() {
+        local stage_name="$1"
+        local complexity_arg="$5"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                printf '%s' "$complexity_arg" > "$review_complexity_file"
+                echo '{"status":"success","result":"approved","summary":"Approved"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Pass complexity "S" as arg 6 to run_quality_loop
+    run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "S"
+
+    [[ -f "$review_complexity_file" ]] || fail "review stage was not called"
+    local captured_complexity
+    captured_complexity=$(< "$review_complexity_file")
+    [ "$captured_complexity" = "S" ] || fail "Expected complexity 'S' passed to review run_stage, got '$captured_complexity'"
+}
+
 @test "approved result with only minor issues is not overridden" {
     local fix_called="$TEST_TMP/minor_only_fix_called"
     echo "false" > "$fix_called"
