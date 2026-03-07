@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "Structured output from deploy and verification phase of implement-issue workflow",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error", "partial"],
+      "description": "Overall status of deployment and verification"
+    },
+    "deployment_target": {
+      "type": "string",
+      "description": "The target environment where the code was deployed (e.g., staging, production, local)"
+    },
+    "health_status": {
+      "type": "string",
+      "enum": ["healthy", "degraded", "failed", "unknown"],
+      "description": "Status of the deployed application health checks"
+    },
+    "verification_results": {
+      "type": "object",
+      "description": "Results from verification tests and checks",
+      "properties": {
+        "tests_passed": {
+          "type": "boolean",
+          "description": "Whether all tests passed"
+        },
+        "acceptance_criteria_met": {
+          "type": "boolean",
+          "description": "Whether all acceptance criteria are satisfied"
+        },
+        "details": {
+          "type": "string",
+          "description": "Detailed verification information"
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "description": "Array of any issues encountered during deployment or verification",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "warning", "info"],
+            "description": "Severity level of the issue"
+          },
+          "message": {
+            "type": "string",
+            "description": "Description of the issue"
+          }
+        },
+        "required": ["severity", "message"]
+      }
+    },
+    "summary": {
+      "type": "string",
+      "description": "High-level summary of the deployment and verification results"
+    }
+  },
+  "required": ["status", "deployment_target", "health_status", "summary"]
+}
