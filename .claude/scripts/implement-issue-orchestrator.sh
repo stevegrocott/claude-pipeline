@@ -861,6 +861,20 @@ run_stage() {
             return 0
         fi
 
+        # Fallback: if no structured output, try .result text wrapping
+        # (same pattern as lines 936-944)
+        local timeout_fallback_result
+        timeout_fallback_result=$(printf '%s' "$output" | jq -c '
+            select(.is_error == false and .result != null) |
+            {status: "success", summary: .result}
+        ' 2>/dev/null)
+
+        if [[ -n "$timeout_fallback_result" ]]; then
+            log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced .result — using fallback"
+            printf '%s\n' "$timeout_fallback_result"
+            return 0
+        fi
+
         # Retry with a 20% longer timeout before giving up
         local retry_timeout
         retry_timeout=$(( stage_timeout + stage_timeout / 5 ))
