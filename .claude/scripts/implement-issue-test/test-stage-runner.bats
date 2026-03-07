@@ -17,6 +17,7 @@ setup() {
     export LOG_BASE="$TEST_TMP/logs/test"
     export LOG_FILE="$LOG_BASE/orchestrator.log"
     export STAGE_COUNTER=0
+    export _CONSECUTIVE_TIMEOUTS=0
     export SCHEMA_DIR="$TEST_TMP/schemas"
 
     mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
@@ -312,6 +313,145 @@ teardown() {
 }
 
 # =============================================================================
+# CASCADE TIMEOUT DETECTION
+# =============================================================================
+
+@test "cascade timeout: counter increments after definitive timeout" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout (both initial and retry)
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "test-stage" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	[ "$_CONSECUTIVE_TIMEOUTS" -eq 1 ] || \
+		fail "Expected counter=1 after one timeout, got $_CONSECUTIVE_TIMEOUTS"
+}
+
+@test "cascade timeout: no warning after single timeout" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "test-stage" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+
+	! grep -q "Cascade timeout detected" "$LOG_FILE" || \
+		fail "Should not warn after single timeout. Log: $(cat "$LOG_FILE")"
+}
+
+@test "cascade timeout: warning logged after 2 consecutive timeouts" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	run_stage "stage-2" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+
+	grep -q "Cascade timeout detected" "$LOG_FILE" || \
+		fail "Expected cascade warning in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "cascade timeout: warning includes actionable suggestion" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	run_stage "stage-2" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+
+	grep -q "increasing timeout\|reducing complexity" "$LOG_FILE" || \
+		fail "Expected suggestion in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "cascade timeout: warning includes timed-out stage names" {
+	timeout() {
+		shift  # skip timeout value
+		return 124  # always timeout
+	}
+	export -f timeout
+
+	_CONSECUTIVE_TIMEOUTS=0
+	_TIMED_OUT_STAGE_NAMES=""
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	run_stage "stage-2" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+
+	grep -q "stage-1, stage-2" "$LOG_FILE" || \
+		fail "Expected stage names in cascade warning. Log: $(cat "$LOG_FILE")"
+}
+
+@test "cascade timeout: counter resets to 0 after successful stage" {
+	local calls_file="$TEST_TMP/cascade-calls.txt"
+	printf '0' > "$calls_file"
+	timeout() {
+		local n
+		n=$(cat "$calls_file")
+		n=$((n + 1))
+		printf '%s' "$n" > "$calls_file"
+		shift  # skip timeout value
+		if (( n <= 2 )); then
+			# First two calls: initial attempt + retry for stage-1
+			return 124
+		fi
+		echo '{"result":"ok","structured_output":{"status":"success"}}'
+	}
+	export -f timeout
+	export calls_file
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null || true
+	# counter = 1 after stage-1 definitively times out
+	run_stage "stage-2" "prompt" "test-schema.json" >/dev/null 2>/dev/null
+	# counter should be reset to 0 after stage-2 succeeds
+	[ "$_CONSECUTIVE_TIMEOUTS" -eq 0 ] || \
+		fail "Expected counter=0 after success, got $_CONSECUTIVE_TIMEOUTS"
+}
+
+@test "cascade timeout: counter stays 0 when initial timeout recovers" {
+	# A timeout that recovers (structured output extracted from first attempt)
+	# should NOT increment the counter — it did not definitively time out.
+	local calls_file="$TEST_TMP/recover-calls.txt"
+	printf '0' > "$calls_file"
+	timeout() {
+		local n
+		n=$(cat "$calls_file")
+		n=$((n + 1))
+		printf '%s' "$n" > "$calls_file"
+		shift  # skip timeout value
+		# Return structured output AND exit 124 — simulates early-output timeout
+		echo '{"result":"partial","structured_output":{"status":"success"}}'
+		return 124
+	}
+	export -f timeout
+	export calls_file
+
+	_CONSECUTIVE_TIMEOUTS=0
+	run_stage "stage-1" "prompt" "test-schema.json" \
+		>/dev/null 2>/dev/null
+	# Only one call made (early-output recovery), counter stays at 0
+	[ "$_CONSECUTIVE_TIMEOUTS" -eq 0 ] || \
+		fail "Expected counter=0 on recovery, got $_CONSECUTIVE_TIMEOUTS"
+}
+
+# =============================================================================
 # AGENT SELECTION
 # =============================================================================
 
@@ -482,6 +622,131 @@ teardown() {
     call_count=$(wc -l < "$calls_file")
     (( call_count == 1 )) || \
         fail "Expected 1 timeout call (no retry), got $call_count"
+}
+
+# =============================================================================
+# TIMEOUT .RESULT FALLBACK
+# =============================================================================
+
+@test "run_stage uses .result fallback when timeout occurs with no structured_output" {
+	# When exit 124 occurs but output has .is_error:false and .result (no
+	# .structured_output), run_stage must use a fallback payload and return 0.
+	local calls_file="$TEST_TMP/result-fallback-calls.txt"
+	timeout() {
+		local t="$1"; shift
+		printf 'CALLED\n' >> "$calls_file"
+		echo '{"result":"Summary of work done","is_error":false}'
+		return 124
+	}
+	export -f timeout
+	export calls_file
+
+	local result
+	result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local status_val
+	status_val=$(printf '%s' "$result" | jq -r '.status')
+	[ "$status_val" = "success" ] || \
+		fail "Expected status=success, got: $status_val (result: $result)"
+
+	local summary_val
+	summary_val=$(printf '%s' "$result" | jq -r '.summary')
+	[ "$summary_val" = "Summary of work done" ] || \
+		fail "Expected summary='Summary of work done', got: $summary_val"
+
+	# Only one timeout call — no retry should happen
+	local call_count
+	call_count=$(wc -l < "$calls_file")
+	(( call_count == 1 )) || \
+		fail "Expected 1 timeout call (no retry on fallback), got $call_count"
+}
+
+@test "run_stage logs WARN when using .result fallback on timeout" {
+	timeout() {
+		shift
+		echo '{"result":"Fallback content","is_error":false}'
+		return 124
+	}
+	export -f timeout
+
+	run_stage "test" "prompt" "test-schema.json" >/dev/null 2>/dev/null
+
+	grep -q "produced .result" "$LOG_FILE" || \
+		fail "Expected WARN about .result fallback in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage does not use .result fallback when is_error is true on timeout" {
+	# When output has is_error:true the fallback must not trigger;
+	# the retry path should be attempted instead.
+	local calls_file="$TEST_TMP/no-fallback-calls.txt"
+	timeout() {
+		local t="$1"; shift
+		printf 'CALLED\n' >> "$calls_file"
+		echo '{"result":"some content","is_error":true}'
+		return 124
+	}
+	export -f timeout
+	export calls_file
+
+	run run_stage "test" "prompt" "test-schema.json"
+	[ "$status" -eq 1 ]
+
+	# Both initial attempt and retry must have been called (fallback skipped)
+	local call_count
+	call_count=$(wc -l < "$calls_file")
+	(( call_count == 2 )) || \
+		fail "Expected 2 timeout calls (fallback skipped, retry made), got $call_count"
+}
+
+# =============================================================================
+# DIAGNOSTIC LOGGING
+# =============================================================================
+
+@test "run_stage logs diagnostic byte count when structured output extraction fails" {
+	# Output has is_error:true — neither .structured_output nor .result fallback
+	# will match, so the diagnostic log must fire before the error return.
+	timeout() {
+		shift
+		echo '{"is_error":true,"result":"error occurred"}'
+	}
+	export -f timeout
+
+	run run_stage "test" "prompt" "test-schema.json"
+	[ "$status" -eq 1 ]
+
+	grep -q "Diagnostic fallback failure — Output byte count:" "$LOG_FILE" || \
+		fail "Expected diagnostic byte count in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage logs diagnostic output preview when structured output extraction fails" {
+	timeout() {
+		shift
+		echo '{"is_error":true,"result":"unique diagnostic content xyz"}'
+	}
+	export -f timeout
+
+	run run_stage "test" "prompt" "test-schema.json"
+	[ "$status" -eq 1 ]
+
+	grep -q "Diagnostic fallback failure — First 500 characters:" "$LOG_FILE" || \
+		fail "Expected diagnostic preview in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage diagnostic log captures actual output content" {
+	# The preview logged must include the raw output content, making it useful
+	# for debugging what the model actually returned.
+	timeout() {
+		shift
+		echo '{"is_error":true,"result":"recognizable-debug-marker-abc123"}'
+	}
+	export -f timeout
+
+	run run_stage "test" "prompt" "test-schema.json"
+	[ "$status" -eq 1 ]
+
+	grep -q "recognizable-debug-marker-abc123" "$LOG_FILE" || \
+		fail "Diagnostic log must include actual output content. Log: $(cat "$LOG_FILE")"
 }
 
 # =============================================================================

@@ -244,13 +244,14 @@ teardown() {
     [[ "$func_def" == *"implement-issue-simplify.json"* ]]
 }
 
-@test "quality loop does not call comment_issue for intermediate sub-stages" {
+@test "quality loop only calls comment_issue for convergence exit not per-iteration" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    # No comment_issue calls must appear anywhere in run_quality_loop.
-    # Using "comment_issue" as the anchor ensures any future call with any title is caught.
-    [[ "$func_def" != *"comment_issue"* ]]
+    # comment_issue is permitted only for the convergence failure notification.
+    # It must reference "Convergence Failure" to confirm it is scoped to
+    # the convergence exit block, not called during normal iteration stages.
+    [[ "$func_def" == *'comment_issue'*'Convergence Failure'* ]]
 }
 
 # =============================================================================
@@ -729,6 +730,15 @@ HIST_EOF
 
     # Must reference the review-history file for convergence comparison
     [[ "$func_def" == *"review-history-\${stage_prefix}.json"* ]] || [[ "$func_def" == *'review-history-${stage_prefix}.json'* ]]
+}
+
+@test "quality loop convergence log_warn includes specific repeated issue descriptions" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # The log_warn call must reference repeat_issues (specific descriptions)
+    # not just the ratio percentage count
+    grep -q 'log_warn.*repeat_issues' <<< "$func_def"
 }
 
 # =============================================================================

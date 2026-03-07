@@ -211,6 +211,8 @@ fi
 
 LOG_FILE=""
 STAGE_COUNTER=0
+_CONSECUTIVE_TIMEOUTS=0
+_TIMED_OUT_STAGE_NAMES=""
 
 log() {
     local msg="[$(date -Iseconds)] $*"
@@ -571,6 +573,8 @@ fi
 mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
 LOG_FILE="$LOG_BASE/orchestrator.log"
 STAGE_COUNTER=0
+_CONSECUTIVE_TIMEOUTS=0
+_TIMED_OUT_STAGE_NAMES=""
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
@@ -770,6 +774,8 @@ run_stage() {
     # Validate schema file exists
     if [[ ! -f "$SCHEMA_DIR/$schema_file" ]]; then
         log_error "Schema file not found: $SCHEMA_DIR/$schema_file"
+        _CONSECUTIVE_TIMEOUTS=0
+        _TIMED_OUT_STAGE_NAMES=""
         echo '{"status":"error","error":"schema not found"}'
         return 1
     fi
@@ -861,6 +867,20 @@ run_stage() {
             return 0
         fi
 
+        # Fallback: if no structured output, try .result text wrapping
+        # (same pattern as lines 936-944)
+        local timeout_fallback_result
+        timeout_fallback_result=$(printf '%s' "$output" | jq -c '
+            select(.is_error == false and .result != null) |
+            {status: "success", summary: .result}
+        ' 2>/dev/null)
+
+        if [[ -n "$timeout_fallback_result" ]]; then
+            log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced .result — using fallback"
+            printf '%s\n' "$timeout_fallback_result"
+            return 0
+        fi
+
         # Retry with a 20% longer timeout before giving up
         local retry_timeout
         retry_timeout=$(( stage_timeout + stage_timeout / 5 ))
@@ -883,6 +903,12 @@ run_stage() {
 
         if (( exit_code == 124 )); then
             log_error "Stage $stage_name timed out again after ${retry_timeout}s"
+            _TIMED_OUT_STAGE_NAMES="${_TIMED_OUT_STAGE_NAMES:+$_TIMED_OUT_STAGE_NAMES, }$stage_name"
+            (( _CONSECUTIVE_TIMEOUTS++ )) || true
+            if (( _CONSECUTIVE_TIMEOUTS >= 2 )); then
+                log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
+                    "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
+            fi
             echo '{"status":"error","error":"timeout"}'
             return 1
         fi
@@ -1028,11 +1054,23 @@ for m in re.finditer(r'\[\s*\{', t):
             return 0
         fi
 
+        # Diagnostic: log raw output first 500 chars and byte count when both
+        # .structured_output and .result extraction fail
+        local output_byte_count
+        output_byte_count=$(printf '%s' "$output" | wc -c)
+        local output_preview="${output:0:500}"
+        log "Diagnostic fallback failure — Output byte count: $output_byte_count"
+        log "Diagnostic fallback failure — First 500 characters: $output_preview"
+
         log_error "No structured output from $stage_name"
+        _CONSECUTIVE_TIMEOUTS=0
+        _TIMED_OUT_STAGE_NAMES=""
         echo '{"status":"error","error":"no structured output"}'
         return 1
     fi
 
+    _CONSECUTIVE_TIMEOUTS=0
+    _TIMED_OUT_STAGE_NAMES=""
     printf '%s\n' "$structured"
 }
 
@@ -1179,21 +1217,42 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
 
         # Convergence detection: check if >50% of issues are repeats from prior iterations
         if [[ -f "$review_history_file" ]] && (( loop_iteration > 1 )); then
-            local repeat_ratio
-            repeat_ratio=$(printf '%s' "$review_result" | jq --slurpfile history "$review_history_file" '
+            local repeat_ratio repeat_issues
+            repeat_ratio=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
                 . as $root |
                 ($root.issues // []) | length as $current_count |
                 if $current_count == 0 then 0
                 else
                     [$root.issues[] | .description] as $current |
                     [$history[0][] | .issues[]? | .description] as $prior |
-                    [$current[] | select(. as $c | $prior | any(. == $c))] | length as $repeats |
-                    ($repeats * 100 / $current_count)
+                    [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
+                    ($repeats | length * 100 / $current_count)
                 end
-            ' 2>/dev/null || printf '0')
+            ' 2>/dev/null || echo 0)
+            repeat_issues=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
+                . as $root |
+                ($root.issues // []) | length as $current_count |
+                if $current_count == 0 then ""
+                else
+                    [$root.issues[] | .description] as $current |
+                    [$history[0][] | .issues[]? | .description] as $prior |
+                    [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
+                    ($repeats | join("\n- "))
+                end
+            ' 2>/dev/null || echo '')
 
             if (( repeat_ratio > 33 )); then
-                log_warn "Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Exiting loop."
+                log_warn "Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Exiting loop.${repeat_issues:+ Repeating: ${repeat_issues}}"
+
+                local convergence_body="⚠️ Quality loop convergence failure: ${repeat_ratio}% of issues are repeats from prior iterations. Breaking loop to prevent waste."
+                if [[ -n "$repeat_issues" ]]; then
+                    convergence_body+="
+
+**Repeating Issues:**
+- $repeat_issues"
+                fi
+
+                comment_issue "Quality Loop: Convergence Failure ($stage_prefix)" "$convergence_body" "code-reviewer"
                 loop_approved=true
                 break
             fi
@@ -1628,6 +1687,7 @@ all_failures_environment_related() {
 #   $5 - complexity hint for model selection (S/M/L, optional)
 # Returns:
 #   0 on success (tests pass and validated)
+#   0 on convergence soft exit (loop_complete=true, pipeline continues)
 #   2 on max iterations exceeded (calls exit 2)
 run_test_loop() {
     local loop_dir="$1"
@@ -1957,12 +2017,20 @@ $test_summary" "default"
             local sig_count
             sig_count=$(printf '%s' "$prior_failure_sigs" | tr ' ' '\n' | grep -c "^${failure_sig}$" || true)
             if (( sig_count >= 2 )); then
-                log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Exiting loop."
-                comment_issue "Test Loop: Convergence Failure" "⚠️ Same test failures repeated $sig_count times. Aborting test-fix loop to prevent waste.
+                # Extract failure descriptions for both log and comment message
+                local failure_summaries
+                failure_summaries=$(printf '%s' "$pr_failures" | jq -r '.[] | "- \(.title): \(.description)"' 2>/dev/null || printf '')
+                log_warn "Test-fix convergence failure: same failures repeated $sig_count times. Breaking loop (soft exit).${failure_summaries:+ Failures: ${failure_summaries}}"
+
+                comment_issue "Test Loop: Convergence Failure (soft exit)" "⚠️ Same test failures repeated $sig_count times. Breaking test-fix loop to prevent waste. Pipeline will continue to docs/PR/complete stages.
+
+**Repeated Failures:**
+${failure_summaries}
 
 $test_summary" "default"
-                set_final_state "test_convergence_failure"
-                exit 2
+                set_final_state "test_convergence_soft_exit"
+                loop_complete=true
+                break
             fi
 
             local fix_prompt="ENVIRONMENT NOTE: If failures mention Redis/database connection errors, HTTP 500 from route handlers, or similar infrastructure issues, these are environment issues not code bugs. Do NOT attempt to fix these — note them as environment-dependent and focus only on code-level failures.
