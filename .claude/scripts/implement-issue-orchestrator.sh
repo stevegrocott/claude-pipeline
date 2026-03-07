@@ -1168,6 +1168,11 @@ Output a summary of changes made."
             ' "$review_history_file" 2>/dev/null || printf '')
         fi
 
+        # Pre-compute modified files (three-dot merge-base diff) for review stage
+        local review_changed_files_raw review_changed_files
+        review_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+        review_changed_files=$(printf '%s\n' "$review_changed_files_raw" | grep -v -E '^$' || true)
+
         local review_prompt="Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT: This is a task-level quality check within the implementation workflow, NOT a full PR review.
@@ -1178,6 +1183,9 @@ Check:
 - Consistency with codebase conventions
 - Potential bugs or issues
 - Security concerns
+
+FILES CHANGED:
+$review_changed_files
 
 $(if [[ -n "$prior_context" ]]; then
     printf '\n'
