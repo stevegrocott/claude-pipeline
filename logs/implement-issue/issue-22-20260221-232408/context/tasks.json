@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "description": "**(M)** Merge test execution and validation into single stage — in `run_test_loop()`, replace the separate test-loop-iter and test-validate-iter stages with a single combined stage. The prompt should: (1) run the test suite once, (2) report pass/fail with failure details, (3) validate test comprehensiveness for changed files, (4) return both test results and validation findings in one structured response. Update the corresponding JSON schema if needed. Remove the separate validation stage call.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 2,
+    "description": "**(S)** Prevent complexity override on light-tier stages — in `model-config.sh`, modify `resolve_model()` to skip the complexity-to-tier override when the stage's default tier is \"light\". Test execution, parsing, and validation stages should always use their default tier regardless of task complexity. This ensures test stages use Haiku even for M/L complexity tasks.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 3,
+    "description": "**(S)** Add config-only early exit after parse_issue — after task extraction, if `detect_change_scope` returns \"config\", skip implement/quality/test stages and jump directly to PR creation. Add a GitHub comment: \"Config-only changes detected — skipping to PR creation.\" Ensure the branch has commits before creating the PR.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 4,
+    "description": "**(S)** Update BATS tests — add test cases for: (1) merged test+validate stage produces combined output, (2) light-tier stages ignore complexity override, (3) config-only scope triggers early exit to PR stage",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  }
+]

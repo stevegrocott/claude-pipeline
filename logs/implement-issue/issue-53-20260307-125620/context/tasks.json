@@ -1,0 +1,23 @@
+[
+  {
+    "id": 1,
+    "description": "**(S)** Verify and fix `$loop_complexity` passthrough to the fix stage in `run_quality_loop` (line 1143) — ensure it reaches `run_stage` as the complexity parameter for model selection",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 2,
+    "description": "**(S)** Pass complexity hint to test loop fix-quality stages (line 1846 `fix-test-quality-iter-$test_iteration`) — currently missing complexity parameter",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 3,
+    "description": "**(S)** Add BATS tests for complexity passthrough to fix stages in both quality and test loops",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  }
+]

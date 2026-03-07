@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "description": "**(S)** Add diagnostic logging in structured output fallback (after line 947): log first 500 characters of raw output and output byte count when both `.structured_output` and `.result` extraction fail",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 2,
+    "description": "**(S)** Apply `.result` fallback to timeout handling (lines 854-865): after checking `.structured_output`, try `.result` text wrapping (same as lines 936-944) before declaring timeout failure",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 3,
+    "description": "**(M)** Change test loop convergence from hard `exit 2` to soft break (like quality loop): set `loop_complete=true`, log the convergence failure, but allow pipeline to continue to docs/PR/complete stages. Update `set_final_state` to `test_convergence_soft_exit` to distinguish from hard failures",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 4,
+    "description": "**(S)** Add cascade timeout detection: track consecutive stage timeouts in `run_stage`; after 2+ consecutive timeouts, log warning with suggestion to increase timeout or reduce task complexity. No automatic behavior change — informational only",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 5,
+    "description": "**(S)** Add convergence failure summary to test and quality loop exit messages: include the specific failure descriptions that repeated, not just the count",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 6,
+    "description": "**(S)** Add BATS tests for diagnostic logging, timeout `.result` fallback, and soft test convergence exit behavior",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "description": "**(S)** Verify `fix-acceptance-test` prefix matching in `_match_stage_prefix` and add explicit `fix-acceptance*` case to `_stage_to_tier` if needed (model-config.sh lines 41-63, 95-97)",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 2,
+    "description": "**(S)** Pass complexity hint (`$task_size` or `$loop_complexity`) as 5th argument to `fix-e2e` `run_stage` call in `implement-issue-orchestrator.sh` (line 2390)",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 3,
+    "description": "**(M)** Refine `get_pr_review_config` to use three tiers: <20 lines → haiku/300s/1 iter, 20-50 lines → haiku/600s/1 iter, 50-200 lines → sonnet/900s/2 iter, >200 lines → sonnet/1800s/2 iter (lines 1186-1198)",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 4,
+    "description": "**(S)** Add BATS tests for prefix matching of `fix-acceptance-test`, complexity forwarding to fix-e2e, and the new PR review tier thresholds",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  }
+]

@@ -1,0 +1,6 @@
+=== implement-task-1 output ===
+Error: Fallback model cannot be the same as the main model. Please specify a different model for --fallback-model.
+=== exit code: 1 ===
+=== implement-task-1 output ===
+Error: Fallback model cannot be the same as the main model. Please specify a different model for --fallback-model.
+=== exit code: 1 ===

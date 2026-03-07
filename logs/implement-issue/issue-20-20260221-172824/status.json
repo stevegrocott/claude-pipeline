@@ -1,0 +1,91 @@
+{
+  "state": "running",
+  "issue": 20,
+  "base_branch": "main",
+  "branch": "feature/issue-20",
+  "current_stage": "test_loop",
+  "current_task": 5,
+  "stages": {
+    "parse_issue": {
+      "status": "completed",
+      "started_at": "2026-02-21T06:28:26Z",
+      "completed_at": "2026-02-21T06:28:26Z"
+    },
+    "validate_plan": {
+      "status": "completed",
+      "started_at": "2026-02-21T06:28:27Z",
+      "completed_at": "2026-02-21T06:28:28Z"
+    },
+    "implement": {
+      "status": "completed",
+      "task_progress": "1/5",
+      "started_at": "2026-02-21T06:28:28Z",
+      "completed_at": "2026-02-21T08:44:43Z"
+    },
+    "quality_loop": {
+      "status": "completed",
+      "iteration": 1,
+      "completed_at": "2026-02-21T08:44:43Z"
+    },
+    "test_loop": {
+      "status": "in_progress",
+      "iteration": 3,
+      "started_at": "2026-02-21T08:44:43Z"
+    },
+    "docs": {
+      "status": "pending"
+    },
+    "pr": {
+      "status": "pending"
+    },
+    "pr_review": {
+      "status": "pending",
+      "iteration": 0
+    },
+    "complete": {
+      "status": "pending"
+    }
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "description": "**(M)** Replace `--changedSince` with explicit changed-file test execution — in `run_test_loop()`, compute `changed_test_files=$(git diff \"$BASE_BRANCH\"...HEAD --name-only | grep -E '\\.test\\.[jt]sx?$|\\.spec\\.[jt]sx?$')` and pass them directly to Jest: `jest $changed_test_files`. Fall back to `--changedSince` only if no test files were directly changed. Also exclude `.integration.test.ts` files with a grep filter.",
+      "agent": "default",
+      "status": "completed",
+      "review_attempts": 1
+    },
+    {
+      "id": 2,
+      "description": "**(S)** Add pre-existing failure filtering to fix-agent dispatch — before building the fix prompt, compute which test files are PR-changed vs dependency-pulled. Only include failures from PR-changed test files in the `$failures` variable passed to the fix-agent. Log skipped pre-existing failures as informational.",
+      "agent": "default",
+      "status": "failed",
+      "review_attempts": 1
+    },
+    {
+      "id": 3,
+      "description": "**(S)** Add environment-awareness to fix-agent prompt — prepend: \"If failures mention Redis/database connection errors, HTTP 500 from route handlers, or similar infrastructure issues, these are environment issues not code bugs. Skip these and note them as environment-dependent.\"",
+      "agent": "default",
+      "status": "failed",
+      "review_attempts": 1
+    },
+    {
+      "id": 4,
+      "description": "**(S)** Add non-blocking full-scope check after PR tests pass — after the PR-scoped test loop succeeds, optionally run `jest --changedSince=$BASE_BRANCH` once (no retry loop) and report any additional failures as a GitHub comment marked \"Pre-existing failures (informational)\" without blocking the pipeline.",
+      "agent": "default",
+      "status": "failed",
+      "review_attempts": 1
+    },
+    {
+      "id": 5,
+      "description": "**(S)** Update BATS tests — add test cases for: explicit file path test execution, integration test exclusion, pre-existing failure filtering, fallback to `--changedSince` when no test files changed",
+      "agent": "default",
+      "status": "failed",
+      "review_attempts": 1
+    }
+  ],
+  "quality_iterations": 1,
+  "test_iterations": 3,
+  "pr_review_iterations": 0,
+  "last_update": "2026-02-21T09:15:24Z",
+  "log_dir": "logs/implement-issue/issue-20-20260221-172824"
+}

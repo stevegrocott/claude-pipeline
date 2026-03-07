@@ -1,0 +1,94 @@
+{
+  "state": "running",
+  "issue": "49",
+  "base_branch": "main",
+  "branch": "feature/issue-49",
+  "current_stage": "implement",
+  "current_task": 1,
+  "stages": {
+    "parse_issue": {
+      "status": "completed",
+      "started_at": "2026-03-07T04:00:15Z",
+      "completed_at": "2026-03-07T04:00:16Z"
+    },
+    "validate_plan": {
+      "status": "completed",
+      "started_at": "2026-03-07T04:00:16Z",
+      "completed_at": "2026-03-07T04:00:18Z"
+    },
+    "implement": {
+      "status": "in_progress",
+      "task_progress": "0/5",
+      "started_at": "2026-03-07T04:00:18Z"
+    },
+    "quality_loop": {
+      "status": "pending",
+      "iteration": 0
+    },
+    "test_loop": {
+      "status": "pending",
+      "iteration": 0
+    },
+    "e2e_verify": {
+      "status": "pending"
+    },
+    "acceptance_test": {
+      "status": "pending"
+    },
+    "docs": {
+      "status": "pending"
+    },
+    "pr": {
+      "status": "pending"
+    },
+    "pr_review": {
+      "status": "pending",
+      "iteration": 0
+    },
+    "complete": {
+      "status": "pending"
+    }
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "description": "**(S)** Pre-compute modified file list before the simplify stage in `run_quality_loop` (before line 997) using the same pattern as test validation (lines 1601-1603), and inject it into the simplify prompt replacing the embedded git command",
+      "agent": "bash-script-craftsman",
+      "status": "in_progress",
+      "review_attempts": 0
+    },
+    {
+      "id": 2,
+      "description": "**(S)** Pre-compute modified file list before the docs stage (before line 2507) and inject into the docs prompt replacing the embedded git command",
+      "agent": "bash-script-craftsman",
+      "status": "pending",
+      "review_attempts": 0
+    },
+    {
+      "id": 3,
+      "description": "**(S)** Pass the pre-computed file list to the review prompt in `run_quality_loop` (lines 1027-1047) as a \"FILES CHANGED\" section so reviewers don't re-discover files",
+      "agent": "bash-script-craftsman",
+      "status": "pending",
+      "review_attempts": 0
+    },
+    {
+      "id": 4,
+      "description": "**(M)** Add \"LIKELY AFFECTED FILES\" section to the implement-task prompt (lines 2202-2213): extract file paths mentioned in the task description using regex, and include any files modified by prior tasks in the same issue (from `git diff $BASE_BRANCH...HEAD --name-only`)",
+      "agent": "bash-script-craftsman",
+      "status": "pending",
+      "review_attempts": 0
+    },
+    {
+      "id": 5,
+      "description": "**(S)** Add BATS tests verifying that prompts contain file lists and don't contain embedded git commands",
+      "agent": "default",
+      "status": "pending",
+      "review_attempts": 0
+    }
+  ],
+  "quality_iterations": 0,
+  "test_iterations": 0,
+  "pr_review_iterations": 0,
+  "last_update": "2026-03-07T04:00:18Z",
+  "log_dir": "logs/implement-issue/issue-49-20260307-150013"
+}

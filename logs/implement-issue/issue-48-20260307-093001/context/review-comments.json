@@ -1,0 +1,1 @@
+The implementation logic itself is correct — boundary values (<20, <50, <200, else) and their corresponding model/timeout/iteration values exactly match the issue specification. The change is minimal and consistent with existing code patterns. Only the missing test coverage (a hard AC requirement) and stale comment need to be addressed.

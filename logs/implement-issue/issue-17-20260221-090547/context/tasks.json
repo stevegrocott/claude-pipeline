@@ -1,0 +1,72 @@
+[
+  {
+    "id": 1,
+    "description": "**(M)** Rewrite `test-integration.bats` for current orchestrator architecture — remove all worktree/setup/research/evaluate/plan stage tests. Replace with tests for current flow: parse-issue→implement (self-review)→quality-loop→test-loop→docs→pr→pr-review→complete. Should test: parse-issue schema, implement-task schema, test-loop flow, quality-loop flow, PR creation flow. Target: 0 failures.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 2,
+    "description": "**(S)** Fix `test-argument-parsing.bats` — replace `fail` commands with BATS-native `[ \"$status\" -ne 0 ]` or `[[ ... ]] || return 1` patterns. Alternatively, add bats-assert as a test dependency. Target: 0 failures.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 3,
+    "description": "**(S)** Fix `test-status-functions.bats` — remove `set_worktree_info` tests (function no longer exists), update `init_status` test to match current status.json schema (no setup/research/evaluate/plan stages). Target: 0 failures.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 4,
+    "description": "**(S)** Fix `test-rate-limit.bats` — update `detect_rate_limit` tests to match current implementation's string matching logic. 5 tests expect case-insensitive substring matching that the implementation doesn't provide. Either fix tests to match implementation, or fix implementation to match test expectations. Target: 0 failures.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 5,
+    "description": "**(S)** Fix `test-comment-helpers.bats` — ensure REPO constant is extracted by `source_orchestrator_functions()` awk filter, or mock it in test setup. Target: 0 failures.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 6,
+    "description": "**(S)** Fix timeout-as-success bug in `run_stage()` callers — when `run_stage()` returns `{\"status\":\"error\",\"error\":\"timeout\"}`, callers check `.result` (null) not `.status`. In test loop: null ≠ \"failed\" falls through to test-validate. In PR review: null ≠ \"approved\" triggers fix cycle with empty feedback. Add helper `is_stage_timeout()` and handle explicitly.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 7,
+    "description": "**(S)** Add scope constraints to fix-tests prompt — change to: \"Fix ONLY the specific test failures listed below. Do NOT rewrite test files, introduce new dependencies, or modify pre-existing test code. Only fix the failing assertions.\"",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 8,
+    "description": "**(S)** Add scope enforcement to test-validate — compute explicit file list via `git diff $BASE_BRANCH...HEAD --name-only` (not `--changedSince` dependency graph). Pass to validate prompt as \"ONLY validate tests for these specific files.\" Add: \"If a test file has pre-existing quality issues NOT introduced by this PR, report 'passed' and note them separately.\"",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 9,
+    "description": "**(S)** Add stage-type-based timeouts — replace flat `STAGE_TIMEOUT=3600` with `get_stage_timeout()`: test/docs/pr→600s, task-review/test-validate→900s, implement/fix→1800s, pr-review→1800s.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 10,
+    "description": "**(S)** Add branch verification before commits — `verify_on_feature_branch()` checks `git rev-parse --abbrev-ref HEAD` matches expected branch before fix stages.",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  }
+]

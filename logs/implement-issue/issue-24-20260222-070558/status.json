@@ -1,0 +1,74 @@
+{
+  "state": "running",
+  "issue": 24,
+  "base_branch": "main",
+  "branch": "feature/issue-24",
+  "current_stage": "pr",
+  "current_task": null,
+  "stages": {
+    "parse_issue": {
+      "status": "completed",
+      "started_at": "2026-02-21T20:06:00Z",
+      "completed_at": "2026-02-21T20:06:01Z"
+    },
+    "validate_plan": {
+      "status": "completed",
+      "started_at": "2026-02-21T20:06:02Z",
+      "completed_at": "2026-02-21T20:06:02Z"
+    },
+    "implement": {
+      "status": "completed",
+      "task_progress": "0/2",
+      "started_at": "2026-02-21T20:06:02Z",
+      "completed_at": "2026-02-21T20:06:02Z"
+    },
+    "quality_loop": {
+      "status": "completed",
+      "iteration": 0,
+      "completed_at": "2026-02-21T20:06:02Z"
+    },
+    "test_loop": {
+      "status": "completed",
+      "iteration": 0,
+      "started_at": "2026-02-21T20:06:02Z",
+      "completed_at": "2026-02-21T20:06:02Z"
+    },
+    "docs": {
+      "status": "completed",
+      "started_at": "2026-02-21T20:06:02Z",
+      "completed_at": "2026-02-21T20:06:04Z"
+    },
+    "pr": {
+      "status": "in_progress",
+      "started_at": "2026-02-21T20:06:04Z"
+    },
+    "pr_review": {
+      "status": "pending",
+      "iteration": 0
+    },
+    "complete": {
+      "status": "pending"
+    }
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "description": "**(S)** Add PR number validation and recovery in `create_and_review_pr()` — after line 2104, add: (1) validate `pr_number` is a positive integer, (2) if null/missing, query `gh pr list --head \"$branch\" --state open --json number --jq '.[0].number'` to recover, (3) if still null, log error and exit cleanly. Also make `pr_number` required in `implement-issue-pr.json` schema.",
+      "agent": "bash-script-craftsman",
+      "status": "pending",
+      "review_attempts": 0
+    },
+    {
+      "id": 2,
+      "description": "**(S)** Add BATS tests for PR number recovery — test cases: (1) pr_number extracted from structured_output normally, (2) pr_number missing triggers `gh pr list` recovery, (3) both missing triggers clean error exit, (4) non-integer pr_number triggers recovery",
+      "agent": "bash-script-craftsman",
+      "status": "pending",
+      "review_attempts": 0
+    }
+  ],
+  "quality_iterations": 0,
+  "test_iterations": 0,
+  "pr_review_iterations": 0,
+  "last_update": "2026-02-21T20:06:04Z",
+  "log_dir": "logs/implement-issue/issue-24-20260222-070558"
+}

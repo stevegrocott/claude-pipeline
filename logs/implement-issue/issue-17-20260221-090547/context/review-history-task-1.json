@@ -1,0 +1,43 @@
+[
+  {
+    "iteration": 1,
+    "issues": [
+      {
+        "file": ".claude/scripts/implement-issue-test/test-integration.bats",
+        "line": 279,
+        "severity": "minor",
+        "description": "Misleading/redundant `result=$?` pattern in M-size and L-size quality loop tests (lines 279-290). The `should_run_quality_loop \"M\"` call without `run` means BATS will abort the test at that line if it returns non-zero — so `result` is always 0, and the subsequent `[ \"$result\" -eq 0 ]` assertion is tautological and never catches a real failure. This creates false confidence. Contrast with the correct S-size test at line 274 which properly uses `run should_run_quality_loop \"S\"` and then checks `$status`. The M and L tests should use the same pattern: `run should_run_quality_loop \"M\"` then `[ \"$status\" -eq 0 ]`."
+      },
+      {
+        "file": ".claude/scripts/implement-issue-test/test-integration.bats",
+        "line": 749,
+        "severity": "minor",
+        "description": "Same `result=$?` anti-pattern in `should_run_docs_stage runs for typescript changes` (lines 749-754). The bash and config variants correctly use `run should_run_docs_stage` + `$status`, but the typescript variant uses the verbose `$?` capture pattern which is always 0. This inconsistency within the same section is confusing. Should be: `run should_run_docs_stage \"typescript\"` then `[ \"$status\" -eq 0 ]`."
+      },
+      {
+        "file": ".claude/scripts/implement-issue-test/test-integration.bats",
+        "line": 383,
+        "severity": "minor",
+        "description": "Test name `detect_change_scope classifies typescript files` is actively misleading — the body only checks `type -t detect_change_scope` (function existence), it performs zero classification testing. The detailed classification tests live in `test-smart-test-targeting.bats`, so coverage exists, but this test name creates a false impression of what is being verified. Either rename the test to `detect_change_scope function exists` or remove it entirely since existence is already implicit from other tests in `test-smart-test-targeting.bats` that call the function."
+      },
+      {
+        "file": ".claude/scripts/implement-issue-test/test-integration.bats",
+        "line": 507,
+        "severity": "minor",
+        "description": "Overly broad exit code assertions in the ERROR HANDLING section. `orchestrator exits 1 on parse_issue failure` (line 507) and `orchestrator exits 2 on max PR review iterations` (line 529) both check `[[ \"$main_def\" == *\"exit 1\"* ]]` / `[[ \"$main_def\" == *\"exit 2\"* ]]` against the entire `main` function body. Since `main` has multiple `exit 1` and `exit 2` calls for different failure modes, these tests pass regardless of whether the specific scenario's exit path is present. They'd still pass if the PR review max-iterations exit was accidentally removed. Consider narrowing by checking the surrounding context string rather than just the exit code in isolation, or delegate these assertions to the behavioral tests below."
+      },
+      {
+        "file": ".claude/scripts/implement-issue-test/test-integration.bats",
+        "line": 28,
+        "severity": "minor",
+        "description": "Duplicate schema copying in `setup()`. The helper's `setup_test_env()` (test-helper.bash lines 30-33) already copies schemas from `$SCRIPT_DIR/schemas` into `$TEST_TMP/schemas`. Then `setup()` in this file does the same copy again at lines 28-29. The second copy is harmless but unnecessary — it adds noise and could cause confusion about where schema setup responsibility lives. Remove the duplicate block (lines 28-39 can be simplified to just the fallback minimal schema creation, since `setup_test_env` handles the real copy)."
+      }
+    ],
+    "result": "changes_requested"
+  },
+  {
+    "iteration": 2,
+    "issues": [],
+    "result": "approved"
+  }
+]

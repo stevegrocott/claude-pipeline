@@ -1,0 +1,62 @@
+[
+  {
+    "iteration": 1,
+    "issues": [
+      {
+        "file": ".claude/scripts/implement-issue-orchestrator.sh",
+        "line": 954,
+        "severity": "major",
+        "description": "hash_re='#([0-9]+)' is too broad and will match issue references (e.g. 'issue #52'), step counts ('step #3'), commit refs, etc. Because the three patterns are OR-chained and hash_re is last, it fires whenever pr_re and bang_re don't match. Downstream at line 2707, the extracted number is consumed as the real PR number; the only guard (line 2716) rejects empty/null but not a valid-looking-but-wrong integer. Remove hash_re entirely or restrict it to a clearly PR-context pattern to prevent the review loop from targeting the wrong PR."
+      },
+      {
+        "file": ".claude/scripts/implement-issue-orchestrator.sh",
+        "line": 975,
+        "severity": "major",
+        "description": "grep -oE '\\[[ ]*\\{[^]]+\\]' uses [^]]+ which stops at the first ']' character, silently truncating any task object that contains a nested array (e.g. a 'dependencies' field). The subsequent jq validation then fails and nothing is extracted. Given the orchestrator's own task schemas include nested arrays (see lines 347-358), this will commonly produce no output for real payloads. Replace with a balanced-bracket parser (e.g. a small python3 -c snippet) or explicitly document the limitation."
+      },
+      {
+        "file": ".claude/scripts/implement-issue-test/test-stage-runner.bats",
+        "line": 162,
+        "severity": "minor",
+        "description": "No negative test verifies that a result text containing a bare '#N' reference (e.g. 'Implemented issue #52') does NOT set pr_number. This is the exact scenario that would catch the hash_re false-positive bug. Add a test: result text contains '#52' in an issue-reference context and assert pr_number is empty/null in the fallback output."
+      },
+      {
+        "file": ".claude/scripts/implement-issue-test/test-stage-runner.bats",
+        "line": 173,
+        "severity": "minor",
+        "description": "New timeout() mocks do not call 'shift' to skip the timeout argument, unlike the reference test '@test run_stage extracts structured_output' which does. Functionally harmless since mock bodies ignore all args, but inconsistent with the established convention in the test file."
+      }
+    ],
+    "result": "changes_requested"
+  },
+  {
+    "iteration": 2,
+    "issues": [
+      {
+        "severity": "minor",
+        "file": ".claude/scripts/implement-issue-test/test-stage-runner.bats",
+        "line": 169,
+        "description": "New @test blocks (lines 169–262) use hard tab indentation while all pre-existing tests in the file use 4-space indentation. Functionally harmless but violates the established convention and causes noisy diffs."
+      },
+      {
+        "severity": "minor",
+        "file": ".claude/scripts/implement-issue-test/helpers/test-helper.bash",
+        "line": 262,
+        "description": "New fail() helper writes to stderr (>&2) while peer assertion helpers like assert_contains() write to stdout. Both work in bats failure output, but the inconsistency will confuse future contributors about the expected output channel for assertion helpers."
+      },
+      {
+        "severity": "minor",
+        "file": ".claude/scripts/implement-issue-orchestrator.sh",
+        "line": 977,
+        "description": "Suggestion: The balanced-bracket parser requires python3 with no guard. If python3 is absent, 2>/dev/null silently suppresses the error and tasks_match is empty (graceful degradation), but there is no signal to the operator. A brief inline comment or command -v python3 guard would improve transparency."
+      },
+      {
+        "severity": "minor",
+        "file": ".claude/scripts/implement-issue-orchestrator.sh",
+        "line": 955,
+        "description": "Suggestion: bang_re='!([0-9]+)' has no leading word boundary or context, so it could match '!42' in unlikely strings like 'Error!42 retries'. Adding a leading anchor (e.g. (^| )!([0-9]+) with BASH_REMATCH[2]) would eliminate false positives, though the current pattern is acceptable for realistic PR-creation output."
+      }
+    ],
+    "result": "approved"
+  }
+]

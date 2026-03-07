@@ -1,0 +1,37 @@
+[
+  {
+    "id": 1,
+    "description": "**(M)** Add field-aware structured output recovery in `run_stage` (after line 944) that extracts `pr_number`, `branch`, and `tasks` from `.result` text using regex patterns when `.structured_output` is missing",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 2,
+    "description": "**(S)** Add PR number recovery fallback in the PR creation section (around line 2560): if `pr_number` is null after stage completes, run `gh pr list --head \"$BRANCH\" --json number -q '.[0].number'` to recover it",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 3,
+    "description": "**(S)** Implement graduated retry for task implementation: on first failure, retry with `_next_model_up` model and 20% increased timeout in the task retry loop",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 4,
+    "description": "**(S)** Add timeout escalation in `run_stage`: when a stage times out (exit 124) and is retried, increase timeout by 20% on the retry attempt",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 5,
+    "description": "**(S)** Add BATS tests for PR number recovery, graduated retry model escalation, and timeout escalation logic",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  }
+]

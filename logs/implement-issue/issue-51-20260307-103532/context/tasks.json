@@ -1,0 +1,37 @@
+[
+  {
+    "id": 1,
+    "description": "**(S)** Lower `MAX_TEST_ITERATIONS` from 10 to 7 and reduce test convergence threshold from 3 to 2 identical failures in `implement-issue-orchestrator.sh` (lines 29, 1772)",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 2,
+    "description": "**(S)** Add a `MAX_VALIDATION_FIX_ITERATIONS=2` constant and separate counter to cap validation-driven fix cycles independently from test failure fixes in `run_test_loop` (lines 1829-1846)",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 3,
+    "description": "**(M)** Add environment error detection function that checks failure descriptions for Redis/DB/HTTP 500 patterns and skips fix agent dispatch when all failures are environment-related (around lines 1729-1765)",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 4,
+    "description": "**(S)** Add explicit scope constraint to test validation fix prompt: \"Only fix quality issues in test files that correspond to PR-changed implementation files\" (line 1846 fix prompt)",
+    "agent": "bash-script-craftsman",
+    "status": "pending",
+    "review_attempts": 0
+  },
+  {
+    "id": 5,
+    "description": "**(S)** Update BATS tests to cover new constants and environment error detection logic",
+    "agent": "default",
+    "status": "pending",
+    "review_attempts": 0
+  }
+]

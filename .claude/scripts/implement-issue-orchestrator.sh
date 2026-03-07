@@ -1122,11 +1122,18 @@ run_quality_loop() {
         if [[ "$skip_simplify" == "true" ]]; then
             log "Skipping simplify for $stage_prefix iter $loop_iteration (prior iteration reported no changes)"
         else
+            # Pre-compute modified TypeScript/React files (three-dot merge-base diff)
+            # before simplify stage. Recomputed each iteration since fix stages may add commits.
+            local simplify_changed_files_raw simplify_changed_files
+            simplify_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only -- '*.ts' '*.tsx' 2>/dev/null || true)
+            simplify_changed_files=$(printf '%s\n' "$simplify_changed_files_raw" | grep -v -E '^$' || true)
+
             local simplify_prompt="Simplify modified TypeScript/React files in the current branch in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT SCOPE CONSTRAINT: This is for issue #$ISSUE_NUMBER. Only simplify code that is directly related to the issue's goals. Do NOT apply unrelated refactoring to files that were only incidentally touched or are outside the issue's focus area.
 
-Get modified files with: git -C $loop_dir diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx'
+MODIFIED TYPESCRIPT/REACT FILES:
+$simplify_changed_files
 
 If no TypeScript/React files were modified as part of this issue's implementation, make no changes and report 'No changes to simplify'.
 
@@ -1161,6 +1168,11 @@ Output a summary of changes made."
             ' "$review_history_file" 2>/dev/null || printf '')
         fi
 
+        # Pre-compute modified files (three-dot merge-base diff) for review stage
+        local review_changed_files_raw review_changed_files
+        review_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+        review_changed_files=$(printf '%s\n' "$review_changed_files_raw" | grep -v -E '^$' || true)
+
         local review_prompt="Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT: This is a task-level quality check within the implementation workflow, NOT a full PR review.
@@ -1171,6 +1183,9 @@ Check:
 - Consistency with codebase conventions
 - Potential bugs or issues
 - Security concerns
+
+FILES CHANGED:
+$review_changed_files
 
 $(if [[ -n "$prior_context" ]]; then
     printf '\n'
@@ -1503,6 +1518,35 @@ get_max_quality_iterations() {
 	else
 		echo "$size_based"
 	fi
+}
+
+# =============================================================================
+# PROMPT FILE-LIST BUILDER
+# =============================================================================
+#
+# Formats a list of file paths into the "LIKELY AFFECTED FILES:" block that
+# is injected into the implement-task prompt.  Keeping this in a named
+# function makes it testable in isolation.
+#
+# Arguments:
+#   $@ - zero or more file paths
+# Outputs:
+#   A leading newline when no files are provided (preserves blank-line
+#   separator in prompt).  A "LIKELY AFFECTED FILES:" section listing
+#   deduplicated, sorted file paths when one or more are provided.
+#
+build_files_block() {
+    local block=$'\n'
+    if [[ $# -gt 0 ]]; then
+        local deduped
+        deduped=$(printf '%s\n' "$@" | sort -u)
+        block=$'\nLIKELY AFFECTED FILES:\n'
+        local f
+        while IFS= read -r f; do
+            [[ -n "$f" ]] && block+="- $f"$'\n'
+        done <<< "$deduped"
+    fi
+    printf '%s' "$block"
 }
 
 # =============================================================================
@@ -2467,14 +2511,34 @@ $task_list_md
             local base_model
             base_model=$(resolve_model "implement-task-$task_id" "$task_size")
 
+            # Build list of likely affected files for the implement prompt.
+            # Sources: (1) paths extracted from task description via regex,
+            #          (2) files already modified in this branch.
+            local -a affected_files=()
+            local f
+            while IFS= read -r f; do
+                [[ -n "$f" ]] && affected_files+=("$f")
+            done < <(
+                printf '%s' "$task_desc" \
+                    | grep -oE \
+                        '[a-zA-Z0-9_.][a-zA-Z0-9_./-]*(/[a-zA-Z0-9_./-]+)+' \
+                    2>/dev/null || true
+            )
+            while IFS= read -r f; do
+                [[ -n "$f" ]] && affected_files+=("$f")
+            done < <(
+                git diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true
+            )
+            local files_block
+            files_block=$(build_files_block "${affected_files[@]+"${affected_files[@]}"}")
+
             while (( review_attempts < max_attempts )); do
                 review_attempts=$((review_attempts + 1))
 
                 # Implement with self-review (eliminates separate task-review invocation)
                 local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
 
-$task_desc
-
+$task_desc${files_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
@@ -2774,6 +2838,20 @@ Investigate the root cause and fix the issue. Commit your changes."
     fi
 
     # -------------------------------------------------------------------------
+    # Pre-compute modified TypeScript files before docs stage
+    # -------------------------------------------------------------------------
+    local modified_ts_files
+    modified_ts_files=$(git diff "$BASE_BRANCH"...HEAD --name-only -- '*.ts' '*.tsx' 2>/dev/null | grep -E '^(apps|packages)/' | sort)
+
+    # Format the file list for the prompt
+    local files_for_prompt
+    if [[ -n "$modified_ts_files" ]]; then
+        files_for_prompt=$(printf '%s' "$modified_ts_files" | sed 's/^/- /')
+    else
+        files_for_prompt="(no TypeScript files modified)"
+    fi
+
+    # -------------------------------------------------------------------------
     # STAGE: DOCS
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "docs"; then
@@ -2794,7 +2872,8 @@ Investigate the root cause and fix the issue. Commit your changes."
 
             local docs_prompt="Write JSDoc/TSDoc comments for all modified TypeScript files on branch $branch in the current working directory.
 
-Get modified files with: git diff $BASE_BRANCH...HEAD --name-only -- '*.ts' '*.tsx' | grep -E '^(apps|packages)/'
+Modified TypeScript files:
+$files_for_prompt
 
 Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSUE_NUMBER): add JSDoc comments"
             run_stage "docs" "$docs_prompt" "implement-issue-implement.json" "default"

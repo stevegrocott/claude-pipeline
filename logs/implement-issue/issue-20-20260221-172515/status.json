@@ -1,0 +1,51 @@
+{
+  "state": "error",
+  "issue": 20,
+  "base_branch": "main",
+  "branch": "",
+  "current_stage": "parse_issue",
+  "current_task": null,
+  "stages": {
+    "parse_issue": {
+      "status": "in_progress",
+      "started_at": "2026-02-21T06:25:17Z",
+      "completed_at": null
+    },
+    "validate_plan": {
+      "status": "pending",
+      "started_at": null,
+      "completed_at": null
+    },
+    "implement": {
+      "status": "pending",
+      "task_progress": "0/0"
+    },
+    "quality_loop": {
+      "status": "pending",
+      "iteration": 0
+    },
+    "test_loop": {
+      "status": "pending",
+      "iteration": 0
+    },
+    "docs": {
+      "status": "pending"
+    },
+    "pr": {
+      "status": "pending"
+    },
+    "pr_review": {
+      "status": "pending",
+      "iteration": 0
+    },
+    "complete": {
+      "status": "pending"
+    }
+  },
+  "tasks": [],
+  "quality_iterations": 0,
+  "test_iterations": 0,
+  "pr_review_iterations": 0,
+  "last_update": "2026-02-21T06:25:18Z",
+  "log_dir": "logs/implement-issue/issue-20-20260221-172515"
+}

@@ -1,0 +1,111 @@
+{
+  "state": "completed",
+  "issue": "52",
+  "base_branch": "main",
+  "branch": "feature/issue-52",
+  "current_stage": "complete",
+  "current_task": 5,
+  "stages": {
+    "parse_issue": {
+      "status": "completed",
+      "started_at": "2026-03-07T00:42:38Z",
+      "completed_at": "2026-03-07T00:42:38Z"
+    },
+    "validate_plan": {
+      "status": "completed",
+      "started_at": "2026-03-07T00:42:38Z",
+      "completed_at": "2026-03-07T00:42:40Z"
+    },
+    "implement": {
+      "status": "completed",
+      "task_progress": "5/5",
+      "started_at": "2026-03-07T00:42:40Z",
+      "completed_at": "2026-03-07T01:44:18Z"
+    },
+    "quality_loop": {
+      "status": "completed",
+      "iteration": 2,
+      "completed_at": "2026-03-07T01:44:18Z"
+    },
+    "test_loop": {
+      "status": "completed",
+      "iteration": 1,
+      "started_at": "2026-03-07T01:44:18Z",
+      "completed_at": "2026-03-07T01:45:31Z"
+    },
+    "e2e_verify": {
+      "status": "completed",
+      "started_at": "2026-03-07T01:45:31Z",
+      "completed_at": "2026-03-07T01:45:31Z"
+    },
+    "acceptance_test": {
+      "status": "completed",
+      "started_at": "2026-03-07T01:45:31Z",
+      "completed_at": "2026-03-07T01:45:33Z"
+    },
+    "docs": {
+      "status": "completed",
+      "started_at": "2026-03-07T01:45:33Z",
+      "completed_at": "2026-03-07T01:45:50Z"
+    },
+    "pr": {
+      "status": "completed",
+      "started_at": "2026-03-07T01:45:50Z",
+      "pr_number": 58,
+      "completed_at": "2026-03-07T01:46:18Z"
+    },
+    "pr_review": {
+      "status": "completed",
+      "iteration": 1,
+      "started_at": "2026-03-07T01:46:18Z",
+      "completed_at": "2026-03-07T01:49:43Z"
+    },
+    "complete": {
+      "status": "completed",
+      "started_at": "2026-03-07T01:49:43Z",
+      "completed_at": "2026-03-07T01:50:18Z"
+    }
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "description": "**(M)** Add field-aware structured output recovery in `run_stage` (after line 944) that extracts `pr_number`, `branch`, and `tasks` from `.result` text using regex patterns when `.structured_output` is missing",
+      "agent": "bash-script-craftsman",
+      "status": "completed",
+      "review_attempts": 1
+    },
+    {
+      "id": 2,
+      "description": "**(S)** Add PR number recovery fallback in the PR creation section (around line 2560): if `pr_number` is null after stage completes, run `gh pr list --head \"$BRANCH\" --json number -q '.[0].number'` to recover it",
+      "agent": "bash-script-craftsman",
+      "status": "completed",
+      "review_attempts": 1
+    },
+    {
+      "id": 3,
+      "description": "**(S)** Implement graduated retry for task implementation: on first failure, retry with `_next_model_up` model and 20% increased timeout in the task retry loop",
+      "agent": "bash-script-craftsman",
+      "status": "completed",
+      "review_attempts": 1
+    },
+    {
+      "id": 4,
+      "description": "**(S)** Add timeout escalation in `run_stage`: when a stage times out (exit 124) and is retried, increase timeout by 20% on the retry attempt",
+      "agent": "bash-script-craftsman",
+      "status": "completed",
+      "review_attempts": 1
+    },
+    {
+      "id": 5,
+      "description": "**(S)** Add BATS tests for PR number recovery, graduated retry model escalation, and timeout escalation logic",
+      "agent": "default",
+      "status": "completed",
+      "review_attempts": 1
+    }
+  ],
+  "quality_iterations": 2,
+  "test_iterations": 1,
+  "pr_review_iterations": 1,
+  "last_update": "2026-03-07T01:50:18Z",
+  "log_dir": "logs/implement-issue/issue-52-20260307-114236"
+}
