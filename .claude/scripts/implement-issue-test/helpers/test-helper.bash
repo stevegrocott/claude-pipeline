@@ -258,6 +258,12 @@ assert_contains() {
     return 0
 }
 
+# Fail with message (compatible with bats-assert)
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    return 1
+}
+
 # Assert string not empty
 assert_not_empty() {
     local value="$1"

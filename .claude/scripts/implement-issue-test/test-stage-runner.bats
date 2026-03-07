@@ -169,6 +169,7 @@ teardown() {
 @test "run_stage fallback extracts pr_number from result text" {
 	# No .structured_output, but .result contains PR number text
 	timeout() {
+		shift  # skip timeout value
 		echo '{"result":"Created PR #42 successfully","is_error":false}'
 	}
 	export -f timeout
@@ -183,9 +184,29 @@ teardown() {
 		fail "Expected pr_number=42, got: $pr_number (full output: $result)"
 }
 
+@test "run_stage fallback does NOT set pr_number from bare issue ref" {
+	# A bare '#N' in an issue-reference context (e.g. 'Implemented issue #52')
+	# must not be extracted as a PR number — hash_re is intentionally absent.
+	timeout() {
+		shift  # skip timeout value
+		echo '{"result":"Implemented issue #52 on branch feature/issue-52","is_error":false}'
+	}
+	export -f timeout
+
+	local result
+	result=$(run_stage "implement" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+
+	local pr_number
+	pr_number=$(printf '%s' "$result" | jq -r '.pr_number // empty')
+	[ -z "$pr_number" ] || \
+		fail "pr_number should be empty for bare issue ref, got: $pr_number"
+}
+
 @test "run_stage fallback extracts branch from result text" {
 	# No .structured_output, but .result contains branch name
 	timeout() {
+		shift  # skip timeout value
 		echo '{"result":"Working on branch feature/issue-52 completed","is_error":false}'
 	}
 	export -f timeout
@@ -207,6 +228,7 @@ teardown() {
 	jq -n --arg t "Tasks: $tasks_json" \
 		'{result: $t, is_error: false}' > "$mock_file"
 	timeout() {
+		shift  # skip timeout value
 		cat "$TEST_TMP/tasks-mock.json"
 	}
 	export -f timeout
@@ -224,6 +246,7 @@ teardown() {
 @test "run_stage fallback with no extractable fields still succeeds" {
 	# No .structured_output, .result is plain text with no parseable fields
 	timeout() {
+		shift  # skip timeout value
 		echo '{"result":"Task completed successfully","is_error":false}'
 	}
 	export -f timeout
@@ -245,6 +268,7 @@ teardown() {
 @test "run_stage returns timeout error on exit code 124" {
     # Override timeout to simulate timeout
     timeout() {
+        shift  # skip timeout value
         return 124
     }
     export -f timeout
@@ -356,12 +380,12 @@ teardown() {
     }
     export -f timeout
 
-    # implement defaults to opus, but S complexity overrides to sonnet
-    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S"
+    # implement defaults to opus, but M complexity overrides to sonnet
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "M"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--model sonnet" "$claude_calls" || \
-        fail "Expected --model sonnet with S complexity. Calls: $(cat "$claude_calls")"
+        fail "Expected --model sonnet with M complexity. Calls: $(cat "$claude_calls")"
 }
 
 @test "run_stage logs model in stage output" {
@@ -390,6 +414,6 @@ teardown() {
     run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
 
     # Verify complexity was logged
-    grep -q "complexity: L" "$LOG_FILE" || \
+    grep -q "Complexity: L" "$LOG_FILE" || \
         fail "Complexity hint was not logged. Log: $(cat "$LOG_FILE")"
 }

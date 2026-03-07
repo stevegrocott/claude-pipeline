@@ -948,13 +948,13 @@ run_stage() {
                 | jq -r '.result // empty' 2>/dev/null)
 
             if [[ -n "$result_text" ]]; then
-                # Extract pr_number from "PR #N", "MR #N", "!N", "#N"
+                # Extract pr_number from "PR #N", "MR #N", or "!N"
+                # Deliberately omits bare "#N" — too ambiguous (issue refs,
+                # step counts, commit hashes) and would produce wrong PR nums.
                 local pr_re='[PpMm][Rr] *#([0-9]+)'
                 local bang_re='!([0-9]+)'
-                local hash_re='#([0-9]+)'
                 if [[ "$result_text" =~ $pr_re ]] \
-                    || [[ "$result_text" =~ $bang_re ]] \
-                    || [[ "$result_text" =~ $hash_re ]]; then
+                    || [[ "$result_text" =~ $bang_re ]]; then
                     local pr_num="${BASH_REMATCH[1]}"
                     fallback_result=$(printf '%s' "$fallback_result" \
                         | jq -c --argjson n "$pr_num" \
@@ -970,11 +970,24 @@ run_stage() {
                             '.branch = $b')
                 fi
 
-                # Extract tasks JSON array embedded in text
+                # Extract tasks JSON array embedded in text using a
+                # balanced-bracket parser so nested arrays (e.g. a
+                # "dependencies" field) are not truncated at their first ']'.
                 local tasks_match
-                tasks_match=$(printf '%s' "$result_text" \
-                    | grep -oE '\[[ ]*\{[^]]+\]' \
-                    | head -1)
+                tasks_match=$(python3 -c "
+import sys, re
+t = sys.stdin.read()
+for m in re.finditer(r'\[\s*\{', t):
+    s = m.start()
+    d = 0
+    for i, c in enumerate(t[s:], s):
+        if c == '[': d += 1
+        elif c == ']':
+            d -= 1
+            if d == 0:
+                print(t[s:i+1])
+                break
+    break" <<< "$result_text" 2>/dev/null)
                 if [[ -n "$tasks_match" ]]; then
                     local valid_tasks
                     valid_tasks=$(printf '%s' "$tasks_match" \
