@@ -1028,6 +1028,14 @@ for m in re.finditer(r'\[\s*\{', t):
             return 0
         fi
 
+        # Diagnostic: log raw output first 500 chars and byte count when both
+        # .structured_output and .result extraction fail
+        local output_byte_count
+        output_byte_count=$(printf '%s' "$output" | wc -c)
+        local output_preview="${output:0:500}"
+        log "Diagnostic fallback failure — Output byte count: $output_byte_count"
+        log "Diagnostic fallback failure — First 500 characters: $output_preview"
+
         log_error "No structured output from $stage_name"
         echo '{"status":"error","error":"no structured output"}'
         return 1
