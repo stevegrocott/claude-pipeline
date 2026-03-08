@@ -1214,15 +1214,36 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             continue
         fi
 
-        local review_verdict review_summary
-        review_verdict=$(printf '%s' "$review_result" | jq -r '
-            if .result then .result
-            elif .status == "success" then "approved"
-            elif .status == "passed" then "passed"
-            else "changes_requested"
-            end
-        ')
+        local review_verdict review_summary verdict_source
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
+        local has_result_field
+        has_result_field=$(printf '%s' "$review_result" | jq 'has("result")' 2>/dev/null)
+
+        if [[ "$has_result_field" == "true" ]]; then
+            # Structured output available: extract verdict from .result field
+            review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+            verdict_source="structured output"
+            log "Verdict extracted from structured output: $review_verdict"
+        else
+            # Fallback: parse verdict from summary text
+            verdict_source="fallback text"
+            local summary_lower
+            summary_lower=$(printf '%s' "$review_summary" | tr '[:upper:]' '[:lower:]')
+
+            # Check for approval keywords
+            if grep -qiE '(approved|lgtm|looks good|no issues)' <<< "$summary_lower"; then
+                review_verdict="approved"
+                log "Verdict parsed from fallback text: approved (matched approval keywords)"
+            # Check for rejection keywords
+            elif grep -qiE '(changes requested|request changes|must fix|blocking|critical)' <<< "$summary_lower"; then
+                review_verdict="changes_requested"
+                log "Verdict parsed from fallback text: changes_requested (matched rejection keywords)"
+            else
+                # Default to changes_requested if ambiguous
+                review_verdict="changes_requested"
+                log "Verdict parsed from fallback text: changes_requested (ambiguous/default)"
+            fi
+        fi
 
         # Append current iteration findings to review history
         local current_issues
@@ -3224,15 +3245,36 @@ Approve or request changes. Output a summary suitable for an issue comment."
             continue
         fi
 
-        local review_verdict review_summary
-        review_verdict=$(printf '%s' "$review_result" | jq -r '
-            if .result then .result
-            elif .status == "success" then "approved"
-            elif .status == "passed" then "passed"
-            else "changes_requested"
-            end
-        ')
+        local review_verdict review_summary verdict_source
         review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
+        local has_result_field
+        has_result_field=$(printf '%s' "$review_result" | jq 'has("result")' 2>/dev/null)
+
+        if [[ "$has_result_field" == "true" ]]; then
+            # Structured output available: extract verdict from .result field
+            review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+            verdict_source="structured output"
+            log "Verdict extracted from structured output: $review_verdict"
+        else
+            # Fallback: parse verdict from summary text
+            verdict_source="fallback text"
+            local summary_lower
+            summary_lower=$(printf '%s' "$review_summary" | tr '[:upper:]' '[:lower:]')
+
+            # Check for approval keywords
+            if grep -qiE '(approved|lgtm|looks good|no issues)' <<< "$summary_lower"; then
+                review_verdict="approved"
+                log "Verdict parsed from fallback text: approved (matched approval keywords)"
+            # Check for rejection keywords
+            elif grep -qiE '(changes requested|request changes|must fix|blocking|critical)' <<< "$summary_lower"; then
+                review_verdict="changes_requested"
+                log "Verdict parsed from fallback text: changes_requested (matched rejection keywords)"
+            else
+                # Default to changes_requested if ambiguous
+                review_verdict="changes_requested"
+                log "Verdict parsed from fallback text: changes_requested (ambiguous/default)"
+            fi
+        fi
 
         # -------------------------------------------------------------------------
         # MAJOR-ISSUE OVERRIDE: If reviewer said "approved" but flagged major
