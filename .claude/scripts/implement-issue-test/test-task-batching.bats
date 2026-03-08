@@ -658,7 +658,7 @@ teardown() {
 	local conflicted_count completed_count
 	conflicted_count=$(printf '%s' "$result" | jq '.conflicted | length' 2>/dev/null)
 	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
-	total_classified=$(( conflicted_count + completed_count ))
+	local total_classified=$(( conflicted_count + completed_count ))
 	[[ "$total_classified" -eq 2 ]]
 	[[ "$conflicted_count" -ge 1 ]]
 
@@ -1030,4 +1030,96 @@ teardown() {
 	[[ "$results" == *"e2e_exit=1"* ]]
 	# acceptance should have succeeded (exit 0)
 	[[ "$results" == *"acceptance_exit=0"* ]]
+}
+
+# =============================================================================
+# run_parallel_post_task_stages — integration tests (call the real function)
+# Verifies skip-condition logic, set_stage_started/completed sequencing, and
+# the PID capture/wait loop using mocked dependencies.
+# =============================================================================
+
+@test "run_parallel_post_task_stages: both stages skip and mark started+completed sequentially" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# Conditions: TEST_E2E_CMD not set → e2e skips;
+	#             pipeline_profile=minimal → acceptance skips.
+	# Neither stage opens a background subshell, so all mocks stay in scope.
+	unset TEST_E2E_CMD
+	unset RESUME_MODE
+
+	local calls_file="$TEST_TMP/rppts-calls.txt"
+	touch "$calls_file"
+
+	# Mock every external symbol touched by the real function
+	is_stage_completed() { return 1; }
+	set_stage_started()  { printf 'started:%s\n'   "$1" >> "$calls_file"; }
+	set_stage_completed(){ printf 'completed:%s\n' "$1" >> "$calls_file"; }
+	comment_issue()      { printf 'comment:%s\n'   "$1" >> "$calls_file"; }
+	run_stage()          { printf 'run_stage:%s\n' "$1" >> "$calls_file";
+	                       printf '{"status":"success","summary":"ok"}'; }
+	log()                { :; }
+	log_warn()           { :; }
+
+	# Call the real function directly
+	run_parallel_post_task_stages \
+		"feature/issue-99" "backend" "minimal" "S"
+
+	[ "$?" -eq 0 ]
+
+	# Both stages must be started then completed (sequential, no parallelism)
+	grep -q "started:e2e_verify"        "$calls_file"
+	grep -q "completed:e2e_verify"      "$calls_file"
+	grep -q "started:acceptance_test"   "$calls_file"
+	grep -q "completed:acceptance_test" "$calls_file"
+
+	# run_stage must NOT have been called — both stages were skipped
+	! grep -q "^run_stage:" "$calls_file"
+}
+
+@test "run_parallel_post_task_stages: e2e skips for non-frontend scope, acceptance runs in parallel (no route files → short-circuit)" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# TEST_E2E_CMD set but scope=backend → e2e skips.
+	# acceptance_test runs in a subshell; because the test git repo has no
+	# '*/routes/*.ts' files, it takes the "no route files" short-circuit path
+	# that only calls log + comment_issue — no run_stage needed.
+	export TEST_E2E_CMD="npm run test:e2e"
+	export BASE_BRANCH=main
+	unset RESUME_MODE
+
+	local calls_file="$TEST_TMP/rppts2-calls.txt"
+	touch "$calls_file"
+	export calls_file
+
+	# Mocks visible to the parent shell
+	is_stage_completed() { return 1; }
+	set_stage_started()  { printf 'started:%s\n'   "$1" >> "$calls_file"; }
+	set_stage_completed(){ printf 'completed:%s\n' "$1" >> "$calls_file"; }
+	comment_issue()      { :; }
+	run_stage()          { printf 'run_stage:%s\n' "$1" >> "$calls_file";
+	                       printf '{"status":"success","summary":"ok"}'; }
+	log()                { :; }
+	log_warn()           { :; }
+	log_error()          { :; }
+	# Export so the acceptance_test subshell can see them
+	export -f set_stage_started set_stage_completed comment_issue
+	export -f run_stage log log_warn log_error
+
+	# Call the real function directly (not via bats `run`)
+	run_parallel_post_task_stages \
+		"main" "backend" "" "S"
+
+	local exit_code=$?
+	[ "$exit_code" -eq 0 ]
+
+	# e2e_verify must have been skipped sequentially (scope ≠ frontend)
+	grep -q "started:e2e_verify"        "$calls_file"
+	grep -q "completed:e2e_verify"      "$calls_file"
+
+	# acceptance_test must have run (in parallel) and completed
+	grep -q "started:acceptance_test"   "$calls_file"
+	grep -q "completed:acceptance_test" "$calls_file"
+
+	# run_stage must NOT have been called — no route files changed
+	! grep -q "^run_stage:" "$calls_file"
 }
