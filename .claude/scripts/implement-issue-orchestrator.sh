@@ -1727,6 +1727,165 @@ compute_pipeline_profile() {
 }
 
 # =============================================================================
+# TASK DEPENDENCY DETECTION
+# =============================================================================
+#
+# Extracts candidate file paths from a task description string.
+# Matches three token shapes:
+#   1. Backtick-quoted paths:   `src/foo/bar.ts`
+#   2. Slash-separated tokens:  src/components/button
+#   3. Extension-bearing names: handler.sh, index.ts
+#
+# Arguments:
+#   $1 - task description string
+# Outputs:
+#   Newline-separated, sorted-unique file paths (empty if none found)
+#
+_extract_task_files_from_desc() {
+	local desc="$1"
+	printf '%s' "$desc" \
+		| grep -oE '`[a-zA-Z0-9_./-]+`|[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+|[a-zA-Z0-9_-]+\.[a-zA-Z0-9]{1,5}' \
+		| sed 's/`//g' \
+		| sort -u
+}
+
+# Groups tasks into parallelizable batches by detecting file-level conflicts.
+#
+# Tasks whose file sets do not overlap are placed in the same batch and can
+# run concurrently.  Tasks that share one or more files are placed in
+# sequential batches.
+#
+# Algorithm: greedy earliest-batch assignment (tasks processed in issue order).
+# Each task is tested against existing batches from batch 1 upward and placed
+# in the first batch that has no file conflict.
+#
+# File sets are derived from:
+#   1. Path-like tokens extracted from the task description (primary)
+#   2. Files already changed on the branch (git diff vs BASE_BRANCH) that
+#      share a path component with description-extracted tokens (secondary)
+#
+# Tasks with empty file sets (no recognisable paths in their description) are
+# always placed in batch 1 alongside other tasks — no conflict is assumed when
+# file sets cannot be determined.
+#
+# Arguments:
+#   $1 - tasks JSON array (elements must have .id and .description)
+#   $2 - base branch name (for git diff; defaults to "main")
+# Outputs:
+#   Updated tasks JSON array with a .batch integer field on each element
+#   (1-indexed; tasks sharing the same batch number can run in parallel)
+#
+compute_task_batches() {
+	local tasks_json="${1:-[]}"
+	local base_branch="${2:-main}"
+
+	local task_count
+	task_count=$(printf '%s' "$tasks_json" | jq 'length')
+
+	# Trivial cases: 0 or 1 tasks — everything is batch 1
+	if ((task_count <= 1)); then
+		printf '%s' "$tasks_json" | jq 'map(. + {batch: 1})'
+		return
+	fi
+
+	# Collect files already changed on the branch (empty on a fresh branch)
+	local -a diff_files=()
+	local diff_out
+	if diff_out=$(git diff --name-only "$base_branch" 2>/dev/null) \
+		&& [[ -n "$diff_out" ]]; then
+		while IFS= read -r f; do
+			[[ -n "$f" ]] && diff_files+=("$f")
+		done <<< "$diff_out"
+	fi
+
+	# Build file sets for each task (parallel arrays, 0-based index)
+	local -a task_files
+	local i
+	for ((i = 0; i < task_count; i++)); do
+		local desc
+		desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
+
+		# Primary: extract path-like tokens from the task description
+		local desc_files
+		desc_files=$(_extract_task_files_from_desc "$desc")
+
+		# Secondary: add diff files that share a path component with any
+		# desc_files token (augments detection when the branch already has commits)
+		local aug_files=""
+		if [[ -n "$desc_files" && ${#diff_files[@]} -gt 0 ]]; then
+			local dfile
+			for dfile in "${diff_files[@]}"; do
+				local dbase="${dfile##*/}"
+				local df
+				while IFS= read -r df; do
+					[[ -z "$df" ]] && continue
+					local dfbase="${df##*/}"
+					if [[ "$dfile" == *"$df"* \
+						|| ( -n "$dfbase" && "$dbase" == "$dfbase" ) ]]; then
+						aug_files+="${dfile}"$'\n'
+						break
+					fi
+				done <<< "$desc_files"
+			done
+		fi
+
+		# Combine and deduplicate both sources
+		local combined
+		combined=$(printf '%s\n%s' "$desc_files" "$aug_files" \
+			| sort -u | grep -v '^[[:space:]]*$')
+		task_files[$i]="$combined"
+	done
+
+	# Greedy batch assignment
+	# batch_used_files[b] = newline-separated files claimed by batch b (0-based)
+	local -a batch_used_files
+	local -a task_batch_idx
+	for ((i = 0; i < task_count; i++)); do
+		local my_files="${task_files[$i]:-}"
+		local b=0
+		local placed=0
+		while [[ $placed -eq 0 ]]; do
+			local conflict=0
+			# Only check overlap when both this task and the batch have
+			# non-empty file sets; unknown sets never trigger a conflict
+			if [[ -n "$my_files" && -n "${batch_used_files[$b]:-}" ]]; then
+				local f
+				while IFS= read -r f; do
+					[[ -z "$f" ]] && continue
+					if printf '%s\n' "${batch_used_files[$b]}" \
+						| grep -qxF "$f"; then
+						conflict=1
+						break
+					fi
+				done <<< "$my_files"
+			fi
+
+			if [[ $conflict -eq 0 ]]; then
+				task_batch_idx[$i]=$b
+				if [[ -n "$my_files" ]]; then
+					batch_used_files[$b]+=$'\n'"$my_files"
+				fi
+				placed=1
+			else
+				((b++))
+			fi
+		done
+	done
+
+	# Inject 1-based batch numbers back into tasks_json
+	local result="$tasks_json"
+	for ((i = 0; i < task_count; i++)); do
+		local batch_num=$(( task_batch_idx[i] + 1 ))
+		result=$(printf '%s' "$result" | jq \
+			--argjson idx "$i" \
+			--argjson batch "$batch_num" \
+			'.[$idx] += {batch: $batch}')
+	done
+
+	printf '%s' "$result"
+}
+
+# =============================================================================
 # PROMPT FILE-LIST BUILDER
 # =============================================================================
 #
@@ -2507,6 +2666,25 @@ Log directory: \`$LOG_BASE\`"
         fi
 
         log "Extracted $task_count tasks from issue body"
+
+        # Compute parallelizable batch assignments for all tasks.
+        # Tasks whose inferred file sets do not overlap are grouped into the
+        # same batch; tasks sharing files are placed in sequential batches.
+        log "Computing task batch assignments for dependency-aware scheduling..."
+        tasks_json=$(compute_task_batches "$tasks_json" "${BASE_BRANCH:-main}")
+
+        # Log the batch groupings so operators can see the scheduling decision
+        local max_batch
+        max_batch=$(printf '%s' "$tasks_json" | jq '[.[].batch] | max')
+        log "Batch groupings: $max_batch sequential batch(es) across $task_count tasks"
+        local b
+        for ((b = 1; b <= max_batch; b++)); do
+            local batch_ids
+            batch_ids=$(printf '%s' "$tasks_json" | jq -r \
+                "[.[] | select(.batch == $b) | \"#\(.id)\"] | join(\", \")")
+            log "  Batch $b (can run in parallel): tasks $batch_ids"
+        done
+
         set_tasks "$tasks_json"
         printf '%s\n' "$tasks_json" > "$LOG_BASE/context/tasks.json"
 
