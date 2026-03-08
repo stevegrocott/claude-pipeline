@@ -1743,8 +1743,18 @@ compute_pipeline_profile() {
 #
 _extract_task_files_from_desc() {
 	local desc="$1"
+	# Limit bare-extension matching to known file types to avoid false
+	# positives from version strings (v1.0), domain names, issue refs, etc.
+	local ext_pat
+	ext_pat='sh|bats|bash|ts|tsx|js|jsx|mjs|cjs'
+	ext_pat+="|py|go|rb|rs|java|kt|swift"
+	ext_pat+="|json|yaml|yml|toml|sql|md|css|html|tf"
+	local grep_pat
+	grep_pat='`[a-zA-Z0-9_./-]+`'
+	grep_pat+='|[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+'
+	grep_pat+="|[a-zA-Z0-9_-]+\\.($ext_pat)"
 	printf '%s' "$desc" \
-		| grep -oE '`[a-zA-Z0-9_./-]+`|[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+|[a-zA-Z0-9_-]+\.[a-zA-Z0-9]{1,5}' \
+		| grep -oE "$grep_pat" \
 		| sed 's/`//g' \
 		| sort -u
 }
@@ -1844,7 +1854,7 @@ compute_task_batches() {
 		local my_files="${task_files[$i]:-}"
 		local b=0
 		local placed=0
-		while [[ $placed -eq 0 ]]; do
+		while [[ $placed -eq 0 && $b -lt 1000 ]]; do
 			local conflict=0
 			# Only check overlap when both this task and the batch have
 			# non-empty file sets; unknown sets never trigger a conflict
@@ -1870,12 +1880,21 @@ compute_task_batches() {
 				((b++))
 			fi
 		done
+		# Safety fallback: loop ceiling hit without placement (defensive only;
+		# an empty batch always has no conflict so this path is unreachable in
+		# normal operation).  Assign to the current batch as a last resort.
+		if [[ $placed -eq 0 ]]; then
+			log_error "Task $i: batch-assignment loop limit exceeded;" \
+				"assigning to batch $((b + 1)) as fallback"
+			task_batch_idx[$i]=$b
+		fi
 	done
 
 	# Inject 1-based batch numbers back into tasks_json
 	local result="$tasks_json"
 	for ((i = 0; i < task_count; i++)); do
-		local batch_num=$(( task_batch_idx[i] + 1 ))
+		local batch_num
+		batch_num=$(( task_batch_idx[i] + 1 ))
 		result=$(printf '%s' "$result" | jq \
 			--argjson idx "$i" \
 			--argjson batch "$batch_num" \
@@ -2863,6 +2882,11 @@ $task_list_md
             completed_tasks=0
         fi
 
+        # NOTE: each task carries a .batch field (set by compute_task_batches)
+        # that groups non-conflicting tasks for potential parallel execution.
+        # Parallel dispatch based on .batch is deferred to a future iteration;
+        # tasks execute sequentially here.  The field is retained as metadata
+        # for operator visibility (logged during parse_issue) and future use.
         for ((i=0; i<task_count; i++)); do
             local task
             task=$(printf '%s' "$tasks_json" | jq ".[$i]")
