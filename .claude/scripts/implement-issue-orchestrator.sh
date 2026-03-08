@@ -284,7 +284,8 @@ init_status() {
             test_iterations: 0,
             pr_review_iterations: 0,
             last_update: (now | todate),
-            log_dir: $log_dir
+            log_dir: $log_dir,
+            escalations: []
         }' > "$STATUS_FILE"
 
     log "Initialized status file: $STATUS_FILE"
@@ -335,6 +336,22 @@ set_stage_completed() {
     jq --arg stage "$stage" \
        '.stages[$stage].completed_at = (now | todate) |
         .stages[$stage].status = "completed" |
+        .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    sync_status_to_log
+}
+
+record_escalation() {
+    local stage="$1"
+    local from_model="$2"
+    local to_model="$3"
+    local reason="$4"
+
+    jq --arg stage "$stage" \
+       --arg from_model "$from_model" \
+       --arg to_model "$to_model" \
+       --arg reason "$reason" \
+       '.escalations += [{stage: $stage, from_model: $from_model, to_model: $to_model, reason: $reason}] |
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
@@ -947,6 +964,9 @@ run_stage() {
 
         log "WARN: Stage $stage_name hit max turns with $model — escalating to $escalated_model (no turn cap)"
         printf '%s\n' "=== $stage_name escalating: $model → $escalated_model ===" >> "$stage_log"
+
+        # Record escalation event
+        record_escalation "$stage_name" "$model" "$escalated_model" "max_turns_exhausted"
 
         # Retry with escalated model and no --max-turns cap
         local escalated_fallback
