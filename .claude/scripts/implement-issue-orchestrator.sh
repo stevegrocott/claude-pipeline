@@ -3163,6 +3163,12 @@ $dv_summary" "default"
             set_stage_started "docs"
             comment_issue "Docs Stage: Skipped" "⏭️ No TypeScript/React files changed (scope: \`$branch_scope\`). Skipping docs stage."
             set_stage_completed "docs"
+        elif [[ "$pipeline_profile" == "minimal" ]]; then
+            log "Skipping docs stage: minimal profile (single S-task)"
+            set_stage_started "docs"
+            comment_issue "Docs Stage: Skipped" \
+                "⏭️ Minimal profile (single S-task). Skipping docs stage."
+            set_stage_completed "docs"
         elif all_tasks_s_complexity; then
             log "Skipping docs stage: all tasks are S-complexity"
             set_stage_started "docs"

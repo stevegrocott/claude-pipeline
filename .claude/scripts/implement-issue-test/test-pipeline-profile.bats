@@ -168,6 +168,40 @@ teardown() {
 # the diff-size check; with a small diff it should be minimal.
 # =============================================================================
 
+# =============================================================================
+# compute_pipeline_profile() — MINIMAL beats DIFF boundary (docs-skip invariant)
+#
+# A single S-task must return 'minimal' even when the diff meets or exceeds the
+# 20-line threshold that would otherwise yield 'standard'.  The task-count rule
+# takes priority, ensuring the docs stage is skipped for single-S-task work.
+# =============================================================================
+
+@test "compute_pipeline_profile: single S-task at diff boundary (20 lines) returns 'minimal'" {
+	# 20 lines would normally enter 'standard' territory for multi-task lists;
+	# a single task must still yield 'minimal'.
+	get_diff_line_count() { printf '%s' "20"; }
+	local tasks='[{"description":"**(S)** Wire profile to docs stage"}]'
+	local result
+	result=$(compute_pipeline_profile "$tasks")
+	[[ "$result" == "minimal" ]]
+}
+
+@test "compute_pipeline_profile: single S-task with large diff (200 lines) returns 'minimal'" {
+	# Confirms the task-count rule beats the diff-size rule at an extreme value.
+	get_diff_line_count() { printf '%s' "200"; }
+	local tasks='[{"description":"**(S)** Fix auth bug"}]'
+	local result
+	result=$(compute_pipeline_profile "$tasks")
+	[[ "$result" == "minimal" ]]
+}
+
+# =============================================================================
+# compute_pipeline_profile() — EMPTY / EDGE CASES
+#
+# Empty task list has task_count=0 and ml_count=0.  It falls through to
+# the diff-size check; with a small diff it should be minimal.
+# =============================================================================
+
 @test "compute_pipeline_profile: empty task list with small diff returns 'minimal'" {
 	get_diff_line_count() { printf '%s' "0"; }
 	local result
