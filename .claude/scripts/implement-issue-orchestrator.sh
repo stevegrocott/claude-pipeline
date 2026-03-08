@@ -1729,6 +1729,11 @@ compute_pipeline_profile() {
 # =============================================================================
 # TASK DEPENDENCY DETECTION
 # =============================================================================
+
+# Known file extensions to avoid false positives when extracting bare filenames
+# (version strings v1.0, domains, etc. are excluded)
+readonly KNOWN_FILE_EXTENSIONS='sh|bats|bash|ts|tsx|js|jsx|mjs|cjs|py|go|rb|rs|java|kt|swift|json|yaml|yml|toml|sql|md|css|html|tf'
+
 #
 # Extracts candidate file paths from a task description string.
 # Matches three token shapes:
@@ -1743,12 +1748,6 @@ compute_pipeline_profile() {
 #
 _extract_task_files_from_desc() {
 	local desc="$1"
-	# Limit bare-extension matching to known file types to avoid false
-	# positives from version strings (v1.0), domain names, issue refs, etc.
-	local ext_pat
-	ext_pat='sh|bats|bash|ts|tsx|js|jsx|mjs|cjs'
-	ext_pat+="|py|go|rb|rs|java|kt|swift"
-	ext_pat+="|json|yaml|yml|toml|sql|md|css|html|tf"
 	local grep_pat
 	grep_pat='`[a-zA-Z0-9_./-]+`'
 	grep_pat+='|[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+'
@@ -1890,18 +1889,603 @@ compute_task_batches() {
 		fi
 	done
 
-	# Inject 1-based batch numbers back into tasks_json
-	local result="$tasks_json"
+	# Inject 1-based batch numbers back into tasks_json (single jq pass)
+	local batch_updates=""
 	for ((i = 0; i < task_count; i++)); do
-		local batch_num
-		batch_num=$(( task_batch_idx[i] + 1 ))
-		result=$(printf '%s' "$result" | jq \
-			--argjson idx "$i" \
-			--argjson batch "$batch_num" \
-			'.[$idx] += {batch: $batch}')
+		local batch_num=$(( task_batch_idx[i] + 1 ))
+		batch_updates+=" | .[$i].batch = $batch_num"
 	done
 
-	printf '%s' "$result"
+	printf '%s' "$tasks_json" | jq ".$batch_updates"
+}
+
+# =============================================================================
+# WORKTREE-BASED PARALLEL TASK EXECUTION
+# =============================================================================
+
+# Create a git worktree for a single task.
+#
+# Arguments:
+#   $1 - worktree base directory
+#   $2 - feature branch name (source commit)
+#   $3 - task ID
+# Outputs:
+#   Worktree path on stdout
+#
+create_task_worktree() {
+	local wt_base="$1"
+	local feature_branch="$2"
+	local task_id="$3"
+
+	local wt_branch="wt-task-${task_id}"
+	local wt_path="${wt_base}/task-${task_id}"
+
+	mkdir -p "$wt_base"
+
+	# Create branch from feature branch HEAD
+	if ! git branch "$wt_branch" "$feature_branch" \
+		>/dev/null 2>&1; then
+		log_error \
+			"Failed to create branch $wt_branch"
+		return 1
+	fi
+
+	# Create the worktree
+	if ! git worktree add "$wt_path" "$wt_branch" \
+		>/dev/null 2>&1; then
+		log_error \
+			"Failed to create worktree at $wt_path"
+		git branch -D "$wt_branch" >/dev/null 2>&1
+		return 1
+	fi
+
+	printf '%s' "$wt_path"
+}
+
+# Run a task's implement + quality loop inside a worktree.
+#
+# This function is designed to run in a background subshell.
+# It writes a JSON result to the specified log file.
+#
+# Arguments:
+#   $1  - task_id
+#   $2  - task_desc
+#   $3  - task_agent
+#   $4  - task_size (S/M/L)
+#   $5  - worktree_path
+#   $6  - wt_branch
+#   $7  - feature_branch
+#   $8  - result_file (path to write JSON result)
+#   $9  - base_branch
+# Returns:
+#   0 on success, 1 on failure
+#
+run_task_in_worktree() {
+	local task_id="$1"
+	local task_desc="$2"
+	local task_agent="$3"
+	local task_size="$4"
+	local wt_path="$5"
+	local wt_branch="$6"
+	local feature_branch="$7"
+	local result_file="$8"
+	local base_branch="$9"
+
+	cd "$wt_path" || {
+		printf '%s' \
+			'{"status":"failed","review_attempts":0}' \
+			> "$result_file"
+		return 1
+	}
+
+	local max_attempts
+	max_attempts=$(get_max_review_attempts "$task_size")
+	local review_attempts=0
+	local task_succeeded=false
+
+	local base_timeout
+	base_timeout=$(get_stage_timeout \
+		"implement-task-$task_id")
+	local base_model
+	base_model=$(resolve_model \
+		"implement-task-$task_id" "$task_size")
+
+	# Build affected files list
+	local -a affected_files=()
+	local f
+	while IFS= read -r f; do
+		[[ -n "$f" ]] && affected_files+=("$f")
+	done < <(
+		printf '%s' "$task_desc" \
+			| grep -oE \
+			'[a-zA-Z0-9_.][a-zA-Z0-9_./-]*(/[a-zA-Z0-9_./-]+)+' \
+			2>/dev/null || true
+	)
+	while IFS= read -r f; do
+		[[ -n "$f" ]] && affected_files+=("$f")
+	done < <(
+		git diff "$base_branch"...HEAD \
+			--name-only 2>/dev/null || true
+	)
+	local files_block
+	files_block=$(build_files_block \
+		"${affected_files[@]+"${affected_files[@]}"}")
+
+	local impl_result=""
+
+	while (( review_attempts < max_attempts )); do
+		review_attempts=$((review_attempts + 1))
+
+		local impl_prompt
+		impl_prompt="Implement task $task_id on branch $wt_branch in the current working directory:
+
+$task_desc${files_block}
+SELF-REVIEW BEFORE COMMITTING:
+After implementing, verify your changes against the task description above:
+1. Does your implementation fully achieve the task's goal?
+2. Are there any obvious issues, missing edge cases, or incomplete parts?
+3. If you find problems, fix them before committing.
+
+Only commit when you are confident the task goal is achieved.
+Commit your changes with a descriptive message."
+
+		local current_timeout="$base_timeout"
+		local current_model=""
+		if (( review_attempts > 1 )); then
+			current_model=$(_next_model_up "$base_model")
+			current_timeout=$((base_timeout * 120 / 100))
+			log "Task $task_id retry: escalating" \
+				"to $current_model with" \
+				"timeout ${current_timeout}s"
+		fi
+
+		if [[ -n "$current_model" ]]; then
+			impl_result=$(run_stage \
+				"implement-task-$task_id" \
+				"$impl_prompt" \
+				"implement-issue-implement.json" \
+				"$task_agent" "$task_size" \
+				"$current_timeout" "$current_model")
+		else
+			impl_result=$(run_stage \
+				"implement-task-$task_id" \
+				"$impl_prompt" \
+				"implement-issue-implement.json" \
+				"$task_agent" "$task_size")
+		fi
+
+		local impl_status
+		impl_status=$(printf '%s' "$impl_result" \
+			| jq -r '.status')
+
+		if [[ "$impl_status" == "success" ]]; then
+			task_succeeded=true
+			break
+		fi
+
+		log_warn \
+			"Task $task_id attempt" \
+			"$review_attempts/$max_attempts failed"
+	done
+
+	if [[ "$task_succeeded" == "true" ]]; then
+		# Run quality loop inside worktree
+		if should_run_quality_loop "$task_size"; then
+			local quality_max
+			quality_max=$(get_max_quality_iterations \
+				"$task_desc" "$base_branch")
+			log "Running quality loop for" \
+				"task $task_id in worktree"
+			run_quality_loop "." "$wt_branch" \
+				"task-$task_id" "$task_agent" \
+				"$quality_max" "$task_size"
+		fi
+
+		local commit_sha
+		commit_sha=$(printf '%s' "$impl_result" \
+			| jq -r '.commit')
+		local impl_summary
+		impl_summary=$(printf '%s' "$impl_result" \
+			| jq -r '.summary // "Implementation completed"')
+
+		printf '%s' "{
+\"status\":\"success\",
+\"review_attempts\":$review_attempts,
+\"commit\":\"$commit_sha\",
+\"summary\":$(printf '%s' "$impl_summary" | jq -Rs .)
+}" > "$result_file"
+		return 0
+	fi
+
+	printf '%s' \
+		"{\"status\":\"failed\",\"review_attempts\":$review_attempts}" \
+		> "$result_file"
+	return 1
+}
+
+# Merge a worktree branch into the feature branch.
+#
+# Arguments:
+#   $1 - feature_branch
+#   $2 - wt_branch
+#   $3 - task_id
+# Returns:
+#   0 on success, 1 on merge conflict
+#
+merge_worktree_branch() {
+	local feature_branch="$1"
+	local wt_branch="$2"
+	local task_id="$3"
+
+	log "Merging $wt_branch into $feature_branch" \
+		"(task $task_id)"
+
+	git checkout "$feature_branch" >/dev/null 2>&1 || {
+		log_error "Failed to checkout $feature_branch"
+		return 1
+	}
+
+	if git merge --no-edit "$wt_branch" \
+		>/dev/null 2>&1; then
+		log "Merge of task $task_id succeeded"
+		return 0
+	fi
+
+	log_warn "Merge conflict for task $task_id" \
+		"— aborting merge"
+	git merge --abort >/dev/null 2>&1
+	return 1
+}
+
+# Clean up a git worktree and its branch.
+#
+# Arguments:
+#   $1 - worktree_path
+#   $2 - wt_branch
+#
+cleanup_worktree() {
+	local wt_path="$1"
+	local wt_branch="$2"
+
+	if [[ -d "$wt_path" ]]; then
+		git worktree remove --force "$wt_path" \
+			2>/dev/null >&2 || true
+	fi
+	git worktree prune 2>/dev/null >&2 || true
+	git branch -D "$wt_branch" 2>/dev/null >&2 || true
+}
+
+# Execute a batch of tasks in parallel using worktrees.
+#
+# Arguments:
+#   $1 - batch_number
+#   $2 - tasks_json (filtered to this batch)
+#   $3 - feature_branch
+#   $4 - base_branch
+# Outputs:
+#   JSON object on stdout:
+#   {"completed":[...],"failed":[...],"conflicted":[...]}
+#
+execute_batch_parallel() {
+	local batch_num="$1"
+	local batch_tasks="$2"
+	local feature_branch="$3"
+	local base_branch="$4"
+
+	local wt_base="${LOG_BASE}/worktrees"
+	local batch_count
+	batch_count=$(printf '%s' "$batch_tasks" \
+		| jq 'length')
+
+	log "Batch $batch_num: launching $batch_count" \
+		"tasks in parallel"
+
+	local -a pids=()
+	local -a task_ids=()
+	local -a wt_paths=()
+	local -a wt_branches=()
+	local -a result_files=()
+
+	local i
+	for ((i = 0; i < batch_count; i++)); do
+		local task
+		task=$(printf '%s' "$batch_tasks" \
+			| jq ".[$i]")
+		local tid tdesc tagent tsize
+		tid=$(printf '%s' "$task" | jq -r '.id')
+		tdesc=$(printf '%s' "$task" | jq -r '.description')
+		tagent=$(printf '%s' "$task" | jq -r '.agent')
+		tsize=$(extract_task_size "$tdesc")
+
+		local wt_branch="wt-task-${tid}"
+		local result_file
+		result_file="${LOG_BASE}/stages/task-${tid}-worktree.log"
+
+		local wt_path
+		wt_path=$(create_task_worktree \
+			"$wt_base" "$feature_branch" "$tid")
+
+		if [[ -z "$wt_path" ]]; then
+			log_error "Could not create worktree" \
+				"for task $tid"
+			printf '%s' \
+				'{"status":"failed","review_attempts":0}' \
+				> "$result_file"
+			task_ids+=("$tid")
+			wt_paths+=("")
+			wt_branches+=("$wt_branch")
+			result_files+=("$result_file")
+			continue
+		fi
+
+		task_ids+=("$tid")
+		wt_paths+=("$wt_path")
+		wt_branches+=("$wt_branch")
+		result_files+=("$result_file")
+
+		# Launch in background subshell
+		(
+			run_task_in_worktree \
+				"$tid" "$tdesc" "$tagent" \
+				"$tsize" "$wt_path" \
+				"$wt_branch" "$feature_branch" \
+				"$result_file" "$base_branch"
+		) &
+		local last_pid=$!
+		pids+=("$last_pid")
+		log "Task $tid launched (PID $last_pid)" \
+			"in $wt_path"
+	done
+
+	# Wait for all background tasks
+	local p
+	for p in "${pids[@]}"; do
+		wait "$p" 2>/dev/null || true
+	done
+
+	log "Batch $batch_num: all tasks finished," \
+		"collecting results"
+
+	# Ensure we are on the feature branch for merges
+	git checkout "$feature_branch" >/dev/null 2>&1 || true
+
+	# Collect results and attempt merges
+	local -a completed=()
+	local -a failed=()
+	local -a conflicted=()
+
+	for ((i = 0; i < ${#task_ids[@]}; i++)); do
+		local tid="${task_ids[$i]}"
+		local rf="${result_files[$i]}"
+		local wb="${wt_branches[$i]}"
+		local wp="${wt_paths[$i]}"
+
+		if [[ ! -f "$rf" ]]; then
+			log_error "No result file for task $tid"
+			failed+=("$tid")
+			cleanup_worktree "$wp" "$wb"
+			continue
+		fi
+
+		local rstatus
+		rstatus=$(jq -r '.status' "$rf" 2>/dev/null)
+
+		if [[ "$rstatus" != "success" ]]; then
+			log_error "Task $tid failed in worktree"
+			failed+=("$tid")
+			cleanup_worktree "$wp" "$wb"
+			continue
+		fi
+
+		# Attempt merge
+		if merge_worktree_branch \
+			"$feature_branch" "$wb" "$tid"; then
+			completed+=("$tid")
+		else
+			conflicted+=("$tid")
+		fi
+
+		cleanup_worktree "$wp" "$wb"
+	done
+
+	# Build result JSON
+	local comp_json fail_json conf_json
+	comp_json=$(printf '%s\n' "${completed[@]+"${completed[@]}"}" \
+		| jq -R 'select(length>0) | tonumber' \
+		| jq -s '.')
+	fail_json=$(printf '%s\n' "${failed[@]+"${failed[@]}"}" \
+		| jq -R 'select(length>0) | tonumber' \
+		| jq -s '.')
+	conf_json=$(printf '%s\n' "${conflicted[@]+"${conflicted[@]}"}" \
+		| jq -R 'select(length>0) | tonumber' \
+		| jq -s '.')
+
+	printf '%s' "{\"completed\":${comp_json},\"failed\":${fail_json},\"conflicted\":${conf_json}}"
+}
+
+# Execute tasks serially (fallback / single-task batches).
+#
+# This extracts the existing sequential logic into a
+# reusable function for conflict-retry and single-task
+# batches.
+#
+# Arguments:
+#   $1 - tasks_json (array of task objects)
+#   $2 - feature_branch
+#   $3 - base_branch
+# Outputs:
+#   JSON: {"completed":[...],"failed":[...]}
+#
+execute_batch_serial() {
+	local serial_tasks="$1"
+	local feature_branch="$2"
+	local base_branch="$3"
+
+	local count
+	count=$(printf '%s' "$serial_tasks" | jq 'length')
+
+	local -a completed=()
+	local -a failed=()
+
+	local i
+	for ((i = 0; i < count; i++)); do
+		local task
+		task=$(printf '%s' "$serial_tasks" \
+			| jq ".[$i]")
+		local tid tdesc tagent tsize
+		tid=$(printf '%s' "$task" | jq -r '.id')
+		tdesc=$(printf '%s' "$task" \
+			| jq -r '.description')
+		tagent=$(printf '%s' "$task" \
+			| jq -r '.agent')
+		tsize=$(extract_task_size "$tdesc")
+
+		log "Implementing task $tid" \
+			"(serial): $tdesc"
+
+		local max_attempts
+		max_attempts=$(get_max_review_attempts "$tsize")
+		local review_attempts=0
+		local task_succeeded=false
+
+		local base_timeout
+		base_timeout=$(get_stage_timeout \
+			"implement-task-$tid")
+		local base_model
+		base_model=$(resolve_model \
+			"implement-task-$tid" "$tsize")
+
+		# Build affected files list
+		local -a affected_files=()
+		local f
+		while IFS= read -r f; do
+			[[ -n "$f" ]] && affected_files+=("$f")
+		done < <(
+			printf '%s' "$tdesc" \
+				| grep -oE \
+				'[a-zA-Z0-9_.][a-zA-Z0-9_./-]*(/[a-zA-Z0-9_./-]+)+' \
+				2>/dev/null || true
+		)
+		while IFS= read -r f; do
+			[[ -n "$f" ]] && affected_files+=("$f")
+		done < <(
+			git diff "$base_branch"...HEAD \
+				--name-only 2>/dev/null || true
+		)
+		local files_block
+		files_block=$(build_files_block \
+			"${affected_files[@]+"${affected_files[@]}"}")
+
+		local impl_result=""
+
+		while (( review_attempts < max_attempts )); do
+			review_attempts=$((review_attempts + 1))
+
+			local impl_prompt
+			impl_prompt="Implement task $tid on branch $feature_branch in the current working directory:
+
+$tdesc${files_block}
+SELF-REVIEW BEFORE COMMITTING:
+After implementing, verify your changes against the task description above:
+1. Does your implementation fully achieve the task's goal?
+2. Are there any obvious issues, missing edge cases, or incomplete parts?
+3. If you find problems, fix them before committing.
+
+Only commit when you are confident the task goal is achieved.
+Commit your changes with a descriptive message."
+
+			local current_timeout="$base_timeout"
+			local current_model=""
+			if (( review_attempts > 1 )); then
+				current_model=$(_next_model_up \
+					"$base_model")
+				current_timeout=$(( \
+					base_timeout * 120 / 100))
+				log "Task $tid retry: escalating" \
+					"to $current_model with" \
+					"timeout ${current_timeout}s"
+			fi
+
+			if [[ -n "$current_model" ]]; then
+				impl_result=$(run_stage \
+					"implement-task-$tid" \
+					"$impl_prompt" \
+					"implement-issue-implement.json" \
+					"$tagent" "$tsize" \
+					"$current_timeout" \
+					"$current_model")
+			else
+				impl_result=$(run_stage \
+					"implement-task-$tid" \
+					"$impl_prompt" \
+					"implement-issue-implement.json" \
+					"$tagent" "$tsize")
+			fi
+
+			local impl_status
+			impl_status=$(printf '%s' "$impl_result" \
+				| jq -r '.status')
+
+			if [[ "$impl_status" == "success" ]]; then
+				task_succeeded=true
+				break
+			fi
+
+			log_warn "Task $tid attempt" \
+				"$review_attempts/$max_attempts" \
+				"failed"
+		done
+
+		if [[ "$task_succeeded" == "true" ]]; then
+			# Quality loop
+			if should_run_quality_loop "$tsize"; then
+				local quality_max
+				quality_max=$(get_max_quality_iterations \
+					"$tdesc" "$base_branch")
+				log "Running quality loop for" \
+					"task $tid (serial)"
+				run_quality_loop "." \
+					"$feature_branch" \
+					"task-$tid" "$tagent" \
+					"$quality_max" "$tsize"
+			fi
+
+			# Write result file for main loop
+			local commit_sha
+			commit_sha=$(printf '%s' "$impl_result" \
+				| jq -r '.commit')
+			local impl_summary
+			impl_summary=$(printf '%s' "$impl_result" \
+				| jq -r \
+				'.summary // "Implementation completed"')
+			local rf
+			rf="${LOG_BASE}/stages/task-${tid}-serial.log"
+			printf '%s' "{
+\"status\":\"success\",
+\"review_attempts\":$review_attempts,
+\"commit\":\"$commit_sha\",
+\"summary\":$(printf '%s' "$impl_summary" | jq -Rs .)
+}" > "$rf"
+
+			completed+=("$tid")
+		else
+			failed+=("$tid")
+		fi
+	done
+
+	# Build result JSON
+	local comp_json fail_json
+	comp_json=$(printf '%s\n' \
+		"${completed[@]+"${completed[@]}"}" \
+		| jq -R 'select(length>0) | tonumber' \
+		| jq -s '.')
+	fail_json=$(printf '%s\n' \
+		"${failed[@]+"${failed[@]}"}" \
+		| jq -R 'select(length>0) | tonumber' \
+		| jq -s '.')
+
+	printf '%s' \
+		"{\"completed\":${comp_json},\"failed\":${fail_json}}"
 }
 
 # =============================================================================
@@ -2693,15 +3277,15 @@ Log directory: \`$LOG_BASE\`"
         tasks_json=$(compute_task_batches "$tasks_json" "${BASE_BRANCH:-main}")
 
         # Log the batch groupings so operators can see the scheduling decision
-        local max_batch
-        max_batch=$(printf '%s' "$tasks_json" | jq '[.[].batch] | max')
-        log "Batch groupings: $max_batch sequential batch(es) across $task_count tasks"
-        local b
-        for ((b = 1; b <= max_batch; b++)); do
-            local batch_ids
-            batch_ids=$(printf '%s' "$tasks_json" | jq -r \
-                "[.[] | select(.batch == $b) | \"#\(.id)\"] | join(\", \")")
-            log "  Batch $b (can run in parallel): tasks $batch_ids"
+        printf '%s' "$tasks_json" | jq -r '
+            ([.[].batch] | max) as $max_batch |
+            "Batch groupings: \($max_batch) sequential batch(es) across \(length) tasks" ,
+            (range(1; $max_batch + 1) as $b |
+              "  Batch \($b) (can run in parallel): tasks \([
+                .[] | select(.batch == $b) | "#\(.id)"
+              ] | join(", "))")
+        ' | while IFS= read -r line; do
+            log "$line"
         done
 
         set_tasks "$tasks_json"
@@ -2882,162 +3466,234 @@ $task_list_md
             completed_tasks=0
         fi
 
-        # NOTE: each task carries a .batch field (set by compute_task_batches)
-        # that groups non-conflicting tasks for potential parallel execution.
-        # Parallel dispatch based on .batch is deferred to a future iteration;
-        # tasks execute sequentially here.  The field is retained as metadata
-        # for operator visibility (logged during parse_issue) and future use.
-        for ((i=0; i<task_count; i++)); do
-            local task
-            task=$(printf '%s' "$tasks_json" | jq ".[$i]")
-            local task_id task_desc task_agent task_status task_size
-            task_id=$(printf '%s' "$task" | jq -r '.id')
-            task_desc=$(printf '%s' "$task" | jq -r '.description')
-            task_agent=$(printf '%s' "$task" | jq -r '.agent')
-            # Extract size marker from description: **(S)**, **(M)**, **(L)**
-            task_size=$(extract_task_size "$task_desc")
-            if [[ -z "$task_size" ]]; then
-                log_warn "Task $task_id: no size marker found in description — defaulting to max_attempts=3"
-            fi
-
-            # Accumulate max-priority complexity: L > M > S.
-            # The test loop runs once after all tasks, so it needs the
-            # heaviest size to select an appropriately capable model.
-            case "$task_size" in
+        # Compute max_task_size across all tasks (needed by
+        # test loop later regardless of execution order).
+        for ((i = 0; i < task_count; i++)); do
+            local task_desc_tmp
+            task_desc_tmp=$(printf '%s' "$tasks_json" \
+                | jq -r ".[$i].description")
+            local ts_tmp
+            ts_tmp=$(extract_task_size "$task_desc_tmp")
+            case "$ts_tmp" in
                 L) max_task_size="L" ;;
-                M) [[ "$max_task_size" != "L" ]] && max_task_size="M" ;;
-                S) [[ -z "$max_task_size" ]] && max_task_size="S" ;;
+                M) [[ "$max_task_size" != "L" ]] \
+                    && max_task_size="M" ;;
+                S) [[ -z "$max_task_size" ]] \
+                    && max_task_size="S" ;;
             esac
+        done
 
-            # In resume mode, check if this task is already completed
-            if [[ -n "$RESUME_MODE" ]]; then
-                task_status=$(jq -r ".tasks[] | select(.id == $task_id) | .status" "$STATUS_FILE" 2>/dev/null)
-                if [[ "$task_status" == "completed" ]]; then
-                    log "Skipping task $task_id (already completed)"
-                    continue
-                fi
-            fi
+        # Determine distinct batch numbers (ascending)
+        local -a batch_nums
+        readarray -t batch_nums < <(
+            printf '%s' "$tasks_json" \
+                | jq -r '.[].batch' \
+                | sort -nu
+        )
 
-            log "Implementing task $task_id: $task_desc (agent: $task_agent)"
-            update_task "$task_id" "in_progress"
+        log "Task batches: ${#batch_nums[@]}" \
+            "batch(es) across $task_count tasks"
 
-            local max_attempts
-            max_attempts=$(get_max_review_attempts "$task_size")
-            local review_attempts=0
-            local task_succeeded=false
+        # Helper: process results for a set of task IDs
+        # after serial or parallel execution.  Updates
+        # task status, posts comments, tracks progress.
+        _process_batch_results() {
+            local result_json="$1"
+            local src_label="$2"
 
-            # Get base timeout and model for graduated retry
-            local base_timeout
-            base_timeout=$(get_stage_timeout "implement-task-$task_id")
-            local base_model
-            base_model=$(resolve_model "implement-task-$task_id" "$task_size")
+            # Process completed tasks
+            local comp_count
+            comp_count=$(printf '%s' "$result_json" \
+                | jq '.completed | length')
+            local ci
+            for ((ci = 0; ci < comp_count; ci++)); do
+                local tid
+                tid=$(printf '%s' "$result_json" \
+                    | jq -r ".completed[$ci]")
 
-            # Build list of likely affected files for the implement prompt.
-            # Sources: (1) paths extracted from task description via regex,
-            #          (2) files already modified in this branch.
-            local -a affected_files=()
-            local f
-            while IFS= read -r f; do
-                [[ -n "$f" ]] && affected_files+=("$f")
-            done < <(
-                printf '%s' "$task_desc" \
-                    | grep -oE \
-                        '[a-zA-Z0-9_.][a-zA-Z0-9_./-]*(/[a-zA-Z0-9_./-]+)+' \
-                    2>/dev/null || true
-            )
-            while IFS= read -r f; do
-                [[ -n "$f" ]] && affected_files+=("$f")
-            done < <(
-                git diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true
-            )
-            local files_block
-            files_block=$(build_files_block "${affected_files[@]+"${affected_files[@]}"}")
-
-            while (( review_attempts < max_attempts )); do
-                review_attempts=$((review_attempts + 1))
-
-                # Implement with self-review (eliminates separate task-review invocation)
-                local impl_prompt="Implement task $task_id on branch $branch in the current working directory:
-
-$task_desc${files_block}
-SELF-REVIEW BEFORE COMMITTING:
-After implementing, verify your changes against the task description above:
-1. Does your implementation fully achieve the task's goal?
-2. Are there any obvious issues, missing edge cases, or incomplete parts?
-3. If you find problems, fix them before committing.
-
-Only commit when you are confident the task goal is achieved.
-Commit your changes with a descriptive message."
-
-                # On retry after first failure: escalate model and increase timeout by 20%
-                local current_timeout="$base_timeout"
-                local current_model=""
-                if (( review_attempts > 1 )); then
-                    # Graduated retry: use next model up and 20% increased timeout
-                    current_model=$(_next_model_up "$base_model")
-                    current_timeout=$((base_timeout * 120 / 100))
-                    log "Task $task_id retry: escalating to $current_model with timeout ${current_timeout}s"
+                # Read result file for this task
+                local rf=""
+                if [[ -f "${LOG_BASE}/stages/task-${tid}-worktree.log" ]]; then
+                    rf="${LOG_BASE}/stages/task-${tid}-worktree.log"
+                elif [[ -f "${LOG_BASE}/stages/task-${tid}-serial.log" ]]; then
+                    rf="${LOG_BASE}/stages/task-${tid}-serial.log"
                 fi
 
-                local impl_result
-                if [[ -n "$current_model" ]]; then
-                    # Pass escalated model and increased timeout
-                    impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size" "$current_timeout" "$current_model")
-                else
-                    # First attempt: use defaults
-                    impl_result=$(run_stage "implement-task-$task_id" "$impl_prompt" "implement-issue-implement.json" "$task_agent" "$task_size")
+                local rattempts="0"
+                local commit_sha="unknown"
+                local impl_summary="Implementation completed"
+                if [[ -n "$rf" && -f "$rf" ]]; then
+                    rattempts=$(jq -r \
+                        '.review_attempts // 0' \
+                        "$rf" 2>/dev/null)
+                    commit_sha=$(jq -r \
+                        '.commit // "unknown"' \
+                        "$rf" 2>/dev/null)
+                    impl_summary=$(jq -r \
+                        '.summary // "Implementation completed"' \
+                        "$rf" 2>/dev/null)
                 fi
 
-                local impl_status
-                impl_status=$(printf '%s' "$impl_result" | jq -r '.status')
+                update_task "$tid" "completed" \
+                    "$rattempts"
+                completed_tasks=$((completed_tasks + 1))
 
-                if [[ "$impl_status" == "success" ]]; then
-                    task_succeeded=true
-                    break
-                fi
+                # Get task description for comment
+                local tdesc
+                tdesc=$(printf '%s' "$tasks_json" \
+                    | jq -r \
+                    ".[] | select(.id == $tid) | .description")
+                local tagent
+                tagent=$(printf '%s' "$tasks_json" \
+                    | jq -r \
+                    ".[] | select(.id == $tid) | .agent")
 
-                log_warn "Task $task_id attempt $review_attempts/$max_attempts failed"
-            done
-
-            if [[ "$task_succeeded" == "true" ]]; then
-                update_task "$task_id" "completed" "$review_attempts"
-                completed_tasks=$((completed_tasks+1))
-
-                local commit_sha
-                commit_sha=$(printf '%s' "$impl_result" | jq -r '.commit')
-
-                local impl_summary
-                impl_summary=$(printf '%s' "$impl_result" | jq -r '.summary // "Implementation completed"')
-                comment_issue "Task $task_id Complete" "**$task_desc**
+                comment_issue \
+                    "Task $tid Complete ($src_label)" \
+                    "**$tdesc**
 
 **Commit:** \`$commit_sha\`
 
-$impl_summary" "$task_agent"
+$impl_summary" "$tagent"
 
-                # Run quality loop for this task (skipped for S-size tasks)
-                if should_run_quality_loop "$task_size"; then
-                    local quality_max
-                    quality_max=$(get_max_quality_iterations "$task_desc" "$BASE_BRANCH")
-                    log "Running quality loop for task $task_id (size: ${task_size:-unknown}, max_iterations: $quality_max)"
-                    run_quality_loop "." "$branch" "task-$task_id" "$task_agent" "$quality_max" "$task_size"
-                else
-                    log "Skipping quality loop for task $task_id (S-size task)"
+                # Update progress
+                jq --arg progress \
+                    "$completed_tasks/$task_count" \
+                    '.stages.implement.task_progress = $progress | .last_update = (now | todate)' \
+                    "$STATUS_FILE" \
+                    > "${STATUS_FILE}.tmp" \
+                    && mv "${STATUS_FILE}.tmp" \
+                    "$STATUS_FILE"
+                sync_status_to_log
+            done
+
+            # Process failed tasks
+            local fail_count
+            fail_count=$(printf '%s' "$result_json" \
+                | jq '.failed | length')
+            local fi_idx
+            for ((fi_idx = 0; fi_idx < fail_count; fi_idx++)); do
+                local tid
+                tid=$(printf '%s' "$result_json" \
+                    | jq -r ".failed[$fi_idx]")
+                log_error "Task $tid failed ($src_label)"
+                update_task "$tid" "failed" "0"
+            done
+        }
+
+        # Iterate over batches in order
+        for batch_num in "${batch_nums[@]}"; do
+            # Filter tasks for this batch
+            local batch_tasks
+            batch_tasks=$(printf '%s' "$tasks_json" \
+                | jq "[.[] | select(.batch == $batch_num)]")
+            local batch_size
+            batch_size=$(printf '%s' "$batch_tasks" \
+                | jq 'length')
+
+            # Skip already-completed tasks in resume mode
+            if [[ -n "$RESUME_MODE" ]]; then
+                local pending_tasks
+                pending_tasks=$(printf '%s' "$batch_tasks" \
+                    | jq '[.[] | select(
+                        .id as $tid |
+                        '"$(jq -r \
+                            '[.tasks[] | select(.status == "completed") | .id]' \
+                            "$STATUS_FILE" 2>/dev/null \
+                            || printf '[]')"' |
+                        index($tid) | not
+                    )]')
+                local pending_count
+                pending_count=$(printf '%s' \
+                    "$pending_tasks" | jq 'length')
+                if ((pending_count == 0)); then
+                    log "Batch $batch_num: all tasks" \
+                        "already completed (resume)"
+                    continue
                 fi
-            else
-                log_error "Task $task_id failed after $review_attempts attempts"
-                update_task "$task_id" "failed" "$review_attempts"
+                if ((pending_count < batch_size)); then
+                    log "Batch $batch_num:" \
+                        "$((batch_size - pending_count))" \
+                        "task(s) already done," \
+                        "$pending_count remaining"
+                fi
+                batch_tasks="$pending_tasks"
+                batch_size="$pending_count"
             fi
 
-            # Update progress
-            jq --arg progress "$completed_tasks/$task_count" \
-               '.stages.implement.task_progress = $progress | .last_update = (now | todate)' \
-               "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
-            sync_status_to_log
+            # Mark tasks in_progress
+            local ti
+            for ((ti = 0; ti < batch_size; ti++)); do
+                local tid
+                tid=$(printf '%s' "$batch_tasks" \
+                    | jq -r ".[$ti].id")
+                update_task "$tid" "in_progress"
+            done
+
+            log "Batch $batch_num: $batch_size task(s)"
+
+            if ((batch_size == 1)); then
+                # Single task: run serially (no worktree)
+                log "Batch $batch_num: single task," \
+                    "running serially"
+                local serial_result
+                serial_result=$(execute_batch_serial \
+                    "$batch_tasks" "$branch" \
+                    "$BASE_BRANCH")
+                _process_batch_results \
+                    "$serial_result" "serial"
+            else
+                # Multiple tasks: run in parallel
+                local par_result
+                par_result=$(execute_batch_parallel \
+                    "$batch_num" "$batch_tasks" \
+                    "$branch" "$BASE_BRANCH")
+
+                _process_batch_results \
+                    "$par_result" "parallel"
+
+                # Handle conflicted tasks by re-running
+                # them serially
+                local conf_count
+                conf_count=$(printf '%s' "$par_result" \
+                    | jq '.conflicted | length')
+                if ((conf_count > 0)); then
+                    log_warn "Batch $batch_num:" \
+                        "$conf_count task(s) had" \
+                        "merge conflicts —" \
+                        "retrying serially"
+
+                    # Build tasks JSON for conflicted IDs
+                    local conf_ids
+                    conf_ids=$(printf '%s' "$par_result" \
+                        | jq '.conflicted')
+                    local retry_tasks
+                    retry_tasks=$(printf '%s' \
+                        "$batch_tasks" \
+                        | jq --argjson ids "$conf_ids" \
+                        '[.[] | select(
+                            .id as $t |
+                            $ids | index($t)
+                        )]')
+
+                    local retry_result
+                    retry_result=$(execute_batch_serial \
+                        "$retry_tasks" "$branch" \
+                        "$BASE_BRANCH")
+                    _process_batch_results \
+                        "$retry_result" "conflict-retry"
+                fi
+            fi
+
+            # Ensure we are on the feature branch
+            git checkout "$branch" 2>&1 >/dev/null || true
         done
 
         set_stage_completed "implement"
-        set_stage_completed "quality_loop"  # Quality loop ran per-task
-        log "Implementation complete. $completed_tasks/$task_count tasks completed (with per-task quality loops)."
+        set_stage_completed "quality_loop"
+        log "Implementation complete." \
+            "$completed_tasks/$task_count tasks" \
+            "completed (with per-task quality loops)."
     fi
 
     # -------------------------------------------------------------------------
