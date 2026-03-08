@@ -424,6 +424,108 @@ increment_pr_review_iteration() {
 }
 
 # =============================================================================
+# METRICS EXPORT
+# =============================================================================
+
+# export_metrics() — emit metrics.json to $LOG_BASE/ at orchestrator completion
+#
+# Schema:
+# {
+#   "schema_version": "1",          -- bump when fields are added/removed
+#   "issue":          string,        -- issue number or key
+#   "base_branch":    string,
+#   "branch":         string,        -- feature branch used
+#   "state":          string,        -- final orchestrator state
+#   "started_at":     ISO8601|null,  -- earliest stage started_at across all stages
+#   "completed_at":   ISO8601|null,  -- latest stage completed_at across all stages
+#   "total_duration_seconds": number|null,
+#   "stages": {
+#     "<stage_key>": {
+#       "status":             string,
+#       "started_at":         ISO8601|null,
+#       "completed_at":       ISO8601|null,
+#       "duration_seconds":   number|null,  -- null if missing timestamps
+#       "model":              string|null   -- model used (if tracked)
+#     }, ...
+#   },
+#   "iteration_summary": {
+#     "quality_iterations":    number,
+#     "test_iterations":       number,
+#     "pr_review_iterations":  number
+#   },
+#   "escalations": [
+#     { "stage": string, "from_model": string, "to_model": string, "reason": string }, ...
+#   ]
+# }
+export_metrics() {
+    local metrics_file="$LOG_BASE/metrics.json"
+
+    if [[ ! -f "$STATUS_FILE" ]]; then
+        log "WARN: export_metrics: STATUS_FILE not found, skipping metrics export"
+        return 0
+    fi
+
+    jq --arg schema_version "1" '
+        # Helper: parse ISO8601 to epoch seconds via @sh/strptime is not portable;
+        # use todate/fromdate round-trip available in jq >= 1.6.
+        def iso_to_epoch:
+            if . == null or . == "" then null
+            else try (. | fromdate) catch null
+            end;
+
+        def duration_seconds(s; e):
+            if (s | iso_to_epoch) != null and (e | iso_to_epoch) != null
+            then ((e | iso_to_epoch) - (s | iso_to_epoch))
+            else null
+            end;
+
+        # Per-stage enrichment
+        def enrich_stage(s):
+            s + {
+                duration_seconds: duration_seconds(s.started_at // null; s.completed_at // null)
+            };
+
+        # Collect all started_at / completed_at values across stages
+        def all_started: [.stages[].started_at // empty] | map(select(. != null));
+        def all_completed: [.stages[].completed_at // empty] | map(select(. != null));
+
+        . as $status |
+
+        # Calculate overall start/end from earliest/latest stage timestamps
+        ($status | all_started | sort | first // null) as $run_started |
+        ($status | all_completed | sort | last // null) as $run_completed |
+
+        {
+            schema_version: $schema_version,
+            issue:          $status.issue,
+            base_branch:    $status.base_branch,
+            branch:         $status.branch,
+            state:          $status.state,
+            started_at:     $run_started,
+            completed_at:   $run_completed,
+            total_duration_seconds: duration_seconds($run_started; $run_completed),
+            stages: (
+                $status.stages | to_entries | map(
+                    { key: .key, value: enrich_stage(.value) }
+                ) | from_entries
+            ),
+            iteration_summary: {
+                quality_iterations:   ($status.quality_iterations // 0),
+                test_iterations:      ($status.test_iterations // 0),
+                pr_review_iterations: ($status.pr_review_iterations // 0)
+            },
+            escalations: ($status.escalations // [])
+        }
+    ' "$STATUS_FILE" > "$metrics_file" 2>/dev/null
+
+    if [[ $? -eq 0 && -f "$metrics_file" ]]; then
+        log "Metrics exported to $metrics_file"
+    else
+        log "WARN: export_metrics: jq transform failed, metrics.json not written"
+    fi
+}
+
+# =============================================================================
 # RESUME FUNCTIONALITY
 # =============================================================================
 
@@ -594,6 +696,11 @@ LOG_FILE="$LOG_BASE/orchestrator.log"
 STAGE_COUNTER=0
 _CONSECUTIVE_TIMEOUTS=0
 _TIMED_OUT_STAGE_NAMES=""
+
+# Register EXIT trap so export_metrics() runs on every exit path
+# (export_metrics is defined later in the STATUS FILE MANAGEMENT section
+# but bash traps are evaluated at exit time, so forward reference is fine)
+trap 'export_metrics' EXIT
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
