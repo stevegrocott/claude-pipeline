@@ -1530,6 +1530,25 @@ apply_profile_to_pr_review_max_iter() {
 	fi
 }
 
+# Applies pipeline profile to the test loop max-iterations cap.
+# For minimal profile, caps max_iter at 2 (fast feedback, avoid wasted cycles).
+# For standard and full profiles, passes the config value through unchanged.
+#
+# Arguments:
+#   $1 - pipeline_profile: minimal | standard | full
+#   $2 - config_max_iter: the base MAX_TEST_ITERATIONS value
+# Outputs:
+#   The effective max_iterations value (integer)
+apply_profile_to_test_max_iter() {
+	local profile="$1"
+	local config_max_iter="$2"
+	if [[ "$profile" == "minimal" ]]; then
+		printf '%s' "2"
+	else
+		printf '%s' "$config_max_iter"
+	fi
+}
+
 # Determines whether the quality loop should run for a given task size.
 # Arguments:
 #   $1 - task_size: S | M | L (or other/empty)
@@ -1925,10 +1944,14 @@ run_test_loop() {
     local loop_branch="$2"
     local loop_agent="${3:-$AGENT}"
     local loop_complexity="${5:-}"
+    local loop_profile="${6:-}"
 
     local loop_complete=false
     local test_iteration=0
     local validation_fix_iteration=0
+    local max_test_iter
+    max_test_iter=$(apply_profile_to_test_max_iter \
+        "$loop_profile" "$MAX_TEST_ITERATIONS")
 
     log "Starting test loop after all tasks complete"
 
@@ -2039,13 +2062,13 @@ run_test_loop() {
         test_iteration=$((test_iteration + 1))
         increment_test_iteration  # Track iteration in status file
 
-        if (( test_iteration > MAX_TEST_ITERATIONS )); then
-            log_error "Test loop exceeded max iterations ($MAX_TEST_ITERATIONS)"
+        if (( test_iteration > max_test_iter )); then
+            log_error "Test loop exceeded max iterations ($max_test_iter)"
             set_final_state "max_iterations_test"
             exit 2
         fi
 
-        log "Test loop iteration $test_iteration/$MAX_TEST_ITERATIONS (scope: $change_scope)"
+        log "Test loop iteration $test_iteration/$max_test_iter (scope: $change_scope)"
 
         # =========================================================================
         # COMBINED TEST EXECUTION + VALIDATION → single stage
@@ -2168,7 +2191,7 @@ Output both test results and validation findings in one structured response.
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$test_result"; then
             log_warn "Test stage timed out on iteration $test_iteration — retrying next iteration"
-            comment_issue "Test Loop: Timeout ($test_iteration/$MAX_TEST_ITERATIONS)" "⏱️ Test stage timed out. Retrying on next iteration." "default"
+            comment_issue "Test Loop: Timeout ($test_iteration/$max_test_iter)" "⏱️ Test stage timed out. Retrying on next iteration." "default"
             continue
         fi
 
@@ -2184,7 +2207,7 @@ Output both test results and validation findings in one structured response.
         # HANDLE TEST FAILURES
         # -----------------------------------------------------------------
         if [[ "$test_status" == "failed" ]]; then
-            comment_issue "Test Loop: Tests ($test_iteration/$MAX_TEST_ITERATIONS)" "❌ **Result:** $test_status
+            comment_issue "Test Loop: Tests ($test_iteration/$max_test_iter)" "❌ **Result:** $test_status
 
 $test_summary" "default"
             log "Tests failed. Getting failures and fixing..."
@@ -2214,7 +2237,7 @@ $test_summary" "default"
             if (( pr_failure_count == 0 )); then
                 log "INFO: All test failures are pre-existing. Skipping fix-agent dispatch."
                 if (( skipped_count > 0 )); then
-                    comment_issue "Test Loop: Pre-existing Failures ($test_iteration/$MAX_TEST_ITERATIONS)" \
+                    comment_issue "Test Loop: Pre-existing Failures ($test_iteration/$max_test_iter)" \
                         "ℹ️ $skipped_count pre-existing failure(s) detected (not from PR-changed test files). Skipping fix-agent." "default"
                 fi
                 loop_complete=true
@@ -2229,7 +2252,7 @@ $test_summary" "default"
                 log "INFO: All failures are environment-related." \
                     "Skipping fix-agent dispatch."
                 local env_title="Test Loop: Environment Errors"
-                env_title+=" ($test_iteration/$MAX_TEST_ITERATIONS)"
+                env_title+=" ($test_iteration/$max_test_iter)"
                 local env_body
                 env_body="ℹ️ All test failures appear to be"
                 env_body+=" environment-related (Redis/DB connection"
@@ -2285,7 +2308,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment: Fix results
-            comment_issue "Test Loop: Test Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$loop_agent"
+            comment_issue "Test Loop: Test Fix ($test_iteration/$max_test_iter)" "$fix_summary" "$loop_agent"
             continue
         fi
 
@@ -2293,7 +2316,7 @@ Fix the issues and commit. Output a summary of fixes applied."
         # TESTS PASSED — check validation result
         # -----------------------------------------------------------------
         if [[ "$validate_status" == "passed" || "$validate_status" == "skipped" ]]; then
-            comment_issue "Test Loop: Results ($test_iteration/$MAX_TEST_ITERATIONS)" "✅ **Tests:** passed
+            comment_issue "Test Loop: Results ($test_iteration/$max_test_iter)" "✅ **Tests:** passed
 ✅ **Validation:** $validate_status
 
 $test_summary" "default"
@@ -2310,7 +2333,7 @@ $test_summary" "default"
                 exit 2
             fi
 
-            comment_issue "Test Loop: Results ($test_iteration/$MAX_TEST_ITERATIONS)" "✅ **Tests:** passed
+            comment_issue "Test Loop: Results ($test_iteration/$max_test_iter)" "✅ **Tests:** passed
 🔄 **Validation:** $validate_status
 
 $test_summary
@@ -2346,7 +2369,7 @@ Output a summary of fixes applied."
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment: Fix results
-            comment_issue "Test Loop: Validation Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$loop_agent"
+            comment_issue "Test Loop: Validation Fix ($test_iteration/$max_test_iter)" "$fix_summary" "$loop_agent"
         fi
     done
 
@@ -2834,7 +2857,8 @@ $impl_summary" "$task_agent"
         set_stage_started "test_loop"
         log "Running test loop after all tasks complete..."
 
-        run_test_loop "." "$branch" "$AGENT" "$branch_scope" "$max_task_size"
+        run_test_loop "." "$branch" "$AGENT" \
+            "$branch_scope" "$max_task_size" "$pipeline_profile"
 
         # ---------------------------------------------------------------------
         # NON-BLOCKING FULL-SCOPE CHECK (informational only)

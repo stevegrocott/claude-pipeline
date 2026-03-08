@@ -308,3 +308,50 @@ teardown() {
 	result=$(apply_profile_to_pr_review_max_iter "full" "1")
 	[[ "$result" == "1" ]]
 }
+
+# =============================================================================
+# apply_profile_to_test_max_iter() — PROFILE-BASED TEST LOOP CAPPING
+#
+# minimal profile: always returns 2 regardless of config value
+# standard profile: passes config value through unchanged
+# full profile: passes config value through unchanged
+# =============================================================================
+
+@test "test loop: minimal profile caps max_iter at 2 (config says 7)" {
+	local result
+	result=$(apply_profile_to_test_max_iter "minimal" "7")
+	[[ "$result" == "2" ]]
+}
+
+@test "test loop: minimal profile caps max_iter at 2 (config says 3)" {
+	# Even if a lower config value were passed, minimal always returns 2.
+	local result
+	result=$(apply_profile_to_test_max_iter "minimal" "3")
+	[[ "$result" == "2" ]]
+}
+
+@test "test loop: standard profile keeps config value (config says 7)" {
+	# standard profile must not reduce the iteration budget.
+	local result
+	result=$(apply_profile_to_test_max_iter "standard" "7")
+	[[ "$result" == "7" ]]
+}
+
+@test "test loop: standard profile keeps config value (config says 3)" {
+	local result
+	result=$(apply_profile_to_test_max_iter "standard" "3")
+	[[ "$result" == "3" ]]
+}
+
+@test "test loop: full profile keeps config value (config says 7)" {
+	# full profile must not reduce the iteration budget.
+	local result
+	result=$(apply_profile_to_test_max_iter "full" "7")
+	[[ "$result" == "7" ]]
+}
+
+@test "test loop: full profile keeps config value (config says 3)" {
+	local result
+	result=$(apply_profile_to_test_max_iter "full" "3")
+	[[ "$result" == "3" ]]
+}
