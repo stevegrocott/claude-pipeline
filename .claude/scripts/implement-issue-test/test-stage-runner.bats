@@ -840,3 +840,143 @@ teardown() {
     [[ "$second_call_args" != *"--max-turns"* ]] || \
         fail "Escalated retry should not include --max-turns. Args: $second_call_args"
 }
+
+# =============================================================================
+# COMPLEXITY-AWARE MAX-TURNS LOGIC
+# =============================================================================
+
+@test "run_stage passes --max-turns 40 to sonnet with M-complexity" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "M"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 40" "$claude_calls" || \
+        fail "Expected --max-turns 40 for sonnet with M-complexity. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage passes --max-turns 40 to sonnet with L-complexity" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # implement+L resolves to opus; use model_override to force sonnet + L hint
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "L" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 40" "$claude_calls" || \
+        fail "Expected --max-turns 40 for sonnet with L-complexity. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage passes --max-turns 25 to sonnet with S-complexity" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # implement+S resolves to haiku; use model_override to force sonnet + S hint
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 25" "$claude_calls" || \
+        fail "Expected --max-turns 25 for sonnet with S-complexity. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage passes --max-turns 25 to sonnet with empty complexity" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # review stage is standard tier — resolves naturally to sonnet with no complexity hint
+    run_stage "review-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 25" "$claude_calls" || \
+        fail "Expected --max-turns 25 for sonnet with empty complexity. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage passes --max-turns 10 to haiku for light-tier stage" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # parse is a light-tier stage
+    run_stage "parse-issue" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 10" "$claude_calls" || \
+        fail "Expected --max-turns 10 for haiku light-tier stage. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage passes --max-turns 15 to haiku via S-complexity override" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # implement-task-1 with S-complexity resolves to haiku via override
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" || \
+        fail "Expected --max-turns 15 for haiku via complexity override. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage logs max-turns value for sonnet with M-complexity" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "M"
+
+    grep -q "Max turns: 40 (sonnet with M/L complexity)" "$LOG_FILE" || \
+        fail "Max turns logging not found in log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage logs max-turns value for sonnet with S-complexity" {
+    source "$TEST_TMP/model-config.sh"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    # implement+S resolves to haiku; use model_override to force sonnet + S hint
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    grep -q "Max turns: 25 (sonnet with S/empty complexity)" "$LOG_FILE" || \
+        fail "Max turns logging not found in log. Log: $(cat "$LOG_FILE")"
+}
