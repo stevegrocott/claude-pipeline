@@ -1477,43 +1477,58 @@ _setup_parallel_stage_mocks() {
 
 	mkdir -p "$LOG_BASE/stages"
 
-	local pids_file="$TEST_TMP/pids.log"
+	local e2e_pid_file="$TEST_TMP/e2e845.pid"
+	local acc_pid_file="$TEST_TMP/acc845.pid"
 
 	is_stage_completed() { return 1; }
 	set_stage_started()  { :; }
 	set_stage_completed(){ :; }
 	comment_issue()      { :; }
+
+	# e2e subshell calls run_stage — capture its subshell PID via $PPID.
+	# (Use 'sh -c echo $PPID' for bash 3.x / macOS compatibility;
+	# $BASHPID is not available on the system bash 3.2.)
 	run_stage() {
-		local stage="$1"
-		printf "pid=%d\n" "$$" >> "$pids_file"
-		sleep 0.02
+		sh -c 'echo $PPID' > "$e2e_pid_file"
 		printf '{"status":"success","result":"passed","summary":"ok"}'
 	}
-	log()     { :; }
+
+	# acceptance subshell takes the "no route files" short-circuit path and
+	# calls log "No API route files changed …".  Detect that message to
+	# capture the acceptance subshell's own PID.
+	log() {
+		[[ "${1:-}" == *"No API"* ]] \
+			&& sh -c 'echo $PPID' > "$acc_pid_file"
+		true
+	}
 	log_warn() { :; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
 	export -f comment_issue run_stage log log_warn
-	export pids_file
+	export e2e_pid_file acc_pid_file
 
 	run_parallel_post_task_stages \
 		"main" "frontend" "" "S" 2>/dev/null
 
 	[ $? -eq 0 ]
 
-	# Two different PIDs should have been spawned
-	[[ -f "$pids_file" ]] || {
-		echo "pids file not created"
-		exit 1
-	}
+	# Both subshells must have written their PID files
+	[[ -f "$e2e_pid_file" ]] || { echo "e2e PID file not created"; exit 1; }
+	[[ -f "$acc_pid_file" ]] || { echo "acceptance PID file not created"; exit 1; }
 
-	local pid_count
-	pid_count=$(wc -l < "$pids_file")
-	[[ "$pid_count" -eq 2 ]] || {
-		echo "Expected 2 spawned processes, got $pid_count"
-		cat "$pids_file"
-		exit 1
-	}
+	local e2e_pid acc_pid
+	e2e_pid=$(cat "$e2e_pid_file")
+	acc_pid=$(cat "$acc_pid_file")
+
+	# PIDs must be numeric
+	[[ "$e2e_pid" =~ ^[0-9]+$ ]] \
+		|| { echo "e2e PID not numeric: $e2e_pid"; exit 1; }
+	[[ "$acc_pid"  =~ ^[0-9]+$ ]] \
+		|| { echo "acc PID not numeric: $acc_pid"; exit 1; }
+
+	# PIDs must differ — each stage runs in its own background subshell
+	[[ "$e2e_pid" -ne "$acc_pid" ]] \
+		|| { echo "e2e and acceptance ran in the same process (pid=$e2e_pid)"; exit 1; }
 }
 
 @test "run_parallel_post_task_stages: skipped stages do not spawn background processes" {
