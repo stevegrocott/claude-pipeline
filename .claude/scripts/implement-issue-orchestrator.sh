@@ -837,8 +837,13 @@ run_stage() {
         turns_args=(--max-turns 15)
         log "  Max turns: 15 (haiku via complexity override)"
     elif [[ "$model" == "sonnet" ]]; then
-        turns_args=(--max-turns 25)
-        log "  Max turns: 25 (sonnet cap)"
+        if [[ "$complexity" == "M" || "$complexity" == "L" ]]; then
+            turns_args=(--max-turns 40)
+            log "  Max turns: 40 (sonnet with M/L complexity)"
+        else
+            turns_args=(--max-turns 25)
+            log "  Max turns: 25 (sonnet with S/empty complexity)"
+        fi
     fi
 
     local output
@@ -1468,8 +1473,8 @@ all_tasks_s_complexity() {
 # Four tiers by diff line count:
 #   <20  lines  → haiku,  300s timeout, 1 iteration  (tiny)
 #   <50  lines  → haiku,  600s timeout, 1 iteration  (small)
-#   <200 lines  → sonnet, 900s timeout, 2 iterations (medium)
-#   200+ lines  → sonnet, 1800s timeout, 2 iterations (large)
+#   <200 lines  → sonnet, 900s timeout, MAX_PR_REVIEW_ITERATIONS (medium)
+#   200+ lines  → sonnet, 1800s timeout, MAX_PR_REVIEW_ITERATIONS (large)
 get_pr_review_config() {
     local diff_lines
     diff_lines=$(get_diff_line_count "$BASE_BRANCH")
@@ -1479,9 +1484,9 @@ get_pr_review_config() {
     elif (( diff_lines < 50 )); then
         printf '{"model":"haiku","timeout":600,"max_iterations":1}'
     elif (( diff_lines < 200 )); then
-        printf '{"model":"sonnet","timeout":900,"max_iterations":2}'
+        printf '{"model":"sonnet","timeout":900,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
     else
-        printf '{"model":"sonnet","timeout":1800,"max_iterations":2}'
+        printf '{"model":"sonnet","timeout":1800,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
     fi
 }
 
