@@ -3218,6 +3218,11 @@ run_parallel_post_task_stages() {
 	# ------------------------------------------------------------------
 	local e2e_pid="" acceptance_pid=""
 	local e2e_start=0 acceptance_start=0
+	# Temp files carry failure summaries out of subshells for sequential
+	# fix dispatch; avoids two fix agents committing to $branch concurrently.
+	local e2e_fail_file acceptance_fail_file
+	e2e_fail_file=$(mktemp)
+	acceptance_fail_file=$(mktemp)
 
 	if $run_e2e; then
 		e2e_start=$(date +%s)
@@ -3262,36 +3267,11 @@ Report result as 'passed' or 'failed' with a detailed summary."
 $e2e_verify_summary" "playwright-test-developer"
 
 			if [[ "$e2e_verify_status" == "failed" ]]; then
-				log_error \
-					"E2E verification failed" \
-					"— dispatching implementation agent to fix"
-
-				local e2e_fix_prompt
-				e2e_fix_prompt="E2E tests for issue #$ISSUE_NUMBER \
-FAILED. The unit tests passed but E2E tests found visual/behavioral \
-issues.
-
-Failure details:
-$e2e_verify_summary
-
-Fix the frontend code to resolve these E2E failures. Do NOT modify \
-the test files — fix the implementation code.
-Commit your changes."
-
-				verify_on_feature_branch "$branch" || true
-
-				local e2e_fix_result
-				e2e_fix_result=$(run_stage "fix-e2e" \
-					"$e2e_fix_prompt" \
-					"implement-issue-fix.json" \
-					"$AGENT" \
-					"$max_task_size")
-
-				local e2e_fix_summary
-				e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
-					| jq -r '.summary // "Fix applied"')
-				comment_issue "E2E Fix" \
-					"$e2e_fix_summary" "$AGENT"
+				# Write summary for sequential fix dispatch after wait.
+				# Fixes must not run concurrently with acceptance fixes
+				# to prevent two agents committing to $branch at once.
+				printf '%s' "$e2e_verify_summary" > "$e2e_fail_file"
+				exit 1
 			fi
 		) &
 		e2e_pid=$!
@@ -3374,41 +3354,12 @@ Output result as 'passed' or 'failed' with a detailed summary."
 $acceptance_summary" "default"
 
 				if [[ "$acceptance_status" == "failed" ]]; then
-					log_error \
-						"Acceptance test failed" \
-						"— fix does not work against running services"
-
-					local acceptance_fix_prompt
-					acceptance_fix_prompt="The acceptance test for \
-issue #$ISSUE_NUMBER FAILED. The unit tests passed but the fix does \
-not work when tested against the actual running endpoint.
-
-Failure details:
-$acceptance_summary
-
-Common causes:
-- Response field names don't match what the frontend/consumer expects
-- Fastify response schema strips fields via fast-json-stringify
-- Docker container running stale code (may need rebuild)
-- Database migration not applied
-
-Investigate the root cause and fix the issue. Commit your changes."
-
-					verify_on_feature_branch "$branch" || true
-
-					local acceptance_fix_result
-					acceptance_fix_result=$(run_stage \
-						"fix-acceptance-test" \
-						"$acceptance_fix_prompt" \
-						"implement-issue-fix.json" \
-						"$AGENT")
-
-					local acceptance_fix_summary
-					acceptance_fix_summary=$(printf '%s' \
-						"$acceptance_fix_result" \
-						| jq -r '.summary // "Fix applied"')
-					comment_issue "Acceptance Test Fix" \
-						"$acceptance_fix_summary" "$AGENT"
+					# Write summary for sequential fix dispatch after wait.
+					# Fixes must not run concurrently with e2e fixes
+					# to prevent two agents committing to $branch at once.
+					printf '%s' "$acceptance_summary" \
+						> "$acceptance_fail_file"
+					exit 1
 				fi
 			fi
 		) &
@@ -3444,6 +3395,88 @@ Investigate the root cause and fix the issue. Commit your changes."
 				"acceptance-test stage exited with code $acceptance_exit"
 		fi
 	fi
+
+	# ------------------------------------------------------------------
+	# Sequential fix dispatch: if a stage failed, dispatch fix agents
+	# one at a time to avoid concurrent commits to $branch.
+	# ------------------------------------------------------------------
+	if [[ -s "$e2e_fail_file" ]]; then
+		local e2e_fail_summary
+		e2e_fail_summary=$(<"$e2e_fail_file")
+		log_error \
+			"E2E verification failed" \
+			"— dispatching implementation agent to fix"
+
+		local e2e_fix_prompt
+		e2e_fix_prompt="E2E tests for issue #$ISSUE_NUMBER \
+FAILED. The unit tests passed but E2E tests found visual/behavioral \
+issues.
+
+Failure details:
+$e2e_fail_summary
+
+Fix the frontend code to resolve these E2E failures. Do NOT modify \
+the test files — fix the implementation code.
+Commit your changes."
+
+		verify_on_feature_branch "$branch" || true
+
+		local e2e_fix_result
+		e2e_fix_result=$(run_stage "fix-e2e" \
+			"$e2e_fix_prompt" \
+			"implement-issue-fix.json" \
+			"$AGENT" \
+			"$max_task_size")
+
+		local e2e_fix_summary
+		e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
+			| jq -r '.summary // "Fix applied"')
+		comment_issue "E2E Fix" \
+			"$e2e_fix_summary" "$AGENT"
+	fi
+
+	if [[ -s "$acceptance_fail_file" ]]; then
+		local acceptance_fail_summary
+		acceptance_fail_summary=$(<"$acceptance_fail_file")
+		log_error \
+			"Acceptance test failed" \
+			"— dispatching implementation agent to fix"
+
+		local acceptance_fix_prompt
+		acceptance_fix_prompt="The acceptance test for \
+issue #$ISSUE_NUMBER FAILED. The unit tests passed but the fix does \
+not work when tested against the actual running endpoint.
+
+Failure details:
+$acceptance_fail_summary
+
+Common causes:
+- Response field names don't match what the frontend/consumer expects
+- Fastify response schema strips fields via fast-json-stringify
+- Docker container running stale code (may need rebuild)
+- Database migration not applied
+
+Investigate the root cause and fix the issue. Commit your changes."
+
+		verify_on_feature_branch "$branch" || true
+
+		local acceptance_fix_result
+		acceptance_fix_result=$(run_stage \
+			"fix-acceptance-test" \
+			"$acceptance_fix_prompt" \
+			"implement-issue-fix.json" \
+			"$AGENT")
+
+		local acceptance_fix_summary
+		acceptance_fix_summary=$(printf '%s' \
+			"$acceptance_fix_result" \
+			| jq -r '.summary // "Fix applied"')
+		comment_issue "Acceptance Test Fix" \
+			"$acceptance_fix_summary" "$AGENT"
+	fi
+
+	# Clean up temp files
+	rm -f "$e2e_fail_file" "$acceptance_fail_file"
 
 	# Mark completed AFTER parallelism (sequential writes, no race)
 	$run_e2e && set_stage_completed "e2e_verify"
@@ -3800,8 +3833,11 @@ $task_list_md
         done
 
         # Determine distinct batch numbers (ascending)
-        local -a batch_nums
-        readarray -t batch_nums < <(
+        # Uses while-read instead of readarray for bash 3.2 compat (macOS).
+        local -a batch_nums=()
+        while IFS= read -r _bn; do
+            batch_nums+=("$_bn")
+        done < <(
             printf '%s' "$tasks_json" \
                 | jq -r '.[].batch' \
                 | sort -nu
