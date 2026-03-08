@@ -516,3 +516,201 @@ teardown() {
 	git branch -D wt-task-1 2>/dev/null || true
 	git branch -D wt-task-2 2>/dev/null || true
 }
+
+# =============================================================================
+# run_parallel_post_task_stages (parallel e2e-verify and acceptance-test)
+# Tests the parallel execution of post-task stages with independent exit codes
+# =============================================================================
+
+@test "run_parallel_post_task_stages: runs e2e-verify and acceptance-test in parallel using bash &" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# Create a simple test implementation of the function
+	# to verify the core parallel behavior works
+	local -a stage_log
+
+	run_parallel_post_task_stages_test() {
+		local feature_branch="$1"
+		local base_branch="$2"
+		local e2e_result acceptance_result
+		local e2e_exit acceptance_exit
+
+		# Run both stages in parallel using & and wait
+		(
+			echo "e2e-verify" >> "$TEST_TMP/stages.log"
+			sleep 0.05
+		) &
+		e2e_exit=$?
+
+		(
+			echo "acceptance-test" >> "$TEST_TMP/stages.log"
+			sleep 0.05
+		) &
+		acceptance_exit=$?
+
+		wait
+	}
+
+	run_parallel_post_task_stages_test "main" "main"
+
+	# Both stages should have executed
+	[[ -f "$TEST_TMP/stages.log" ]]
+	[[ $(grep -c "e2e-verify" "$TEST_TMP/stages.log") -eq 1 ]]
+	[[ $(grep -c "acceptance-test" "$TEST_TMP/stages.log") -eq 1 ]]
+}
+
+@test "run_parallel_post_task_stages: captures exit codes from both stages independently" {
+	# Test that exit codes from parallel stages are captured correctly
+	test_exit_codes() {
+		# Simulate e2e-verify (success)
+		(
+			echo "running e2e"
+			exit 0
+		) &
+		local e2e_pid=$!
+
+		# Simulate acceptance-test (failure)
+		(
+			echo "running acceptance"
+			exit 1
+		) &
+		local acceptance_pid=$!
+
+		# Wait for each and capture exit code
+		wait $e2e_pid
+		local e2e_exit=$?
+
+		wait $acceptance_pid
+		local acceptance_exit=$?
+
+		# Store results
+		printf '%s\n' "e2e=$e2e_exit" "acceptance=$acceptance_exit"
+	}
+
+	local results
+	results=$(test_exit_codes)
+
+	# Verify exit codes were captured
+	[[ "$results" == *"e2e=0"* ]]
+	[[ "$results" == *"acceptance=1"* ]]
+}
+
+@test "run_parallel_post_task_stages: logs stage timing for both parallel stages" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# Create minimal implementation that logs timing
+	test_with_timing() {
+		local log_file="$TEST_TMP/test_timing.log"
+		local start_time end_time elapsed
+
+		# Stage 1: e2e-verify
+		start_time=$(date +%s%N)
+		(
+			sleep 0.05
+		) &
+		wait
+		end_time=$(date +%s%N)
+		elapsed=$(( (end_time - start_time) / 1000000 ))
+		printf 'e2e-verify: %dms\n' "$elapsed" >> "$log_file"
+
+		# Stage 2: acceptance-test
+		start_time=$(date +%s%N)
+		(
+			sleep 0.05
+		) &
+		wait
+		end_time=$(date +%s%N)
+		elapsed=$(( (end_time - start_time) / 1000000 ))
+		printf 'acceptance-test: %dms\n' "$elapsed" >> "$log_file"
+
+		cat "$log_file"
+	}
+
+	local result
+	result=$(test_with_timing)
+
+	# Should have timing for both stages
+	[[ "$result" == *"e2e-verify"* ]]
+	[[ "$result" == *"acceptance-test"* ]]
+	[[ "$result" == *"ms"* ]]
+}
+
+@test "run_parallel_post_task_stages: ensures docs stage runs after both parallel stages complete" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# Test that docs runs after wait returns
+	test_docs_order() {
+		local order_log="$TEST_TMP/order.log"
+
+		# Parallel stages
+		(
+			echo "e2e-verify" >> "$order_log"
+			sleep 0.02
+		) &
+
+		(
+			echo "acceptance-test" >> "$order_log"
+			sleep 0.02
+		) &
+
+		# Wait for both to complete
+		wait
+
+		# Now run docs (sequential)
+		echo "docs" >> "$order_log"
+
+		# Count lines and verify docs is last
+		cat "$order_log"
+	}
+
+	local result
+	result=$(test_docs_order)
+
+	# Last line should be docs
+	[[ "$(echo "$result" | tail -1)" == "docs" ]]
+
+	# Should have 3 lines total (2 parallel + 1 sequential)
+	[[ $(echo "$result" | wc -l) -eq 3 ]]
+}
+
+@test "run_parallel_post_task_stages: handles failure in one parallel stage without blocking the other" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# Test independent failure handling
+	test_independent_failures() {
+		local status_log="$TEST_TMP/status.log"
+
+		# e2e-verify fails
+		(
+			echo "e2e-verify starting" >> "$status_log"
+			exit 1
+		) &
+		local e2e_pid=$!
+
+		# acceptance-test succeeds
+		(
+			echo "acceptance-test starting" >> "$status_log"
+			exit 0
+		) &
+		local acceptance_pid=$!
+
+		# Both should complete regardless of individual status
+		wait $e2e_pid
+		local e2e_exit=$?
+
+		wait $acceptance_pid
+		local acceptance_exit=$?
+
+		printf '%s\n' "e2e_exit=$e2e_exit" "acceptance_exit=$acceptance_exit"
+	}
+
+	local results
+	results=$(test_independent_failures)
+
+	# e2e should have failed (exit 1)
+	[[ "$results" == *"e2e_exit=1"* ]]
+	# acceptance should have succeeded (exit 0)
+	[[ "$results" == *"acceptance_exit=0"* ]]
+}

@@ -3140,6 +3140,322 @@ Output a summary of fixes applied."
 }
 
 # =============================================================================
+# PARALLEL POST-TASK STAGES
+#
+# Runs e2e-verify and acceptance-test concurrently using bash & + wait.
+# docs runs sequentially after both complete (it modifies files).
+# Exit codes from both parallel stages are captured independently.
+# Stage timing is logged for each parallel stage.
+#
+# Arguments:
+#   $1 - branch          (feature branch name)
+#   $2 - branch_scope    (from detect_change_scope)
+#   $3 - pipeline_profile (minimal|standard|full)
+#   $4 - max_task_size   (S|M|L)
+# =============================================================================
+
+run_parallel_post_task_stages() {
+	local branch="$1"
+	local branch_scope="$2"
+	local pipeline_profile="$3"
+	local max_task_size="$4"
+
+	# ------------------------------------------------------------------
+	# Determine skip conditions sequentially before launching subshells.
+	# This avoids STATUS_FILE race conditions on set_stage_started writes.
+	# ------------------------------------------------------------------
+	local run_e2e=true run_acceptance=true
+
+	# E2E VERIFY skip logic
+	if [[ -n "$RESUME_MODE" ]] && is_stage_completed "e2e_verify"; then
+		log "Skipping e2e_verify stage (already completed)"
+		run_e2e=false
+	elif [[ -z "${TEST_E2E_CMD:-}" ]]; then
+		log "Skipping e2e_verify stage (TEST_E2E_CMD not configured)"
+		run_e2e=false
+	elif [[ "$branch_scope" != "frontend" \
+		&& "$branch_scope" != "ts-frontend" ]]; then
+		log "Skipping e2e_verify stage" \
+			"(scope '$branch_scope' is not frontend)"
+		run_e2e=false
+	fi
+
+	# ACCEPTANCE TEST skip logic
+	if [[ -n "$RESUME_MODE" ]] && is_stage_completed "acceptance_test"; then
+		log "Skipping acceptance_test stage (already completed)"
+		run_acceptance=false
+	elif [[ "$pipeline_profile" == "minimal" ]]; then
+		log "Skipping acceptance test: minimal profile (single S-task)"
+		run_acceptance=false
+	fi
+
+	# Handle skipped stages sequentially (no parallelism needed)
+	if ! $run_e2e; then
+		set_stage_started "e2e_verify"
+		set_stage_completed "e2e_verify"
+	fi
+	if ! $run_acceptance; then
+		set_stage_started "acceptance_test"
+		if [[ "$pipeline_profile" == "minimal" ]]; then
+			comment_issue "Acceptance Test: Skipped" \
+				"⏭️ Minimal profile (single S-task). Skipping acceptance test."
+		fi
+		set_stage_completed "acceptance_test"
+	fi
+
+	# Both skipped — nothing more to do
+	if ! $run_e2e && ! $run_acceptance; then
+		return 0
+	fi
+
+	# Mark running stages as started BEFORE parallelism (sequential,
+	# no STATUS_FILE write race).
+	$run_e2e && set_stage_started "e2e_verify"
+	$run_acceptance && set_stage_started "acceptance_test"
+
+	# ------------------------------------------------------------------
+	# Launch parallel stages
+	# ------------------------------------------------------------------
+	local e2e_pid="" acceptance_pid=""
+	local e2e_start=0 acceptance_start=0
+
+	if $run_e2e; then
+		e2e_start=$(date +%s)
+		log "Running E2E verification for frontend changes (parallel)..."
+		(
+			local e2e_verify_prompt
+			e2e_verify_prompt="Run E2E tests to verify the frontend \
+changes for issue #$ISSUE_NUMBER.
+
+TEST COMMAND:
+$TEST_E2E_CMD
+
+BASE URL: ${TEST_E2E_BASE_URL:-http://localhost:5173}
+
+INSTRUCTIONS:
+1. Run the E2E test suite using the command above
+2. If tests fail, report the failures with details about what \
+visual/behavioral issues were found
+3. Focus on verifying user-visible behavior: layout, interactions, \
+navigation, visual regressions
+
+Report result as 'passed' or 'failed' with a detailed summary."
+
+			local e2e_verify_result
+			e2e_verify_result=$(run_stage "e2e-verify" \
+				"$e2e_verify_prompt" \
+				"implement-issue-test.json" \
+				"playwright-test-developer")
+
+			local e2e_verify_status e2e_verify_summary
+			e2e_verify_status=$(printf '%s' "$e2e_verify_result" \
+				| jq -r '.result')
+			e2e_verify_summary=$(printf '%s' "$e2e_verify_result" \
+				| jq -r '.summary // "E2E verification completed"')
+
+			local e2e_icon="✅"
+			[[ "$e2e_verify_status" == "failed" ]] \
+				&& e2e_icon="❌"
+			comment_issue "E2E Verification" \
+				"$e2e_icon **Result:** $e2e_verify_status
+
+$e2e_verify_summary" "playwright-test-developer"
+
+			if [[ "$e2e_verify_status" == "failed" ]]; then
+				log_error \
+					"E2E verification failed" \
+					"— dispatching implementation agent to fix"
+
+				local e2e_fix_prompt
+				e2e_fix_prompt="E2E tests for issue #$ISSUE_NUMBER \
+FAILED. The unit tests passed but E2E tests found visual/behavioral \
+issues.
+
+Failure details:
+$e2e_verify_summary
+
+Fix the frontend code to resolve these E2E failures. Do NOT modify \
+the test files — fix the implementation code.
+Commit your changes."
+
+				verify_on_feature_branch "$branch" || true
+
+				local e2e_fix_result
+				e2e_fix_result=$(run_stage "fix-e2e" \
+					"$e2e_fix_prompt" \
+					"implement-issue-fix.json" \
+					"$AGENT" \
+					"$max_task_size")
+
+				local e2e_fix_summary
+				e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
+					| jq -r '.summary // "Fix applied"')
+				comment_issue "E2E Fix" \
+					"$e2e_fix_summary" "$AGENT"
+			fi
+		) &
+		e2e_pid=$!
+	fi
+
+	if $run_acceptance; then
+		acceptance_start=$(date +%s)
+		(
+			# Check if any changed files are API route files
+			local changed_route_files
+			changed_route_files=$(git diff "$BASE_BRANCH"...HEAD \
+				--name-only \
+				-- '*/routes/*.ts' '*/routes/*.js' \
+				2>/dev/null || true)
+
+			if [[ -z "$changed_route_files" ]]; then
+				log "No API route files changed" \
+					"— skipping acceptance test"
+				comment_issue "Acceptance Test: Skipped" \
+					"⏭️ No API route files changed. Skipping endpoint verification." \
+					"default"
+			elif ! command -v docker &>/dev/null \
+				&& ! command -v docker-compose &>/dev/null; then
+				log_warn \
+					"Docker not available — skipping acceptance test"
+				comment_issue "Acceptance Test: Skipped" \
+					"⚠️ Docker not available. Endpoint verification skipped. Manual verification recommended before merge." \
+					"default"
+			else
+				log "API route files changed — running acceptance test"
+				log "Changed routes: $changed_route_files"
+
+				local acceptance_prompt
+				acceptance_prompt="Verify the fix for issue \
+#$ISSUE_NUMBER works against running services.
+
+CHANGED API ROUTE FILES:
+$changed_route_files
+
+ACCEPTANCE CRITERIA (from issue):
+$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>/dev/null \
+	| jq -r '.body' \
+	| awk '/^## Acceptance Criteria/{found=1; next} \
+		found && /^## /{exit} found{print}')
+
+STEPS:
+1. Check if Docker containers are running \
+(docker compose ps or docker-compose ps)
+2. If containers are not running, try to start them \
+(docker compose up -d) — if this fails, skip with a warning
+3. For each changed route file, identify the endpoint(s) \
+that were modified
+4. Hit each modified endpoint with a real HTTP request \
+(use curl or node http module from inside the container)
+5. Verify the response shape matches what the acceptance criteria expect
+6. If the response is wrong, report 'failed' with details about \
+what was expected vs actual
+
+Output result as 'passed' or 'failed' with a detailed summary."
+
+				local acceptance_result
+				acceptance_result=$(run_stage "acceptance-test" \
+					"$acceptance_prompt" \
+					"implement-issue-test.json" \
+					"default")
+
+				local acceptance_status acceptance_summary
+				acceptance_status=$(printf '%s' "$acceptance_result" \
+					| jq -r '.result')
+				acceptance_summary=$(printf '%s' "$acceptance_result" \
+					| jq -r \
+					'.summary // "Acceptance test completed"')
+
+				local acceptance_icon="✅"
+				[[ "$acceptance_status" == "failed" ]] \
+					&& acceptance_icon="❌"
+				comment_issue "Acceptance Test" \
+					"$acceptance_icon **Result:** $acceptance_status
+
+$acceptance_summary" "default"
+
+				if [[ "$acceptance_status" == "failed" ]]; then
+					log_error \
+						"Acceptance test failed" \
+						"— fix does not work against running services"
+
+					local acceptance_fix_prompt
+					acceptance_fix_prompt="The acceptance test for \
+issue #$ISSUE_NUMBER FAILED. The unit tests passed but the fix does \
+not work when tested against the actual running endpoint.
+
+Failure details:
+$acceptance_summary
+
+Common causes:
+- Response field names don't match what the frontend/consumer expects
+- Fastify response schema strips fields via fast-json-stringify
+- Docker container running stale code (may need rebuild)
+- Database migration not applied
+
+Investigate the root cause and fix the issue. Commit your changes."
+
+					verify_on_feature_branch "$branch" || true
+
+					local acceptance_fix_result
+					acceptance_fix_result=$(run_stage \
+						"fix-acceptance-test" \
+						"$acceptance_fix_prompt" \
+						"implement-issue-fix.json" \
+						"$AGENT")
+
+					local acceptance_fix_summary
+					acceptance_fix_summary=$(printf '%s' \
+						"$acceptance_fix_result" \
+						| jq -r '.summary // "Fix applied"')
+					comment_issue "Acceptance Test Fix" \
+						"$acceptance_fix_summary" "$AGENT"
+				fi
+			fi
+		) &
+		acceptance_pid=$!
+	fi
+
+	# ------------------------------------------------------------------
+	# Wait for both parallel stages; capture exit codes independently.
+	# ------------------------------------------------------------------
+	local e2e_exit=0 acceptance_exit=0
+	local e2e_elapsed=0 acceptance_elapsed=0
+
+	if [[ -n "$e2e_pid" ]]; then
+		wait "$e2e_pid"
+		e2e_exit=$?
+		e2e_elapsed=$(( $(date +%s) - e2e_start ))
+		log "Stage timing: e2e-verify completed in ${e2e_elapsed}s" \
+			"(exit=$e2e_exit)"
+		if ((e2e_exit != 0)); then
+			log_warn \
+				"e2e-verify stage exited with code $e2e_exit"
+		fi
+	fi
+
+	if [[ -n "$acceptance_pid" ]]; then
+		wait "$acceptance_pid"
+		acceptance_exit=$?
+		acceptance_elapsed=$(( $(date +%s) - acceptance_start ))
+		log "Stage timing: acceptance-test completed in" \
+			"${acceptance_elapsed}s (exit=$acceptance_exit)"
+		if ((acceptance_exit != 0)); then
+			log_warn \
+				"acceptance-test stage exited with code $acceptance_exit"
+		fi
+	fi
+
+	# Mark completed AFTER parallelism (sequential writes, no race)
+	$run_e2e && set_stage_completed "e2e_verify"
+	$run_acceptance && set_stage_completed "acceptance_test"
+
+	log "Parallel post-task stages complete:" \
+		"e2e_exit=$e2e_exit acceptance_exit=$acceptance_exit"
+
+	return 0
+}
+
+# =============================================================================
 # MAIN FLOW
 # =============================================================================
 
@@ -3756,171 +4072,12 @@ $full_scope_failures
     fi
 
     # -------------------------------------------------------------------------
-    # STAGE: E2E VERIFY (Playwright visual/behavioral verification)
-    # Runs after unit tests pass. For issues that change frontend UI, dispatches
-    # playwright-test-developer to run E2E tests and verify visual/behavioral
-    # correctness. Skips when TEST_E2E_CMD is not configured or scope is not
-    # frontend/ts-frontend.
+    # STAGES: E2E VERIFY + ACCEPTANCE TEST (run in parallel)
+    # Both stages run concurrently via run_parallel_post_task_stages.
+    # docs runs sequentially after both complete (it modifies files).
     # -------------------------------------------------------------------------
-    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "e2e_verify"; then
-        log "Skipping e2e_verify stage (already completed)"
-    elif [[ -z "${TEST_E2E_CMD:-}" ]]; then
-        log "Skipping e2e_verify stage (TEST_E2E_CMD not configured)"
-        set_stage_started "e2e_verify"
-        set_stage_completed "e2e_verify"
-    elif [[ "$branch_scope" != "frontend" && "$branch_scope" != "ts-frontend" ]]; then
-        log "Skipping e2e_verify stage (scope '$branch_scope' is not frontend)"
-        set_stage_started "e2e_verify"
-        set_stage_completed "e2e_verify"
-    else
-        set_stage_started "e2e_verify"
-        log "Running E2E verification for frontend changes..."
-
-        local e2e_verify_prompt="Run E2E tests to verify the frontend changes for issue #$ISSUE_NUMBER.
-
-TEST COMMAND:
-$TEST_E2E_CMD
-
-BASE URL: ${TEST_E2E_BASE_URL:-http://localhost:5173}
-
-INSTRUCTIONS:
-1. Run the E2E test suite using the command above
-2. If tests fail, report the failures with details about what visual/behavioral issues were found
-3. Focus on verifying user-visible behavior: layout, interactions, navigation, visual regressions
-
-Report result as 'passed' or 'failed' with a detailed summary."
-
-        local e2e_verify_result
-        e2e_verify_result=$(run_stage "e2e-verify" "$e2e_verify_prompt" "implement-issue-test.json" "playwright-test-developer")
-
-        local e2e_verify_status e2e_verify_summary
-        e2e_verify_status=$(printf '%s' "$e2e_verify_result" | jq -r '.result')
-        e2e_verify_summary=$(printf '%s' "$e2e_verify_result" | jq -r '.summary // "E2E verification completed"')
-
-        local e2e_icon="✅"
-        [[ "$e2e_verify_status" == "failed" ]] && e2e_icon="❌"
-        comment_issue "E2E Verification" "$e2e_icon **Result:** $e2e_verify_status
-
-$e2e_verify_summary" "playwright-test-developer"
-
-        if [[ "$e2e_verify_status" == "failed" ]]; then
-            log_error "E2E verification failed — dispatching implementation agent to fix"
-
-            local e2e_fix_prompt="E2E tests for issue #$ISSUE_NUMBER FAILED. The unit tests passed but E2E tests found visual/behavioral issues.
-
-Failure details:
-$e2e_verify_summary
-
-Fix the frontend code to resolve these E2E failures. Do NOT modify the test files — fix the implementation code.
-Commit your changes."
-
-            verify_on_feature_branch "$branch" || true
-
-            local e2e_fix_result
-            e2e_fix_result=$(run_stage "fix-e2e" "$e2e_fix_prompt" "implement-issue-fix.json" "$AGENT" "$max_task_size")
-
-            local e2e_fix_summary
-            e2e_fix_summary=$(printf '%s' "$e2e_fix_result" | jq -r '.summary // "Fix applied"')
-            comment_issue "E2E Fix" "$e2e_fix_summary" "$AGENT"
-        fi
-
-        set_stage_completed "e2e_verify"
-    fi
-
-    # -------------------------------------------------------------------------
-    # STAGE: ACCEPTANCE TEST (verify fix works against running services)
-    # Runs after unit tests pass.  For issues that change API routes, hits the
-    # actual endpoint in Docker and verifies the response shape matches the
-    # issue's acceptance criteria.  Skips gracefully if Docker is unavailable.
-    # Added in claude-pipeline#25 to prevent "unit tests pass but fix is broken".
-    # Skips for minimal profile (single S-task changes).
-    # -------------------------------------------------------------------------
-    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "acceptance_test"; then
-        log "Skipping acceptance_test stage (already completed)"
-    elif [[ "$pipeline_profile" == "minimal" ]]; then
-        log "Skipping acceptance test: minimal profile (single S-task)"
-        set_stage_started "acceptance_test"
-        comment_issue "Acceptance Test: Skipped" \
-            "⏭️ Minimal profile (single S-task). Skipping acceptance test."
-        set_stage_completed "acceptance_test"
-    else
-        set_stage_started "acceptance_test"
-
-        # Check if any changed files are API route files
-        local changed_route_files
-        changed_route_files=$(git diff "$BASE_BRANCH"...HEAD --name-only -- '*/routes/*.ts' '*/routes/*.js' 2>/dev/null || true)
-
-        if [[ -z "$changed_route_files" ]]; then
-            log "No API route files changed — skipping acceptance test"
-            comment_issue "Acceptance Test: Skipped" "⏭️ No API route files changed. Skipping endpoint verification." "default"
-        elif ! command -v docker &>/dev/null && ! command -v docker-compose &>/dev/null; then
-            log_warn "Docker not available — skipping acceptance test"
-            comment_issue "Acceptance Test: Skipped" "⚠️ Docker not available. Endpoint verification skipped. Manual verification recommended before merge." "default"
-        else
-            log "API route files changed — running acceptance test"
-            log "Changed routes: $changed_route_files"
-
-            local acceptance_prompt="Verify the fix for issue #$ISSUE_NUMBER works against running services.
-
-CHANGED API ROUTE FILES:
-$changed_route_files
-
-ACCEPTANCE CRITERIA (from issue):
-$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>/dev/null | jq -r '.body' | awk '/^## Acceptance Criteria/{found=1; next} found && /^## /{exit} found{print}')
-
-STEPS:
-1. Check if Docker containers are running (docker compose ps or docker-compose ps)
-2. If containers are not running, try to start them (docker compose up -d) — if this fails, skip with a warning
-3. For each changed route file, identify the endpoint(s) that were modified
-4. Hit each modified endpoint with a real HTTP request (use curl or node http module from inside the container)
-5. Verify the response shape matches what the acceptance criteria expect
-6. If the response is wrong, report 'failed' with details about what was expected vs actual
-
-Output result as 'passed' or 'failed' with a detailed summary."
-
-            local acceptance_result
-            acceptance_result=$(run_stage "acceptance-test" "$acceptance_prompt" "implement-issue-test.json" "default")
-
-            local acceptance_status acceptance_summary
-            acceptance_status=$(printf '%s' "$acceptance_result" | jq -r '.result')
-            acceptance_summary=$(printf '%s' "$acceptance_result" | jq -r '.summary // "Acceptance test completed"')
-
-            local acceptance_icon="✅"
-            [[ "$acceptance_status" == "failed" ]] && acceptance_icon="❌"
-            comment_issue "Acceptance Test" "$acceptance_icon **Result:** $acceptance_status
-
-$acceptance_summary" "default"
-
-            if [[ "$acceptance_status" == "failed" ]]; then
-                log_error "Acceptance test failed — fix does not work against running services"
-
-                # Give the implementation agent a chance to fix
-                local acceptance_fix_prompt="The acceptance test for issue #$ISSUE_NUMBER FAILED. The unit tests passed but the fix does not work when tested against the actual running endpoint.
-
-Failure details:
-$acceptance_summary
-
-Common causes:
-- Response field names don't match what the frontend/consumer expects
-- Fastify response schema strips fields via fast-json-stringify
-- Docker container running stale code (may need rebuild)
-- Database migration not applied
-
-Investigate the root cause and fix the issue. Commit your changes."
-
-                verify_on_feature_branch "$branch" || true
-
-                local acceptance_fix_result
-                acceptance_fix_result=$(run_stage "fix-acceptance-test" "$acceptance_fix_prompt" "implement-issue-fix.json" "$AGENT")
-
-                local acceptance_fix_summary
-                acceptance_fix_summary=$(printf '%s' "$acceptance_fix_result" | jq -r '.summary // "Fix applied"')
-                comment_issue "Acceptance Test Fix" "$acceptance_fix_summary" "$AGENT"
-            fi
-        fi
-
-        set_stage_completed "acceptance_test"
-    fi
+    run_parallel_post_task_stages \
+        "$branch" "$branch_scope" "$pipeline_profile" "$max_task_size"
 
     # -------------------------------------------------------------------------
     # STAGE: DEPLOY VERIFY
