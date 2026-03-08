@@ -1670,7 +1670,7 @@ compute_pipeline_profile() {
 		return
 	fi
 
-	# minimal: single S-task
+	# minimal: single task (M/L already caught by ml_count guard above)
 	if ((task_count == 1)); then
 		printf '%s' "minimal"
 		return
@@ -2490,6 +2490,8 @@ Log directory: \`$LOG_BASE\`"
     # -------------------------------------------------------------------------
     pipeline_profile=$(compute_pipeline_profile "$tasks_json")
     log "Pipeline profile: $pipeline_profile"
+    # TODO(issue-XX): wire pipeline_profile to stage-selection logic so that
+    # 'minimal' skips optional quality/simplify stages and 'full' enforces them.
 
     # -------------------------------------------------------------------------
     # EARLY SCOPE CHECK: config-only bypass
