@@ -1751,7 +1751,7 @@ _extract_task_files_from_desc() {
 	local grep_pat
 	grep_pat='`[a-zA-Z0-9_./-]+`'
 	grep_pat+='|[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+'
-	grep_pat+="|[a-zA-Z0-9_-]+\\.($ext_pat)"
+	grep_pat+="|[a-zA-Z0-9_-]+\\.($KNOWN_FILE_EXTENSIONS)"
 	printf '%s' "$desc" \
 		| grep -oE "$grep_pat" \
 		| sed 's/`//g' \
