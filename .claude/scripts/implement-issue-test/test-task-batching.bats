@@ -522,6 +522,323 @@ teardown() {
 # Tests the parallel execution of post-task stages with independent exit codes
 # =============================================================================
 
+# =============================================================================
+# per-task log file creation
+# =============================================================================
+
+@test "execute_batch_serial: creates per-task serial log file at LOG_BASE/stages" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/serial-log-test main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	run_stage() {
+		printf '%s' '{"status":"success","commit":"abc123","summary":"done"}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks
+	tasks='[{"id":3,"description":"Do thing","agent":"default"}]'
+	execute_batch_serial "$tasks" "feature/serial-log-test" "main" \
+		>/dev/null
+
+	# Serial log file must exist at expected path
+	[[ -f "${LOG_BASE}/stages/task-3-serial.log" ]]
+
+	# Log file must contain valid JSON with status:success
+	local status_val
+	status_val=$(jq -r '.status' "${LOG_BASE}/stages/task-3-serial.log")
+	[[ "$status_val" == "success" ]]
+
+	git checkout -q main
+	git branch -D feature/serial-log-test 2>/dev/null || true
+}
+
+@test "execute_batch_parallel: creates per-task worktree log file at LOG_BASE/stages" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/par-log-test main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'src\n' > src.ts
+	git add src.ts
+	git commit -q -m "add src"
+
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf 'output\n' > "task-${task_id}.out"
+		git add "task-${task_id}.out"
+		git commit -q -m "task $task_id"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks
+	tasks='[{"id":8,"description":"Modify src.ts","agent":"default","batch":1}]'
+	execute_batch_parallel 1 "$tasks" "feature/par-log-test" "main" \
+		>/dev/null 2>/dev/null || true
+
+	# Worktree log file must exist at expected path
+	[[ -f "${LOG_BASE}/stages/task-8-worktree.log" ]]
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/par-log-test 2>/dev/null || true
+	git branch -D wt-task-8 2>/dev/null || true
+}
+
+# =============================================================================
+# merge conflict fallback to serial
+# =============================================================================
+
+@test "execute_batch_parallel: conflicted tasks appear in conflicted array not completed" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/conf-fallback main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'shared content\n' > shared.ts
+	git add shared.ts
+	git commit -q -m "add shared"
+
+	# run_task_in_worktree writes conflicting content to shared.ts
+	# so that merge back to feature branch will conflict
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		# Overwrite shared.ts with task-specific content to manufacture conflict
+		printf 'task %s changes\n' "$task_id" > shared.ts
+		git add shared.ts
+		git commit -q -m "task $task_id changes shared.ts"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+
+	# Two tasks both touching shared.ts will cause a merge conflict
+	# on the second merge.  We run them one at a time in the simplest setup:
+	# Task 10 merges fine; task 11 conflicts because shared.ts already changed.
+	local tasks
+	tasks='[
+		{"id":10,"description":"Modify shared.ts","agent":"default","batch":1},
+		{"id":11,"description":"Modify shared.ts","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/conf-fallback" "main" \
+		2>/dev/null) || true
+
+	# At least one task must be conflicted (not all completed)
+	local conflicted_count completed_count
+	conflicted_count=$(printf '%s' "$result" | jq '.conflicted | length' 2>/dev/null)
+	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+	total_classified=$(( conflicted_count + completed_count ))
+	[[ "$total_classified" -eq 2 ]]
+	[[ "$conflicted_count" -ge 1 ]]
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/conf-fallback 2>/dev/null || true
+	git branch -D wt-task-10 2>/dev/null || true
+	git branch -D wt-task-11 2>/dev/null || true
+}
+
+@test "conflicted tasks from parallel can be re-run serially with same outcome" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/conf-retry main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# Mock run_stage to succeed
+	run_stage() {
+		printf '%s' '{"status":"success","commit":"retry123","summary":"retried"}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	# Simulate conflicted task IDs from a previous parallel run
+	local conflicted_tasks
+	conflicted_tasks='[{"id":15,"description":"Retry after conflict","agent":"default"}]'
+
+	local retry_result
+	retry_result=$(execute_batch_serial \
+		"$conflicted_tasks" "feature/conf-retry" "main")
+
+	# Must complete successfully (same as if it ran in first pass)
+	local comp_len
+	comp_len=$(printf '%s' "$retry_result" | jq '.completed | length')
+	[[ "$comp_len" -eq 1 ]]
+
+	local comp_id
+	comp_id=$(printf '%s' "$retry_result" | jq '.completed[0]')
+	[[ "$comp_id" -eq 15 ]]
+
+	git checkout -q main
+	git branch -D feature/conf-retry 2>/dev/null || true
+}
+
+# =============================================================================
+# serial fallback produces identical results to parallel execution
+# =============================================================================
+
+@test "serial and parallel produce same completed/failed structure for single task" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'content\n' > myfile.ts
+	git add myfile.ts
+	git commit -q -m "add myfile"
+
+	# Mock for serial path
+	run_stage() {
+		printf '%s' '{"status":"success","commit":"sha1","summary":"done"}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	# Serial path
+	git checkout -q -b feature/equiv-serial main
+	local serial_result
+	serial_result=$(execute_batch_serial \
+		'[{"id":20,"description":"Modify myfile.ts","agent":"default"}]' \
+		"feature/equiv-serial" "main")
+	local serial_comp
+	serial_comp=$(printf '%s' "$serial_result" | jq '.completed | length')
+	local serial_fail
+	serial_fail=$(printf '%s' "$serial_result" | jq '.failed | length')
+
+	# Parallel path with equivalent mock
+	git checkout -q -b feature/equiv-par main
+
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf 'change\n' > "task-${task_id}.ts"
+		git add "task-${task_id}.ts"
+		git commit -q -m "task $task_id"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+
+	local par_result
+	par_result=$(execute_batch_parallel 1 \
+		'[{"id":20,"description":"Modify myfile.ts","agent":"default","batch":1}]' \
+		"feature/equiv-par" "main" 2>/dev/null) || true
+	local par_comp
+	par_comp=$(printf '%s' "$par_result" | jq '.completed | length')
+	local par_fail
+	par_fail=$(printf '%s' "$par_result" | jq '.failed | length')
+
+	# Both paths should report 1 completed, 0 failed
+	[[ "$serial_comp" -eq 1 ]]
+	[[ "$serial_fail" -eq 0 ]]
+	[[ "$par_comp" -eq 1 ]]
+	[[ "$par_fail" -eq 0 ]]
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/equiv-serial 2>/dev/null || true
+	git branch -D feature/equiv-par 2>/dev/null || true
+	git branch -D wt-task-20 2>/dev/null || true
+}
+
+# =============================================================================
+# batch assignment drives execution path (single vs multi)
+# =============================================================================
+
+@test "compute_task_batches: single task gets batch 1 (drives serial path)" {
+	cd "$TEST_TMP/repo" || exit 1
+	local result batch_num
+	result=$(compute_task_batches \
+		'[{"id":1,"description":"Update README.md","agent":"default"}]' \
+		main)
+	batch_num=$(printf '%s' "$result" | jq '.[0].batch')
+	# A single task batch = 1; batch_size == 1 triggers serial execution
+	[[ "$batch_num" -eq 1 ]]
+	local batch_count
+	batch_count=$(printf '%s' "$result" | jq 'length')
+	[[ "$batch_count" -eq 1 ]]
+}
+
+@test "compute_task_batches: non-overlapping tasks in same batch (drives parallel path)" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result
+	tasks='[
+		{"id":1,"description":"Modify alpha.ts","agent":"default"},
+		{"id":2,"description":"Modify beta.ts","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	local b1 b2
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	# Same batch number → batch_size == 2 → parallel execution path
+	[[ "$b1" -eq 1 ]]
+	[[ "$b2" -eq 1 ]]
+}
+
+@test "compute_task_batches: overlapping tasks in different batches (serial per batch)" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result
+	tasks='[
+		{"id":1,"description":"Update shared.ts","agent":"default"},
+		{"id":2,"description":"Also update shared.ts","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	local b1 b2
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	# Different batch numbers → each batch has size 1 → serial execution
+	[[ "$b1" -ne "$b2" ]]
+}
+
+# =============================================================================
+# run_parallel_post_task_stages (parallel e2e-verify and acceptance-test)
+# Tests the parallel execution of post-task stages with independent exit codes
+# =============================================================================
+
 @test "run_parallel_post_task_stages: runs e2e-verify and acceptance-test in parallel using bash &" {
 	cd "$TEST_TMP/repo" || exit 1
 
