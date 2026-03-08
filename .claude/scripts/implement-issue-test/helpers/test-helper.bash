@@ -38,15 +38,23 @@ setup_test_env() {
     fi
 
     # Copy platform config (sourced by orchestrator functions)
+    # Preserve directory structure: TEST_TMP/.claude/config/platform.sh
     if [[ -f "$SCRIPT_DIR/../config/platform.sh" ]]; then
-        mkdir -p "$TEST_TMP/config"
-        cp "$SCRIPT_DIR/../config/platform.sh" "$TEST_TMP/config/platform.sh"
+        mkdir -p "$TEST_TMP/.claude/config"
+        cp "$SCRIPT_DIR/../config/platform.sh" "$TEST_TMP/.claude/config/platform.sh"
     fi
 
     # Copy platform wrapper scripts
+    # Preserve directory structure: TEST_TMP/.claude/scripts/platform/
     if [[ -d "$SCRIPT_DIR/platform" ]]; then
-        cp -r "$SCRIPT_DIR/platform" "$TEST_TMP/platform"
+        mkdir -p "$TEST_TMP/.claude/scripts"
+        cp -r "$SCRIPT_DIR/platform" "$TEST_TMP/.claude/scripts/platform"
     fi
+
+    # Create symlink for backward compatibility: TEST_TMP/config and TEST_TMP/platform
+    # (in case any code still references the old flattened structure)
+    [[ -d "$TEST_TMP/.claude/config" ]] && ln -s "./.claude/config" "$TEST_TMP/config" 2>/dev/null || true
+    [[ -d "$TEST_TMP/.claude/scripts/platform" ]] && ln -s "./.claude/scripts/platform" "$TEST_TMP/platform" 2>/dev/null || true
 
     # Change to test directory
     cd "$TEST_TMP" || exit 1
