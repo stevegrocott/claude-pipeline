@@ -1935,6 +1935,7 @@ all_failures_environment_related() {
 #   $3 - agent to use for fix stages (optional, falls back to global $AGENT)
 #   $4 - pre-computed change scope (optional; computed via detect_change_scope if omitted)
 #   $5 - complexity hint for model selection (S/M/L, optional)
+#   $6 - loop_profile: pipeline profile (minimal|standard|full, optional)
 # Returns:
 #   0 on success (tests pass and validated)
 #   0 on convergence soft exit (loop_complete=true, pipeline continues)

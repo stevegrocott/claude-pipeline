@@ -93,7 +93,6 @@ teardown() {
 	local tasks='[{"description":"**(S)** Fix typo in README"}]'
 	local result
 	result=$(compute_pipeline_profile "$tasks")
-	[[ "$result" == "full" || "$result" == "minimal" ]]
 	# A single S-task has ml_count=0 and task_count=1, so must be minimal
 	[[ "$result" == "minimal" ]]
 }
@@ -162,13 +161,6 @@ teardown() {
 }
 
 # =============================================================================
-# compute_pipeline_profile() — EMPTY / EDGE CASES
-#
-# Empty task list has task_count=0 and ml_count=0.  It falls through to
-# the diff-size check; with a small diff it should be minimal.
-# =============================================================================
-
-# =============================================================================
 # compute_pipeline_profile() — MINIMAL beats DIFF boundary (docs-skip invariant)
 #
 # A single S-task must return 'minimal' even when the diff meets or exceeds the
@@ -217,27 +209,24 @@ teardown() {
 }
 
 # =============================================================================
-# ACCEPTANCE TEST STAGE — PROFILE-BASED SKIPPING
+# compute_pipeline_profile() — ADDITIONAL CLASSIFICATION CHECKS
 #
-# The acceptance test stage is skipped for minimal profile (single S-task)
-# but runs for standard and full profiles. This ensures expensive integration
-# tests don't run on trivial single-line fixes.
+# Additional profile classification checks covering real-world input shapes
+# not exercised in the sections above.
 # =============================================================================
 
-@test "acceptance test stage: minimal profile should skip (single S-task)" {
-	# A single S-task has no M/L tasks, task_count=1, so profile is minimal.
-	# This test documents the expected behavior: acceptance test skipped.
+@test "compute_pipeline_profile: single S-task with large diff still returns 'minimal' (profile classification)" {
+	# A single S-task has no M/L tasks, task_count=1, so profile is minimal
+	# regardless of diff size.
 	get_diff_line_count() { printf '%s' "100"; }
 	local tasks='[{"description":"**(S)** Fix typo in README"}]'
 	local result
 	result=$(compute_pipeline_profile "$tasks")
 	[[ "$result" == "minimal" ]]
-	# Acceptance test stage should be skipped when profile is minimal
 }
 
-@test "acceptance test stage: standard profile should run (multiple S-tasks, large diff)" {
+@test "compute_pipeline_profile: multiple S-tasks with 50-line diff returns 'standard' (profile classification)" {
 	# Multiple S-tasks with large diff produces standard profile.
-	# This test documents the expected behavior: acceptance test runs.
 	get_diff_line_count() { printf '%s' "50"; }
 	local tasks
 	tasks='[
@@ -247,18 +236,15 @@ teardown() {
 	local result
 	result=$(compute_pipeline_profile "$tasks")
 	[[ "$result" == "standard" ]]
-	# Acceptance test stage should run when profile is standard
 }
 
-@test "acceptance test stage: full profile should run (any M/L task)" {
-	# Any M or L task produces full profile.
-	# This test documents the expected behavior: acceptance test runs.
+@test "compute_pipeline_profile: M-task with small diff returns 'full' (profile classification)" {
+	# Any M or L task produces full profile regardless of diff size.
 	get_diff_line_count() { printf '%s' "5"; }
 	local tasks='[{"description":"**(M)** Add auth middleware"}]'
 	local result
 	result=$(compute_pipeline_profile "$tasks")
 	[[ "$result" == "full" ]]
-	# Acceptance test stage should run when profile is full
 }
 
 # =============================================================================
