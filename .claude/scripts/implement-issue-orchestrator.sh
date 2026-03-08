@@ -794,6 +794,14 @@ run_stage() {
     fi
     fallback_model=$(_next_model_up "$model")
 
+    # Record resolved model in status.json stage entry for export_metrics()
+    if [[ -f "$STATUS_FILE" ]]; then
+        local stage_key="${stage_name//-/_}"
+        jq --arg stage "$stage_key" --arg model "$model" \
+           '.stages[$stage].model = $model' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    fi
+
     log "Running stage: $stage_name"
     log "  Schema: $schema_file"
     log "  Agent: ${agent:-default}"
