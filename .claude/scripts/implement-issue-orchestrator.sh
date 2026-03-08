@@ -2931,9 +2931,16 @@ Commit your changes."
     # actual endpoint in Docker and verifies the response shape matches the
     # issue's acceptance criteria.  Skips gracefully if Docker is unavailable.
     # Added in claude-pipeline#25 to prevent "unit tests pass but fix is broken".
+    # Skips for minimal profile (single S-task changes).
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "acceptance_test"; then
         log "Skipping acceptance_test stage (already completed)"
+    elif [[ "$pipeline_profile" == "minimal" ]]; then
+        log "Skipping acceptance test: minimal profile (single S-task)"
+        set_stage_started "acceptance_test"
+        comment_issue "Acceptance Test: Skipped" \
+            "⏭️ Minimal profile (single S-task). Skipping acceptance test."
+        set_stage_completed "acceptance_test"
     else
         set_stage_started "acceptance_test"
 

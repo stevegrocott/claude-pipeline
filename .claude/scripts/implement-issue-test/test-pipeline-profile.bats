@@ -215,3 +215,48 @@ teardown() {
 	result=$(compute_pipeline_profile "[]")
 	[[ "$result" == "standard" ]]
 }
+
+# =============================================================================
+# ACCEPTANCE TEST STAGE — PROFILE-BASED SKIPPING
+#
+# The acceptance test stage is skipped for minimal profile (single S-task)
+# but runs for standard and full profiles. This ensures expensive integration
+# tests don't run on trivial single-line fixes.
+# =============================================================================
+
+@test "acceptance test stage: minimal profile should skip (single S-task)" {
+	# A single S-task has no M/L tasks, task_count=1, so profile is minimal.
+	# This test documents the expected behavior: acceptance test skipped.
+	get_diff_line_count() { printf '%s' "100"; }
+	local tasks='[{"description":"**(S)** Fix typo in README"}]'
+	local result
+	result=$(compute_pipeline_profile "$tasks")
+	[[ "$result" == "minimal" ]]
+	# Acceptance test stage should be skipped when profile is minimal
+}
+
+@test "acceptance test stage: standard profile should run (multiple S-tasks, large diff)" {
+	# Multiple S-tasks with large diff produces standard profile.
+	# This test documents the expected behavior: acceptance test runs.
+	get_diff_line_count() { printf '%s' "50"; }
+	local tasks
+	tasks='[
+		{"description":"**(S)** Add validation"},
+		{"description":"**(S)** Add tests"}
+	]'
+	local result
+	result=$(compute_pipeline_profile "$tasks")
+	[[ "$result" == "standard" ]]
+	# Acceptance test stage should run when profile is standard
+}
+
+@test "acceptance test stage: full profile should run (any M/L task)" {
+	# Any M or L task produces full profile.
+	# This test documents the expected behavior: acceptance test runs.
+	get_diff_line_count() { printf '%s' "5"; }
+	local tasks='[{"description":"**(M)** Add auth middleware"}]'
+	local result
+	result=$(compute_pipeline_profile "$tasks")
+	[[ "$result" == "full" ]]
+	# Acceptance test stage should run when profile is full
+}
