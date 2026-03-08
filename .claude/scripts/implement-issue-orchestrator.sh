@@ -1511,6 +1511,44 @@ get_pr_review_config() {
     fi
 }
 
+# Apply pipeline profile to PR review max iterations.
+# For minimal profile, caps max_iter at 1 regardless of get_pr_review_config() output.
+# For standard and full profiles, keeps the dynamic value unchanged.
+#
+# Arguments:
+#   $1 - pipeline_profile: minimal | standard | full
+#   $2 - config_max_iter: the max_iterations value from get_pr_review_config()
+# Outputs:
+#   The effective max_iterations value (integer)
+apply_profile_to_pr_review_max_iter() {
+	local profile="$1"
+	local config_max_iter="$2"
+	if [[ "$profile" == "minimal" ]]; then
+		printf '%s' "1"
+	else
+		printf '%s' "$config_max_iter"
+	fi
+}
+
+# Applies pipeline profile to the test loop max-iterations cap.
+# For minimal profile, caps max_iter at 2 (fast feedback, avoid wasted cycles).
+# For standard and full profiles, passes the config value through unchanged.
+#
+# Arguments:
+#   $1 - pipeline_profile: minimal | standard | full
+#   $2 - config_max_iter: the base MAX_TEST_ITERATIONS value
+# Outputs:
+#   The effective max_iterations value (integer)
+apply_profile_to_test_max_iter() {
+	local profile="$1"
+	local config_max_iter="$2"
+	if [[ "$profile" == "minimal" ]]; then
+		printf '%s' "2"
+	else
+		printf '%s' "$config_max_iter"
+	fi
+}
+
 # Determines whether the quality loop should run for a given task size.
 # Arguments:
 #   $1 - task_size: S | M | L (or other/empty)
@@ -1635,6 +1673,57 @@ get_max_quality_iterations() {
 	else
 		echo "$size_based"
 	fi
+}
+
+# =============================================================================
+# PIPELINE PROFILE CLASSIFIER
+# =============================================================================
+#
+# Classifies the pipeline complexity profile based on task sizes and diff size.
+# Called immediately after parse_issue completes so that task count and sizes
+# are known.
+#
+# Profile rules (in priority order):
+#   full     — any M or L task present
+#   minimal  — single S-task, OR current diff < 20 lines
+#   standard — all S-tasks with multiple tasks (and diff >= 20 lines)
+#
+# Arguments:
+#   $1 - tasks_json: JSON array of task objects with .description fields
+# Outputs:
+#   One of: minimal | standard | full
+#
+compute_pipeline_profile() {
+	local tasks_json="${1:-[]}"
+
+	local task_count
+	task_count=$(printf '%s' "$tasks_json" | jq 'length')
+
+	# full: any M or L task present
+	local ml_count
+	ml_count=$(printf '%s' "$tasks_json" \
+		| jq '[.[] | select(.description | test("\\*\\*\\([ML]\\)\\*\\*"))] | length')
+	if ((ml_count > 0)); then
+		printf '%s' "full"
+		return
+	fi
+
+	# minimal: single task (M/L already caught by ml_count guard above)
+	if ((task_count == 1)); then
+		printf '%s' "minimal"
+		return
+	fi
+
+	# minimal: diff < 20 lines (catches trivial resume/config-tweak scenarios)
+	local diff_lines
+	diff_lines=$(get_diff_line_count "${BASE_BRANCH:-main}")
+	if ((diff_lines < 20)); then
+		printf '%s' "minimal"
+		return
+	fi
+
+	# standard: all S-tasks, multiple tasks, diff >= 20 lines
+	printf '%s' "standard"
 }
 
 # =============================================================================
@@ -1846,6 +1935,7 @@ all_failures_environment_related() {
 #   $3 - agent to use for fix stages (optional, falls back to global $AGENT)
 #   $4 - pre-computed change scope (optional; computed via detect_change_scope if omitted)
 #   $5 - complexity hint for model selection (S/M/L, optional)
+#   $6 - loop_profile: pipeline profile (minimal|standard|full, optional)
 # Returns:
 #   0 on success (tests pass and validated)
 #   0 on convergence soft exit (loop_complete=true, pipeline continues)
@@ -1855,10 +1945,14 @@ run_test_loop() {
     local loop_branch="$2"
     local loop_agent="${3:-$AGENT}"
     local loop_complexity="${5:-}"
+    local loop_profile="${6:-}"
 
     local loop_complete=false
     local test_iteration=0
     local validation_fix_iteration=0
+    local max_test_iter
+    max_test_iter=$(apply_profile_to_test_max_iter \
+        "$loop_profile" "$MAX_TEST_ITERATIONS")
 
     log "Starting test loop after all tasks complete"
 
@@ -1969,13 +2063,13 @@ run_test_loop() {
         test_iteration=$((test_iteration + 1))
         increment_test_iteration  # Track iteration in status file
 
-        if (( test_iteration > MAX_TEST_ITERATIONS )); then
-            log_error "Test loop exceeded max iterations ($MAX_TEST_ITERATIONS)"
+        if (( test_iteration > max_test_iter )); then
+            log_error "Test loop exceeded max iterations ($max_test_iter)"
             set_final_state "max_iterations_test"
             exit 2
         fi
 
-        log "Test loop iteration $test_iteration/$MAX_TEST_ITERATIONS (scope: $change_scope)"
+        log "Test loop iteration $test_iteration/$max_test_iter (scope: $change_scope)"
 
         # =========================================================================
         # COMBINED TEST EXECUTION + VALIDATION → single stage
@@ -2098,7 +2192,7 @@ Output both test results and validation findings in one structured response.
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$test_result"; then
             log_warn "Test stage timed out on iteration $test_iteration — retrying next iteration"
-            comment_issue "Test Loop: Timeout ($test_iteration/$MAX_TEST_ITERATIONS)" "⏱️ Test stage timed out. Retrying on next iteration." "default"
+            comment_issue "Test Loop: Timeout ($test_iteration/$max_test_iter)" "⏱️ Test stage timed out. Retrying on next iteration." "default"
             continue
         fi
 
@@ -2114,7 +2208,7 @@ Output both test results and validation findings in one structured response.
         # HANDLE TEST FAILURES
         # -----------------------------------------------------------------
         if [[ "$test_status" == "failed" ]]; then
-            comment_issue "Test Loop: Tests ($test_iteration/$MAX_TEST_ITERATIONS)" "❌ **Result:** $test_status
+            comment_issue "Test Loop: Tests ($test_iteration/$max_test_iter)" "❌ **Result:** $test_status
 
 $test_summary" "default"
             log "Tests failed. Getting failures and fixing..."
@@ -2144,7 +2238,7 @@ $test_summary" "default"
             if (( pr_failure_count == 0 )); then
                 log "INFO: All test failures are pre-existing. Skipping fix-agent dispatch."
                 if (( skipped_count > 0 )); then
-                    comment_issue "Test Loop: Pre-existing Failures ($test_iteration/$MAX_TEST_ITERATIONS)" \
+                    comment_issue "Test Loop: Pre-existing Failures ($test_iteration/$max_test_iter)" \
                         "ℹ️ $skipped_count pre-existing failure(s) detected (not from PR-changed test files). Skipping fix-agent." "default"
                 fi
                 loop_complete=true
@@ -2159,7 +2253,7 @@ $test_summary" "default"
                 log "INFO: All failures are environment-related." \
                     "Skipping fix-agent dispatch."
                 local env_title="Test Loop: Environment Errors"
-                env_title+=" ($test_iteration/$MAX_TEST_ITERATIONS)"
+                env_title+=" ($test_iteration/$max_test_iter)"
                 local env_body
                 env_body="ℹ️ All test failures appear to be"
                 env_body+=" environment-related (Redis/DB connection"
@@ -2215,7 +2309,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment: Fix results
-            comment_issue "Test Loop: Test Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$loop_agent"
+            comment_issue "Test Loop: Test Fix ($test_iteration/$max_test_iter)" "$fix_summary" "$loop_agent"
             continue
         fi
 
@@ -2223,7 +2317,7 @@ Fix the issues and commit. Output a summary of fixes applied."
         # TESTS PASSED — check validation result
         # -----------------------------------------------------------------
         if [[ "$validate_status" == "passed" || "$validate_status" == "skipped" ]]; then
-            comment_issue "Test Loop: Results ($test_iteration/$MAX_TEST_ITERATIONS)" "✅ **Tests:** passed
+            comment_issue "Test Loop: Results ($test_iteration/$max_test_iter)" "✅ **Tests:** passed
 ✅ **Validation:** $validate_status
 
 $test_summary" "default"
@@ -2240,7 +2334,7 @@ $test_summary" "default"
                 exit 2
             fi
 
-            comment_issue "Test Loop: Results ($test_iteration/$MAX_TEST_ITERATIONS)" "✅ **Tests:** passed
+            comment_issue "Test Loop: Results ($test_iteration/$max_test_iter)" "✅ **Tests:** passed
 🔄 **Validation:** $validate_status
 
 $test_summary
@@ -2276,7 +2370,7 @@ Output a summary of fixes applied."
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
 
             # Comment: Fix results
-            comment_issue "Test Loop: Validation Fix ($test_iteration/$MAX_TEST_ITERATIONS)" "$fix_summary" "$loop_agent"
+            comment_issue "Test Loop: Validation Fix ($test_iteration/$max_test_iter)" "$fix_summary" "$loop_agent"
         fi
     done
 
@@ -2289,7 +2383,7 @@ Output a summary of fixes applied."
 
 main() {
     # Declare local variables used throughout main
-    local branch tasks_json task_count completed_tasks max_task_size=""
+    local branch tasks_json task_count completed_tasks max_task_size="" pipeline_profile=""
 
     # -------------------------------------------------------------------------
     # RESUME VS FRESH START INITIALIZATION
@@ -2433,6 +2527,14 @@ Log directory: \`$LOG_BASE\`"
         set_stage_completed "parse_issue"
         log "Parse issue complete. Branch: $branch, Tasks: $task_count"
     fi
+
+    # -------------------------------------------------------------------------
+    # PIPELINE PROFILE: classify complexity now that task sizes are known
+    # -------------------------------------------------------------------------
+    pipeline_profile=$(compute_pipeline_profile "$tasks_json")
+    log "Pipeline profile: $pipeline_profile"
+    # TODO(issue-XX): wire pipeline_profile to stage-selection logic so that
+    # 'minimal' skips optional quality/simplify stages and 'full' enforces them.
 
     # -------------------------------------------------------------------------
     # EARLY SCOPE CHECK: config-only bypass
@@ -2756,7 +2858,8 @@ $impl_summary" "$task_agent"
         set_stage_started "test_loop"
         log "Running test loop after all tasks complete..."
 
-        run_test_loop "." "$branch" "$AGENT" "$branch_scope" "$max_task_size"
+        run_test_loop "." "$branch" "$AGENT" \
+            "$branch_scope" "$max_task_size" "$pipeline_profile"
 
         # ---------------------------------------------------------------------
         # NON-BLOCKING FULL-SCOPE CHECK (informational only)
@@ -2872,9 +2975,16 @@ Commit your changes."
     # actual endpoint in Docker and verifies the response shape matches the
     # issue's acceptance criteria.  Skips gracefully if Docker is unavailable.
     # Added in claude-pipeline#25 to prevent "unit tests pass but fix is broken".
+    # Skips for minimal profile (single S-task changes).
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "acceptance_test"; then
         log "Skipping acceptance_test stage (already completed)"
+    elif [[ "$pipeline_profile" == "minimal" ]]; then
+        log "Skipping acceptance test: minimal profile (single S-task)"
+        set_stage_started "acceptance_test"
+        comment_issue "Acceptance Test: Skipped" \
+            "⏭️ Minimal profile (single S-task). Skipping acceptance test."
+        set_stage_completed "acceptance_test"
     else
         set_stage_started "acceptance_test"
 
@@ -3104,6 +3214,12 @@ $dv_summary" "default"
             set_stage_started "docs"
             comment_issue "Docs Stage: Skipped" "⏭️ No TypeScript/React files changed (scope: \`$branch_scope\`). Skipping docs stage."
             set_stage_completed "docs"
+        elif [[ "$pipeline_profile" == "minimal" ]]; then
+            log "Skipping docs stage: minimal profile (single S-task)"
+            set_stage_started "docs"
+            comment_issue "Docs Stage: Skipped" \
+                "⏭️ Minimal profile (single S-task). Skipping docs stage."
+            set_stage_completed "docs"
         elif all_tasks_s_complexity; then
             log "Skipping docs stage: all tasks are S-complexity"
             set_stage_started "docs"
@@ -3208,9 +3324,12 @@ The command will output the MR number. Use that as pr_number in your response."
         pr_review_model=$(printf '%s' "$pr_review_config" | jq -r '.model')
         pr_review_timeout=$(printf '%s' "$pr_review_config" | jq -r '.timeout')
         pr_review_max_iter=$(printf '%s' "$pr_review_config" | jq -r '.max_iterations')
+        pr_review_max_iter=$(apply_profile_to_pr_review_max_iter \
+            "$pipeline_profile" "$pr_review_max_iter")
+
         local diff_lines
         diff_lines=$(get_diff_line_count "$BASE_BRANCH")
-        log "PR review config: model=$pr_review_model, timeout=${pr_review_timeout}s, max_iter=$pr_review_max_iter (diff: ${diff_lines} lines)"
+        log "PR review config: model=$pr_review_model, timeout=${pr_review_timeout}s, max_iter=$pr_review_max_iter (diff: ${diff_lines} lines, profile: $pipeline_profile)"
 
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
