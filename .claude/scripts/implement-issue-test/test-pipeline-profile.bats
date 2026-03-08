@@ -260,3 +260,51 @@ teardown() {
 	[[ "$result" == "full" ]]
 	# Acceptance test stage should run when profile is full
 }
+
+# =============================================================================
+# apply_profile_to_pr_review_max_iter() — PROFILE-BASED MAX ITER CAPPING
+#
+# minimal profile: always returns 1 regardless of config value
+# standard profile: passes config value through unchanged
+# full profile: passes config value through unchanged
+# =============================================================================
+
+@test "pr review: minimal profile caps max_iter at 1 (config says 1)" {
+	local result
+	result=$(apply_profile_to_pr_review_max_iter "minimal" "1")
+	[[ "$result" == "1" ]]
+}
+
+@test "pr review: minimal profile caps max_iter at 1 (config says 2)" {
+	# Even when get_pr_review_config() returns 2 (medium/large diff),
+	# minimal profile forces max_iter down to 1.
+	local result
+	result=$(apply_profile_to_pr_review_max_iter "minimal" "2")
+	[[ "$result" == "1" ]]
+}
+
+@test "pr review: standard profile keeps dynamic config (config says 2)" {
+	# standard profile must not override the diff-size-based value.
+	local result
+	result=$(apply_profile_to_pr_review_max_iter "standard" "2")
+	[[ "$result" == "2" ]]
+}
+
+@test "pr review: standard profile keeps dynamic config (config says 1)" {
+	local result
+	result=$(apply_profile_to_pr_review_max_iter "standard" "1")
+	[[ "$result" == "1" ]]
+}
+
+@test "pr review: full profile keeps dynamic config (config says 2)" {
+	# full profile must not override the diff-size-based value.
+	local result
+	result=$(apply_profile_to_pr_review_max_iter "full" "2")
+	[[ "$result" == "2" ]]
+}
+
+@test "pr review: full profile keeps dynamic config (config says 1)" {
+	local result
+	result=$(apply_profile_to_pr_review_max_iter "full" "1")
+	[[ "$result" == "1" ]]
+}

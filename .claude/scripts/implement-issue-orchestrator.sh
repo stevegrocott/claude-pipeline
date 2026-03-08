@@ -1511,6 +1511,25 @@ get_pr_review_config() {
     fi
 }
 
+# Apply pipeline profile to PR review max iterations.
+# For minimal profile, caps max_iter at 1 regardless of get_pr_review_config() output.
+# For standard and full profiles, keeps the dynamic value unchanged.
+#
+# Arguments:
+#   $1 - pipeline_profile: minimal | standard | full
+#   $2 - config_max_iter: the max_iterations value from get_pr_review_config()
+# Outputs:
+#   The effective max_iterations value (integer)
+apply_profile_to_pr_review_max_iter() {
+	local profile="$1"
+	local config_max_iter="$2"
+	if [[ "$profile" == "minimal" ]]; then
+		printf '%s' "1"
+	else
+		printf '%s' "$config_max_iter"
+	fi
+}
+
 # Determines whether the quality loop should run for a given task size.
 # Arguments:
 #   $1 - task_size: S | M | L (or other/empty)
@@ -3280,9 +3299,12 @@ The command will output the MR number. Use that as pr_number in your response."
         pr_review_model=$(printf '%s' "$pr_review_config" | jq -r '.model')
         pr_review_timeout=$(printf '%s' "$pr_review_config" | jq -r '.timeout')
         pr_review_max_iter=$(printf '%s' "$pr_review_config" | jq -r '.max_iterations')
+        pr_review_max_iter=$(apply_profile_to_pr_review_max_iter \
+            "$pipeline_profile" "$pr_review_max_iter")
+
         local diff_lines
         diff_lines=$(get_diff_line_count "$BASE_BRANCH")
-        log "PR review config: model=$pr_review_model, timeout=${pr_review_timeout}s, max_iter=$pr_review_max_iter (diff: ${diff_lines} lines)"
+        log "PR review config: model=$pr_review_model, timeout=${pr_review_timeout}s, max_iter=$pr_review_max_iter (diff: ${diff_lines} lines, profile: $pipeline_profile)"
 
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
