@@ -1638,6 +1638,57 @@ get_max_quality_iterations() {
 }
 
 # =============================================================================
+# PIPELINE PROFILE CLASSIFIER
+# =============================================================================
+#
+# Classifies the pipeline complexity profile based on task sizes and diff size.
+# Called immediately after parse_issue completes so that task count and sizes
+# are known.
+#
+# Profile rules (in priority order):
+#   full     — any M or L task present
+#   minimal  — single S-task, OR current diff < 20 lines
+#   standard — all S-tasks with multiple tasks (and diff >= 20 lines)
+#
+# Arguments:
+#   $1 - tasks_json: JSON array of task objects with .description fields
+# Outputs:
+#   One of: minimal | standard | full
+#
+compute_pipeline_profile() {
+	local tasks_json="${1:-[]}"
+
+	local task_count
+	task_count=$(printf '%s' "$tasks_json" | jq 'length')
+
+	# full: any M or L task present
+	local ml_count
+	ml_count=$(printf '%s' "$tasks_json" \
+		| jq '[.[] | select(.description | test("\\*\\*\\([ML]\\)\\*\\*"))] | length')
+	if ((ml_count > 0)); then
+		printf '%s' "full"
+		return
+	fi
+
+	# minimal: single S-task
+	if ((task_count == 1)); then
+		printf '%s' "minimal"
+		return
+	fi
+
+	# minimal: diff < 20 lines (catches trivial resume/config-tweak scenarios)
+	local diff_lines
+	diff_lines=$(get_diff_line_count "${BASE_BRANCH:-main}")
+	if ((diff_lines < 20)); then
+		printf '%s' "minimal"
+		return
+	fi
+
+	# standard: all S-tasks, multiple tasks, diff >= 20 lines
+	printf '%s' "standard"
+}
+
+# =============================================================================
 # PROMPT FILE-LIST BUILDER
 # =============================================================================
 #
@@ -2289,7 +2340,7 @@ Output a summary of fixes applied."
 
 main() {
     # Declare local variables used throughout main
-    local branch tasks_json task_count completed_tasks max_task_size=""
+    local branch tasks_json task_count completed_tasks max_task_size="" pipeline_profile=""
 
     # -------------------------------------------------------------------------
     # RESUME VS FRESH START INITIALIZATION
@@ -2433,6 +2484,12 @@ Log directory: \`$LOG_BASE\`"
         set_stage_completed "parse_issue"
         log "Parse issue complete. Branch: $branch, Tasks: $task_count"
     fi
+
+    # -------------------------------------------------------------------------
+    # PIPELINE PROFILE: classify complexity now that task sizes are known
+    # -------------------------------------------------------------------------
+    pipeline_profile=$(compute_pipeline_profile "$tasks_json")
+    log "Pipeline profile: $pipeline_profile"
 
     # -------------------------------------------------------------------------
     # EARLY SCOPE CHECK: config-only bypass
