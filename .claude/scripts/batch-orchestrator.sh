@@ -471,6 +471,15 @@ process_issue() {
 
     log "implement-issue status: $impl_status, PR: ${pr_number:-none}"
 
+    # Log location of metrics.json emitted by the orchestrator's EXIT trap
+    if [[ -f "$issue_status_file" ]]; then
+        local issue_log_dir
+        issue_log_dir=$(jq -r '.log_dir // empty' "$issue_status_file" 2>/dev/null)
+        if [[ -n "$issue_log_dir" && -f "$issue_log_dir/metrics.json" ]]; then
+            log "Metrics available: $issue_log_dir/metrics.json"
+        fi
+    fi
+
     if [[ "$impl_status" != "success" ]]; then
         log_error "implement-issue failed for #$issue_num: ${impl_error:-unknown error}"
         update_issue_field "$issue_num" "status" "failed"
