@@ -60,6 +60,17 @@ Break the chosen approach into implementable tasks:
 - If a task requires reading more than 3 files or modifying more than 2 files, split it
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
+
+**REQUIRED: Each task description MUST include specific file paths from Step 2 research.** Include file names, paths, and line numbers inline. This prevents vague descriptions that cause subagents to explore broadly.
+
+Examples:
+- ❌ **BAD (vague):** `Update Settings component to add dark mode toggle`
+- ✅ **GOOD:** `Update Settings component (src/components/Settings.tsx:45-67) to add dark mode toggle, integrate with ThemeContext (src/context/ThemeContext.ts:12-28)`
+- ❌ **BAD (no paths):** `Implement theme state management using Context API`
+- ✅ **GOOD:** `Implement theme persistence in ThemeContext (src/context/ThemeContext.ts) - add useCallback hook at line 15, update provider initialization at line 32`
+- ❌ **BAD (missing specifics):** `Update CSS styles for dark mode`
+- ✅ **GOOD:** `Update global theme variables in theme.css (src/styles/theme.css:8-45) and add dark mode color overrides at line 50+`
+
 - **E2E tests (REQUIRED for UI changes):** If `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E task for ANY issue touching user-visible UI — CSS, components, layouts, forms, navigation, visual regressions. This is NOT optional for UI work.
   `- [ ] \`[playwright-test-developer]\` **(S)** Write Playwright E2E test for [flow description]`
   E2E tasks reference the `playwright-testing` skill and come after all implementation tasks so the feature exists before the test runs.
