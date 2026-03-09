@@ -70,7 +70,7 @@ _stage_to_tier() {
 # =============================================================================
 #
 # Task complexity hints (S/M/L) from issue parsing override stage defaults.
-# The quality loop forwards these to implement, simplify, review, and fix stages.
+# The quality loop forwards these to implement, review, and fix stages.
 #
 
 _complexity_to_tier() {

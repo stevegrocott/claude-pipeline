@@ -294,8 +294,8 @@ run_with_config() {
 }
 
 @test "complexity hint overrides stage default when provided" {
-	# fix stage defaults to advanced (opus)
-	# S complexity maps to standard (sonnet)
+	# fix stage defaults to standard (sonnet)
+	# S complexity also maps to standard (sonnet) — both agree
 	# Complexity hint takes precedence — callers only pass it when intended
 	run_with_config 'resolve_model "fix" "S"'
 	[ "$status" -eq 0 ]
