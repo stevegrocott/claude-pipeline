@@ -3723,6 +3723,9 @@ Log directory: \`$LOG_BASE\`"
             exit 1
         fi
 
+        # Strip backslash-escaped backticks (gh API returns \` instead of `)
+        tasks_section="${tasks_section//\\\`/\`}"
+
         # Parse tasks into JSON array
         # Matches two formats:
         #   GitHub:  - [ ] `[agent]` description  (checkbox syntax)
@@ -3897,7 +3900,7 @@ Log directory: \`$LOG_BASE\`"
                 | sort -u \
                 | head -10)
 
-            for path_match in "${found_paths[@]}"; do
+            for path_match in ${found_paths[@]+"${found_paths[@]}"}; do
                 if [[ ! -e "$path_match" ]]; then
                     log "WARNING: Referenced file path '$path_match' does not exist in the repo"
                 fi
