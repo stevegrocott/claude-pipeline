@@ -117,10 +117,15 @@ PLATFORM_DIR=".claude/scripts/platform"
 
 ## Implementation Tasks
 - [ ] `[agent-name]` **(S)** Description of task 1
+  - **Affected files:** `path/to/file.ts`, `path/to/other.ts`
 - [ ] `[agent-name]` **(M)** Description of task 2
+  - **Affected files:** `path/to/file2.ts`
 - [ ] `[agent-name]` **(L)** Description of task 3
+  - **Affected files:** `path/to/file3.ts`, `path/to/file4.ts`
 - [ ] `[default]` **(S)** Description of general task (e.g., tests, config)
+  - **Affected files:** `path/to/config.ts`
 - [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured)
+  - **Affected files:** `e2e/tests/test-name.spec.ts`
 
 ## Deploy Verification
 [Include if this issue involves bugs in specific environments or requires deployment testing]
