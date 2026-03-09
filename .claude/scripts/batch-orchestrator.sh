@@ -26,25 +26,6 @@
 set -uo pipefail  # Note: not -e, we handle errors explicitly
 
 # =============================================================================
-# PORTABLE TIMEOUT (macOS does not ship GNU timeout)
-# =============================================================================
-
-if ! command -v timeout &>/dev/null; then
-    timeout() {
-        local duration="$1"; shift
-        perl -e '
-            use POSIX ":sys_wait_h";
-            alarm shift @ARGV;
-            $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
-            $pid = fork // die "fork: $!";
-            if ($pid == 0) { exec @ARGV; die "exec: $!" }
-            waitpid($pid, 0);
-            exit ($? >> 8);
-        ' "$duration" "$@"
-    }
-fi
-
-# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -439,7 +420,7 @@ process_issue() {
         agent_args=(--agent "$AGENT")
     fi
 
-    log "Running: implement-issue-orchestrator.sh --issue $issue_num --branch $BRANCH ${agent_args[*]+"${agent_args[*]}"}"
+    log "Running: implement-issue-orchestrator.sh --issue $issue_num --branch $BRANCH ${agent_args[*]}"
 
     local impl_output
     local impl_exit=0
@@ -447,7 +428,7 @@ process_issue() {
     impl_output=$("$SCRIPT_DIR/implement-issue-orchestrator.sh" \
         --issue "$issue_num" \
         --branch "$BRANCH" \
-        ${agent_args[@]+"${agent_args[@]}"} \
+        "${agent_args[@]}" \
         --status-file "$issue_status_file" \
         2>&1) || impl_exit=$?
 
