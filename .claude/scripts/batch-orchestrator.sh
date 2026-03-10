@@ -528,7 +528,7 @@ process_issue() {
     local proc_output
     local proc_exit=0
 
-    proc_output=$(timeout "$ISSUE_TIMEOUT" claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+    proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
         --agent code-reviewer \
         --dangerously-skip-permissions \
         --output-format json \
@@ -562,7 +562,7 @@ process_issue() {
 
         # Resume
         if [[ -n "$session_id" ]]; then
-            proc_output=$(timeout "$ISSUE_TIMEOUT" claude -p "please continue" \
+            proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "please continue" \
                 --resume "$session_id" \
                 --agent code-reviewer \
                 --dangerously-skip-permissions \
@@ -570,7 +570,7 @@ process_issue() {
                 --json-schema "$PROCESS_SCHEMA" \
                 2>&1) || proc_exit=$?
         else
-            proc_output=$(timeout "$ISSUE_TIMEOUT" claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+            proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
                 --agent code-reviewer \
                 --dangerously-skip-permissions \
                 --output-format json \
