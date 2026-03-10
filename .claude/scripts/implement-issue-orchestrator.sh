@@ -1950,6 +1950,12 @@ _parse_task_lines() {
 			log_warn "Fuzzy task parse (${fuzzy}): $line"
 		fi
 
+		# AC2: default complexity to M when no hint present
+		if [[ ! "$desc" =~ \*\*\([SML]\)\*\* ]]; then
+			log_warn "No complexity hint in task (defaulting to M): $line"
+			desc="**(M)** $desc"
+		fi
+
 		task_id=$((task_id + 1))
 		tasks_json=$(printf '%s' "$tasks_json" | jq \
 			--argjson id "$task_id" \
@@ -3820,34 +3826,19 @@ Log directory: \`$LOG_BASE\`"
             exit 1
         fi
 
-        # Strip backslash-escaped backticks (gh API returns \` instead of `)
-        tasks_section="${tasks_section//\\\`/\`}"
-
-        # Parse tasks into JSON array
-        # Matches two formats:
-        #   GitHub:  - [ ] `[agent]` description  (checkbox syntax)
-        #   Jira:    - `[agent]` description       (plain bullet from ADF)
-        # Checked boxes [x] are considered already complete and skipped.
-        local task_id=0
-        tasks_json="[]"
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^-\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ (.+)$ ]]; then
-                task_id=$((task_id + 1))
-                local agent="${BASH_REMATCH[2]}"
-                local desc="${BASH_REMATCH[3]}"
-                tasks_json=$(printf '%s' "$tasks_json" | jq \
-                    --argjson id "$task_id" \
-                    --arg desc "$desc" \
-                    --arg agent "$agent" \
-                    '. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0}]')
-            fi
-        done <<< "$tasks_section"
+        # Parse tasks using fuzzy parser (handles missing backticks, asterisk
+        # bullets, leading whitespace, and missing square brackets; warns on stderr)
+        tasks_json=$(_parse_task_lines "$tasks_section")
 
         local task_count
         task_count=$(printf '%s' "$tasks_json" | jq length)
 
         if (( task_count == 0 )); then
-            log_error "No parseable tasks found in issue #$ISSUE_NUMBER"
+            local excerpt="${issue_body:0:500}"
+            log_error "No parseable tasks found in issue #$ISSUE_NUMBER. Issue body excerpt (first 500 chars):
+---
+$excerpt
+---"
             set_final_state "error"
             exit 1
         fi
