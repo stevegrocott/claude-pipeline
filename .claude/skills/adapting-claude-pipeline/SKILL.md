@@ -208,7 +208,7 @@ Context size compounds across every message in every conversation. Audit these d
 
 CLAUDE.md is loaded into every message in every conversation. Bloat here multiplies cost and latency across the entire project lifetime.
 
-**Target size: under 2KB** (~200 lines maximum).
+**Target size: under 2KB** (~30–40 lines maximum).
 
 #### What belongs in CLAUDE.md
 
