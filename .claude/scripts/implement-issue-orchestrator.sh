@@ -1865,6 +1865,103 @@ compute_pipeline_profile() {
 # TASK DEPENDENCY DETECTION
 # =============================================================================
 
+#
+# Parses task lines from a tasks section string into a JSON array.
+#
+# Handles the canonical format plus common malformations:
+#   Canonical:  - [ ] `[agent]` description
+#   Fallback 1: - [ ] [agent] description      (missing backticks)
+#   Fallback 2: * [ ] `[agent]` description     (asterisk bullet)
+#   Fallback 3:   - [ ] `[agent]` description   (leading whitespace)
+#   Fallback 4: - [ ] `agent` description        (missing square brackets)
+#
+# Fuzzy matches emit a warning on stderr so operators know the issue body
+# formatting is non-standard.
+#
+# Checked boxes [x] are considered already complete and skipped.
+#
+# Arguments:
+#   $1 - raw text of the tasks section (newline-separated lines)
+# Outputs:
+#   JSON array of task objects on stdout
+#   Warnings for fuzzy matches on stderr
+#
+_parse_task_lines() {
+	local tasks_section="$1"
+
+	# Strip backslash-escaped backticks (gh API returns \` instead of `)
+	tasks_section="${tasks_section//\\\`/\`}"
+
+	local task_id=0
+	local tasks_json="[]"
+
+	# Backtick-containing regex must use a variable (bash cannot escape
+	# backticks inside [[ =~ ]] inline patterns reliably).
+	local bt='`'
+	local _re_bare_agent="^- (\[ \] )?${bt}([^${bt}]+)${bt} (.+)\$"
+
+	while IFS= read -r line; do
+		# Skip empty lines
+		[[ -z "$line" ]] && continue
+
+		# Skip checked boxes [x] — already complete
+		if [[ "$line" =~ \[x\] ]]; then
+			continue
+		fi
+
+		local agent="" desc="" fuzzy=""
+
+		# Canonical: - [ ] `[agent]` description  OR  - `[agent]` description
+		if [[ "$line" =~ ^-\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ (.+)$ ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+
+		# Fallback 1: missing backticks — - [ ] [agent] description
+		# Agent char class excludes spaces to avoid matching the [ ] checkbox.
+		elif [[ "$line" =~ ^-\ (\[\ \]\ )?\[([^\]\ ]+)\]\ (.+)$ ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+			fuzzy="missing backticks around agent name"
+
+		# Fallback 2: asterisk bullet — * [ ] `[agent]` description
+		elif [[ "$line" =~ ^\*\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ (.+)$ ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+			fuzzy="asterisk bullet instead of dash"
+
+		# Fallback 3: leading whitespace — <spaces>- [ ] `[agent]` description
+		elif [[ "$line" =~ ^[[:space:]]+-\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ (.+)$ ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+			fuzzy="extra leading whitespace"
+
+		# Fallback 4: missing square brackets — - [ ] `agent` description
+		elif [[ "$line" =~ $_re_bare_agent ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+			fuzzy="missing square brackets around agent name"
+
+		else
+			# Not a task line — skip silently
+			continue
+		fi
+
+		if [[ -n "$fuzzy" ]]; then
+			log_warn "Fuzzy task parse (${fuzzy}): $line"
+		fi
+
+		task_id=$((task_id + 1))
+		tasks_json=$(printf '%s' "$tasks_json" | jq \
+			--argjson id "$task_id" \
+			--arg desc "$desc" \
+			--arg agent "$agent" \
+			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0}]')
+
+	done <<< "$tasks_section"
+
+	printf '%s\n' "$tasks_json"
+}
+
 # Known file extensions to avoid false positives when extracting bare filenames
 # (version strings v1.0, domains, etc. are excluded)
 readonly KNOWN_FILE_EXTENSIONS='sh|bats|bash|ts|tsx|js|jsx|mjs|cjs|py|go|rb|rs|java|kt|swift|json|yaml|yml|toml|sql|md|css|html|tf'
