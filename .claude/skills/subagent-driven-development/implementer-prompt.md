@@ -66,6 +66,16 @@ Task tool (subagent_type: <project-specific agent>):
 
     If a tool is unavailable (call fails), fall back to manual exploration. Do not block on missing tools.
 
+    ## Scope Enforcement
+
+    If the task description includes scope constraint fields, respect them strictly:
+
+    - **`Scope: N files`** — do not modify more than N files. If you find you need to touch more, stop and ask before proceeding.
+    - **`Done when: [criterion]`** — stop working as soon as this criterion is met. Do not continue to "clean up" or "improve" beyond it.
+    - **`Affected files: [list]`** — read and modify only these files. Do not explore adjacent files or modules unless the task explicitly requires it.
+
+    These constraints exist to prevent context bloat. If a field is absent, apply reasonable defaults: limit exploration to directly relevant files and stop when the stated goal is achieved.
+
     ## Your Job
 
     Once you're clear on requirements:

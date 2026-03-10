@@ -116,15 +116,15 @@ PLATFORM_DIR=".claude/scripts/platform"
 - [alternative 2] — rejected because [reason]
 
 ## Implementation Tasks
-- [ ] `[agent-name]` **(S)** Description of task 1
+- [ ] `[agent-name]` **(S)** Description of task 1. Scope: 2 files. Done when: [specific criterion].
   - **Affected files:** `path/to/file.ts`, `path/to/other.ts`
-- [ ] `[agent-name]` **(M)** Description of task 2
-  - **Affected files:** `path/to/file2.ts`
-- [ ] `[agent-name]` **(L)** Description of task 3
+- [ ] `[agent-name]` **(M)** Description of task 2. Scope: 3 files. Done when: [specific criterion].
+  - **Affected files:** `path/to/file2.ts`, `path/to/other.ts`
+- [ ] `[agent-name]` **(L)** Description of task 3. Scope: 5 files. Done when: [specific criterion].
   - **Affected files:** `path/to/file3.ts`, `path/to/file4.ts`
-- [ ] `[default]` **(S)** Description of general task (e.g., tests, config)
+- [ ] `[default]` **(S)** Description of general task (e.g., tests, config). Scope: 2 files. Done when: [specific criterion].
   - **Affected files:** `path/to/config.ts`
-- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured)
+- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured). Scope: 1 file. Done when: test passes.
   - **Affected files:** `e2e/tests/test-name.spec.ts`
 
 ## Deploy Verification
@@ -156,7 +156,7 @@ Ready for implementation: /implement-issue NNN main
 The `## Implementation Tasks` section must use this parseable convention:
 
 ```markdown
-- [ ] `[agent-name]` **(M)** Task description
+- [ ] `[agent-name]` **(M)** Task description. Scope: N files. Done when: [criterion]. Affected files: `path/to/file`
 ```
 
 **Agent values** (adapt to your project's agents):
@@ -165,7 +165,14 @@ The `## Implementation Tasks` section must use this parseable convention:
 - `[playwright-test-developer]` for E2E tests (when `TEST_E2E_CMD` is configured)
 - `[default]` for general tasks (config, tests, documentation, mixed)
 
-**Parsing rule:** Regex `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description. Task IDs assigned sequentially.
+**Scope constraint fields** (required — prevents context bloat and over-exploration):
+- `Scope: N files` — hard upper limit on files the agent should modify (default: 3)
+- `Done when: [criterion]` — explicit stopping condition; agent stops when this is true
+- `Affected files: path/to/file, path/to/other` — exact files to read/modify; prevents broad search
+
+**Why these fields matter:** Without scope boundaries, agents explore broadly and continue past the goal. These fields give implementers a clear stop signal and prevent the 3x context growth seen in unconstrained runs.
+
+**Parsing rule:** Regex `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description. Task IDs assigned sequentially. Scope fields are parsed from the description text and passed to the implementer.
 
 ## Key Principles
 
