@@ -238,6 +238,55 @@ Move verbose content out of CLAUDE.md and reference it by path:
 
 Reference these in CLAUDE.md with a single line: `- See .claude/prompts/api-reference.md for endpoint list`
 
+#### Lean CLAUDE.md Template
+
+Use this as a starting point when creating a CLAUDE.md for an adapted project. Fill in the placeholders and delete sections that don't apply.
+
+```markdown
+# [Project Name]
+
+[One-line description of what this project does.]
+[One-line note on current focus or active constraint, if any.]
+
+## Dev Commands
+
+[start command, e.g.: npm run dev / python manage.py runserver / ./scripts/start.sh]
+[test command, e.g.: npm test / pytest / ./scripts/test.sh]
+[build command, e.g.: npm run build / make build]
+[lint command, e.g.: npm run lint / ruff check .]
+[format command, e.g.: npm run format / black .]
+[deploy command, e.g.: ./scripts/deploy-local.sh]
+
+## Ports & URLs
+
+- Local: http://localhost:[PORT]
+- Staging: [staging URL]
+- Production: [prod URL]
+- API: http://localhost:[API_PORT] (if separate)
+
+## Auth & Credentials
+
+- Env file: [.env / .env.local / config/.env]
+- Required vars: [VAR_NAME_1], [VAR_NAME_2], [VAR_NAME_3]
+- Secrets source: [1Password / AWS Secrets Manager / team vault / ask @teammate]
+
+## Key Constraints
+
+- [e.g.: Never force-push main]
+- [e.g.: Always squash-merge PRs]
+- [e.g.: No debug code in production]
+- [e.g.: Run tests before committing]
+```
+
+**Guidelines when filling out the template:**
+- Project overview: 2 lines max — what it is, current focus
+- Dev commands: only the commands Claude will actually run (5–10 lines)
+- Ports & URLs: only environments that exist (3–5 lines)
+- Auth: env file location + required var names only — no actual secrets (3–5 lines)
+- Constraints: hard rules that override Claude's defaults (3–5 lines)
+
+Remove any section that has no content — an empty section adds noise.
+
 #### Migration Checklist for Existing Projects
 
 When adapting a project that already has a bloated CLAUDE.md:
