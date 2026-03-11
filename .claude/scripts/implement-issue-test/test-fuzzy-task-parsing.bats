@@ -200,3 +200,51 @@ Another random line'
 	[ "$count" -eq 1 ]
 	[ "$agent" = "default" ]
 }
+
+# =============================================================================
+# COMPLEXITY DEFAULT ASSERTION (issue #90)
+# =============================================================================
+
+@test "complexity defaults to M when no hint is present" {
+	local input='- [ ] `[default]` Wire fast-path flag'
+	local result
+	result=$(_parse_task_lines "$input")
+
+	local desc
+	desc=$(printf '%s' "$result" | jq -r '.[0].description')
+
+	[[ "$desc" == "**(M)** Wire fast-path flag" ]]
+}
+
+@test "explicit complexity hint S is preserved" {
+	local input='- [ ] `[default]` **(S)** Fix typo in readme'
+	local result
+	result=$(_parse_task_lines "$input")
+
+	local desc
+	desc=$(printf '%s' "$result" | jq -r '.[0].description')
+
+	[[ "$desc" == "**(S)** Fix typo in readme" ]]
+}
+
+@test "explicit complexity hint L is preserved" {
+	local input='- [ ] `[default]` **(L)** Refactor authentication module'
+	local result
+	result=$(_parse_task_lines "$input")
+
+	local desc
+	desc=$(printf '%s' "$result" | jq -r '.[0].description')
+
+	[[ "$desc" == "**(L)** Refactor authentication module" ]]
+}
+
+@test "explicit complexity hint M is not doubled" {
+	local input='- [ ] `[default]` **(M)** Add validation layer'
+	local result
+	result=$(_parse_task_lines "$input")
+
+	local desc
+	desc=$(printf '%s' "$result" | jq -r '.[0].description')
+
+	[[ "$desc" == "**(M)** Add validation layer" ]]
+}
