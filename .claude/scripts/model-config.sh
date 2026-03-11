@@ -48,7 +48,7 @@ _stage_to_tier() {
 		test)           printf '%s' "light" ;;
 		review)         printf '%s' "standard" ;;
 		simplify)       printf '%s' "light" ;;
-		pr)             printf '%s' "light" ;;
+		pr)             printf '%s' "standard" ;;
 		pr-review)      printf '%s' "standard" ;;
 		pr-fix)         printf '%s' "standard" ;;
 		spec-review)    printf '%s' "standard" ;;
@@ -155,7 +155,7 @@ resolve_model() {
 	fi
 
 	# Apply complexity hint — overrides stage default when provided.
-	# Light-tier stages (test, parse-issue, validate-plan, pr, complete, docs,
+	# Light-tier stages (test, parse-issue, validate-plan, complete, docs,
 	# simplify, acceptance-test) are mechanical and always use haiku;
 	# complexity hints are ignored for them.
 	# The quality loop forwards task-level complexity to implement, review,

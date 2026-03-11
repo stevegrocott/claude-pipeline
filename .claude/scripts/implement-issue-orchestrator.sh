@@ -1041,15 +1041,47 @@ run_stage() {
         printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"
 
         if (( exit_code == 124 )); then
-            log_error "Stage $stage_name timed out again after ${retry_timeout}s"
-            _TIMED_OUT_STAGE_NAMES="${_TIMED_OUT_STAGE_NAMES:+$_TIMED_OUT_STAGE_NAMES, }$stage_name"
-            (( _CONSECUTIVE_TIMEOUTS++ )) || true
-            if (( _CONSECUTIVE_TIMEOUTS >= 2 )); then
-                log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
-                    "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
+            # Double timeout at same model tier — escalate to next model
+            local timeout_escalated_model
+            timeout_escalated_model=$(_next_model_up "$model")
+
+            if [[ "$timeout_escalated_model" != "$model" ]]; then
+                log "WARN: Stage $stage_name timed out twice with $model — escalating to $timeout_escalated_model"
+                printf '%s\n' "=== $stage_name timeout escalation: $model → $timeout_escalated_model ===" >> "$stage_log"
+
+                record_escalation "$stage_name" "$model" "$timeout_escalated_model" "double_timeout"
+
+                local -a timeout_esc_fallback_args=()
+                local timeout_esc_fallback
+                timeout_esc_fallback=$(_next_model_up "$timeout_escalated_model")
+                if [[ "$timeout_esc_fallback" != "$timeout_escalated_model" ]]; then
+                    timeout_esc_fallback_args=(--fallback-model "$timeout_esc_fallback")
+                fi
+
+                exit_code=0
+                output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+                    ${agent_args[@]+"${agent_args[@]}"} \
+                    --model "$timeout_escalated_model" \
+                    ${timeout_esc_fallback_args[@]+"${timeout_esc_fallback_args[@]}"} \
+                    --dangerously-skip-permissions \
+                    --output-format json \
+                    --json-schema "$schema" \
+                    2>&1) || exit_code=$?
+
+                printf '%s\n' "=== $stage_name timeout escalation output ===" >> "$stage_log"
+                printf '%s\n' "$output" >> "$stage_log"
+                printf '%s\n' "=== timeout escalation exit code: $exit_code ===" >> "$stage_log"
+            else
+                log_error "Stage $stage_name timed out twice with $model (ceiling) — cannot escalate"
+                _TIMED_OUT_STAGE_NAMES="${_TIMED_OUT_STAGE_NAMES:+$_TIMED_OUT_STAGE_NAMES, }$stage_name"
+                (( _CONSECUTIVE_TIMEOUTS++ )) || true
+                if (( _CONSECUTIVE_TIMEOUTS >= 2 )); then
+                    log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
+                        "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
+                fi
+                echo '{"status":"error","error":"timeout"}'
+                return 1
             fi
-            echo '{"status":"error","error":"timeout"}'
-            return 1
         fi
     fi
 
@@ -1203,6 +1235,61 @@ for m in re.finditer(r'\[\s*\{', t):
         local output_preview="${output:0:500}"
         log "Diagnostic fallback failure — Output byte count: $output_byte_count"
         log "Diagnostic fallback failure — First 500 characters: $output_preview"
+
+        # Empty/unparseable output — escalate to next model before failing
+        local empty_escalated_model
+        empty_escalated_model=$(_next_model_up "$model")
+
+        if [[ "$empty_escalated_model" != "$model" ]]; then
+            log "WARN: No structured output from $stage_name with $model — escalating to $empty_escalated_model"
+            printf '%s\n' "=== $stage_name empty output escalation: $model → $empty_escalated_model ===" >> "$stage_log"
+
+            record_escalation "$stage_name" "$model" "$empty_escalated_model" "empty_output"
+
+            local -a empty_esc_fallback_args=()
+            local empty_esc_fallback
+            empty_esc_fallback=$(_next_model_up "$empty_escalated_model")
+            if [[ "$empty_esc_fallback" != "$empty_escalated_model" ]]; then
+                empty_esc_fallback_args=(--fallback-model "$empty_esc_fallback")
+            fi
+
+            local empty_esc_exit_code=0
+            output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+                ${agent_args[@]+"${agent_args[@]}"} \
+                --model "$empty_escalated_model" \
+                ${empty_esc_fallback_args[@]+"${empty_esc_fallback_args[@]}"} \
+                --dangerously-skip-permissions \
+                --output-format json \
+                --json-schema "$schema" \
+                2>&1) || empty_esc_exit_code=$?
+
+            printf '%s\n' "=== $stage_name empty output escalation output ===" >> "$stage_log"
+            printf '%s\n' "$output" >> "$stage_log"
+            printf '%s\n' "=== empty output escalation exit code: $empty_esc_exit_code ===" >> "$stage_log"
+
+            # Re-extract structured output from escalated run
+            structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
+            if [[ -n "$structured" ]]; then
+                _CONSECUTIVE_TIMEOUTS=0
+                _TIMED_OUT_STAGE_NAMES=""
+                printf '%s\n' "$structured"
+                return 0
+            fi
+
+            # Try .result fallback from escalated run
+            local esc_fallback_result
+            esc_fallback_result=$(printf '%s' "$output" | jq -c '
+                select(.is_error == false and .result != null) |
+                {status: "success", summary: .result}
+            ' 2>/dev/null)
+            if [[ -n "$esc_fallback_result" ]]; then
+                log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
+                _CONSECUTIVE_TIMEOUTS=0
+                _TIMED_OUT_STAGE_NAMES=""
+                printf '%s\n' "$esc_fallback_result"
+                return 0
+            fi
+        fi
 
         log_error "No structured output from $stage_name"
         _CONSECUTIVE_TIMEOUTS=0
@@ -2177,6 +2264,38 @@ create_task_worktree() {
 		return 1
 	fi
 
+	# Write stage-level excludes so agents cannot accidentally
+	# commit large binary or data files.  Uses the worktree's
+	# own info/exclude (not tracked, not committed).
+	local wt_git_dir
+	wt_git_dir=$(git -C "$wt_path" \
+		rev-parse --git-dir 2>/dev/null)
+	if [[ -n "$wt_git_dir" ]]; then
+		mkdir -p "$wt_git_dir/info"
+		cat >> "$wt_git_dir/info/exclude" <<'STAGE_EXCLUDES'
+# Stage-level excludes — added by orchestrator, not committed.
+.silo-downloads/
+*.db
+*.sqlite
+*.sqlite3
+*.bin
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.whl
+*.egg-info/
+*.pyc
+__pycache__/
+*.so
+*.o
+*.a
+*.dylib
+*.dll
+*.exe
+STAGE_EXCLUDES
+	fi
+
 	printf '%s' "$wt_path"
 }
 
@@ -2265,6 +2384,10 @@ After implementing, verify your changes against the task description above:
 3. If you find problems, fix them before committing.
 
 Only commit when you are confident the task goal is achieved.
+When committing: run 'git diff --name-only' to list the files
+you changed, then 'git add' only those specific files. Never
+use 'git add -A' or 'git add .' — only stage files the task
+actually modified.
 Commit your changes with a descriptive message."
 
 		local current_timeout="$base_timeout"
@@ -2307,6 +2430,9 @@ Commit your changes with a descriptive message."
 	done
 
 	if [[ "$task_succeeded" == "true" ]]; then
+		# Sanitize: remove accidentally committed binary/data files
+		sanitize_worktree_commits "." "$base_branch" "$task_id"
+
 		# Run quality loop inside worktree
 		if should_run_quality_loop "$task_size"; then
 			local quality_max
@@ -2339,6 +2465,75 @@ Commit your changes with a descriptive message."
 		"{\"status\":\"failed\",\"review_attempts\":$review_attempts}" \
 		> "$result_file"
 	return 1
+}
+
+# Sanitize commits in a worktree: remove accidentally staged binary/data files.
+#
+# Uses git diff --name-only to identify changed source files, then checks for
+# files that should not have been committed (binaries, large data files).
+# Amends the last commit to exclude them if found.
+#
+# Arguments:
+#   $1 - worktree_path
+#   $2 - base_branch (to compare against)
+#   $3 - task_id (for logging)
+#
+# Binary patterns excluded:
+#   .silo-downloads/, *.db, *.sqlite*, *.bin, *.zip, *.tar.*, *.whl,
+#   *.egg-info/, *.pyc, __pycache__/, *.so, *.o, *.a, *.dylib, *.dll, *.exe
+#
+sanitize_worktree_commits() {
+	local wt_path="$1"
+	local base_branch="$2"
+	local task_id="$3"
+
+	# Binary/data file patterns to exclude from commits
+	local -a exclude_patterns=(
+		'\.silo-downloads/'
+		'\.db$'
+		'\.sqlite3?$'
+		'\.bin$'
+		'\.zip$'
+		'\.tar\.(gz|bz2|xz)$'
+		'\.whl$'
+		'\.egg-info/'
+		'\.pyc$'
+		'__pycache__/'
+		'\.so$'
+		'\.[oa]$'
+		'\.dylib$'
+		'\.dll$'
+		'\.exe$'
+	)
+
+	# Build combined regex
+	local exclude_regex
+	exclude_regex=$(printf '%s|' "${exclude_patterns[@]}")
+	exclude_regex="${exclude_regex%|}"  # trim trailing pipe
+
+	# Get files in the worktree's commits vs base
+	local -a bad_files=()
+	local file
+	while IFS= read -r file; do
+		[[ -n "$file" ]] || continue
+		if [[ "$file" =~ $exclude_regex ]]; then
+			bad_files+=("$file")
+		fi
+	done < <(
+		git -C "$wt_path" diff "$base_branch"...HEAD \
+			--name-only 2>/dev/null || true
+	)
+
+	if (( ${#bad_files[@]} == 0 )); then
+		return 0
+	fi
+
+	log_warn "Task $task_id: removing ${#bad_files[@]} binary/data file(s) from commits"
+	for file in "${bad_files[@]}"; do
+		log "  Removing: $file"
+		git -C "$wt_path" rm --cached "$file" 2>/dev/null || true
+	done
+	git -C "$wt_path" commit --amend --no-edit 2>/dev/null || true
 }
 
 # Merge a worktree branch into the feature branch.
@@ -4544,7 +4739,7 @@ git push -u origin $branch 2>/dev/null; $PLATFORM_DIR/create-mr.sh --source '$br
 The command will output the MR number. Use that as pr_number in your response."
 
         local pr_result
-        pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json")
+        pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "sonnet")
 
         local pr_status
         pr_status=$(printf '%s' "$pr_result" | jq -r '.status')

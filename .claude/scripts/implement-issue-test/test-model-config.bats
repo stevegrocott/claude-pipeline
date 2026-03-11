@@ -125,10 +125,10 @@ run_with_config() {
 	[[ "$output" == "light" ]]
 }
 
-@test "stage pr maps to light" {
+@test "stage pr maps to standard" {
 	run_with_config '_stage_to_tier "pr"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "light" ]]
+	[[ "$output" == "standard" ]]
 }
 
 @test "stage spec-review maps to standard" {
@@ -217,10 +217,10 @@ run_with_config() {
 	[[ "$output" == "haiku" ]]
 }
 
-@test "resolve_model returns haiku for pr stage" {
+@test "resolve_model returns sonnet for pr stage" {
 	run_with_config 'resolve_model "pr"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "haiku" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model returns sonnet for code-review stage" {
@@ -643,11 +643,11 @@ run_with_config() {
 	[[ "$output" == "haiku" ]]
 }
 
-@test "complexity L does not override pr stage light tier" {
-	# pr defaults to light (haiku) and must stay haiku
+@test "complexity L overrides pr stage standard tier to opus" {
+	# pr defaults to standard (sonnet); L complexity upgrades to opus
 	run_with_config 'resolve_model "pr" "L"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "haiku" ]]
+	[[ "$output" == "opus" ]]
 }
 
 @test "complexity S does not override validate-plan light stage" {
@@ -741,7 +741,7 @@ run_with_config() {
 @test "resolve_model matches pr prefix in pr-create-iter-1" {
 	run_with_config 'resolve_model "pr-create-iter-1"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "haiku" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model matches parse-issue prefix in parse-issue-retry-1" {
