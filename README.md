@@ -62,9 +62,9 @@ The adaptation skill walks you through a brainstorming session about your projec
 - **8 specialized agents** (backend/frontend developers, reviewers, validators, Playwright test developer, orchestration writer)
 - **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including format converters)
 - **2 hooks** for session initialization and post-PR simplification
-- **3 orchestration scripts** for batch issue processing and end-to-end implementation
+- **2 orchestration scripts** for batch issue processing and end-to-end implementation
 - **13 JSON schemas** for structured output at each pipeline stage
-- **22 BATS test files** across orchestrator and platform wrapper test suites
+- **30 BATS test files** across orchestrator and platform wrapper test suites
 - **Quality gates** at every stage: spec compliance, code quality, test validation, acceptance testing
 
 ## Architecture
@@ -86,7 +86,7 @@ Phase 2: Implementation
 
 ### Orchestrator Pipeline Stages
 
-The `implement-issue-orchestrator.sh` (4,800 lines) runs 11 stages per issue:
+The `implement-issue-orchestrator.sh` (~5,000 lines) runs 11 stages per issue:
 
 | Stage | Model Tier | Description |
 |-------|-----------|-------------|
@@ -396,7 +396,7 @@ After resolving a bug or observing a recurring problem:
 ## Testing
 
 ```bash
-# Orchestrator tests (22 test files)
+# Orchestrator tests (23 test files, ~930 tests)
 cd .claude/scripts/implement-issue-test
 ./run-tests.sh
 
@@ -405,7 +405,7 @@ cd .claude/scripts/platform-test
 ./run-tests.sh
 ```
 
-Test coverage includes: argument parsing, branch verification, comment helpers, constants, deploy verification, environment error detection, metrics export, fuzzy task parsing, helper functions, integration, JSON parsing, model config, pipeline profiles, PR review config, prompt file lists, quality loop, rate limiting, smart test targeting, stage runner, status functions, task batching, and verdict parsing.
+Test coverage includes: argument parsing, branch verification, comment helpers, constants, deploy verification, environment error detection, metrics export, fuzzy task parsing, helper functions, integration, JSON parsing, model config, pipeline profiles, PR review config, prompt file lists, quality loop, rate limiting, smart test targeting, stage runner, status functions, task batching, timeout escalation, and verdict parsing.
 
 ## Philosophy
 
