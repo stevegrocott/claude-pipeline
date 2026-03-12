@@ -439,7 +439,7 @@ process_issue() {
         agent_args=(--agent "$AGENT")
     fi
 
-    log "Running: implement-issue-orchestrator.sh --issue $issue_num --branch $BRANCH ${agent_args[*]+"${agent_args[*]}"}"
+    log "Running: implement-issue-orchestrator.sh --issue $issue_num --branch $BRANCH ${agent_args[@]+"${agent_args[@]}"}"
 
     local impl_output
     local impl_exit=0
