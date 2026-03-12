@@ -31,25 +31,19 @@ if [[ ! -d "$LOCAL_DIR" ]]; then
 fi
 
 copied=0
-skipped=0
 
 while IFS= read -r -d '' local_file; do
-    # Compute relative path within local/
     rel_path="${local_file#"${LOCAL_DIR}/"}"
     target="${CLAUDE_DIR}/${rel_path}"
 
-    # Ensure target directory exists
-    target_dir="$(dirname "$target")"
-
     if $DRY_RUN; then
         echo "[dry-run] Would copy: local/${rel_path} → ${rel_path}"
-        ((copied++))
     else
-        mkdir -p "$target_dir"
+        mkdir -p "$(dirname "$target")"
         cp "$local_file" "$target"
         echo "Applied: local/${rel_path} → ${rel_path}"
-        ((copied++))
     fi
+    ((copied++))
 done < <(find "$LOCAL_DIR" -type f -print0)
 
 if $DRY_RUN; then
