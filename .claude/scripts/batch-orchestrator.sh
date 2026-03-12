@@ -26,6 +26,25 @@
 set -uo pipefail  # Note: not -e, we handle errors explicitly
 
 # =============================================================================
+# PORTABLE TIMEOUT (macOS does not ship GNU timeout)
+# =============================================================================
+
+if ! command -v timeout &>/dev/null; then
+    timeout() {
+        local duration="$1"; shift
+        perl -e '
+            use POSIX ":sys_wait_h";
+            alarm shift @ARGV;
+            $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
+            $pid = fork // die "fork: $!";
+            if ($pid == 0) { exec @ARGV; die "exec: $!" }
+            waitpid($pid, 0);
+            exit ($? >> 8);
+        ' "$duration" "$@"
+    }
+fi
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -420,7 +439,7 @@ process_issue() {
         agent_args=(--agent "$AGENT")
     fi
 
-    log "Running: implement-issue-orchestrator.sh --issue $issue_num --branch $BRANCH ${agent_args[*]}"
+    log "Running: implement-issue-orchestrator.sh --issue $issue_num --branch $BRANCH ${agent_args[@]+"${agent_args[@]}"}"
 
     local impl_output
     local impl_exit=0
@@ -428,7 +447,7 @@ process_issue() {
     impl_output=$("$SCRIPT_DIR/implement-issue-orchestrator.sh" \
         --issue "$issue_num" \
         --branch "$BRANCH" \
-        "${agent_args[@]}" \
+        ${agent_args[@]+"${agent_args[@]}"} \
         --status-file "$issue_status_file" \
         2>&1) || impl_exit=$?
 
@@ -471,6 +490,15 @@ process_issue() {
 
     log "implement-issue status: $impl_status, PR: ${pr_number:-none}"
 
+    # Log location of metrics.json emitted by the orchestrator's EXIT trap
+    if [[ -f "$issue_status_file" ]]; then
+        local issue_log_dir
+        issue_log_dir=$(jq -r '.log_dir // empty' "$issue_status_file" 2>/dev/null)
+        if [[ -n "$issue_log_dir" && -f "$issue_log_dir/metrics.json" ]]; then
+            log "Metrics available: $issue_log_dir/metrics.json"
+        fi
+    fi
+
     if [[ "$impl_status" != "success" ]]; then
         log_error "implement-issue failed for #$issue_num: ${impl_error:-unknown error}"
         update_issue_field "$issue_num" "status" "failed"
@@ -500,7 +528,7 @@ process_issue() {
     local proc_output
     local proc_exit=0
 
-    proc_output=$(timeout "$ISSUE_TIMEOUT" claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+    proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
         --agent code-reviewer \
         --dangerously-skip-permissions \
         --output-format json \
@@ -534,7 +562,7 @@ process_issue() {
 
         # Resume
         if [[ -n "$session_id" ]]; then
-            proc_output=$(timeout "$ISSUE_TIMEOUT" claude -p "please continue" \
+            proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "please continue" \
                 --resume "$session_id" \
                 --agent code-reviewer \
                 --dangerously-skip-permissions \
@@ -542,7 +570,7 @@ process_issue() {
                 --json-schema "$PROCESS_SCHEMA" \
                 2>&1) || proc_exit=$?
         else
-            proc_output=$(timeout "$ISSUE_TIMEOUT" claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+            proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
                 --agent code-reviewer \
                 --dangerously-skip-permissions \
                 --output-format json \

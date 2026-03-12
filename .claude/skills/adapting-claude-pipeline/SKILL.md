@@ -204,6 +204,103 @@ Context size compounds across every message in every conversation. Audit these d
 - [ ] No technology-specific checklists in agent definitions (put in stage-specific prompts, loaded once per invocation)
 - [ ] Rarely-used CLAUDE.md sections moved to separate files that are read on-demand
 
+### CLAUDE.md Size Management
+
+CLAUDE.md is loaded into every message in every conversation. Bloat here multiplies cost and latency across the entire project lifetime.
+
+**Target size: under 2KB** (~30–40 lines maximum).
+
+#### What belongs in CLAUDE.md
+
+Only content that must be visible on every message:
+
+| Content type | Examples |
+|---|---|
+| Run commands | `npm run dev`, `./scripts/deploy-local.sh`, test commands |
+| Ports & URLs | `localhost:3000`, staging URL, prod URL |
+| Credentials & env | Required env vars, secrets location, API key sources |
+| Key constraints | "Never force-push main", "always squash-merge", "no debug code in prod" |
+| Active issue notes | Short reminders about current bugs or in-progress work (clear when resolved) |
+
+#### What belongs in linked files
+
+Move verbose content out of CLAUDE.md and reference it by path:
+
+| Content type | Where to put it |
+|---|---|
+| API docs, endpoint lists | `.claude/prompts/api-reference.md` |
+| Skill descriptions | Individual skill SKILL.md files |
+| Agent authorities & anti-patterns | Individual agent files |
+| Setup cost components | `.claude/prompts/setup-costs.md` or similar |
+| Water/resource requirements | `.claude/prompts/requirements.md` |
+| Architecture diagrams or specs | `docs/architecture.md` |
+| Long testing instructions | `.claude/prompts/testing-guide.md` |
+
+Reference these in CLAUDE.md with a single line: `- See .claude/prompts/api-reference.md for endpoint list`
+
+#### Lean CLAUDE.md Template
+
+Use this as a starting point when creating a CLAUDE.md for an adapted project. Fill in the placeholders and delete sections that don't apply.
+
+```markdown
+# [Project Name]
+
+[One-line description of what this project does.]
+[One-line note on current focus or active constraint, if any.]
+
+## Dev Commands
+
+[start command, e.g.: npm run dev / python manage.py runserver / ./scripts/start.sh]
+[test command, e.g.: npm test / pytest / ./scripts/test.sh]
+[build command, e.g.: npm run build / make build]
+[lint command, e.g.: npm run lint / ruff check .]
+[format command, e.g.: npm run format / black .]
+[deploy command, e.g.: ./scripts/deploy-local.sh]
+
+## Ports & URLs
+
+- Local: http://localhost:[PORT]
+- Staging: [staging URL]
+- Production: [prod URL]
+- API: http://localhost:[API_PORT] (if separate)
+
+## Auth & Credentials
+
+- Env file: [.env / .env.local / config/.env]
+- Required vars: [VAR_NAME_1], [VAR_NAME_2], [VAR_NAME_3]
+- Secrets source: [1Password / AWS Secrets Manager / team vault / ask @teammate]
+
+## Key Constraints
+
+- [e.g.: Never force-push main]
+- [e.g.: Always squash-merge PRs]
+- [e.g.: No debug code in production]
+- [e.g.: Run tests before committing]
+```
+
+**Guidelines when filling out the template:**
+- Project overview: 2 lines max — what it is, current focus
+- Dev commands: only the commands Claude will actually run (5–10 lines)
+- Ports & URLs: only environments that exist (3–5 lines)
+- Auth: env file location + required var names only — no actual secrets (3–5 lines)
+- Constraints: hard rules that override Claude's defaults (3–5 lines)
+
+Remove any section that has no content — an empty section adds noise.
+
+#### Migration Checklist for Existing Projects
+
+When adapting a project that already has a bloated CLAUDE.md:
+
+- [ ] Measure current size: `wc -c CLAUDE.md` — target under 2048 bytes
+- [ ] Identify sections that are never read mid-conversation (architecture docs, full requirement lists, long API references)
+- [ ] Move each verbose section to an appropriately named file under `.claude/prompts/`
+- [ ] Replace each moved section with a one-line reference in CLAUDE.md
+- [ ] Remove resolved issue notes (e.g., "bug #79 not fixed") — these belong in GitHub Issues, not CLAUDE.md
+- [ ] Remove duplicate content already covered in skill/agent files
+- [ ] Verify commands, ports, credentials, and constraints remain in CLAUDE.md
+- [ ] Re-measure: `wc -c CLAUDE.md` — confirm under 2KB
+- [ ] Do a smoke test: open a new conversation and verify Claude still has the context it needs
+
 ### Phase 4: Write the Plan
 
 **REQUIRED:** Use the `writing-plans` skill.

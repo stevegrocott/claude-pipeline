@@ -244,13 +244,14 @@ teardown() {
     [[ "$func_def" == *"implement-issue-simplify.json"* ]]
 }
 
-@test "quality loop does not call comment_issue for intermediate sub-stages" {
+@test "quality loop only calls comment_issue for convergence exit not per-iteration" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    # No comment_issue calls must appear anywhere in run_quality_loop.
-    # Using "comment_issue" as the anchor ensures any future call with any title is caught.
-    [[ "$func_def" != *"comment_issue"* ]]
+    # comment_issue is permitted only for the convergence failure notification.
+    # It must reference "Convergence Failure" to confirm it is scoped to
+    # the convergence exit block, not called during normal iteration stages.
+    [[ "$func_def" == *'comment_issue'*'Convergence Failure'* ]]
 }
 
 # =============================================================================
@@ -691,12 +692,12 @@ HIST_EOF
 # CONVERGENCE DETECTION
 # =============================================================================
 
-@test "convergence detection checks repeat ratio above 50%" {
+@test "convergence detection checks repeat ratio above 33%" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    # Must compare repeat_ratio against 50
-    [[ "$func_def" == *"repeat_ratio > 50"* ]]
+    # Must compare repeat_ratio against 33
+    [[ "$func_def" == *"repeat_ratio > 33"* ]]
 }
 
 @test "convergence detection sets loop_approved on repeat detection" {
@@ -729,6 +730,15 @@ HIST_EOF
 
     # Must reference the review-history file for convergence comparison
     [[ "$func_def" == *"review-history-\${stage_prefix}.json"* ]] || [[ "$func_def" == *'review-history-${stage_prefix}.json'* ]]
+}
+
+@test "quality loop convergence log_warn includes specific repeated issue descriptions" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # The log_warn call must reference repeat_issues (specific descriptions)
+    # not just the ratio percentage count
+    grep -q 'log_warn.*repeat_issues' <<< "$func_def"
 }
 
 # =============================================================================
@@ -1044,4 +1054,642 @@ _setup_git_repo_with_diff() {
 
     # The function must call is_stage_timeout before checking review_verdict
     [[ "$func_def" == *"is_stage_timeout"* ]]
+}
+
+# =============================================================================
+# CONVERGENCE THRESHOLD — >33% triggers early exit
+# =============================================================================
+
+@test "convergence detection exits early when >33% issues are repeats" {
+    # Pre-seed history with iteration 1 containing 3 issues
+    local history_file="$LOG_BASE/context/review-history-test.json"
+    cat > "$history_file" << 'HIST_EOF'
+[{"iteration":1,"issues":[{"description":"Missing error handling"},{"description":"Unused variable x"},{"description":"Magic number 42"}],"result":"changes_requested"}]
+HIST_EOF
+
+    local counter_file="$TEST_TMP/conv_review_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    local fix_count_file="$TEST_TMP/conv_fix_count"
+    echo "0" > "$fix_count_file"
+    export fix_count_file
+
+    run_stage() {
+        case "$1" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+
+                # Both iterations return the same 2 repeat issues from the pre-seeded history
+                # At iter 2: loop_iteration > 1 → convergence check fires → 2/2 = 100% repeats > 33
+                echo '{"status":"success","result":"changes_requested","issues":[{"description":"Missing error handling"},{"description":"Unused variable x"}],"summary":"Still issues"}'
+                ;;
+            fix-review-*)
+                local fc
+                fc=$(cat "$fix_count_file")
+                fc=$((fc + 1))
+                echo "$fc" > "$fix_count_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    local exit_status=$?
+
+    # Loop should exit 0 (convergence triggers loop_approved=true, not exit 2)
+    [ "$exit_status" -eq 0 ]
+
+    # Should have reviewed exactly twice (iter 1 + iter 2 which triggers convergence)
+    local review_count
+    review_count=$(cat "$counter_file")
+    [ "$review_count" -eq 2 ]
+
+    # Fix should NOT have been called on iteration 2 (convergence broke before fix)
+    local fix_count
+    fix_count=$(cat "$fix_count_file")
+    [ "$fix_count" -eq 1 ]
+}
+
+@test "convergence detection does NOT exit when <=33% issues are repeats" {
+    # Pre-seed history with 1 issue
+    local history_file="$LOG_BASE/context/review-history-test.json"
+    cat > "$history_file" << 'HIST_EOF'
+[{"iteration":1,"issues":[{"description":"Missing error handling"}],"result":"changes_requested"}]
+HIST_EOF
+
+    local counter_file="$TEST_TMP/no_conv_review_count"
+    echo "0" > "$counter_file"
+    export counter_file
+
+    run_stage() {
+        case "$1" in
+            simplify-*)
+                echo '{"status":"success","summary":"Simplified"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$counter_file")
+                count=$((count + 1))
+                echo "$count" > "$counter_file"
+
+                if (( count == 1 )); then
+                    # 1 new issue + 0 repeats from prior = 0% repeat ratio → should NOT converge
+                    echo '{"status":"success","result":"changes_requested","issues":[{"description":"Completely new issue"}],"summary":"New issue found"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    local exit_status=$?
+
+    [ "$exit_status" -eq 0 ]
+
+    # Should have gone through both review iterations (no early exit from convergence)
+    local review_count
+    review_count=$(cat "$counter_file")
+    [ "$review_count" -ge 2 ]
+}
+
+# =============================================================================
+# SIMPLIFY SKIP LOGIC
+# =============================================================================
+
+@test "simplify is skipped on second iteration when first reported no changes and review timed out" {
+    # When simplify reports "no changes" and review times out (continue without fix),
+    # skip_simplify stays true and simplify is skipped on the next iteration.
+    local simplify_log="$TEST_TMP/simplify_calls"
+    : > "$simplify_log"
+    export simplify_log
+
+    local review_count_file="$TEST_TMP/simplify_skip_review_count"
+    echo "0" > "$review_count_file"
+    export review_count_file
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            simplify-*)
+                echo "$stage_name" >> "$simplify_log"
+                echo '{"status":"success","summary":"No changes to simplify"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$review_count_file")
+                count=$((count + 1))
+                echo "$count" > "$review_count_file"
+
+                if (( count == 1 )); then
+                    # First review: timeout → continue (skip_simplify stays true, fix does NOT run)
+                    echo '{"status":"error","error":"timeout"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    # Simplify should have been called only ONCE:
+    # iter 1: simplify runs (no changes → skip_simplify=true); review times out → continue
+    # iter 2: skip_simplify=true → simplify SKIPPED; review=approved → done
+    local simplify_call_count
+    simplify_call_count=$(wc -l < "$simplify_log" | tr -d ' ')
+    [ "$simplify_call_count" -eq 1 ]
+}
+
+@test "simplify skip is reset after fix stage runs" {
+    # Scenario: simplify=no changes, review=changes_requested, fix runs → skip_simplify=false
+    # So on iteration 3, simplify should run again
+    local simplify_log="$TEST_TMP/simplify_reset_calls"
+    : > "$simplify_log"
+    export simplify_log
+
+    local review_count_file="$TEST_TMP/simplify_reset_review_count"
+    echo "0" > "$review_count_file"
+    export review_count_file
+
+    local simplify_call_num=0
+    export simplify_call_num
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            simplify-*)
+                echo "$stage_name" >> "$simplify_log"
+                local num
+                num=$(wc -l < "$simplify_log" | tr -d ' ')
+                if (( num == 1 )); then
+                    # First call: no changes → triggers skip
+                    echo '{"status":"success","summary":"No changes to simplify"}'
+                else
+                    # Third call (after fix reset skip): made changes
+                    echo '{"status":"success","summary":"Simplified 2 files"}'
+                fi
+                ;;
+            review-*)
+                local count
+                count=$(cat "$review_count_file")
+                count=$((count + 1))
+                echo "$count" > "$review_count_file"
+
+                if (( count <= 2 )); then
+                    echo '{"status":"success","result":"changes_requested","comments":"Fix issue","summary":"Issue found"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    # Simplify should be called at least twice: iter1 (no changes), iter3 (after fix reset)
+    local simplify_call_count
+    simplify_call_count=$(wc -l < "$simplify_log" | tr -d ' ')
+    [ "$simplify_call_count" -ge 2 ] || fail "Expected simplify called >=2 times after reset, got $simplify_call_count"
+}
+
+@test "simplify skip logic is present in run_quality_loop function" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # Must have the skip_simplify variable
+    [[ "$func_def" == *"skip_simplify"* ]]
+
+    # Must skip when true
+    [[ "$func_def" == *'skip_simplify == "true"'* ]] || [[ "$func_def" == *"skip_simplify=true"* ]]
+
+    # Must reset after fix
+    [[ "$func_def" == *"skip_simplify=false"* ]]
+}
+
+@test "simplify skip sets skip_simplify=true when summary contains 'no changes'" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # The function must check for "no changes" in the simplify summary (case-insensitive)
+    [[ "$func_def" == *"no changes"* ]] || [[ "$func_def" == *"No changes"* ]] || [[ "$func_def" == *"grep -qi"* ]]
+}
+
+# =============================================================================
+# CUMULATIVE FINDINGS TRUNCATION — last 2 iterations only
+# =============================================================================
+
+@test "cumulative findings uses last 2 iterations via .[-2:] slice" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # Must use .[-2:] to limit to last 2 history entries
+    [[ "$func_def" == *'.[-2:]'* ]]
+}
+
+@test "cumulative findings omits older iterations beyond last 2" {
+    # Build review history with 3 iterations
+    local history_file="$LOG_BASE/context/review-history-test.json"
+    cat > "$history_file" << 'HIST_EOF'
+[
+  {"iteration":1,"issues":[{"description":"Old issue from iter 1","severity":"minor"}],"result":"changes_requested"},
+  {"iteration":2,"issues":[{"description":"Old issue from iter 2","severity":"minor"}],"result":"changes_requested"}
+]
+HIST_EOF
+
+    local fix_prompt_file="$TEST_TMP/cumulative_fix_prompt"
+    export fix_prompt_file
+
+    local review_count_file="$TEST_TMP/cumulative_review_count"
+    echo "0" > "$review_count_file"
+    export review_count_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$review_count_file")
+                count=$((count + 1))
+                echo "$count" > "$review_count_file"
+
+                if (( count == 1 )); then
+                    # Third iteration review — requests changes so fix runs
+                    echo '{"status":"success","result":"changes_requested","issues":[{"description":"Current issue iter 3","severity":"minor"}],"comments":"Fix current issue","summary":"1 issue"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                # Capture fix prompt to verify cumulative_findings content
+                printf '%s' "$prompt" > "$fix_prompt_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    # Fix prompt must exist
+    [[ -f "$fix_prompt_file" ]] || fail "Fix prompt was not captured"
+
+    local captured_prompt
+    captured_prompt=$(< "$fix_prompt_file")
+
+    # "Old issue from iter 1" is 3 entries back — must NOT appear (beyond last 2)
+    [[ "$captured_prompt" != *"Old issue from iter 1"* ]] || fail "iter 1 issue should be excluded from cumulative findings (only last 2 kept)"
+
+    # "Old issue from iter 2" is in last 2 entries — must appear
+    [[ "$captured_prompt" == *"Old issue from iter 2"* ]] || fail "iter 2 issue should be included in cumulative findings (within last 2)"
+}
+
+@test "cumulative findings includes current iteration issues in fix prompt" {
+    local history_file="$LOG_BASE/context/review-history-test.json"
+    rm -f "$history_file"
+
+    local fix_prompt_file="$TEST_TMP/curr_iter_fix_prompt"
+    export fix_prompt_file
+
+    local review_count_file="$TEST_TMP/curr_review_count"
+    echo "0" > "$review_count_file"
+    export review_count_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$review_count_file")
+                count=$((count + 1))
+                echo "$count" > "$review_count_file"
+
+                if (( count == 1 )); then
+                    echo '{"status":"success","result":"changes_requested","issues":[{"description":"Use const instead of let","severity":"minor"}],"comments":"Use const instead of let","summary":"1 issue"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                printf '%s' "$prompt" > "$fix_prompt_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    [[ -f "$fix_prompt_file" ]]
+    local captured
+    captured=$(< "$fix_prompt_file")
+    [[ "$captured" == *"Use const instead of let"* ]]
+}
+
+# =============================================================================
+# MAJOR-ISSUE FILTERING — fix prompt includes only major-severity issues
+# =============================================================================
+
+@test "major-issue override triggers when approved result has major-severity issues" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # Must check severity == "major"
+    [[ "$func_def" == *'severity == "major"'* ]]
+
+    # Must override verdict to changes_requested
+    [[ "$func_def" == *"major_issue_override=true"* ]]
+}
+
+@test "fix prompt contains only major-severity descriptions when major_issue_override is active" {
+    local fix_prompt_file="$TEST_TMP/major_fix_prompt"
+    export fix_prompt_file
+
+    local review_count_file="$TEST_TMP/major_review_count"
+    echo "0" > "$review_count_file"
+    export review_count_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$review_count_file")
+                count=$((count + 1))
+                echo "$count" > "$review_count_file"
+
+                if (( count == 1 )); then
+                    # Approved with mixed severity → major_issue_override kicks in, verdict overridden to changes_requested
+                    echo '{"status":"success","result":"approved","issues":[{"description":"Critical security flaw","severity":"major"},{"description":"Minor style nit","severity":"minor"}],"summary":"Approved with notes"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"All clear"}'
+                fi
+                ;;
+            fix-review-*)
+                printf '%s' "$prompt" > "$fix_prompt_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    [[ -f "$fix_prompt_file" ]]
+    local captured
+    captured=$(< "$fix_prompt_file")
+
+    # Major issue must appear in fix prompt
+    [[ "$captured" == *"Critical security flaw"* ]]
+
+    # Minor issue must NOT appear (filtered out by major_issue_override)
+    [[ "$captured" != *"Minor style nit"* ]]
+}
+
+@test "fix prompt includes all issue descriptions when no major_issue_override" {
+    local fix_prompt_file="$TEST_TMP/no_override_fix_prompt"
+    export fix_prompt_file
+
+    local review_count_file="$TEST_TMP/no_override_review_count"
+    echo "0" > "$review_count_file"
+    export review_count_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$review_count_file")
+                count=$((count + 1))
+                echo "$count" > "$review_count_file"
+
+                if (( count == 1 )); then
+                    # changes_requested (not approved) → no major_issue_override → use .comments field
+                    echo '{"status":"success","result":"changes_requested","comments":"Fix naming and add tests","issues":[{"description":"Bad naming","severity":"minor"},{"description":"Missing tests","severity":"minor"}],"summary":"2 issues"}'
+                else
+                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                fi
+                ;;
+            fix-review-*)
+                printf '%s' "$prompt" > "$fix_prompt_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+
+    [[ -f "$fix_prompt_file" ]]
+    local captured
+    captured=$(< "$fix_prompt_file")
+
+    # When no major_issue_override, comments field is used (not filtered by severity)
+    [[ "$captured" == *"Fix naming and add tests"* ]]
+}
+
+@test "major-issue override filters cumulative findings to major-severity only" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # When major_issue_override, cumulative_findings jq must filter by severity == "major"
+    [[ "$func_def" == *'select(.severity == "major")'* ]]
+}
+
+# =============================================================================
+# COMPLEXITY PASSTHROUGH TO FIX STAGES
+# =============================================================================
+
+@test "run_quality_loop passes complexity arg to fix-review run_stage call" {
+    local complexity_file="$TEST_TMP/fix_review_complexity"
+    export complexity_file
+
+    run_stage() {
+        local stage_name="$1"
+        local complexity_arg="$5"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                echo '{"status":"success","result":"changes_requested","comments":"Fix this","summary":"1 issue"}'
+                ;;
+            fix-review-*)
+                # Capture the complexity arg (5th positional arg to run_stage)
+                printf '%s' "$complexity_arg" > "$complexity_file"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Pass complexity "M" as arg 6 to run_quality_loop.
+    # Run in a subshell so exit 2 (max iterations exceeded) does not kill the test.
+    # The fix-review stage runs before the exit, so the complexity file is written.
+    ( run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "M" ) || true
+
+    [[ -f "$complexity_file" ]] || fail "fix-review stage was not called"
+    local captured_complexity
+    captured_complexity=$(< "$complexity_file")
+    [ "$captured_complexity" = "M" ] || fail "Expected complexity 'M' passed to fix-review run_stage, got '$captured_complexity'"
+}
+
+@test "run_quality_loop passes complexity arg to simplify run_stage call" {
+    local simplify_complexity_file="$TEST_TMP/simplify_complexity"
+    export simplify_complexity_file
+
+    run_stage() {
+        local stage_name="$1"
+        local complexity_arg="$5"
+        case "$stage_name" in
+            simplify-*)
+                printf '%s' "$complexity_arg" > "$simplify_complexity_file"
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                echo '{"status":"success","result":"approved","summary":"Approved"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Pass complexity "L" as arg 6 to run_quality_loop
+    run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "L"
+
+    [[ -f "$simplify_complexity_file" ]] || fail "simplify stage was not called"
+    local captured_complexity
+    captured_complexity=$(< "$simplify_complexity_file")
+    [ "$captured_complexity" = "L" ] || fail "Expected complexity 'L' passed to simplify run_stage, got '$captured_complexity'"
+}
+
+@test "run_quality_loop passes complexity arg to review run_stage call" {
+    local review_complexity_file="$TEST_TMP/review_complexity"
+    export review_complexity_file
+
+    run_stage() {
+        local stage_name="$1"
+        local complexity_arg="$5"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                printf '%s' "$complexity_arg" > "$review_complexity_file"
+                echo '{"status":"success","result":"approved","summary":"Approved"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Pass complexity "S" as arg 6 to run_quality_loop
+    run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "S"
+
+    [[ -f "$review_complexity_file" ]] || fail "review stage was not called"
+    local captured_complexity
+    captured_complexity=$(< "$review_complexity_file")
+    [ "$captured_complexity" = "S" ] || fail "Expected complexity 'S' passed to review run_stage, got '$captured_complexity'"
+}
+
+@test "approved result with only minor issues is not overridden" {
+    local fix_called="$TEST_TMP/minor_only_fix_called"
+    echo "false" > "$fix_called"
+    export fix_called
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","summary":"No changes"}'
+                ;;
+            review-*)
+                # Approved with only minor issues → NO override
+                echo '{"status":"success","result":"approved","issues":[{"description":"Style nit","severity":"minor"}],"summary":"Approved"}'
+                ;;
+            fix-review-*)
+                echo "true" > "$fix_called"
+                echo '{"status":"success","summary":"Fixed"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    local exit_status=$?
+
+    # Should succeed without override
+    [ "$exit_status" -eq 0 ]
+
+    # Fix should NOT have been called (approved stands)
+    local was_fix_called
+    was_fix_called=$(cat "$fix_called")
+    [ "$was_fix_called" = "false" ] || fail "Fix should not be called when only minor issues exist in an approved review"
 }

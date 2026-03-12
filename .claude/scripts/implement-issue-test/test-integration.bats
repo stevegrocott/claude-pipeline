@@ -72,6 +72,77 @@ teardown() {
 }
 
 # =============================================================================
+# PR NUMBER RECOVERY — find-mr.sh + gh pr list FALLBACK
+# =============================================================================
+
+@test "orchestrator has gh pr list fallback for PR number recovery" {
+    local main_def
+    main_def=$(declare -f main)
+    [[ "$main_def" == *"gh pr list"* ]] || \
+        fail "gh pr list fallback not found in orchestrator main"
+}
+
+@test "orchestrator tries find-mr.sh before gh pr list for PR number recovery" {
+    local main_def
+    main_def=$(declare -f main)
+    [[ "$main_def" == *"find-mr.sh"* ]] || \
+        fail "find-mr.sh primary PR recovery not found in orchestrator"
+    [[ "$main_def" == *"gh pr list"* ]] || \
+        fail "gh pr list fallback not found in orchestrator"
+    # find-mr.sh must appear before gh pr list (primary before fallback)
+    local find_pos gh_pos
+    find_pos=$(printf '%s' "$main_def" | grep -b -o "find-mr.sh" | head -1 | cut -d: -f1)
+    gh_pos=$(printf '%s' "$main_def" | grep -b -o "gh pr list" | head -1 | cut -d: -f1)
+    (( find_pos < gh_pos )) || \
+        fail "find-mr.sh (pos $find_pos) should appear before gh pr list (pos $gh_pos)"
+}
+
+@test "orchestrator validates pr_number before accepting it from structured output" {
+    local main_def
+    main_def=$(declare -f main)
+    # The validation regex must reject non-numeric pr_number values
+    [[ "$main_def" == *'^[0-9]+'* ]] || \
+        fail "Numeric pr_number validation regex not found in orchestrator"
+}
+
+# =============================================================================
+# GRADUATED RETRY MODEL ESCALATION (implement task loop)
+# =============================================================================
+
+@test "orchestrator implements graduated model escalation on task retry" {
+    local main_def
+    main_def=$(declare -f main)
+    [[ "$main_def" == *"_next_model_up"* ]] || \
+        fail "Model escalation (_next_model_up) not found in implement task retry"
+    [[ "$main_def" == *"review_attempts"* ]] || \
+        fail "Retry attempt counter (review_attempts) not found in implement task loop"
+}
+
+@test "orchestrator escalates timeout by 20% on implement task retry" {
+    local main_def
+    main_def=$(declare -f main)
+    # The 20% timeout increase: base_timeout * 120 / 100
+    [[ "$main_def" == *"120 / 100"* ]] || \
+        fail "20%% timeout escalation formula (base_timeout * 120 / 100) not found in main"
+}
+
+@test "orchestrator only escalates model on retry not on first attempt" {
+    local main_def
+    main_def=$(declare -f main)
+    # review_attempts > 1 guards the escalation so first attempt uses base model
+    [[ "$main_def" == *"review_attempts > 1"* ]] || \
+        fail "Guard condition (review_attempts > 1) for model escalation not found"
+}
+
+@test "orchestrator logs model escalation on task retry" {
+    local main_def
+    main_def=$(declare -f main)
+    # A log message must accompany the escalation for observability
+    [[ "$main_def" == *"escalating"* ]] || \
+        fail "Escalation log message not found in implement task retry"
+}
+
+# =============================================================================
 # PARSE-ISSUE SCHEMA
 # =============================================================================
 
@@ -372,6 +443,27 @@ teardown() {
     [[ "$func_def" == *"failure_sig"* ]] || [[ "$func_def" == *"sig_count"* ]]
 }
 
+@test "test loop convergence uses soft exit not hard exit 2" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Convergence sets test_convergence_soft_exit, not test_convergence_failure
+    [[ "$func_def" == *'set_final_state "test_convergence_soft_exit"'* ]]
+    # Convergence sets loop_complete=true instead of exit 2
+    [[ "$func_def" == *"loop_complete=true"* ]]
+    # Must NOT contain the old hard exit pattern for convergence
+    [[ "$func_def" != *'set_final_state "test_convergence_failure"'* ]]
+}
+
+@test "test loop convergence log_warn includes specific failure descriptions not just count" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # The log_warn call must reference failure_summaries (specific descriptions)
+    # not just sig_count (the repeat count)
+    grep -q 'log_warn.*failure_summaries' <<< "$func_def"
+}
+
 @test "test loop respects MAX_TEST_ITERATIONS" {
     local func_def
     func_def=$(declare -f run_test_loop)
@@ -479,10 +571,11 @@ teardown() {
 }
 
 @test "PR review respects MAX_PR_REVIEW_ITERATIONS" {
-    local main_def
-    main_def=$(declare -f main)
+    # MAX_PR_REVIEW_ITERATIONS is used in get_pr_review_config, which main() calls
+    local config_def
+    config_def=$(declare -f get_pr_review_config)
 
-    [[ "$main_def" == *"MAX_PR_REVIEW_ITERATIONS"* ]]
+    [[ "$config_def" == *"MAX_PR_REVIEW_ITERATIONS"* ]]
 }
 
 @test "PR review skips quality loop — re-review catches remaining issues" {
@@ -872,26 +965,21 @@ teardown() {
 # PR NUMBER RECOVERY
 # =============================================================================
 
-@test "create_and_review_pr validates pr_number is a positive integer" {
-    local main_def
-    main_def=$(declare -f create_and_review_pr)
-
-    [[ "$main_def" == *'pr_number" =~ ^[0-9]+$'* ]]
+@test "PR number regex validation exists in orchestrator main body" {
+    grep -qF '"$pr_number" =~ ^[0-9]+$' "$ORCHESTRATOR_SCRIPT"
 }
 
-@test "create_and_review_pr recovers PR number via find-mr.sh when missing" {
-    local main_def
-    main_def=$(declare -f create_and_review_pr)
-
-    [[ "$main_def" == *"find-mr.sh"* ]]
-    [[ "$main_def" == *"recovering via find-mr.sh"* ]]
+@test "find-mr.sh recovery path exists with log message recovering via find-mr.sh" {
+    grep -q 'recovering via find-mr.sh' "$ORCHESTRATOR_SCRIPT"
+    grep -q 'find-mr.sh' "$ORCHESTRATOR_SCRIPT"
 }
 
-@test "create_and_review_pr exits cleanly when PR number unrecoverable" {
-    local main_def
-    main_def=$(declare -f create_and_review_pr)
+@test "gh pr list fallback exists with log message gh pr list fallback" {
+    grep -q 'gh pr list fallback' "$ORCHESTRATOR_SCRIPT"
+}
 
-    [[ "$main_def" == *"Could not recover PR/MR number"* ]]
+@test "error exit with Could not recover PR/MR number message" {
+    grep -q 'Could not recover PR/MR number' "$ORCHESTRATOR_SCRIPT"
 }
 
 # =============================================================================
@@ -962,4 +1050,81 @@ teardown() {
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
     [[ "$script_content" == *'PLATFORM_DIR="$SCRIPT_DIR/platform"'* ]]
+}
+
+# =============================================================================
+# GRADUATED RETRY — task implementation escalates model + timeout on failure
+# =============================================================================
+
+@test "implement loop captures base_timeout and base_model before retry loop" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # Must resolve base values once, outside the while loop
+    [[ "$main_def" == *"base_timeout"* ]]
+    [[ "$main_def" == *"base_model"* ]]
+    [[ "$main_def" == *'get_stage_timeout'* ]]
+    [[ "$main_def" == *'resolve_model'* ]]
+}
+
+@test "implement loop uses _next_model_up for model escalation on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *'_next_model_up "$base_model"'* ]]
+}
+
+@test "implement loop increases timeout by 20 percent on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # 20% increase: base * 120 / 100
+    [[ "$main_def" == *'120 / 100'* ]]
+    [[ "$main_def" == *'current_timeout'* ]]
+}
+
+@test "implement loop passes model_override to run_stage on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # run_stage must be called with current_model as 7th arg on retry
+    [[ "$main_def" == *'"$current_model"'* ]]
+}
+
+@test "implement loop passes timeout_override to run_stage on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # run_stage must be called with current_timeout as 6th arg on retry
+    [[ "$main_def" == *'"$current_timeout"'* ]]
+}
+
+@test "implement loop logs escalation message on retry" {
+    local main_def
+    main_def=$(declare -f main)
+
+    [[ "$main_def" == *"escalating to"* ]]
+}
+
+@test "implement loop only escalates after first attempt" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # Gate on review_attempts > 1 (not >= 1)
+    [[ "$main_def" == *'review_attempts > 1'* ]]
+}
+
+@test "20 percent timeout increase arithmetic is correct" {
+    # Verify bash integer math gives correct 20% increase
+    local base=1800
+    local increased=$((base * 120 / 100))
+    [ "$increased" -eq 2160 ]
+
+    local base2=900
+    local increased2=$((base2 * 120 / 100))
+    [ "$increased2" -eq 1080 ]
+
+    local base3=300
+    local increased3=$((base3 * 120 / 100))
+    [ "$increased3" -eq 360 ]
 }

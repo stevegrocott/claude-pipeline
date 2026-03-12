@@ -175,6 +175,8 @@ Don't add features, refactor other code, or "improve" beyond the test.
 npm test path/to/test.test.ts 2>&1 | tail -10
 ```
 
+Truncate test output to last 10 lines — you only need pass/fail and error summary. If test fails unexpectedly, re-run without truncation to see full output.
+
 Confirm:
 - Test passes
 - Other tests still pass

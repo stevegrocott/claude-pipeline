@@ -60,6 +60,17 @@ Break the chosen approach into implementable tasks:
 - If a task requires reading more than 3 files or modifying more than 2 files, split it
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
+
+**REQUIRED: Each task description MUST include specific file paths from Step 2 research.** Include file names, paths, and line numbers inline. This prevents vague descriptions that cause subagents to explore broadly.
+
+Examples:
+- ❌ **BAD (vague):** `Update Settings component to add dark mode toggle`
+- ✅ **GOOD:** `Update Settings component (src/components/Settings.tsx:45-67) to add dark mode toggle, integrate with ThemeContext (src/context/ThemeContext.ts:12-28)`
+- ❌ **BAD (no paths):** `Implement theme state management using Context API`
+- ✅ **GOOD:** `Implement theme persistence in ThemeContext (src/context/ThemeContext.ts) - add useCallback hook at line 15, update provider initialization at line 32`
+- ❌ **BAD (missing specifics):** `Update CSS styles for dark mode`
+- ✅ **GOOD:** `Update global theme variables in theme.css (src/styles/theme.css:8-45) and add dark mode color overrides at line 50+`
+
 - **E2E tests (REQUIRED for UI changes):** If `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E task for ANY issue touching user-visible UI — CSS, components, layouts, forms, navigation, visual regressions. This is NOT optional for UI work.
   `- [ ] \`[playwright-test-developer]\` **(S)** Write Playwright E2E test for [flow description]`
   E2E tasks reference the `playwright-testing` skill and come after all implementation tasks so the feature exists before the test runs.
@@ -71,6 +82,8 @@ Break the chosen approach into implementable tasks:
 ### Step 5: Create Issue
 
 **Before creating the issue, ask the user which epic to parent it under** using `AskUserQuestion`. Look up open epics in the project to offer relevant options. For Precis/KIKS, all issues must sit under KIKS-410 (the Precis initiative) within an appropriate epic. Present the most likely epics as options based on the research context (e.g., if the work is UI-related, suggest "KIKS-546 UI Enhancements").
+
+**Deploy Verification section (optional):** Include a `## Deploy Verification` section if the issue involves environment-specific bugs or requires deployment testing. This section guides the deploy-verify stage by specifying target environment, health endpoint, and custom verification logic. Include this for bugs that only reproduce in test/staging/production but not locally.
 
 Create the issue using the platform wrapper with `--parent` set to the chosen epic:
 
@@ -103,11 +116,22 @@ PLATFORM_DIR=".claude/scripts/platform"
 - [alternative 2] — rejected because [reason]
 
 ## Implementation Tasks
-- [ ] `[agent-name]` **(S)** Description of task 1
-- [ ] `[agent-name]` **(M)** Description of task 2
-- [ ] `[agent-name]` **(L)** Description of task 3
-- [ ] `[default]` **(S)** Description of general task (e.g., tests, config)
-- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured)
+- [ ] `[agent-name]` **(S)** Description of task 1. Scope: 2 files. Done when: [specific criterion].
+  - **Affected files:** `path/to/file.ts`, `path/to/other.ts`
+- [ ] `[agent-name]` **(M)** Description of task 2. Scope: 3 files. Done when: [specific criterion].
+  - **Affected files:** `path/to/file2.ts`, `path/to/other.ts`
+- [ ] `[agent-name]` **(L)** Description of task 3. Scope: 5 files. Done when: [specific criterion].
+  - **Affected files:** `path/to/file3.ts`, `path/to/file4.ts`
+- [ ] `[default]` **(S)** Description of general task (e.g., tests, config). Scope: 2 files. Done when: [specific criterion].
+  - **Affected files:** `path/to/config.ts`
+- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured). Scope: 1 file. Done when: test passes.
+  - **Affected files:** `e2e/tests/test-name.spec.ts`
+
+## Deploy Verification
+[Include if this issue involves bugs in specific environments or requires deployment testing]
+- **Target environment:** [staging|test|nas|production]
+- **Health endpoint:** [full URL to health check endpoint, e.g., https://example.com/health]
+- **Verification command:** [optional — custom shell command to verify deployment, e.g., "curl -s https://example.com/api/status | jq .status"]
 
 ## Acceptance Criteria
 - [ ] AC1: [measurable criterion]
@@ -132,7 +156,7 @@ Ready for implementation: /implement-issue NNN main
 The `## Implementation Tasks` section must use this parseable convention:
 
 ```markdown
-- [ ] `[agent-name]` **(M)** Task description
+- [ ] `[agent-name]` **(M)** Task description. Scope: N files. Done when: [criterion]. Affected files: `path/to/file`
 ```
 
 **Agent values** (adapt to your project's agents):
@@ -141,7 +165,14 @@ The `## Implementation Tasks` section must use this parseable convention:
 - `[playwright-test-developer]` for E2E tests (when `TEST_E2E_CMD` is configured)
 - `[default]` for general tasks (config, tests, documentation, mixed)
 
-**Parsing rule:** Regex `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description. Task IDs assigned sequentially.
+**Scope constraint fields** (required — prevents context bloat and over-exploration):
+- `Scope: N files` — hard upper limit on files the agent should modify (default: 3)
+- `Done when: [criterion]` — explicit stopping condition; agent stops when this is true
+- `Affected files: path/to/file, path/to/other` — exact files to read/modify; prevents broad search
+
+**Why these fields matter:** Without scope boundaries, agents explore broadly and continue past the goal. These fields give implementers a clear stop signal and prevent the 3x context growth seen in unconstrained runs.
+
+**Parsing rule:** Regex `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description. Task IDs assigned sequentially. Scope fields are parsed from the description text and passed to the implementer.
 
 ## Key Principles
 

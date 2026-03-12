@@ -79,11 +79,11 @@ teardown() {
     [[ "$func_def" == *'$ISSUE_NUMBER'* ]] || [[ "$func_def" == *'"$ISSUE_NUMBER"'* ]]
 }
 
-@test "comment_issue uses REPO variable" {
+@test "comment_issue uses PLATFORM_DIR variable" {
     local func_def
     func_def=$(declare -f comment_issue)
 
-    [[ "$func_def" == *'$REPO'* ]] || [[ "$func_def" == *'"$REPO"'* ]]
+    [[ "$func_def" == *'$PLATFORM_DIR'* ]] || [[ "$func_def" == *'"$PLATFORM_DIR"'* ]]
 }
 
 @test "comment_issue includes orchestrator attribution" {
@@ -119,11 +119,11 @@ teardown() {
     [[ "$func_def" == *'pr_num="$1"'* ]] || [[ "$func_def" == *'local pr_num'* ]]
 }
 
-@test "comment_pr uses REPO variable" {
+@test "comment_pr uses PLATFORM_DIR variable" {
     local func_def
     func_def=$(declare -f comment_pr)
 
-    [[ "$func_def" == *'$REPO'* ]] || [[ "$func_def" == *'"$REPO"'* ]]
+    [[ "$func_def" == *'$PLATFORM_DIR'* ]] || [[ "$func_def" == *'"$PLATFORM_DIR"'* ]]
 }
 
 @test "comment_pr includes orchestrator attribution" {
@@ -325,11 +325,15 @@ EOF
 
 @test "quality loop does not call comment_issue for intermediate stages" {
     # Intermediate quality loop comments were removed in #561 to reduce noise.
+    # Only the convergence failure (error termination condition) comment remains.
     # Milestone comments (task complete, PR complete) are still posted by main().
     local func_def
     func_def=$(declare -f run_quality_loop)
 
-    [[ "$func_def" != *"comment_issue"* ]]
+    # No intermediate progress comments (only convergence failure error comment is allowed)
+    [[ "$func_def" != *'comment_issue "Quality Loop: Review'* ]]
+    [[ "$func_def" != *'comment_issue "Quality Loop: Fix'* ]]
+    [[ "$func_def" != *'comment_issue "Quality Loop: Complete'* ]]
 }
 
 # =============================================================================

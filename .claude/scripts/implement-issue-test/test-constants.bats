@@ -117,6 +117,57 @@ teardown() {
     [ "$MAX_PR_REVIEW_ITERATIONS" -eq 2 ]
 }
 
+@test "MAX_TEST_ITERATIONS is 7" {
+    [ "$MAX_TEST_ITERATIONS" -eq 7 ]
+}
+
+@test "MAX_TEST_ITERATIONS is declared readonly" {
+    local script_content
+    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
+
+    [[ "$script_content" == *"readonly MAX_TEST_ITERATIONS=7"* ]]
+}
+
+@test "MAX_VALIDATION_FIX_ITERATIONS is 2" {
+    [ "$MAX_VALIDATION_FIX_ITERATIONS" -eq 2 ]
+}
+
+@test "MAX_VALIDATION_FIX_ITERATIONS is declared readonly" {
+    local script_content
+    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
+
+    [[ "$script_content" == *"readonly MAX_VALIDATION_FIX_ITERATIONS=2"* ]]
+}
+
+@test "run_test_loop initialises validation_fix_iteration counter separately from test_iteration" {
+    local func_def
+    func_def=$(declare -f run_test_loop)
+
+    # Both counters must be declared as separate local variables
+    [[ "$func_def" == *"local validation_fix_iteration=0"* ]]
+    [[ "$func_def" == *"local test_iteration=0"* ]]
+}
+
+@test "validation fix cap check uses MAX_VALIDATION_FIX_ITERATIONS" {
+    local script_content
+    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
+
+    # The cap guard must compare validation_fix_iteration against the constant
+    [[ "$script_content" == *"validation_fix_iteration > MAX_VALIDATION_FIX_ITERATIONS"* ]]
+}
+
+@test "validation fix counter is incremented independently of test_iteration" {
+    local script_content
+    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
+
+    # Validation counter incremented via arithmetic expansion
+    [[ "$script_content" == \
+        *"validation_fix_iteration=\$((validation_fix_iteration + 1))"* ]]
+    # test_iteration uses the same safe pattern
+    [[ "$script_content" == \
+        *"test_iteration=\$((test_iteration + 1))"* ]]
+}
+
 # =============================================================================
 # RATE LIMIT CONSTANTS
 # =============================================================================
@@ -172,6 +223,8 @@ teardown() {
 
     [[ "$script_content" == *"readonly MAX_QUALITY_ITERATIONS"* ]]
     [[ "$script_content" == *"readonly MAX_PR_REVIEW_ITERATIONS"* ]]
+    [[ "$script_content" == *"readonly MAX_TEST_ITERATIONS"* ]]
+    [[ "$script_content" == *"readonly MAX_VALIDATION_FIX_ITERATIONS"* ]]
     [[ "$script_content" == *"readonly RATE_LIMIT_BUFFER"* ]]
     [[ "$script_content" == *"readonly RATE_LIMIT_DEFAULT_WAIT"* ]]
 }

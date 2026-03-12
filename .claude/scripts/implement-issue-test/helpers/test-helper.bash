@@ -38,15 +38,23 @@ setup_test_env() {
     fi
 
     # Copy platform config (sourced by orchestrator functions)
+    # Preserve directory structure: TEST_TMP/.claude/config/platform.sh
     if [[ -f "$SCRIPT_DIR/../config/platform.sh" ]]; then
-        mkdir -p "$TEST_TMP/config"
-        cp "$SCRIPT_DIR/../config/platform.sh" "$TEST_TMP/config/platform.sh"
+        mkdir -p "$TEST_TMP/.claude/config"
+        cp "$SCRIPT_DIR/../config/platform.sh" "$TEST_TMP/.claude/config/platform.sh"
     fi
 
     # Copy platform wrapper scripts
+    # Preserve directory structure: TEST_TMP/.claude/scripts/platform/
     if [[ -d "$SCRIPT_DIR/platform" ]]; then
-        cp -r "$SCRIPT_DIR/platform" "$TEST_TMP/platform"
+        mkdir -p "$TEST_TMP/.claude/scripts"
+        cp -r "$SCRIPT_DIR/platform" "$TEST_TMP/.claude/scripts/platform"
     fi
+
+    # Create symlink for backward compatibility: TEST_TMP/config and TEST_TMP/platform
+    # (in case any code still references the old flattened structure)
+    [[ -d "$TEST_TMP/.claude/config" ]] && ln -s "./.claude/config" "$TEST_TMP/config" 2>/dev/null || true
+    [[ -d "$TEST_TMP/.claude/scripts/platform" ]] && ln -s "./.claude/scripts/platform" "$TEST_TMP/platform" 2>/dev/null || true
 
     # Change to test directory
     cd "$TEST_TMP" || exit 1
@@ -258,6 +266,12 @@ assert_contains() {
     return 0
 }
 
+# Fail with message (compatible with bats-assert)
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    return 1
+}
+
 # Assert string not empty
 assert_not_empty() {
     local value="$1"
@@ -323,6 +337,10 @@ HEADER
         # Skip STAGE_COUNTER init (set in test defaults)
         /^STAGE_COUNTER=0$/ { next }
 
+        # Skip _CONSECUTIVE_TIMEOUTS and _TIMED_OUT_STAGE_NAMES init (set in test defaults)
+        /^_CONSECUTIVE_TIMEOUTS=0$/ { next }
+        /^_TIMED_OUT_STAGE_NAMES=""$/ { next }
+
         # Skip main invocation
         /^main "\$@"$/ { next }
 
@@ -350,6 +368,8 @@ STATUS_FILE="${STATUS_FILE:-status.json}"
 LOG_BASE="${LOG_BASE:-logs/test}"
 LOG_FILE="${LOG_FILE:-$LOG_BASE/orchestrator.log}"
 STAGE_COUNTER="${STAGE_COUNTER:-0}"
+_CONSECUTIVE_TIMEOUTS="${_CONSECUTIVE_TIMEOUTS:-0}"
+_TIMED_OUT_STAGE_NAMES="${_TIMED_OUT_STAGE_NAMES:-}"
 QUIET="${QUIET:-false}"
 EOF
 

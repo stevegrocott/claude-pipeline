@@ -74,6 +74,9 @@ You MUST complete each phase before proceeding to the next.
    **WHEN system has multiple components (CI → build → signing, API → service → database):**
 
    **BEFORE proposing fixes, add diagnostic instrumentation:**
+
+   When running diagnostic commands that produce verbose output, use `| tail -20` to capture the relevant end. For long-running diagnostic builds, use `run_in_background: true`. Full output floods context — capture only what you need to form hypotheses.
+
    ```
    For EACH component boundary:
      - Log what data enters component

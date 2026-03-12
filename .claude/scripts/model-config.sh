@@ -42,19 +42,22 @@ _stage_to_tier() {
 	case "$1" in
 		parse-issue)    printf '%s' "light" ;;
 		validate-plan)  printf '%s' "light" ;;
-		implement)      printf '%s' "advanced" ;;
+		implement)      printf '%s' "standard" ;;
 		task-review)    printf '%s' "standard" ;;
 		fix)            printf '%s' "standard" ;;
 		test)           printf '%s' "light" ;;
 		review)         printf '%s' "standard" ;;
 		simplify)       printf '%s' "light" ;;
-		pr)             printf '%s' "light" ;;
+		pr)             printf '%s' "standard" ;;
 		pr-review)      printf '%s' "standard" ;;
 		pr-fix)         printf '%s' "standard" ;;
 		spec-review)    printf '%s' "standard" ;;
 		code-review)    printf '%s' "standard" ;;
 		e2e-verify)     printf '%s' "light" ;;
 		fix-e2e)        printf '%s' "standard" ;;
+		fix-acceptance-test) printf '%s' "standard" ;;
+		fix-deploy-verify) printf '%s' "standard" ;;
+		deploy-verify)  printf '%s' "light" ;;
 		complete)       printf '%s' "light" ;;
 		docs)           printf '%s' "light" ;;
 		acceptance-test) printf '%s' "light" ;;
@@ -67,12 +70,12 @@ _stage_to_tier() {
 # =============================================================================
 #
 # Task complexity hints (S/M/L) from issue parsing override stage defaults.
-# The quality loop forwards these to implement, simplify, review, and fix stages.
+# The quality loop forwards these to implement, review, and fix stages.
 #
 
 _complexity_to_tier() {
 	case "$1" in
-		S) printf '%s' "light" ;;
+		S) printf '%s' "standard" ;;
 		M) printf '%s' "standard" ;;
 		L) printf '%s' "advanced" ;;
 		*) printf '%s' "" ;;
@@ -93,8 +96,9 @@ _complexity_to_tier() {
 # All known stage prefixes, ordered longest-first for greedy matching
 if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
 	readonly -a _STAGE_PREFIXES=(
-		acceptance-test spec-review code-review task-review validate-plan
-		parse-issue e2e-verify fix-e2e implement simplify complete pr-review pr-fix review test docs fix pr
+		fix-acceptance-test acceptance-test validate-plan
+		fix-deploy-verify deploy-verify spec-review code-review task-review parse-issue e2e-verify
+		pr-review implement simplify complete pr-fix fix-e2e review test docs fix pr
 	)
 fi
 
@@ -151,7 +155,7 @@ resolve_model() {
 	fi
 
 	# Apply complexity hint — overrides stage default when provided.
-	# Light-tier stages (test, parse-issue, validate-plan, pr, complete, docs,
+	# Light-tier stages (test, parse-issue, validate-plan, complete, docs,
 	# simplify, acceptance-test) are mechanical and always use haiku;
 	# complexity hints are ignored for them.
 	# The quality loop forwards task-level complexity to implement, review,
