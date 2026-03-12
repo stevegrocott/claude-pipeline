@@ -11,6 +11,8 @@ Adapt the generic `.claude/` pipeline folder to a specific project's tech stack,
 
 **Core principle:** Every file in `.claude/` must earn its place. If it doesn't serve the target project, delete it. If it needs modification, modify it. If new capabilities are needed, create them.
 
+**Sync safety:** Stack-specific files you customize are stored in `.claude/local/` (gitignored). After pulling upstream pipeline changes, run `.claude/scripts/apply-local.sh` to re-apply your customizations on top of updated generic defaults.
+
 ## When to Use
 
 - Cloning the claude-pipeline repo into a new project
@@ -39,6 +41,35 @@ digraph adaptation {
 ```
 
 ---
+
+### Phase 0: Initialize Local Overrides
+
+Create the local customization directory and copy stack-specific files you'll modify:
+
+```bash
+mkdir -p .claude/local/agents .claude/local/config .claude/local/skills .claude/local/prompts/frontend
+
+# Copy stack-specific agents you want to customize
+cp .claude/agents/fastify-backend-developer.md .claude/local/agents/
+cp .claude/agents/react-frontend-developer.md .claude/local/agents/
+cp .claude/agents/playwright-test-developer.md .claude/local/agents/
+
+# Copy config for customization
+cp .claude/config/platform.sh .claude/local/config/
+
+# Copy any stack-specific skills you want to keep and customize
+# (Delete from local/ any you don't need — they'll stay as generic defaults)
+```
+
+All modifications in subsequent phases should target files in `.claude/local/`, not the originals. After customization, run:
+
+```bash
+.claude/scripts/apply-local.sh
+```
+
+This copies your customizations over the generic defaults. The `.claude/local/` directory is gitignored in the pipeline repo, so upstream pulls never overwrite your work.
+
+**Already adapted?** After pulling upstream changes, just run `apply-local.sh` to re-apply.
 
 ### Phase 1: Brainstorm
 
@@ -100,12 +131,12 @@ Categorize every `.claude/` file into one of four buckets:
 |--------|--------|---------|
 | **Keep as-is** | Universal process skills | brainstorming, writing-plans, TDD, systematic-debugging |
 | **Modify** | Adapt to new tech stack | implement-issue (change test commands), agents (change domain) |
-| **Replace** | Same purpose, different implementation | laravel-backend-developer → python-backend-developer |
-| **Delete** | Irrelevant to target project | bulletproof-frontend (for a CLI tool), write-docblocks (non-PHP) |
+| **Replace** | Same purpose, different implementation | backend-developer → python-backend-developer |
+| **Delete** | Irrelevant to target project | bulletproof-frontend (for a CLI tool), frontend-developer (for a CLI tool) |
 
 #### Inventory Checklist
 
-**Skills (21 in template):**
+**Skills (20 in template):**
 
 | Skill | Category | Typical Decision |
 |-------|----------|-----------------|
@@ -126,25 +157,21 @@ Categorize every `.claude/` file into one of four buckets:
 | ui-design-fundamentals | Domain (web/CSS) | Keep if web project; delete otherwise |
 | using-git-worktrees | Process | Keep as-is |
 | using-skills | Meta | Keep as-is |
-| write-docblocks | Domain (PHP) | Replace with language-specific doc skill, or delete |
 | writing-agents | Meta | Keep as-is |
 | writing-plans | Process | Keep as-is |
 | writing-skills | Meta | Keep as-is |
 
-**Agents (11 in template):**
+**Agents (8 in template):**
 
 | Agent | Category | Typical Decision |
 |-------|----------|-----------------|
-| bash-script-craftsman | Domain (bash) | Keep if project uses bash |
-| bats-test-validator | Domain (bash) | Keep if project uses bash |
-| bulletproof-frontend-developer | Domain (web) | Replace or delete based on project frontend needs |
+| backend-developer | Domain (template) | Copy to local/, customize for your backend stack |
+| frontend-developer | Domain (template) | Copy to local/, customize for your frontend stack; delete from local/ if no frontend |
+| e2e-test-developer | Domain (template) | Copy to local/, customize for your E2E stack; delete from local/ if no browser UI |
+| bash-script-craftsman | Domain (bash) | Keep as-is if project uses bash |
 | cc-orchestration-writer | Meta | Keep as-is |
-| code-reviewer | Process | Modify (update tech stack refs) |
-| code-simplifier | Domain (PHP) | Replace with language-specific version |
-| laravel-backend-developer | Domain (Laravel) | Replace with project-specific developer agent |
-| phpdoc-writer | Domain (PHP) | Replace or delete |
-| php-test-validator | Domain (PHP) | Replace with language-specific test validator |
-| playwright-test-developer | Domain (E2E) | Keep if keeping playwright-testing skill |
+| code-reviewer | Process | Copy to local/ and add tech-specific checklists |
+| project-manager-backlog | Process | Keep as-is |
 | spec-reviewer | Process | Keep as-is (tech-agnostic) |
 
 **Hooks:**
@@ -338,6 +365,9 @@ Route tasks to the correct agent/skill:
 | **Modify orchestration scripts** | Dispatch `cc-orchestration-writer` agent via Task tool |
 | **Modify hooks/settings** | Direct edit |
 | **Create new hooks** | `bash-script-craftsman` agent via Task tool |
+| **Apply customizations** | Run `.claude/scripts/apply-local.sh` after all modifications |
+
+**Note:** All modifications to stack-specific files should target `.claude/local/`, not the originals. The apply script copies them into place.
 
 **Platform configuration task:**
 Based on brainstorming answers, modify `.claude/config/platform.sh`:
@@ -358,22 +388,23 @@ After all modifications:
 4. **Skill description audit** — All skill descriptions match new project context
 5. **Agent coordination audit** — Deferral relationships between agents are consistent
 6. **Dry run** — Walk through a typical workflow (e.g., implement-issue) mentally to verify the pipeline makes sense
+7. **Local override check** — Verify all customized files exist in `.claude/local/` and `apply-local.sh` runs cleanly
 
 ## Common Adaptation Patterns
 
 ### Web to CLI/Library
 
-**Delete:** bulletproof-frontend, review-ui, ui-design-fundamentals, bulletproof-frontend-developer agent, all frontend prompts
+**Delete:** bulletproof-frontend, review-ui, ui-design-fundamentals, frontend-developer agent, all frontend prompts
 
-**Replace:** laravel-backend-developer → language-specific developer agent
+**Replace:** backend-developer → language-specific developer agent
 
-**Modify:** code-simplifier (change language), test validators (change framework)
+**Modify:** code-reviewer (add language-specific checklists), test validators (change framework)
 
 ### Laravel to Python/Django
 
-**Replace:** laravel-backend-developer → django-backend-developer, php-test-validator → pytest-validator, code-simplifier → python code simplifier, write-docblocks → python docstring writer
+**Replace:** backend-developer → django-backend-developer, e2e-test-developer → pytest-validator
 
-**Modify:** settings.json (Pint → Black/Ruff), post-pr-simplify.sh (PHP → Python)
+**Modify:** settings.json (formatter → Black/Ruff), code-reviewer (add Python-specific checklists)
 
 ### Monolith to Microservices
 

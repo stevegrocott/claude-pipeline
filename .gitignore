@@ -1,3 +1,7 @@
 # Orchestrator runtime artifacts
 logs/
 status.json
+
+# Local customizations (created by /adapting-claude-pipeline, never committed to pipeline repo)
+# These override the generic defaults when synced via apply-local.sh
+.claude/local/

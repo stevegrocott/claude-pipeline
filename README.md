@@ -56,6 +56,29 @@ claude
 
 The adaptation skill walks you through a brainstorming session about your project and customizes the pipeline for your tech stack, platform configuration, E2E testing, and MCP tool availability.
 
+## Syncing Upstream Changes
+
+Stack-specific files (agents, some skills, prompts) ship as **generic templates** in this repo. When you run `/adapting-claude-pipeline`, your customized versions are stored in `.claude/local/` (gitignored) and applied over the defaults.
+
+This means upstream pulls update the generic templates without touching your customizations. After pulling, re-apply your local overrides:
+
+```bash
+# Pull upstream pipeline changes
+git fetch pipeline main
+git format-patch pipeline/main --stdout | git apply --check  # dry run
+git format-patch pipeline/main --stdout | git apply           # apply
+
+# Re-apply your local customizations on top
+.claude/scripts/apply-local.sh
+
+# Optional: review what upstream changed in templates
+git diff HEAD~1 -- .claude/agents/ .claude/skills/ .claude/config/
+```
+
+**First time?** Run `/adapting-claude-pipeline` to create your `.claude/local/` customizations.
+
+**New upstream templates?** If upstream adds new stack-specific files, copy them to `.claude/local/` and customize — `apply-local.sh` will keep them applied.
+
 ## What's Inside
 
 - **26 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
