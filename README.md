@@ -1,4 +1,4 @@
-# Claude Pipeline (stevegrocott fork)
+# Claude Pipeline
 
 > Forked from [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline) — a portable `.claude/` folder for structured Claude Code development workflows.
 
@@ -19,10 +19,14 @@ Chains: understand → research codebase → evaluate approaches → plan → cr
 The issue body contains the full plan with a **parseable task list**:
 ```markdown
 ## Implementation Tasks
-- [ ] `[backend-developer]` Add migration for new column
-- [ ] `[backend-developer]` Update service with new logic
-- [ ] `[frontend-developer]` Add UI component
-- [ ] `[default]` Add test coverage
+- [ ] `[backend-developer]` **(S)** Add migration for new column. Scope: 1 file. Done when: migration runs.
+  - **Affected files:** `db/migrations/001_add_column.sql`
+- [ ] `[backend-developer]` **(M)** Update service with new logic. Scope: 2 files. Done when: unit tests pass.
+  - **Affected files:** `src/services/user.ts`, `src/services/user.test.ts`
+- [ ] `[frontend-developer]` **(S)** Add UI component. Scope: 2 files. Done when: component renders.
+  - **Affected files:** `src/components/Widget.tsx`, `src/components/Widget.test.tsx`
+- [ ] `[playwright-test-developer]` **(S)** Write E2E test for widget flow. Scope: 1 file. Done when: test passes.
+  - **Affected files:** `e2e/tests/widget.spec.ts`
 ```
 
 **Phase 2: Implementation (`/implement-issue`)**
@@ -31,17 +35,9 @@ The issue body contains the full plan with a **parseable task list**:
 ```
 Reads the issue body → extracts tasks → implements → tests → reviews → creates PR/MR.
 
-### No Git Worktrees
+### Feature Branches (No Worktrees for Orchestration)
 
-The upstream pipeline uses git worktrees for isolation. This fork uses **feature branches** in the current working directory instead, which is simpler and avoids merge conflicts from parallel worktree execution.
-
-### Simplified Orchestrator Stages
-
-| Upstream | This Fork |
-|----------|-----------|
-| setup (worktree) → research → evaluate → plan → implement | parse_issue → validate_plan → implement |
-
-The research, evaluation, and planning happen during Phase 1 (`/explore`). Phase 2 just reads the result.
+The upstream pipeline uses git worktrees for isolation. This fork uses **feature branches** in the current working directory for orchestration, which is simpler. Git worktrees are optionally used for **parallel task execution within a batch** — tasks with non-overlapping file sets run in separate worktrees simultaneously and merge back to the feature branch.
 
 ## Quick Start
 
@@ -58,17 +54,18 @@ claude
 > /adapting-claude-pipeline
 ```
 
-The adaptation skill walks you through a brainstorming session about your project and customizes the pipeline for your tech stack.
+The adaptation skill walks you through a brainstorming session about your project and customizes the pipeline for your tech stack, platform configuration, E2E testing, and MCP tool availability.
 
 ## What's Inside
 
-- **24 skills** including `/explore` discovery, Playwright E2E testing, and MCP tools reference
-- **11 specialized agents** (developers, reviewers, validators, Playwright test developer)
-- **10 platform wrapper scripts** for GitHub/GitLab/Jira abstraction
+- **26 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
+- **8 specialized agents** (backend/frontend developers, reviewers, validators, Playwright test developer, orchestration writer)
+- **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including format converters)
 - **2 hooks** for session initialization and post-PR simplification
 - **3 orchestration scripts** for batch issue processing and end-to-end implementation
-- **11 JSON schemas** for structured output
-- **Quality gates** at every level: spec compliance, code quality, test validation
+- **13 JSON schemas** for structured output at each pipeline stage
+- **22 BATS test files** across orchestrator and platform wrapper test suites
+- **Quality gates** at every stage: spec compliance, code quality, test validation, acceptance testing
 
 ## Architecture
 
@@ -82,9 +79,28 @@ Phase 1: Discovery
 
 Phase 2: Implementation
   /implement-issue N main
-    → parse issue → validate plan
-    → implement → test → review → PR/MR
+    → parse_issue → validate_plan → implement → quality_loop
+    → test_loop → e2e_verify → acceptance_test → deploy_verify
+    → docs → pr → pr_review → complete
 ```
+
+### Orchestrator Pipeline Stages
+
+The `implement-issue-orchestrator.sh` (4,800 lines) runs 11 stages per issue:
+
+| Stage | Model Tier | Description |
+|-------|-----------|-------------|
+| `parse_issue` | light (haiku) | Fetch issue body, extract tasks via fuzzy parser, compute batch assignments |
+| `validate_plan` | light (haiku) | Verify agent names exist, check file paths, warn on oversized tasks |
+| `implement` | standard (sonnet) | Execute tasks in dependency-aware batches (serial or parallel via worktrees) |
+| `quality_loop` | mixed | Iterative simplify → review → fix cycle (up to 3 iterations) |
+| `test_loop` | mixed | Smart test targeting with convergence detection (stops on repeated failures) |
+| `e2e_verify` | light (haiku) | Run E2E tests when `TEST_E2E_CMD` configured |
+| `acceptance_test` | light (haiku) | Validate against issue acceptance criteria |
+| `deploy_verify` | light (haiku) | Optional: health check + custom verification against deployed environment |
+| `docs` | light (haiku) | Auto-generate/update documentation if warranted |
+| `pr` | light (haiku) | Create PR/MR with structured description |
+| `pr_review` | standard (sonnet) | Iterative PR review cycle (up to 2 iterations) |
 
 ### Orchestration Hierarchy
 
@@ -92,21 +108,47 @@ Phase 2: Implementation
 handle-issues (skill) → batch-orchestrator.sh
                              |
                    implement-issue-orchestrator.sh (per issue)
-                      parse_issue → validate → implement → test → review → pr
+                      parse → validate → implement → quality → test
+                      → e2e → acceptance → deploy → docs → pr → review
                              |
                    process-pr (skill)
                       merge + follow-ups  OR  re-run implementation
 ```
 
+### Key Orchestrator Features
+
+- **Fuzzy task parsing** — handles missing backticks, asterisk bullets, leading whitespace, and missing square brackets with warnings
+- **Task batching** — tasks with non-overlapping file sets are grouped into parallel batches; tasks sharing files run sequentially
+- **Worktree parallelism** — parallel batches execute in isolated git worktrees and merge back
+- **Pipeline profiles** — classifies issues as minimal/standard/full based on task count and complexity
+- **Smart test targeting** — runs only tests related to changed files; detects convergence (repeated identical failures) and breaks loops
+- **Model escalation** — each stage has a fallback model one tier up (haiku→sonnet→opus) for resilience
+- **Metrics export** — tracks quality iterations, test iterations, PR review iterations, and escalations
+- **Resume support** — can resume from any stage after interruption
+
 ### Skill Categories
 
 | Category | Skills | Purpose |
 |----------|--------|---------|
-| **Discovery** | explore | Turn ideas into fully-planned issues |
+| **Discovery** | explore, investigating-codebase-for-user-stories | Turn ideas into fully-planned issues |
 | **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents | Enforce discipline and methodology |
 | **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans | Automate multi-step development workflows |
-| **Domain** | bulletproof-frontend, ui-design-fundamentals, write-docblocks, review-ui | Tech-stack-specific guidance |
-| **Meta** | using-skills, writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop | Maintain and extend the pipeline itself |
+| **Domain** | bulletproof-frontend, ui-design-fundamentals, write-docblocks, review-ui, playwright-testing | Tech-stack-specific guidance |
+| **Reference** | mcp-tools, using-skills | Tool selection and skill discovery |
+| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, resume-session | Maintain and extend the pipeline itself |
+| **Utility** | using-git-worktrees | Workspace isolation for feature work |
+
+### Model Configuration
+
+The pipeline uses a three-tier model abstraction (`model-config.sh`) that decouples stages from specific model names:
+
+| Tier | Model | Used For |
+|------|-------|----------|
+| **light** | haiku | Mechanical stages: parse, validate, test, simplify, PR creation, docs, complete |
+| **standard** | sonnet | Judgment stages: implement, review, fix, task-review, PR review |
+| **advanced** | opus | Deep reasoning: complex implementation (L-complexity tasks), unknown stages |
+
+Task complexity hints (`S`/`M`/`L`) from issue parsing override stage defaults — S and M use sonnet, L uses opus. Light-tier stages always use haiku regardless of complexity.
 
 ## Platform Configuration
 
@@ -118,6 +160,23 @@ The pipeline is platform-agnostic. All issue tracker and git host interactions g
 |---|---|---|---|
 | **Git hosting** | `gh` CLI | `glab` CLI | — |
 | **Issue tracking** | `gh` CLI | `glab` CLI | `acli` (Atlassian CLI) |
+
+**Platform wrapper scripts:**
+
+| Script | Purpose |
+|--------|---------|
+| `create-issue.sh` | Create issue/ticket, returns ID/key |
+| `read-issue.sh` | Read issue as normalised JSON `{title, body, status}` |
+| `comment-issue.sh` | Add comment to issue |
+| `transition-issue.sh` | Close (GitHub) or transition (Jira) |
+| `list-issues.sh` | List issues as JSON array, supports `--jql` for Jira |
+| `create-mr.sh` | Create PR/MR, returns number |
+| `read-mr-comments.sh` | Read PR/MR comments as JSON array |
+| `comment-mr.sh` | Add comment to PR/MR |
+| `merge-mr.sh` | Merge with configured strategy (squash/merge/rebase) |
+| `find-mr.sh` | Find open PR/MR by branch name |
+| `markdown-to-wiki.py` | Convert Markdown to Jira wiki format |
+| `adf-to-markdown.py` | Convert Atlassian Document Format to Markdown |
 
 **Configuration:** Run `/adapting-claude-pipeline` to set your platform during brainstorming, or edit `.claude/config/platform.sh` directly:
 
@@ -146,6 +205,7 @@ The orchestrator runs unit tests first, then E2E tests (fail fast):
 # In platform.sh
 TEST_UNIT_CMD="npm test"
 TEST_E2E_CMD="npx playwright test"
+TEST_E2E_BASE_URL="http://localhost:3000"
 ```
 
 ## MCP Tools
@@ -186,6 +246,8 @@ Issues are processed sequentially on feature branches. Each issue goes through t
 /brainstorming          # Before any creative work
 /systematic-debugging   # When you hit a bug
 /writing-plans          # Create an implementation plan
+/create-session-summary # Save context before /clear
+/resume-session         # Resume from a saved summary
 ```
 
 ## Task Format Specification
@@ -193,10 +255,18 @@ Issues are processed sequentially on feature branches. Each issue goes through t
 The orchestrator parses tasks from issue bodies using this convention:
 
 ```markdown
-- [ ] `[agent-name]` Task description
+- [ ] `[agent-name]` **(M)** Task description. Scope: 2 files. Done when: [criterion].
+  - **Affected files:** `path/to/file.ts`, `path/to/other.ts`
 ```
 
-**Parsing rule:** Regex `- \[[ x]\] ` `` `\[(.+?)\]` `` ` (.+)` extracts agent and description.
+**Required fields:**
+- **Agent name** in backtick-wrapped square brackets — routes to the correct `.claude/agents/*.md`
+- **Complexity hint** `(S)`, `(M)`, or `(L)` — controls model tier selection
+- **Scope constraint** `Scope: N files` — hard limit on files the agent should modify
+- **Done condition** `Done when: [criterion]` — explicit stopping condition
+- **Affected files** — exact file paths to read/modify, prevents broad exploration
+
+**Parsing:** The fuzzy parser handles common formatting variations (missing backticks, asterisk bullets, extra whitespace) and emits warnings on stderr. Regex: `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description.
 
 **Agent values** should match your `.claude/agents/` directory. The adaptation skill sets these up for your tech stack.
 
@@ -220,19 +290,21 @@ After resolving a bug or observing a recurring problem:
 ## Hooks
 
 - **Session Start** (`hooks/session-start.sh`): Injects `using-skills` into every conversation
-- **Post-PR Simplify** (`hooks/post-pr-simplify.sh`): Runs code-simplifier after PR creation
+- **Post-PR Simplify** (`hooks/post-pr-simplify.sh`): Runs code-simplifier after PR/MR creation (platform-agnostic)
 
 ## Testing
 
 ```bash
-# Orchestrator tests
+# Orchestrator tests (22 test files)
 cd .claude/scripts/implement-issue-test
 ./run-tests.sh
 
-# Platform wrapper tests
+# Platform wrapper tests (7 test files, 48 tests)
 cd .claude/scripts/platform-test
 ./run-tests.sh
 ```
+
+Test coverage includes: argument parsing, branch verification, comment helpers, constants, deploy verification, environment error detection, metrics export, fuzzy task parsing, helper functions, integration, JSON parsing, model config, pipeline profiles, PR review config, prompt file lists, quality loop, rate limiting, smart test targeting, stage runner, status functions, task batching, and verdict parsing.
 
 ## Philosophy
 
@@ -256,12 +328,14 @@ Over 99% of token usage is Claude **reading** context, not writing. These practi
 - **One conversation per task.** Long conversations compound cost — message #80 costs 2x more than message #5 because the entire history is re-read each turn.
 - **Be specific.** "Fix the bug in `src/auth.js` line 42" triggers far fewer tool calls than "fix the login bug". Specificity reduces exploratory reading.
 - **Start fresh when switching topics.** Paste a short summary in your first message instead of carrying forward hundreds of messages.
+- **Truncate build output.** Use `| tail -10` when running builds or test suites. Full build logs in context are re-read on every subsequent tool call.
 
 ### Model Selection
 
 - **Use `/model` to switch tiers.** Haiku handles simple tasks (run tests, format code, quick questions) at a fraction of Opus cost.
-- **The pipeline auto-selects models** via `model-config.sh`: haiku for mechanical stages (parse, test, simplify, PR creation), sonnet for reviews, opus for complex implementation.
-- **S-complexity tasks use haiku.** Small mechanical tasks don't need heavy reasoning.
+- **The pipeline auto-selects models** via `model-config.sh`: haiku for mechanical stages (parse, test, simplify, PR creation), sonnet for implementation and reviews, opus for complex L-sized tasks.
+- **S/M-complexity tasks use sonnet.** L-complexity tasks escalate to opus.
+- **Model escalation** provides resilience — each stage has a fallback model one tier up.
 
 ### CLAUDE.md Size
 
@@ -275,6 +349,7 @@ Your CLAUDE.md is re-read on every message in every conversation. Each line comp
 - **Agent definitions are loaded globally.** Keep `.claude/agents/*.md` files focused on role identity (under 40 lines). Technology checklists belong in `.claude/prompts/` — loaded once per stage, not every invocation.
 - **Light-tier stages cap at 5 turns** via `--max-turns` to prevent open-ended exploration.
 - **Parallel subagents** reduce wall-clock time and prevent context accumulation in a single session.
+- **Scope constraints in task descriptions** (`Scope: N files`, `Done when:`, `Affected files:`) prevent agents from over-exploring and bloating context.
 
 ## License
 
