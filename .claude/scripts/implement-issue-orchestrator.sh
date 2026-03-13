@@ -1552,7 +1552,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
 
         # Oscillation detection: check for A→B→A cycling pattern
         if [[ -f "$review_history_file" ]] && (( loop_iteration > 2 )); then
-            local oscillation_detected=false
+            local oscillation_detected
             oscillation_detected=$(jq '
                 length as $len |
                 if $len >= 3 then
@@ -1565,6 +1565,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             if [[ "$oscillation_detected" == "true" ]]; then
                 log_warn "Quality loop oscillation detected: issues cycling A→B→A. Exiting loop."
                 comment_issue "Quality Loop: Oscillation Detected ($stage_prefix)" "⚠️ Quality loop oscillation detected: fix suggestions are cycling (A→B→A pattern). Breaking loop to prevent waste." "code-reviewer"
+                DEGRADED_STAGES+=("quality:oscillation:$stage_prefix:iter=$loop_iteration")
                 loop_approved=true
                 break
             fi
@@ -3542,18 +3543,11 @@ $test_summary" "default"
 
             # Oscillation detection: check for A→B→A test failure cycling
             if (( test_iteration > 2 )); then
-                local sig_list oscillation_found=false
+                local sig_list
                 sig_list="${prior_failure_sigs## }"  # trim leading space
                 local -a sigs_arr=($sig_list)
                 local arr_len=${#sigs_arr[@]}
-                if (( arr_len >= 3 )); then
-                    # Compare current (last) with 2-ago
-                    if [[ "${sigs_arr[$((arr_len-1))]}" == "${sigs_arr[$((arr_len-3))]}" && "${sigs_arr[$((arr_len-1))]}" != "${sigs_arr[$((arr_len-2))]}" ]]; then
-                        oscillation_found=true
-                    fi
-                fi
-
-                if [[ "$oscillation_found" == "true" ]]; then
+                if (( arr_len >= 3 )) && [[ "${sigs_arr[$((arr_len-1))]}" == "${sigs_arr[$((arr_len-3))]}" && "${sigs_arr[$((arr_len-1))]}" != "${sigs_arr[$((arr_len-2))]}" ]]; then
                     local failure_summaries
                     failure_summaries=$(printf '%s' "$pr_failures" | jq -r '.[] | "- \(.title): \(.description)"' 2>/dev/null || printf '')
                     log_warn "Test-fix oscillation detected: failures cycling A→B→A. Breaking loop (soft exit)."
@@ -3564,6 +3558,7 @@ ${failure_summaries}
 
 $test_summary" "default"
                     set_final_state "test_oscillation_soft_exit"
+                    DEGRADED_STAGES+=("test:oscillation:iter=$test_iteration")
                     loop_complete=true
                     break
                 fi
