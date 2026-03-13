@@ -43,3 +43,10 @@ fi
 # Lint and format (set during /adapt)
 LINT_CMD="${LINT_CMD:-}"
 FORMAT_CMD="${FORMAT_CMD:-}"
+
+# Orchestrator iteration limits (override defaults from implement-issue-orchestrator.sh)
+MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
+MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
+MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
+MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
+MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"  # seconds (default 1 hour)

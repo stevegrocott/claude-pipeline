@@ -330,15 +330,16 @@ teardown() {
     func_def=$(declare -f run_quality_loop)
 
     [[ "$func_def" == *"max_iterations"* ]]
-    [[ "$func_def" == *"exit 2"* ]]
+    [[ "$func_def" == *"DEGRADED_STAGES"* ]]
 }
 
-@test "quality loop exits 2 on max iterations exceeded" {
+@test "quality loop soft-fails on max iterations exceeded" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
     [[ "$func_def" == *'set_final_state "max_iterations_quality"'* ]]
-    [[ "$func_def" == *"exit 2"* ]]
+    [[ "$func_def" == *"DEGRADED_STAGES"* ]]
+    [[ "$func_def" == *"break"* ]]
 }
 
 @test "quality loop has convergence detection" {
@@ -471,12 +472,13 @@ teardown() {
     [[ "$func_def" == *"MAX_TEST_ITERATIONS"* ]]
 }
 
-@test "test loop exits 2 on max iterations exceeded" {
+@test "test loop soft-fails on max iterations exceeded" {
     local func_def
     func_def=$(declare -f run_test_loop)
 
     [[ "$func_def" == *'set_final_state "max_iterations_test"'* ]]
-    [[ "$func_def" == *"exit 2"* ]]
+    [[ "$func_def" == *"DEGRADED_STAGES"* ]]
+    [[ "$func_def" == *"break"* ]]
 }
 
 @test "test loop validates test quality after tests pass" {
@@ -657,28 +659,31 @@ teardown() {
     [[ "$main_def" == *"Implementation Tasks"*"exit 1"* ]]
 }
 
-@test "orchestrator exits 2 on max quality iterations" {
+@test "orchestrator soft-fails on max quality iterations" {
     local func_def
     func_def=$(declare -f run_quality_loop)
 
     [[ "$func_def" == *'set_final_state "max_iterations_quality"'* ]]
-    [[ "$func_def" == *'set_final_state "max_iterations_quality"'*"exit 2"* ]]
+    [[ "$func_def" == *"DEGRADED_STAGES"* ]]
+    [[ "$func_def" == *"break"* ]]
 }
 
-@test "orchestrator exits 2 on max test iterations" {
+@test "orchestrator soft-fails on max test iterations" {
     local func_def
     func_def=$(declare -f run_test_loop)
 
     [[ "$func_def" == *'set_final_state "max_iterations_test"'* ]]
-    [[ "$func_def" == *'set_final_state "max_iterations_test"'*"exit 2"* ]]
+    [[ "$func_def" == *"DEGRADED_STAGES"* ]]
+    [[ "$func_def" == *"break"* ]]
 }
 
-@test "orchestrator exits 2 on max PR review iterations" {
+@test "orchestrator soft-fails on max PR review iterations" {
     local main_def
     main_def=$(declare -f main)
 
     [[ "$main_def" == *'set_final_state "max_iterations_pr_review"'* ]]
-    [[ "$main_def" == *'set_final_state "max_iterations_pr_review"'*"exit 2"* ]]
+    [[ "$main_def" == *"DEGRADED_STAGES"* ]]
+    [[ "$main_def" == *"break"* ]]
 }
 
 # =============================================================================

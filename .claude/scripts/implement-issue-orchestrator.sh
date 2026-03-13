@@ -25,12 +25,14 @@ source "$SCRIPT_DIR/../config/platform.sh"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
 # Timeouts and limits
-readonly MAX_QUALITY_ITERATIONS=5
-readonly MAX_TEST_ITERATIONS=7
-# Cap at 2: merged spec+code review per iteration makes each pass thorough
-# enough that a 3rd iteration rarely finds new issues, while saving ~15 min.
-readonly MAX_PR_REVIEW_ITERATIONS=2
-readonly MAX_VALIDATION_FIX_ITERATIONS=2
+# These can be overridden by platform.sh (sourced above) or env vars
+MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
+MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
+MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
+MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
+MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"
+ORCHESTRATOR_START_EPOCH=$(date +%s)
+declare -a DEGRADED_STAGES=()
 readonly RATE_LIMIT_BUFFER=60
 readonly RATE_LIMIT_DEFAULT_WAIT=3600
 
@@ -76,6 +78,21 @@ get_stage_timeout() {
         implement*|fix*) printf '%s' 1800 ;;
         *)               printf '%s' 1800 ;;
     esac
+}
+
+# =============================================================================
+# GLOBAL WALL-CLOCK TIMEOUT
+# =============================================================================
+
+check_wall_timeout() {
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$(( now - ORCHESTRATOR_START_EPOCH ))
+    if (( elapsed > MAX_ORCHESTRATOR_WALL_TIME )); then
+        log_warn "Global wall-clock timeout: ${elapsed}s elapsed (limit: ${MAX_ORCHESTRATOR_WALL_TIME}s). Soft-exiting current loop."
+        return 1
+    fi
+    return 0
 }
 
 # =============================================================================
@@ -1318,7 +1335,7 @@ for m in re.finditer(r'\[\s*\{', t):
 #   $6 - complexity hint for model selection (S/M/L, optional)
 # Returns:
 #   0 on success (approved)
-#   2 on max iterations exceeded (calls exit 2)
+#   0 on max iterations exceeded (soft-fail, adds to DEGRADED_STAGES)
 run_quality_loop() {
     local loop_dir="$1"
     local loop_branch="$2"
@@ -1335,10 +1352,20 @@ run_quality_loop() {
         loop_iteration=$((loop_iteration + 1))
         increment_quality_iteration  # Global counter for status tracking
 
+        if ! check_wall_timeout; then
+            log_warn "Wall-clock timeout in quality loop at iteration $loop_iteration"
+            set_final_state "wall_timeout_quality"
+            DEGRADED_STAGES+=("quality:wall_timeout:iter=$loop_iteration")
+            loop_approved=true
+            break
+        fi
+
         if (( loop_iteration > max_iterations )); then
-            log_error "Quality loop for $stage_prefix exceeded max iterations ($max_iterations)"
+            log_warn "Quality loop for $stage_prefix exceeded max iterations ($max_iterations). Soft-failing and continuing."
             set_final_state "max_iterations_quality"
-            exit 2
+            DEGRADED_STAGES+=("quality:max_iterations:$stage_prefix:iter=$loop_iteration")
+            loop_approved=true
+            break
         fi
 
         log "Quality loop iteration $loop_iteration/$max_iterations (prefix: $stage_prefix)"
@@ -1518,6 +1545,26 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
                 fi
 
                 comment_issue "Quality Loop: Convergence Failure ($stage_prefix)" "$convergence_body" "code-reviewer"
+                loop_approved=true
+                break
+            fi
+        fi
+
+        # Oscillation detection: check for A→B→A cycling pattern
+        if [[ -f "$review_history_file" ]] && (( loop_iteration > 2 )); then
+            local oscillation_detected=false
+            oscillation_detected=$(jq '
+                length as $len |
+                if $len >= 3 then
+                    (.[$len-1] | [.issues[]?.description] | sort) as $current |
+                    (.[$len-3] | [.issues[]?.description] | sort) as $two_ago |
+                    if $current == $two_ago then true else false end
+                else false end
+            ' "$review_history_file" 2>/dev/null || echo false)
+
+            if [[ "$oscillation_detected" == "true" ]]; then
+                log_warn "Quality loop oscillation detected: issues cycling A→B→A. Exiting loop."
+                comment_issue "Quality Loop: Oscillation Detected ($stage_prefix)" "⚠️ Quality loop oscillation detected: fix suggestions are cycling (A→B→A pattern). Breaking loop to prevent waste." "code-reviewer"
                 loop_approved=true
                 break
             fi
@@ -3134,7 +3181,7 @@ all_failures_environment_related() {
 # Returns:
 #   0 on success (tests pass and validated)
 #   0 on convergence soft exit (loop_complete=true, pipeline continues)
-#   2 on max iterations exceeded (calls exit 2)
+#   0 on max iterations exceeded (soft-fail, adds to DEGRADED_STAGES)
 run_test_loop() {
     local loop_dir="$1"
     local loop_branch="$2"
@@ -3258,10 +3305,20 @@ run_test_loop() {
         test_iteration=$((test_iteration + 1))
         increment_test_iteration  # Track iteration in status file
 
+        if ! check_wall_timeout; then
+            log_warn "Wall-clock timeout in test loop at iteration $test_iteration"
+            set_final_state "wall_timeout_test"
+            DEGRADED_STAGES+=("test:wall_timeout:iter=$test_iteration")
+            loop_complete=true
+            break
+        fi
+
         if (( test_iteration > max_test_iter )); then
-            log_error "Test loop exceeded max iterations ($max_test_iter)"
+            log_warn "Test loop exceeded max iterations ($max_test_iter). Soft-failing and continuing."
             set_final_state "max_iterations_test"
-            exit 2
+            DEGRADED_STAGES+=("test:max_iterations:iter=$test_iteration")
+            loop_complete=true
+            break
         fi
 
         log "Test loop iteration $test_iteration/$max_test_iter (scope: $change_scope)"
@@ -3483,6 +3540,35 @@ $test_summary" "default"
                 break
             fi
 
+            # Oscillation detection: check for A→B→A test failure cycling
+            if (( test_iteration > 2 )); then
+                local sig_list oscillation_found=false
+                sig_list="${prior_failure_sigs## }"  # trim leading space
+                local -a sigs_arr=($sig_list)
+                local arr_len=${#sigs_arr[@]}
+                if (( arr_len >= 3 )); then
+                    # Compare current (last) with 2-ago
+                    if [[ "${sigs_arr[$((arr_len-1))]}" == "${sigs_arr[$((arr_len-3))]}" && "${sigs_arr[$((arr_len-1))]}" != "${sigs_arr[$((arr_len-2))]}" ]]; then
+                        oscillation_found=true
+                    fi
+                fi
+
+                if [[ "$oscillation_found" == "true" ]]; then
+                    local failure_summaries
+                    failure_summaries=$(printf '%s' "$pr_failures" | jq -r '.[] | "- \(.title): \(.description)"' 2>/dev/null || printf '')
+                    log_warn "Test-fix oscillation detected: failures cycling A→B→A. Breaking loop (soft exit)."
+                    comment_issue "Test Loop: Oscillation Detected (soft exit)" "⚠️ Test failures oscillating (A→B→A pattern). Breaking test-fix loop.
+
+**Current Failures:**
+${failure_summaries}
+
+$test_summary" "default"
+                    set_final_state "test_oscillation_soft_exit"
+                    loop_complete=true
+                    break
+                fi
+            fi
+
             local fix_prompt="ENVIRONMENT NOTE: If failures mention Redis/database connection errors, HTTP 500 from route handlers, or similar infrastructure issues, these are environment issues not code bugs. Do NOT attempt to fix these — note them as environment-dependent and focus only on code-level failures.
 
 Fix ONLY the specific test failures listed below. Do NOT rewrite test files, introduce new dependencies, or modify pre-existing test code. Only fix the failing assertions.
@@ -3524,9 +3610,11 @@ $test_summary" "default"
             validation_fix_iteration=$((validation_fix_iteration + 1))
 
             if (( validation_fix_iteration > MAX_VALIDATION_FIX_ITERATIONS )); then
-                log_error "Validation fix loop exceeded max iterations ($MAX_VALIDATION_FIX_ITERATIONS)"
+                log_warn "Validation fix loop exceeded max iterations ($MAX_VALIDATION_FIX_ITERATIONS). Soft-failing and continuing."
                 set_final_state "max_iterations_validation_fix"
-                exit 2
+                DEGRADED_STAGES+=("validation_fix:max_iterations:iter=$validation_fix_iteration")
+                loop_complete=true
+                break
             fi
 
             comment_issue "Test Loop: Results ($test_iteration/$max_test_iter)" "✅ **Tests:** passed
@@ -4808,10 +4896,20 @@ The command will output the MR number. Use that as pr_number in your response."
         local pr_iteration
         pr_iteration=$(jq -r '.pr_review_iterations' "$STATUS_FILE")
 
+        if ! check_wall_timeout; then
+            log_warn "Wall-clock timeout in PR review loop at iteration $pr_iteration"
+            set_final_state "wall_timeout_pr_review"
+            DEGRADED_STAGES+=("pr_review:wall_timeout")
+            pr_approved=true
+            break
+        fi
+
         if (( pr_iteration > pr_review_max_iter )); then
-            log_error "PR review loop exceeded max iterations ($pr_review_max_iter)"
+            log_warn "PR review loop exceeded max iterations ($pr_review_max_iter). Soft-failing and continuing."
             set_final_state "max_iterations_pr_review"
-            exit 2
+            DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
+            pr_approved=true
+            break
         fi
 
         log "PR review iteration $pr_iteration"
@@ -4955,8 +5053,24 @@ Output a summary suitable for a PR/MR comment."
         local complete_summary
         complete_summary=$(printf '%s' "$complete_result" | jq -r '.summary // "Implementation completed successfully"')
 
+        # Add degradation warning to completion comment if any stages soft-failed
+        local degraded_warning=""
+        if (( ${#DEGRADED_STAGES[@]} > 0 )); then
+            degraded_warning="⚠️ **Quality Warning:** The following stages hit their iteration limits and were soft-failed:
+"
+            for ds in "${DEGRADED_STAGES[@]}"; do
+                degraded_warning+="- \`$ds\`
+"
+            done
+            degraded_warning+="
+Manual review of these areas is recommended.
+
+---
+"
+        fi
+
         # Comment #14: Implementation complete
-        comment_pr "$pr_number" "Implementation Complete" "Issue #$ISSUE_NUMBER has been implemented!
+        comment_pr "$pr_number" "Implementation Complete" "${degraded_warning}Issue #$ISSUE_NUMBER has been implemented!
 
 **Branch:** \`$branch\`
 **PR:** #$pr_number
@@ -4968,6 +5082,13 @@ $complete_summary
 
         set_stage_completed "complete"
         set_final_state "completed"
+    fi
+
+    # Record degraded stages in status.json
+    if (( ${#DEGRADED_STAGES[@]} > 0 )); then
+        local degraded_json
+        degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]}" | jq -R . | jq -s .)
+        jq --argjson degraded "$degraded_json" '.degraded_stages = $degraded' "$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
     fi
 
     # Copy final status to log dir

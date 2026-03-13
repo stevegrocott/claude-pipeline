@@ -121,22 +121,22 @@ teardown() {
     [ "$MAX_TEST_ITERATIONS" -eq 7 ]
 }
 
-@test "MAX_TEST_ITERATIONS is declared readonly" {
+@test "MAX_TEST_ITERATIONS is configurable with default 7" {
     local script_content
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
-    [[ "$script_content" == *"readonly MAX_TEST_ITERATIONS=7"* ]]
+    [[ "$script_content" == *'MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"'* ]]
 }
 
 @test "MAX_VALIDATION_FIX_ITERATIONS is 2" {
     [ "$MAX_VALIDATION_FIX_ITERATIONS" -eq 2 ]
 }
 
-@test "MAX_VALIDATION_FIX_ITERATIONS is declared readonly" {
+@test "MAX_VALIDATION_FIX_ITERATIONS is configurable with default 2" {
     local script_content
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
-    [[ "$script_content" == *"readonly MAX_VALIDATION_FIX_ITERATIONS=2"* ]]
+    [[ "$script_content" == *'MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"'* ]]
 }
 
 @test "run_test_loop initialises validation_fix_iteration counter separately from test_iteration" {
@@ -217,14 +217,16 @@ teardown() {
 # READONLY DECLARATIONS
 # =============================================================================
 
-@test "timeout constants are readonly" {
+@test "iteration limits are configurable (not readonly) and rate-limit constants are readonly" {
     local script_content
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
-    [[ "$script_content" == *"readonly MAX_QUALITY_ITERATIONS"* ]]
-    [[ "$script_content" == *"readonly MAX_PR_REVIEW_ITERATIONS"* ]]
-    [[ "$script_content" == *"readonly MAX_TEST_ITERATIONS"* ]]
-    [[ "$script_content" == *"readonly MAX_VALIDATION_FIX_ITERATIONS"* ]]
+    # Iteration limits should NOT be readonly (configurable via platform.sh)
+    [[ "$script_content" != *"readonly MAX_QUALITY_ITERATIONS"* ]]
+    [[ "$script_content" != *"readonly MAX_PR_REVIEW_ITERATIONS"* ]]
+    [[ "$script_content" != *"readonly MAX_TEST_ITERATIONS"* ]]
+    [[ "$script_content" != *"readonly MAX_VALIDATION_FIX_ITERATIONS"* ]]
+    # Rate-limit constants should still be readonly
     [[ "$script_content" == *"readonly RATE_LIMIT_BUFFER"* ]]
     [[ "$script_content" == *"readonly RATE_LIMIT_DEFAULT_WAIT"* ]]
 }
@@ -238,16 +240,18 @@ teardown() {
     [ "$status" -eq 3 ]
 }
 
-@test "script uses documented exit codes" {
+@test "script uses documented exit codes with soft-fail for max iterations" {
     local script_content
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
     # Verify script uses the documented exit codes:
-    # 0 = success, 1 = error, 2 = max iterations, 3 = usage
+    # 0 = success, 1 = error, 3 = usage
+    # Max iterations uses soft-fail (DEGRADED_STAGES + break) instead of exit 2
     [[ "$script_content" == *"exit 0"* ]]
     [[ "$script_content" == *"exit 1"* ]]
-    [[ "$script_content" == *"exit 2"* ]]
+    [[ "$script_content" != *"exit 2"* ]]
     [[ "$script_content" == *"exit 3"* ]]
+    [[ "$script_content" == *"DEGRADED_STAGES"* ]]
 }
 
 # =============================================================================

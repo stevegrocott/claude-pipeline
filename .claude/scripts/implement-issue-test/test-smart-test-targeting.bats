@@ -1387,8 +1387,8 @@ teardown() {
     export -f comment_issue
 
     # Pass complexity "L" as arg 5 to run_test_loop.
-    # Convergence now uses soft exit (loop_complete=true) instead of exit 2,
-    # but we still run in a subshell for max-iterations safety.
+    # Max iterations uses soft-fail (DEGRADED_STAGES + break), but we still
+    # run in a subshell for isolation.
     # The fix-tests stage runs before convergence triggers, so the complexity file is written.
     ( run_test_loop "$TEST_TMP/repo" "feature-fix-tests-complexity" "" "typescript" "L" ) || true
 
@@ -1431,7 +1431,7 @@ teardown() {
     export -f comment_issue
 
     # Pass complexity "M" as arg 5 to run_test_loop.
-    # Run in a subshell for max-iterations safety (still hard exit 2).
+    # Run in a subshell for isolation (max iterations uses soft-fail via DEGRADED_STAGES).
     ( run_test_loop "$TEST_TMP/repo" "feature-fix-test-quality-complexity" "" "typescript" "M" ) || true
 
     [[ -f "$complexity_file" ]] || fail "fix-test-quality stage was not called"

@@ -299,11 +299,18 @@ source_orchestrator_functions() {
 # Extracted functions for testing - DO NOT RUN DIRECTLY
 HEADER
 
-    # Use awk to extract only function definitions and readonly constants
+    # Use awk to extract only function definitions, constants, and config vars
     # This skips argument parsing and immediate execution code
     awk '
         # Extract readonly constant declarations
         /^readonly [A-Z_]+=/ { print; next }
+
+        # Extract configurable limit declarations (MAX_* and ORCHESTRATOR_START_EPOCH)
+        /^MAX_[A-Z_]+=/ { print; next }
+        /^ORCHESTRATOR_START_EPOCH=/ { print; next }
+
+        # Extract array declarations (DEGRADED_STAGES)
+        /^declare -a [A-Z_]+=/ { print; next }
 
         # Skip the argument parsing section entirely
         /^while \[\[.*\$#.*\]\]; do$/,/^done$/ { next }

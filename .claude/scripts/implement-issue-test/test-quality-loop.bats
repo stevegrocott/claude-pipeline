@@ -186,8 +186,9 @@ teardown() {
     # Check that function sets max_iterations state
     [[ "$func_def" == *"max_iterations_quality"* ]]
 
-    # Check that function exits with code 2
-    [[ "$func_def" == *"exit 2"* ]]
+    # Check that function uses soft-fail (DEGRADED_STAGES + break) instead of exit 2
+    [[ "$func_def" == *"DEGRADED_STAGES"* ]]
+    [[ "$func_def" == *"break"* ]]
 }
 
 # =============================================================================
@@ -324,10 +325,10 @@ teardown() {
     [ "$fix_count" -ge 1 ] || fail "Fix stage should have been called after changes_requested"
 }
 
-@test "quality loop has exit 2 for max iterations" {
+@test "quality loop soft-fails on max iterations via DEGRADED_STAGES" {
     # MAX_QUALITY_ITERATIONS is readonly, so we test the structure instead
-    # of behavioral execution. The function must exit with code 2 when
-    # max iterations is reached.
+    # of behavioral execution. The function uses soft-fail (DEGRADED_STAGES
+    # + break) when max iterations is reached.
     local func_def
     func_def=$(declare -f run_quality_loop)
 
@@ -337,8 +338,9 @@ teardown() {
     # Verify the function sets the max_iterations_quality state
     [[ "$func_def" == *"max_iterations_quality"* ]]
 
-    # Verify the function exits with code 2
-    [[ "$func_def" == *"exit 2"* ]]
+    # Verify the function uses soft-fail pattern instead of exit 2
+    [[ "$func_def" == *"DEGRADED_STAGES"* ]]
+    [[ "$func_def" == *"break"* ]]
 }
 
 @test "quality loop increments iteration on each retry" {
@@ -1584,8 +1586,8 @@ HIST_EOF
     export -f comment_issue
 
     # Pass complexity "M" as arg 6 to run_quality_loop.
-    # Run in a subshell so exit 2 (max iterations exceeded) does not kill the test.
-    # The fix-review stage runs before the exit, so the complexity file is written.
+    # Run in a subshell for isolation. Max iterations uses soft-fail
+    # (DEGRADED_STAGES + break) so the complexity file is written.
     ( run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "M" ) || true
 
     [[ -f "$complexity_file" ]] || fail "fix-review stage was not called"
