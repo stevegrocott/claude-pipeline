@@ -2338,7 +2338,7 @@ compute_task_batches() {
 #
 # Clean up stale worktree branches from previous failed runs.
 #
-# Prunes broken worktree refs and deletes any wt-task-*
+# Prunes broken worktree refs and deletes any wt-i*
 # branches that no longer have active worktrees.
 #
 # Arguments:
@@ -2363,7 +2363,7 @@ cleanup_stale_worktrees() {
 		fi
 	done < <(git worktree list 2>/dev/null)
 
-	# Delete wt-task-* branches without active worktrees
+	# Delete wt-i* branches without active worktrees
 	local branch_name
 	while IFS= read -r branch_name; do
 		[[ -z "$branch_name" ]] && continue
@@ -2382,7 +2382,7 @@ cleanup_stale_worktrees() {
 					log "  $line"
 				done
 		fi
-	done < <(git branch --list 'wt-task-*' \
+	done < <(git branch --list 'wt-i*' \
 		--format='%(refname:short)' 2>/dev/null)
 }
 
@@ -2390,6 +2390,7 @@ cleanup_stale_worktrees() {
 #   $1 - worktree base directory
 #   $2 - feature branch name (source commit)
 #   $3 - task ID
+#   $4 - issue number
 # Outputs:
 #   Worktree path on stdout
 #
@@ -2397,8 +2398,9 @@ create_task_worktree() {
 	local wt_base="$1"
 	local feature_branch="$2"
 	local task_id="$3"
+	local issue_num="$4"
 
-	local wt_branch="wt-task-${task_id}"
+	local wt_branch="wt-i${issue_num}-t${task_id}"
 	local wt_path="${wt_base}/task-${task_id}"
 
 	mkdir -p "$wt_base"
@@ -2819,13 +2821,13 @@ execute_batch_parallel() {
 		tagent=$(printf '%s' "$task" | jq -r '.agent')
 		tsize=$(extract_task_size "$tdesc")
 
-		local wt_branch="wt-task-${tid}"
+		local wt_branch="wt-i${ISSUE_NUMBER}-t${tid}"
 		local result_file
 		result_file="${LOG_BASE}/stages/task-${tid}-worktree.log"
 
 		local wt_path
 		wt_path=$(create_task_worktree \
-			"$wt_base" "$feature_branch" "$tid")
+			"$wt_base" "$feature_branch" "$tid" "$ISSUE_NUMBER")
 
 		if [[ -z "$wt_path" ]]; then
 			log_error "Could not create worktree" \
