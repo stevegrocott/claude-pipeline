@@ -223,29 +223,6 @@ if [[ -n "$BASE_BRANCH" ]] && ! [[ "$BASE_BRANCH" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
 fi
 
 # =============================================================================
-# CANONICALIZE RELATIVE PATHS TO ABSOLUTE
-# =============================================================================
-#
-# File paths from defaults or user arguments may be relative.  Convert them
-# to absolute early so the script works correctly regardless of later cwd
-# changes (e.g. cd into a worktree).
-#
-
-to_absolute_path() {
-    local path="$1"
-    if [[ "$path" != /* ]]; then
-        printf '%s' "$PWD/$path"
-    else
-        printf '%s' "$path"
-    fi
-}
-
-STATUS_FILE="$(to_absolute_path "$STATUS_FILE")"
-if [[ -n "$RESUME_LOG_DIR" ]]; then
-    RESUME_LOG_DIR="$(to_absolute_path "$RESUME_LOG_DIR")"
-fi
-
-# =============================================================================
 # LOGGING FUNCTIONS (defined early so other functions can use log/log_error)
 # Note: LOG_FILE and mkdir happen later after LOG_BASE is set
 # =============================================================================
@@ -514,7 +491,9 @@ write_task_summary_to_status() {
     local summary
     summary=$(compute_task_summary) || return 0
 
-    jq --argjson summary "$summary"        '.task_summary = $summary'        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    jq --argjson summary "$summary" \
+       '.task_summary = $summary' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
 
 # =============================================================================
@@ -677,6 +656,8 @@ load_resume_state() {
     fi
     BRANCH=$(jq -r '.branch' "$status_path")
     LOG_BASE=$(jq -r '.log_dir' "$status_path")
+    # Ensure absolute path (worktree subshells cd away from project root)
+    [[ "$LOG_BASE" != /* ]] && LOG_BASE="$(pwd)/$LOG_BASE"
 
     RESUME_STAGE=$(jq -r '.current_stage' "$status_path")
     RESUME_TASK=$(jq -r '.current_task // 0' "$status_path")
@@ -763,14 +744,8 @@ elif [[ "$RESUME_MODE" == "status" ]]; then
 
 else
     # Normal mode - set LOG_BASE
-    LOG_BASE="logs/implement-issue/issue-${ISSUE_NUMBER}-$(date +%Y%m%d-%H%M%S)"
+    LOG_BASE="$(pwd)/logs/implement-issue/issue-${ISSUE_NUMBER}-$(date +%Y%m%d-%H%M%S)"
 fi
-
-# Canonicalize LOG_BASE and STATUS_FILE after all code paths have set them.
-# STATUS_FILE may have been overridden in the logdir resume path (e.g. to a
-# relative fallback "status.json"), so re-canonicalize here.
-LOG_BASE="$(to_absolute_path "$LOG_BASE")"
-STATUS_FILE="$(to_absolute_path "$STATUS_FILE")"
 
 # Display mode info
 if [[ -n "$RESUME_MODE" ]]; then
@@ -3462,9 +3437,24 @@ run_test_loop() {
     # Build E2E command when configured and scope includes frontend,
     # OR when Playwright specs were found in the changed files
     local e2e_command=""
+    local e2e_rebuild_note=""
     if [[ -n "${TEST_E2E_CMD:-}" ]] && { [[ "$change_scope" == "frontend" || "$change_scope" == "ts-frontend" ]] || [[ -n "$playwright_test_files" ]]; }; then
-        e2e_command="$TEST_E2E_CMD"
-        log "E2E testing enabled for $change_scope scope: $e2e_command"
+        # Rebuild containers so E2E tests run against fresh code
+        log "Rebuilding containers before E2E tests in test loop..."
+        local rebuild_json=""
+        if rebuild_json=$(rebuild_and_health_check \
+            "${TEST_E2E_BASE_URL:-http://localhost:30004}" 120); then
+            e2e_command="$TEST_E2E_CMD"
+            e2e_rebuild_note="Container rebuild: success. "
+            log "E2E testing enabled for $change_scope scope: $e2e_command"
+        else
+            local rb_health
+            rb_health=$(printf '%s' "$rebuild_json" \
+                | jq -r '.health // "unknown"')
+            log_warn "Container rebuild/health failed (health: $rb_health)" \
+                "— skipping E2E in test loop"
+            e2e_rebuild_note="Container rebuild failed (health: $rb_health). E2E skipped. "
+        fi
     elif [[ -n "$playwright_test_files" && -z "${TEST_E2E_CMD:-}" ]]; then
         log "WARNING: Playwright specs found but TEST_E2E_CMD not configured — Playwright specs will be skipped"
     fi
@@ -3565,7 +3555,7 @@ No changed files detected vs $BASE_BRANCH. Set validation_result to 'skipped'."
             e2e_section="STEP 1b — E2E TEST EXECUTION (only if unit tests passed in Step 1)
 If tests failed in Step 1, skip this step entirely.
 
-Run the E2E test suite:
+${e2e_rebuild_note}Run the E2E test suite:
 $e2e_command
 
 Report pass/fail. E2E failures count as overall test failure (set result to 'failed').
@@ -3824,6 +3814,79 @@ Output a summary of fixes applied."
 }
 
 # =============================================================================
+# DOCKER REBUILD + HEALTH CHECK HELPER
+#
+# Rebuilds frontend/backend containers and polls health endpoint.
+# Reusable by e2e_verify, acceptance_test, and test_loop stages.
+#
+# Arguments:
+#   $1 - base_url      (e.g., http://localhost:30004)
+#   $2 - timeout_secs  (default 120)
+#
+# Returns: 0 on success, 1 on failure
+# Outputs: JSON status object to stdout
+# =============================================================================
+
+rebuild_and_health_check() {
+	local base_url="${1:-http://localhost:30004}"
+	local timeout_secs="${2:-120}"
+	local start_ts
+	start_ts=$(date +%s)
+
+	local rebuild_status="success"
+	local health_status="healthy"
+
+	# Step 1: Rebuild containers
+	log "Rebuilding frontend + backend containers (--no-cache)..."
+	if ! docker-compose build --no-cache frontend backend 2>&1 \
+		| tail -5; then
+		log_error "Container rebuild failed"
+		rebuild_status="failed"
+		local elapsed=$(( $(date +%s) - start_ts ))
+		printf '{"rebuild":"%s","health":"skipped","elapsed_secs":%d}' \
+			"$rebuild_status" "$elapsed"
+		return 1
+	fi
+
+	# Step 2: Start containers
+	log "Starting containers..."
+	if ! docker-compose up -d frontend backend 2>&1; then
+		log_error "Container start failed"
+		rebuild_status="failed"
+		local elapsed=$(( $(date +%s) - start_ts ))
+		printf '{"rebuild":"%s","health":"skipped","elapsed_secs":%d}' \
+			"$rebuild_status" "$elapsed"
+		return 1
+	fi
+
+	# Step 3: Poll health endpoint
+	local health_url="${base_url}/health"
+	local deadline=$(( $(date +%s) + timeout_secs ))
+	log "Polling health endpoint: $health_url (timeout: ${timeout_secs}s)..."
+
+	while true; do
+		if curl -sf "$health_url" >/dev/null 2>&1; then
+			local elapsed=$(( $(date +%s) - start_ts ))
+			log "Health check passed in ${elapsed}s"
+			printf '{"rebuild":"%s","health":"healthy","elapsed_secs":%d}' \
+				"$rebuild_status" "$elapsed"
+			return 0
+		fi
+
+		if (( $(date +%s) >= deadline )); then
+			local elapsed=$(( $(date +%s) - start_ts ))
+			log_error \
+				"Health check timed out after ${timeout_secs}s"
+			printf '{"rebuild":"%s","health":"timeout","elapsed_secs":%d}' \
+				"$rebuild_status" "$elapsed"
+			return 1
+		fi
+
+		sleep 5
+	done
+}
+
+# =============================================================================
 # PARALLEL POST-TASK STAGES
 #
 # Runs e2e-verify and acceptance-test concurrently using bash & + wait.
@@ -3912,20 +3975,58 @@ run_parallel_post_task_stages() {
 		e2e_start=$(date +%s)
 		log "Running E2E verification for frontend changes (parallel)..."
 		(
+			# Step 1: Rebuild containers and wait for health
+			local rebuild_json rebuild_rc
+			rebuild_json=$(rebuild_and_health_check \
+				"${TEST_E2E_BASE_URL:-http://localhost:30004}" 120) \
+				|| true
+			rebuild_rc=$?
+			local rebuild_status health_status
+			rebuild_status=$(printf '%s' "$rebuild_json" \
+				| jq -r '.rebuild // "skipped"')
+			health_status=$(printf '%s' "$rebuild_json" \
+				| jq -r '.health // "skipped"')
+
+			if ((rebuild_rc != 0)); then
+				log_error "Container rebuild/health failed — skipping E2E"
+				comment_issue "E2E Verification: Skipped" \
+					"⚠️ Container rebuild or health check failed. \
+Rebuild: $rebuild_status, Health: $health_status. \
+E2E tests skipped." "playwright-test-developer"
+				exit 1
+			fi
+
+			# Step 2: Build targeted test command
+			local e2e_cmd="$TEST_E2E_CMD"
+			local pw_specs=""
+			pw_specs=$(git diff "$BASE_BRANCH"...HEAD --name-only \
+				-- 'tests/e2e/*.spec.*' 2>/dev/null || true)
+			if [[ -n "$pw_specs" ]]; then
+				e2e_cmd="$TEST_E2E_CMD -- $pw_specs"
+				log "Targeted E2E: running changed spec files only"
+			fi
+
+			# Step 3: Run E2E tests
 			local e2e_verify_prompt
 			e2e_verify_prompt="Run E2E tests to verify the frontend \
 changes for issue #$ISSUE_NUMBER.
 
-TEST COMMAND:
-$TEST_E2E_CMD
+CONTAINER STATUS:
+Rebuild: $rebuild_status | Health: $health_status
 
-BASE URL: ${TEST_E2E_BASE_URL:-http://localhost:5173}
+TEST COMMAND:
+$e2e_cmd
+
+BASE URL: ${TEST_E2E_BASE_URL:-http://localhost:30004}
+
+SCREENSHOT DIRECTORY: test-results/
 
 INSTRUCTIONS:
 1. Run the E2E test suite using the command above
 2. If tests fail, report the failures with details about what \
 visual/behavioral issues were found
-3. Focus on verifying user-visible behavior: layout, interactions, \
+3. Include screenshot paths from test-results/ in your report
+4. Focus on verifying user-visible behavior: layout, interactions, \
 navigation, visual regressions
 
 Report result as 'passed' or 'failed' with a detailed summary."
@@ -3933,7 +4034,7 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			local e2e_verify_result
 			e2e_verify_result=$(run_stage "e2e-verify" \
 				"$e2e_verify_prompt" \
-				"implement-issue-test.json" \
+				"implement-issue-e2e-validate.json" \
 				"playwright-test-developer")
 
 			local e2e_verify_status e2e_verify_summary
@@ -3947,6 +4048,7 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				&& e2e_icon="❌"
 			comment_issue "E2E Verification" \
 				"$e2e_icon **Result:** $e2e_verify_status
+Container rebuild: $rebuild_status | Health: $health_status
 
 $e2e_verify_summary" "playwright-test-developer"
 
@@ -4087,36 +4189,119 @@ $acceptance_summary" "default"
 	if [[ -s "$e2e_fail_file" ]]; then
 		local e2e_fail_summary
 		e2e_fail_summary=$(<"$e2e_fail_file")
-		log_error \
-			"E2E verification failed" \
-			"— dispatching implementation agent to fix"
+		local max_e2e_fixes="${MAX_E2E_FIX_ITERATIONS:-2}"
+		local e2e_fix_iter=0
+		local e2e_fixed=false
 
-		local e2e_fix_prompt
-		e2e_fix_prompt="E2E tests for issue #$ISSUE_NUMBER \
-FAILED. The unit tests passed but E2E tests found visual/behavioral \
-issues.
+		while ((e2e_fix_iter < max_e2e_fixes)); do
+			e2e_fix_iter=$((e2e_fix_iter + 1))
+			log_error \
+				"E2E verification failed" \
+				"— fix iteration $e2e_fix_iter/$max_e2e_fixes"
+
+			local e2e_fix_prompt
+			e2e_fix_prompt="E2E tests for issue #$ISSUE_NUMBER \
+FAILED (attempt $e2e_fix_iter/$max_e2e_fixes). The unit tests passed \
+but E2E tests found visual/behavioral issues.
 
 Failure details:
 $e2e_fail_summary
+
+SCREENSHOT DIRECTORY: test-results/
+Check test-results/ for failure screenshots to diagnose visual issues.
 
 Fix the frontend code to resolve these E2E failures. Do NOT modify \
 the test files — fix the implementation code.
 Commit your changes."
 
-		verify_on_feature_branch "$branch" || true
+			verify_on_feature_branch "$branch" || true
 
-		local e2e_fix_result
-		e2e_fix_result=$(run_stage "fix-e2e" \
-			"$e2e_fix_prompt" \
-			"implement-issue-fix.json" \
-			"$AGENT" \
-			"$max_task_size")
+			local e2e_fix_result
+			e2e_fix_result=$(run_stage \
+				"fix-e2e-iter-$e2e_fix_iter" \
+				"$e2e_fix_prompt" \
+				"implement-issue-fix.json" \
+				"$AGENT" \
+				"$max_task_size")
 
-		local e2e_fix_summary
-		e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
-			| jq -r '.summary // "Fix applied"')
-		comment_issue "E2E Fix" \
-			"$e2e_fix_summary" "$AGENT"
+			local e2e_fix_summary
+			e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
+				| jq -r '.summary // "Fix applied"')
+			comment_issue "E2E Fix (iteration $e2e_fix_iter)" \
+				"🔧 $e2e_fix_summary" "$AGENT"
+
+			# Rebuild containers if fix changed Docker-relevant files
+			local docker_changes
+			docker_changes=$(git diff HEAD~1 --name-only \
+				-- 'Dockerfile*' 'docker-compose*' 'Containerfile*' \
+				2>/dev/null || true)
+			if [[ -n "$docker_changes" ]]; then
+				log "Fix changed Docker files — rebuilding containers"
+				rebuild_and_health_check \
+					"${TEST_E2E_BASE_URL:-http://localhost:30004}" \
+					120 >/dev/null 2>&1 || true
+			fi
+
+			# Re-run E2E tests
+			local pw_specs=""
+			pw_specs=$(git diff "$BASE_BRANCH"...HEAD --name-only \
+				-- 'tests/e2e/*.spec.*' 2>/dev/null || true)
+			local rerun_cmd="$TEST_E2E_CMD"
+			[[ -n "$pw_specs" ]] && rerun_cmd="$TEST_E2E_CMD -- $pw_specs"
+
+			local rerun_prompt
+			rerun_prompt="Re-run E2E tests after fix iteration \
+$e2e_fix_iter for issue #$ISSUE_NUMBER.
+
+TEST COMMAND:
+$rerun_cmd
+
+BASE URL: ${TEST_E2E_BASE_URL:-http://localhost:30004}
+
+SCREENSHOT DIRECTORY: test-results/
+
+Report result as 'passed' or 'failed' with a detailed summary."
+
+			local rerun_result
+			rerun_result=$(run_stage \
+				"e2e-verify-rerun-iter-$e2e_fix_iter" \
+				"$rerun_prompt" \
+				"implement-issue-e2e-validate.json" \
+				"playwright-test-developer")
+
+			local rerun_status rerun_summary
+			rerun_status=$(printf '%s' "$rerun_result" \
+				| jq -r '.result')
+			rerun_summary=$(printf '%s' "$rerun_result" \
+				| jq -r '.summary // "E2E rerun completed"')
+
+			local rerun_icon="✅"
+			[[ "$rerun_status" == "failed" ]] && rerun_icon="❌"
+			comment_issue \
+				"E2E Verification (rerun $e2e_fix_iter)" \
+				"$rerun_icon **Result:** $rerun_status
+
+$rerun_summary" "playwright-test-developer"
+
+			if [[ "$rerun_status" == "passed" ]]; then
+				e2e_fixed=true
+				break
+			fi
+
+			# Update failure summary for next iteration
+			e2e_fail_summary="$rerun_summary"
+		done
+
+		if ! $e2e_fixed; then
+			log_warn "E2E failed after $max_e2e_fixes fix attempts" \
+				"— proceeding with soft failure"
+			comment_issue "E2E Verification: Soft Failure" \
+				"⚠️ E2E tests still failing after $max_e2e_fixes \
+fix attempts. Manual intervention needed before PR merge.
+
+Last failure:
+$e2e_fail_summary" "playwright-test-developer"
+		fi
 	fi
 
 	if [[ -s "$acceptance_fail_file" ]]; then
@@ -4418,27 +4603,6 @@ $excerpt
                 log "WARNING: Task $((i+1)) description is $desc_len chars — consider splitting into smaller tasks"
             fi
         done
-
-        # (c) Warn about M/L complexity tasks
-        local ml_warn_count=0
-        local -a ml_warn_list=()
-        for ((i=0; i<task_count; i++)); do
-            local check_ml_desc
-            check_ml_desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
-            if echo "$check_ml_desc" | grep -qE '\*\*\([ML]\)\*\*'; then
-                log "⚠️  M/L task detected (task $((i+1))): ${check_ml_desc:0:80}..."
-                ml_warn_list+=("$check_ml_desc")
-                ((ml_warn_count++)) || true
-            fi
-        done
-        if ((ml_warn_count > 0)); then
-            log "⚠️  $ml_warn_count M/L task(s) in this run — M-tasks fail at 3× the rate of S-tasks. Consider decomposing."
-            local ml_warnings_json
-            ml_warnings_json=$(printf '%s\n' "${ml_warn_list[@]}" | jq -R . | jq -s .)
-            jq --argjson warnings "$ml_warnings_json" \
-               '.complexity_warnings = $warnings | .last_update = (now | todate)' \
-               "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
-        fi
 
         # (d) Extract backtick-quoted file paths from issue body and check existence
         if [[ -f "$issue_body_file" ]]; then
@@ -4807,19 +4971,6 @@ $full_scope_failures
     # -------------------------------------------------------------------------
     run_parallel_post_task_stages \
         "$branch" "$branch_scope" "$pipeline_profile" "$max_task_size"
-
-    # -------------------------------------------------------------------------
-    # NO-COMMITS GATE: exit before expensive post-implementation stages
-    # If all tasks produced 0 commits, skip deploy-verify, docs, and PR creation.
-    # -------------------------------------------------------------------------
-    local post_impl_commit_count
-    post_impl_commit_count=$(git rev-list --count "${BASE_BRANCH}..${branch}" 2>/dev/null || echo 0)
-    if (( post_impl_commit_count == 0 )); then
-        log "⚠️  No commits on branch after implementation — all tasks failed without producing changes."
-        comment_issue "Pipeline: No Changes" "⚠️ No commits on branch \`${branch}\` relative to \`${BASE_BRANCH}\` — all tasks failed without producing changes. No PR created." ""
-        set_final_state "no_changes"
-        exit 0
-    fi
 
     # -------------------------------------------------------------------------
     # STAGE: DEPLOY VERIFY

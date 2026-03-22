@@ -22,6 +22,11 @@ TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpuni
 TEST_E2E_CMD="${TEST_E2E_CMD:-}"          # e.g., "npx playwright test" — empty if no E2E
 TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
 
+# Frontend path patterns — pipe-separated globs used by _matches_frontend_pattern()
+# to decide whether a branch touches frontend code (gates E2E verification)
+# e.g., "src/components/*|src/pages/*|tests/e2e/*"
+FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
+
 # Deploy verification (configure during /adapt if project has a test environment)
 # Set DEPLOY_VERIFY_CMD to a shell command that triggers a deploy to the target
 # environment (e.g., "./scripts/deploy-test.sh").  Leave empty to skip the stage.
@@ -49,4 +54,5 @@ MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
 MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
 MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
+MAX_E2E_FIX_ITERATIONS="${MAX_E2E_FIX_ITERATIONS:-2}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"  # seconds (default 1 hour)
