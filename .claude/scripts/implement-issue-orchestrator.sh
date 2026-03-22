@@ -3198,6 +3198,28 @@ _is_playwright_spec() {
     return 1
 }
 
+# Build a targeted E2E command from changed Playwright spec files.
+# If specs exist in the diff, appends them to TEST_E2E_CMD; otherwise returns
+# the base command unchanged.
+# Arguments:
+#   $1 - base branch to diff against
+# Outputs:
+#   The E2E command string (targeted or full)
+_build_targeted_e2e_cmd() {
+    local base="$1"
+    local pw_specs=""
+    pw_specs=$(git diff "$base"...HEAD --name-only \
+        -- 'tests/e2e/*.spec.*' 'test/e2e/*.spec.*' \
+           'e2e/*.spec.*' '**/e2e/*.spec.*' \
+        2>/dev/null || true)
+    if [[ -n "$pw_specs" ]]; then
+        log "Targeted E2E: running changed spec files only"
+        printf '%s -- %s' "$TEST_E2E_CMD" "$pw_specs"
+    else
+        printf '%s' "$TEST_E2E_CMD"
+    fi
+}
+
 # Detect the scope of changes on the current branch vs the base branch.
 # Classifies changed files by extension to determine which test suite to run.
 # Arguments:
@@ -3834,7 +3856,6 @@ rebuild_and_health_check() {
 	start_ts=$(date +%s)
 
 	local rebuild_status="success"
-	local health_status="healthy"
 
 	# Step 1: Rebuild containers
 	log "Rebuilding frontend + backend containers (--no-cache)..."
@@ -3997,14 +4018,8 @@ E2E tests skipped." "playwright-test-developer"
 			fi
 
 			# Step 2: Build targeted test command
-			local e2e_cmd="$TEST_E2E_CMD"
-			local pw_specs=""
-			pw_specs=$(git diff "$BASE_BRANCH"...HEAD --name-only \
-				-- 'tests/e2e/*.spec.*' 2>/dev/null || true)
-			if [[ -n "$pw_specs" ]]; then
-				e2e_cmd="$TEST_E2E_CMD -- $pw_specs"
-				log "Targeted E2E: running changed spec files only"
-			fi
+			local e2e_cmd
+			e2e_cmd=$(_build_targeted_e2e_cmd "$BASE_BRANCH")
 
 			# Step 3: Run E2E tests
 			local e2e_verify_prompt
@@ -4243,11 +4258,8 @@ Commit your changes."
 			fi
 
 			# Re-run E2E tests
-			local pw_specs=""
-			pw_specs=$(git diff "$BASE_BRANCH"...HEAD --name-only \
-				-- 'tests/e2e/*.spec.*' 2>/dev/null || true)
-			local rerun_cmd="$TEST_E2E_CMD"
-			[[ -n "$pw_specs" ]] && rerun_cmd="$TEST_E2E_CMD -- $pw_specs"
+			local rerun_cmd
+			rerun_cmd=$(_build_targeted_e2e_cmd "$BASE_BRANCH")
 
 			local rerun_prompt
 			rerun_prompt="Re-run E2E tests after fix iteration \
