@@ -4875,6 +4875,40 @@ $impl_summary" "$tagent"
                 _process_batch_results \
                     "$par_result" "parallel"
 
+                # If ALL tasks failed (no completions),
+                # retry each failed task serially before
+                # propagating the failure upward.
+                local par_comp_count
+                par_comp_count=$(printf '%s' "$par_result" \
+                    | jq '.completed | length')
+                local par_fail_count
+                par_fail_count=$(printf '%s' "$par_result" \
+                    | jq '.failed | length')
+                if ((par_comp_count == 0 && par_fail_count > 0)); then
+                    log_warn "Batch $batch_num: all" \
+                        "$par_fail_count task(s) failed" \
+                        "in parallel — retrying serially"
+
+                    local fail_ids
+                    fail_ids=$(printf '%s' "$par_result" \
+                        | jq '.failed')
+                    local full_retry_tasks
+                    full_retry_tasks=$(printf '%s' \
+                        "$batch_tasks" \
+                        | jq --argjson ids "$fail_ids" \
+                        '[.[] | select(
+                            .id as $t |
+                            $ids | index($t)
+                        )]')
+
+                    local full_retry_result
+                    full_retry_result=$(execute_batch_serial \
+                        "$full_retry_tasks" "$branch" \
+                        "$BASE_BRANCH")
+                    _process_batch_results \
+                        "$full_retry_result" "full-batch-retry"
+                fi
+
                 # Handle conflicted tasks by re-running
                 # them serially
                 local conf_count
