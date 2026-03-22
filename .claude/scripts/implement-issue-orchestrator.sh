@@ -2849,17 +2849,38 @@ execute_batch_parallel() {
 		wt_branches+=("$wt_branch")
 		result_files+=("$result_file")
 
-		# Launch in background subshell
+		# Launch in background subshell with wall-time guard
 		(
 			run_task_in_worktree \
 				"$tid" "$tdesc" "$tagent" \
 				"$tsize" "$wt_path" \
 				"$wt_branch" "$feature_branch" \
-				"$result_file" "$base_branch"
+				"$result_file" "$base_branch" &
+			_task_pid=$!
+			( sleep "${MAX_TASK_WALL_TIME_SECS}" && \
+				kill "$_task_pid" 2>/dev/null ) &
+			_watchdog_pid=$!
+			wait "$_task_pid" 2>/dev/null
+			_task_exit=$?
+			kill "$_watchdog_pid" 2>/dev/null
+			wait "$_watchdog_pid" 2>/dev/null || true
+			# exit 143 = SIGTERM from watchdog; exit 124 = timeout
+			# command (defensive). Only treat as timeout when no
+			# result file was written by the task.
+			if [[ $_task_exit -eq 124 ]] || \
+				[[ $_task_exit -eq 143 && \
+				! -f "$result_file" ]]; then
+				log_error "Task $tid TIMED OUT" \
+					"after ${MAX_TASK_WALL_TIME_SECS}s"
+				printf '%s' \
+					'{"status":"timeout","review_attempts":0}' \
+					> "$result_file"
+			fi
 		) &
 		local last_pid=$!
 		pids+=("$last_pid")
-		log "Task $tid launched (PID $last_pid)" \
+		log "Task $tid launched (PID $last_pid," \
+			"wall-time limit ${MAX_TASK_WALL_TIME_SECS}s)" \
 			"in $wt_path"
 	done
 
@@ -2896,8 +2917,15 @@ execute_batch_parallel() {
 		local rstatus
 		rstatus=$(jq -r '.status' "$rf" 2>/dev/null)
 
-		if [[ "$rstatus" != "success" ]]; then
-			log_error "Task $tid failed in worktree"
+		if [[ "$rstatus" == "timeout" ]]; then
+			log_error "Task $tid TIMED OUT" \
+				"(exceeded ${MAX_TASK_WALL_TIME_SECS}s wall time)"
+			failed+=("$tid")
+			cleanup_worktree "$wp" "$wb"
+			continue
+		elif [[ "$rstatus" != "success" ]]; then
+			log_error "Task $tid failed in worktree" \
+				"(status: $rstatus)"
 			failed+=("$tid")
 			cleanup_worktree "$wp" "$wb"
 			continue
