@@ -66,6 +66,7 @@ fi
 
 get_stage_timeout() {
     local stage_name="${1:-}"
+    local complexity="${2:-}"
 
     case "$stage_name" in
         test-iter*)     printf '%s' 900 ;;
@@ -75,7 +76,13 @@ get_stage_timeout() {
         fix-e2e*)       printf '%s' 900 ;;
         test*|docs*|pr*) printf '%s' 600 ;;
         task-review*)    printf '%s' 900 ;;
-        implement*|fix*) printf '%s' 1800 ;;
+        implement*|fix*)
+            if [[ "$complexity" == "L" ]]; then
+                printf '%s' 3600
+            else
+                printf '%s' 1800
+            fi
+            ;;
         *)               printf '%s' 1800 ;;
     esac
 }
@@ -1019,7 +1026,7 @@ run_stage() {
     if [[ -n "$timeout_override" ]]; then
         stage_timeout="$timeout_override"
     else
-        stage_timeout=$(get_stage_timeout "$stage_name")
+        stage_timeout=$(get_stage_timeout "$stage_name" "$complexity")
     fi
     log "  Timeout: ${stage_timeout}s"
 
@@ -2529,7 +2536,7 @@ run_task_in_worktree() {
 
 	local base_timeout
 	base_timeout=$(get_stage_timeout \
-		"implement-task-$task_id")
+		"implement-task-$task_id" "$task_size")
 	local base_model
 	base_model=$(resolve_model \
 		"implement-task-$task_id" "$task_size")
@@ -2886,7 +2893,7 @@ execute_batch_parallel() {
 
 	# Wait for all background tasks
 	local p
-	for p in "${pids[@]}"; do
+	for p in "${pids[@]+"${pids[@]}"}"; do
 		wait "$p" 2>/dev/null || true
 	done
 
@@ -3004,7 +3011,7 @@ execute_batch_serial() {
 
 		local base_timeout
 		base_timeout=$(get_stage_timeout \
-			"implement-task-$tid")
+			"implement-task-$tid" "$tsize")
 		local base_model
 		base_model=$(resolve_model \
 			"implement-task-$tid" "$tsize")
