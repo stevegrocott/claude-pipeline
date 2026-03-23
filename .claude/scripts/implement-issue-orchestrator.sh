@@ -4576,6 +4576,30 @@ $excerpt
     # 'minimal' skips optional quality/simplify stages and 'full' enforces them.
 
     # -------------------------------------------------------------------------
+    # COMPLEXITY-ADJUSTED WALL-CLOCK BUDGET
+    # Add 1800s per L-sized task, capped at 4x the base value.
+    # -------------------------------------------------------------------------
+    local l_task_count base_wall_time max_wall_time wall_time_bump
+    l_task_count=$(printf '%s' "$tasks_json" | jq -r '.[].description' \
+        | while IFS= read -r d; do
+            s=$(extract_task_size "$d")
+            [[ -n "$s" ]] && printf '%s\n' "$s"
+          done \
+        | grep -c '^L$' || true)
+    base_wall_time="$MAX_ORCHESTRATOR_WALL_TIME"
+    max_wall_time=$(( base_wall_time * 4 ))
+    wall_time_bump=$(( l_task_count * 1800 ))
+    MAX_ORCHESTRATOR_WALL_TIME=$(( base_wall_time + wall_time_bump ))
+    if (( MAX_ORCHESTRATOR_WALL_TIME > max_wall_time )); then
+        MAX_ORCHESTRATOR_WALL_TIME=$max_wall_time
+    fi
+    if (( wall_time_bump > 0 )); then
+        log "Complexity-adjusted wall-clock budget: ${base_wall_time}s + ${wall_time_bump}s (${l_task_count} L-task(s)) = ${MAX_ORCHESTRATOR_WALL_TIME}s (cap: ${max_wall_time}s)"
+    else
+        log "Wall-clock budget: ${MAX_ORCHESTRATOR_WALL_TIME}s (no L-tasks, no adjustment)"
+    fi
+
+    # -------------------------------------------------------------------------
     # EARLY SCOPE CHECK: config-only bypass
     # If all branch changes are config/doc files only, skip implement/test stages
     # and jump directly to PR creation.
