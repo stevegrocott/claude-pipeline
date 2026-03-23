@@ -2858,24 +2858,27 @@ execute_batch_parallel() {
 
 		# Launch in background subshell with wall-time guard
 		(
+			# Enable job control so the child gets its own process group
+			# (PGID == _task_pid), letting the watchdog kill the whole tree.
+			set -m
 			run_task_in_worktree \
 				"$tid" "$tdesc" "$tagent" \
 				"$tsize" "$wt_path" \
 				"$wt_branch" "$feature_branch" \
 				"$result_file" "$base_branch" &
 			_task_pid=$!
+			set +m
 			( sleep "${MAX_TASK_WALL_TIME_SECS}" && \
-				kill "$_task_pid" 2>/dev/null ) &
+				kill -- -"$_task_pid" 2>/dev/null ) &
 			_watchdog_pid=$!
 			wait "$_task_pid" 2>/dev/null
 			_task_exit=$?
 			kill "$_watchdog_pid" 2>/dev/null
 			wait "$_watchdog_pid" 2>/dev/null || true
-			# exit 143 = SIGTERM from watchdog; exit 124 = timeout
-			# command (defensive). Only treat as timeout when no
-			# result file was written by the task.
-			if [[ $_task_exit -eq 124 ]] || \
-				[[ $_task_exit -eq 143 && \
+			# exit 143 = SIGTERM from watchdog; only treat as timeout
+			# when no result file was written (guards against race
+			# where task completes as watchdog fires).
+			if [[ $_task_exit -eq 143 && \
 				! -f "$result_file" ]]; then
 				log_error "Task $tid TIMED OUT" \
 					"after ${MAX_TASK_WALL_TIME_SECS}s"
