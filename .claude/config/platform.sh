@@ -16,6 +16,10 @@ GIT_CLI="${GIT_CLI:-gh}"                  # gh | glab
 
 # Merge strategy
 MERGE_STYLE="${MERGE_STYLE:-squash}"      # squash | merge | rebase
+# AUTO_MERGE: set to 1 to automatically merge the PR after all checks pass.
+# Set to 0 to leave the PR open for manual review and merging.
+# MERGE_STYLE (above) controls the merge method used when AUTO_MERGE=1.
+AUTO_MERGE="${AUTO_MERGE:-0}"             # 0 = manual merge | 1 = auto-merge when checks pass
 
 # Test commands (set during /adapt based on project stack)
 TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpunit", "pytest"
