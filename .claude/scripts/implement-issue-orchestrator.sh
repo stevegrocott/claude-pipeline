@@ -5400,7 +5400,7 @@ The command will output the MR number. Use that as pr_number in your response."
         # -------------------------------------------------------------------------
         # COMBINED SPEC + CODE REVIEW → PR comment #11 (single pass)
         # -------------------------------------------------------------------------
-        local review_prompt="${PLATFORM_PATTERNS_PREFIX}Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
+        local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
 Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
@@ -5485,7 +5485,7 @@ $review_summary" "code-reviewer"
             local review_comments
             review_comments=$(printf '%s' "$review_result" | jq -r '.comments // ""')
 
-            local fix_prompt="${PLATFORM_PATTERNS_PREFIX}Address PR review feedback on branch $branch in the current working directory:
+            local fix_prompt="Address PR review feedback on branch $branch in the current working directory:
 
 Review feedback:
 $review_comments
