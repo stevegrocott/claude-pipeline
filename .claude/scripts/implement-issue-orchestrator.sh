@@ -1504,6 +1504,7 @@ Check:
 - Consistency with codebase conventions
 - Potential bugs or issues
 - Security concerns
+- If any $queryRaw or raw SQL strings are present, cross-reference them against existing similar queries in the codebase to verify table names and query patterns are consistent
 
 FILES CHANGED:
 $review_changed_files
