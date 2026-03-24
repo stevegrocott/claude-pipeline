@@ -24,6 +24,25 @@ source "$SCRIPT_DIR/model-config.sh"
 source "$SCRIPT_DIR/../config/platform.sh"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
+# Read project context file for agent prompt injection
+# PLATFORM_CONTEXT_FILE is configured in platform.sh; defaults to .claude/config/context.md
+PLATFORM_CONTEXT_CONTENT=""
+if [[ -n "${PLATFORM_CONTEXT_FILE:-}" && -f "$PLATFORM_CONTEXT_FILE" ]]; then
+    PLATFORM_CONTEXT_CONTENT="$(< "$PLATFORM_CONTEXT_FILE")"
+fi
+
+# Build the prefix block injected before task descriptions in implement, fix, and review prompts.
+# Defined once at startup so every prompt inherits a consistent project patterns header.
+if [[ -n "$PLATFORM_CONTEXT_CONTENT" ]]; then
+    PLATFORM_PATTERNS_PREFIX="## Project Patterns
+
+$PLATFORM_CONTEXT_CONTENT
+
+"
+else
+    PLATFORM_PATTERNS_PREFIX=""
+fi
+
 # Timeouts and limits
 # These can be overridden by platform.sh (sourced above) or env vars
 MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
@@ -1494,7 +1513,7 @@ Output a summary of changes made."
         review_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
         review_changed_files=$(printf '%s\n' "$review_changed_files_raw" | grep -v -E '^$' || true)
 
-        local review_prompt="Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
+        local review_prompt="${PLATFORM_PATTERNS_PREFIX}Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT: This is a task-level quality check within the implementation workflow, NOT a full PR review.
 Your job is to verify code quality for the changes made in this task only.
@@ -1676,7 +1695,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
                 fi
             fi
 
-            local fix_prompt="Address code review feedback in working directory $loop_dir on branch $loop_branch.
+            local fix_prompt="${PLATFORM_PATTERNS_PREFIX}Address code review feedback in working directory $loop_dir on branch $loop_branch.
 
 Current iteration findings:
 $review_comments
@@ -2569,7 +2588,7 @@ run_task_in_worktree() {
 		review_attempts=$((review_attempts + 1))
 
 		local impl_prompt
-		impl_prompt="Implement task $task_id on branch $wt_branch in the current working directory:
+		impl_prompt="${PLATFORM_PATTERNS_PREFIX}Implement task $task_id on branch $wt_branch in the current working directory:
 
 $task_desc${files_block}
 SELF-REVIEW BEFORE COMMITTING:
@@ -3785,7 +3804,7 @@ $test_summary" "default"
                 fi
             fi
 
-            local fix_prompt="ENVIRONMENT NOTE: If failures mention Redis/database connection errors, HTTP 500 from route handlers, or similar infrastructure issues, these are environment issues not code bugs. Do NOT attempt to fix these — note them as environment-dependent and focus only on code-level failures.
+            local fix_prompt="${PLATFORM_PATTERNS_PREFIX}ENVIRONMENT NOTE: If failures mention Redis/database connection errors, HTTP 500 from route handlers, or similar infrastructure issues, these are environment issues not code bugs. Do NOT attempt to fix these — note them as environment-dependent and focus only on code-level failures.
 
 Fix ONLY the specific test failures listed below. Do NOT rewrite test files, introduce new dependencies, or modify pre-existing test code. Only fix the failing assertions.
 
@@ -3849,7 +3868,7 @@ $validate_summary" "default"
                 end
             ')
 
-            local fix_prompt="Address test quality issues in working directory $safe_dir on branch $loop_branch:
+            local fix_prompt="${PLATFORM_PATTERNS_PREFIX}Address test quality issues in working directory $safe_dir on branch $loop_branch:
 
 $validate_issues
 
@@ -5376,7 +5395,7 @@ The command will output the MR number. Use that as pr_number in your response."
         # -------------------------------------------------------------------------
         # COMBINED SPEC + CODE REVIEW → PR comment #11 (single pass)
         # -------------------------------------------------------------------------
-        local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
+        local review_prompt="${PLATFORM_PATTERNS_PREFIX}Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
 Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
@@ -5461,7 +5480,7 @@ $review_summary" "code-reviewer"
             local review_comments
             review_comments=$(printf '%s' "$review_result" | jq -r '.comments // ""')
 
-            local fix_prompt="Address PR review feedback on branch $branch in the current working directory:
+            local fix_prompt="${PLATFORM_PATTERNS_PREFIX}Address PR review feedback on branch $branch in the current working directory:
 
 Review feedback:
 $review_comments
