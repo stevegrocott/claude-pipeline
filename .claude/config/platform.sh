@@ -49,6 +49,11 @@ fi
 LINT_CMD="${LINT_CMD:-}"
 FORMAT_CMD="${FORMAT_CMD:-}"
 
+# Project context file — project teams write their patterns, conventions, and
+# architecture notes here so that agents have consistent codebase context.
+# The orchestrator injects this file into agent prompts when it exists.
+PLATFORM_CONTEXT_FILE="${PLATFORM_CONTEXT_FILE:-.claude/config/context.md}"
+
 # Orchestrator iteration limits (override defaults from implement-issue-orchestrator.sh)
 MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
 MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
