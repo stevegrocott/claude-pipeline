@@ -2967,6 +2967,100 @@ execute_batch_parallel() {
 	printf '%s' "{\"completed\":${comp_json},\"failed\":${fail_json},\"conflicted\":${conf_json}}"
 }
 
+# =============================================================================
+# E2E TDD CLASSIFICATION
+# =============================================================================
+#
+# Classify the E2E strategy for a single task before it runs.
+#
+# Classification rules (in priority order):
+#   1. TEST_E2E_CMD not configured → none (can't run E2E)
+#   2. Agent is NOT playwright-test-developer AND desc has no UI keywords → none
+#   3. Agent IS playwright-test-developer AND size L AND UI keywords → tdd*
+#   4. Agent IS playwright-test-developer AND change_scope is frontend/ts-frontend → tdd*
+#   5. Agent IS playwright-test-developer → smoke
+#   6. UI keywords AND change_scope is frontend/ts-frontend → smoke
+#   7. Default → none
+#
+#   *tdd is downgraded to smoke when E2E_TDD_ENABLED=false
+#
+# Arguments:
+#   $1 - task_desc
+#   $2 - task_agent
+#   $3 - task_size  (S/M/L)
+# Outputs (stdout):
+#   none | smoke | tdd
+#
+classify_e2e_strategy() {
+	local task_desc="$1"
+	local task_agent="$2"
+	local task_size="$3"
+
+	# Rule 1: no E2E command → none regardless
+	if [[ -z "${TEST_E2E_CMD:-}" ]]; then
+		printf 'none'
+		return
+	fi
+
+	# Detect UI keywords in description
+	local has_ui_keywords=false
+	if printf '%s' "$task_desc" \
+		| grep -qiE \
+		'button|tab|form|click|navigate|modal|dialog|dropdown|checkbox|input|component|page|view|screen'; then
+		has_ui_keywords=true
+	fi
+
+	# Rule 2: not playwright agent AND no UI keywords → none
+	if [[ "$task_agent" != "playwright-test-developer" ]] \
+		&& [[ "$has_ui_keywords" == "false" ]]; then
+		printf 'none'
+		return
+	fi
+
+	# Detect change scope from current working directory
+	local change_scope
+	change_scope=$(detect_change_scope "." "${BASE_BRANCH:-main}" 2>/dev/null \
+		|| echo "backend")
+	local is_frontend=false
+	if [[ "$change_scope" == "frontend" \
+		|| "$change_scope" == "ts-frontend" ]]; then
+		is_frontend=true
+	fi
+
+	local _tdd_result="tdd"
+	# Honour E2E_TDD_ENABLED flag — downgrade tdd → smoke when disabled
+	if [[ "${E2E_TDD_ENABLED:-true}" == "false" ]]; then
+		_tdd_result="smoke"
+	fi
+
+	if [[ "$task_agent" == "playwright-test-developer" ]]; then
+		# Rule 3: playwright + L size + UI keywords → tdd
+		if [[ "$task_size" == "L" ]] \
+			&& [[ "$has_ui_keywords" == "true" ]]; then
+			printf '%s' "$_tdd_result"
+			return
+		fi
+		# Rule 4: playwright + frontend scope → tdd
+		if [[ "$is_frontend" == "true" ]]; then
+			printf '%s' "$_tdd_result"
+			return
+		fi
+		# Rule 5: playwright (other) → smoke
+		printf 'smoke'
+		return
+	fi
+
+	# Rule 6: UI keywords + frontend scope → smoke
+	if [[ "$has_ui_keywords" == "true" ]] \
+		&& [[ "$is_frontend" == "true" ]]; then
+		printf 'smoke'
+		return
+	fi
+
+	# Rule 7: default
+	printf 'none'
+}
+
 # Execute tasks serially (fallback / single-task batches).
 #
 # This extracts the existing sequential logic into a
@@ -2990,6 +3084,8 @@ execute_batch_serial() {
 
 	local -a completed=()
 	local -a failed=()
+	# Track playwright tasks already run in TDD pre-run mode
+	local -a tdd_prerun_tids=()
 
 	local i
 	for ((i = 0; i < count; i++)); do
@@ -3003,6 +3099,145 @@ execute_batch_serial() {
 		tagent=$(printf '%s' "$task" \
 			| jq -r '.agent')
 		tsize=$(extract_task_size "$tdesc")
+
+		# Skip playwright tasks already run in TDD pre-run mode
+		local _already_prerun=false
+		local _prid
+		for _prid in "${tdd_prerun_tids[@]+"${tdd_prerun_tids[@]}"}"; do
+			if [[ "$_prid" == "$tid" ]]; then
+				_already_prerun=true
+				break
+			fi
+		done
+		if [[ "$_already_prerun" == "true" ]]; then
+			log "Task $tid already executed in TDD" \
+				"pre-run phase — skipping"
+			completed+=("$tid")
+			continue
+		fi
+
+		# Classify E2E strategy before running this task
+		local e2e_strategy
+		e2e_strategy=$(classify_e2e_strategy \
+			"$tdesc" "$tagent" "$tsize")
+		log "Task $tid E2E strategy: $e2e_strategy"
+
+		# TDD: if this is an implementation task and the adjacent next task
+		# is a playwright-test-developer task classified as tdd, run the
+		# playwright task FIRST (RED phase) before the implementation task.
+		if [[ "$tagent" != "playwright-test-developer" ]] \
+			&& (( i + 1 < count )); then
+			local _next_task _next_tid _next_tdesc _next_tagent _next_tsize
+			_next_task=$(printf '%s' "$serial_tasks" \
+				| jq ".[$((i + 1))]")
+			_next_tagent=$(printf '%s' "$_next_task" \
+				| jq -r '.agent')
+			if [[ "$_next_tagent" == "playwright-test-developer" ]]; then
+				_next_tid=$(printf '%s' "$_next_task" \
+					| jq -r '.id')
+				_next_tdesc=$(printf '%s' "$_next_task" \
+					| jq -r '.description')
+				_next_tsize=$(extract_task_size "$_next_tdesc")
+				local _next_strategy
+				_next_strategy=$(classify_e2e_strategy \
+					"$_next_tdesc" "$_next_tagent" \
+					"$_next_tsize")
+				if [[ "$_next_strategy" == "tdd" ]]; then
+					log "TDD pre-run: running playwright" \
+						"task $_next_tid before" \
+						"implementation task $tid"
+
+					# Build prompt for the playwright task
+					local _pw_files_block
+					_pw_files_block=$(build_files_block)
+					local _pw_prompt
+					_pw_prompt="Implement task $_next_tid on branch $feature_branch in the current working directory:
+
+$_next_tdesc${_pw_files_block}
+SELF-REVIEW BEFORE COMMITTING:
+After implementing, verify your changes against the task description above:
+1. Does your implementation fully achieve the task's goal?
+2. Are there any obvious issues, missing edge cases, or incomplete parts?
+3. If you find problems, fix them before committing.
+
+Only commit when you are confident the task goal is achieved.
+Commit your changes with a descriptive message."
+
+					local _pw_timeout _pw_model
+					_pw_timeout=$(get_stage_timeout \
+						"implement-task-$_next_tid" \
+						"$_next_tsize")
+					_pw_model=$(resolve_model \
+						"implement-task-$_next_tid" \
+						"$_next_tsize")
+
+					local _pw_result
+					_pw_result=$(run_stage \
+						"implement-task-${_next_tid}-tdd-red" \
+						"$_pw_prompt" \
+						"implement-issue-implement.json" \
+						"$_next_tagent" "$_next_tsize" \
+						"$_pw_timeout" "$_pw_model")
+
+					local _pw_status
+					_pw_status=$(printf '%s' "$_pw_result" \
+						| jq -r '.status')
+
+					if [[ "$_pw_status" == "success" ]]; then
+						# Find new spec files added by the playwright task
+						local _new_specs
+						_new_specs=$(git diff HEAD~1..HEAD \
+							--name-only --diff-filter=A \
+							2>/dev/null \
+							| grep -E '\.(spec|test)\.(ts|js)$' \
+							|| true)
+
+						if [[ -n "$_new_specs" ]]; then
+							log "TDD RED phase: asserting" \
+								"new spec(s) fail" \
+								"before implementation:"
+							log "$_new_specs"
+							local _red_confirmed=false
+							local _spec_file
+							while IFS= read -r _spec_file; do
+								[[ -z "$_spec_file" ]] && continue
+								log "RED check:" \
+									"$TEST_E2E_CMD --" \
+									"$_spec_file"
+								if bash -c \
+									"$TEST_E2E_CMD -- $_spec_file" \
+									>/dev/null 2>&1; then
+									log_warn "TDD RED:" \
+										"$_spec_file passed" \
+										"(expected failure)"
+								else
+									log "TDD RED confirmed:" \
+										"$_spec_file fails" \
+										"as expected"
+									_red_confirmed=true
+								fi
+							done <<< "$_new_specs"
+							if [[ "$_red_confirmed" == "true" ]]; then
+								log "TDD RED phase confirmed" \
+									"— proceeding with" \
+									"implementation task $tid"
+								fi
+							else
+								log_warn "TDD pre-run: no new" \
+									"spec files found after" \
+									"playwright task $_next_tid" \
+									"— proceeding anyway"
+							fi
+							tdd_prerun_tids+=("$_next_tid")
+					else
+						log_warn "TDD pre-run: playwright" \
+							"task $_next_tid failed" \
+							"— running implementation" \
+							"task $tid anyway"
+					fi
+				fi
+			fi
+		fi
 
 		log "Implementing task $tid" \
 			"(serial): $tdesc"
