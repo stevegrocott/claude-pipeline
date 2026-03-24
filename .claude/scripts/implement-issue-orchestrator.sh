@@ -26,7 +26,7 @@ PLATFORM_DIR="$SCRIPT_DIR/platform"
 
 # Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work regardless of CWD
 if [[ -n "${PLATFORM_CONTEXT_FILE:-}" && "${PLATFORM_CONTEXT_FILE}" != /* ]]; then
-    PLATFORM_CONTEXT_FILE="$(cd "$SCRIPT_DIR/.." && pwd)/$PLATFORM_CONTEXT_FILE"
+    PLATFORM_CONTEXT_FILE="$(cd "$SCRIPT_DIR/../.." && pwd)/$PLATFORM_CONTEXT_FILE"
 fi
 
 # Read project context file for agent prompt injection
