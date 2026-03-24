@@ -21,6 +21,10 @@ MERGE_STYLE="${MERGE_STYLE:-squash}"      # squash | merge | rebase
 TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpunit", "pytest"
 TEST_E2E_CMD="${TEST_E2E_CMD:-}"          # e.g., "npx playwright test" — empty if no E2E
 TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
+# TDD reordering for E2E: default true when TEST_E2E_CMD is set; set false to keep smoke tests only without TDD reordering
+if [[ -z "${E2E_TDD_ENABLED:-}" ]]; then
+  E2E_TDD_ENABLED="$([[ -n "${TEST_E2E_CMD:-}" ]] && echo true || echo false)"
+fi
 
 # Frontend path patterns — pipe-separated globs used by _matches_frontend_pattern()
 # to decide whether a branch touches frontend code (gates E2E verification)
