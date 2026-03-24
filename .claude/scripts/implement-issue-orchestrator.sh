@@ -24,6 +24,11 @@ source "$SCRIPT_DIR/model-config.sh"
 source "$SCRIPT_DIR/../config/platform.sh"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
+# Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work regardless of CWD
+if [[ -n "${PLATFORM_CONTEXT_FILE:-}" && "${PLATFORM_CONTEXT_FILE}" != /* ]]; then
+    PLATFORM_CONTEXT_FILE="$(cd "$SCRIPT_DIR/.." && pwd)/$PLATFORM_CONTEXT_FILE"
+fi
+
 # Read project context file for agent prompt injection
 # PLATFORM_CONTEXT_FILE is configured in platform.sh; defaults to .claude/config/context.md
 PLATFORM_CONTEXT_CONTENT=""
@@ -1523,7 +1528,7 @@ Check:
 - Consistency with codebase conventions
 - Potential bugs or issues
 - Security concerns
-- If any $queryRaw or raw SQL strings are present, cross-reference them against existing similar queries in the codebase to verify table names and query patterns are consistent
+- If any \$queryRaw or raw SQL strings are present, cross-reference them against existing similar queries in the codebase to verify table names and query patterns are consistent
 
 FILES CHANGED:
 $review_changed_files
