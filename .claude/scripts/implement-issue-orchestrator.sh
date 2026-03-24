@@ -5822,6 +5822,38 @@ $complete_summary
         set_final_state "completed"
     fi
 
+    # -------------------------------------------------------------------------
+    # STAGE: AUTO-MERGE (optional)
+    # Triggered when AUTO_MERGE=1.  Merges the PR using MERGE_STYLE (default:
+    # squash).  A failure logs a warning but does not abort the pipeline.
+    # -------------------------------------------------------------------------
+    if [[ "${AUTO_MERGE:-0}" == "1" ]]; then
+        local merge_style="${MERGE_STYLE:-squash}"
+        log "AUTO_MERGE=1: merging PR #$pr_number with --$merge_style"
+        set_stage_started "auto_merge"
+        local merge_output merge_exit
+        merge_exit=0
+        merge_output=$(gh pr merge "$pr_number" "--$merge_style" --yes 2>&1) \
+            || merge_exit=$?
+        if ((merge_exit == 0)); then
+            log "PR #$pr_number merged successfully"
+            comment_issue "PR #$pr_number Auto-Merged" \
+"PR #$pr_number has been automatically merged into \`$BASE_BRANCH\`.
+
+**Merge style:** \`$merge_style\`
+**Branch:** \`$branch\`
+**PR:** #$pr_number"
+            set_stage_completed "auto_merge"
+            jq '.stages.auto_merge.merged = true | .last_update = (now | todate)' \
+                "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+                && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+            sync_status_to_log
+        else
+            log_warn "Auto-merge of PR #$pr_number failed" \
+                "(exit $merge_exit): $merge_output"
+        fi
+    fi
+
     # Record degraded stages in status.json
     if (( ${#DEGRADED_STAGES[@]} > 0 )); then
         local degraded_json
