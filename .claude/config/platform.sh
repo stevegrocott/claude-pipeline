@@ -23,7 +23,7 @@ TEST_E2E_CMD="${TEST_E2E_CMD:-}"          # e.g., "npx playwright test" — empt
 TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
 # TDD reordering for E2E: default true when TEST_E2E_CMD is set; set false to keep smoke tests only without TDD reordering
 if [[ -z "${E2E_TDD_ENABLED:-}" ]]; then
-  E2E_TDD_ENABLED="$([[ -n "${TEST_E2E_CMD:-}" ]] && echo true || echo false)"
+  [[ -n "${TEST_E2E_CMD:-}" ]] && E2E_TDD_ENABLED=true || E2E_TDD_ENABLED=false
 fi
 
 # Frontend path patterns — pipe-separated globs used by _matches_frontend_pattern()

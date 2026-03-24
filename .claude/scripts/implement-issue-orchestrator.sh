@@ -3160,8 +3160,16 @@ After implementing, verify your changes against the task description above:
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
 3. If you find problems, fix them before committing.
 
+MANDATORY UI INTERACTION CONSTRAINTS:
+- Use data-testid selectors on actual buttons, forms, and navigation elements.
+- Do NOT call backend APIs directly from test code as a substitute for UI interactions.
+- Do NOT use waitForLoadState('networkidle') — use domcontentloaded + waitFor on specific elements.
+
 Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
+
+					local _pre_pw_sha
+					_pre_pw_sha=$(git rev-parse HEAD)
 
 					local _pw_timeout _pw_model
 					_pw_timeout=$(get_stage_timeout \
@@ -3186,7 +3194,7 @@ Commit your changes with a descriptive message."
 					if [[ "$_pw_status" == "success" ]]; then
 						# Find new spec files added by the playwright task
 						local _new_specs
-						_new_specs=$(git diff HEAD~1..HEAD \
+						_new_specs=$(git diff "$_pre_pw_sha"..HEAD \
 							--name-only --diff-filter=A \
 							2>/dev/null \
 							| grep -E '\.(spec|test)\.(ts|js)$' \
@@ -3205,7 +3213,7 @@ Commit your changes with a descriptive message."
 									"$TEST_E2E_CMD --" \
 									"$_spec_file"
 								if bash -c \
-									"$TEST_E2E_CMD -- $_spec_file" \
+									"$TEST_E2E_CMD -- $(printf '%q' "$_spec_file")" \
 									>/dev/null 2>&1; then
 									log_warn "TDD RED:" \
 										"$_spec_file passed" \
@@ -3221,14 +3229,21 @@ Commit your changes with a descriptive message."
 								log "TDD RED phase confirmed" \
 									"— proceeding with" \
 									"implementation task $tid"
-								fi
 							else
-								log_warn "TDD pre-run: no new" \
-									"spec files found after" \
-									"playwright task $_next_tid" \
-									"— proceeding anyway"
+								log_warn "TDD RED: not confirmed" \
+									"— all specs passed" \
+									"unexpectedly"
 							fi
-							tdd_prerun_tids+=("$_next_tid")
+						else
+							log_warn "TDD pre-run: no new" \
+								"spec files found after" \
+								"playwright task $_next_tid" \
+								"— proceeding anyway"
+						fi
+						# Register regardless of whether new spec files were
+						# found — prevents double-execution when the playwright
+						# task only modifies page objects or fixtures.
+						tdd_prerun_tids+=("$_next_tid")
 					else
 						log_warn "TDD pre-run: playwright" \
 							"task $_next_tid failed" \
@@ -3289,6 +3304,11 @@ After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
 3. If you find problems, fix them before committing.
+
+MANDATORY UI INTERACTION CONSTRAINTS:
+- Use data-testid selectors on actual buttons, forms, and navigation elements.
+- Do NOT call backend APIs directly from test code as a substitute for UI interactions.
+- Do NOT use waitForLoadState('networkidle') — use domcontentloaded + waitFor on specific elements.
 
 Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
