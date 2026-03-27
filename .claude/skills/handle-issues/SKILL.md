@@ -270,15 +270,15 @@ while true; do
 
     # Read and display progress
     if [[ -f status.json ]]; then
-        STATE=$(jq -r '.state' status.json)
-        COMPLETED=$(jq -r '.progress.completed' status.json)
-        FAILED=$(jq -r '.progress.failed' status.json)
-        TOTAL=$(jq -r '.progress.total' status.json)
+        STATE=$(jq -r '.state // "unknown"' status.json)
+        COMPLETED=$(jq -r '.progress.completed // 0' status.json)
+        FAILED=$(jq -r '.progress.failed // 0' status.json)
+        TOTAL=$(jq -r '.progress.total // 0' status.json)
         CURRENT=$(jq -r '.current_issue // "none"' status.json)
-        RATE_LIMITED=$(jq -r '.rate_limit.waiting' status.json)
+        RATE_LIMITED=$(jq -r '.rate_limit.waiting // false' status.json)
 
         # Calculate lines changed since start (vs base branch)
-        LINES_CHANGED=$(git diff "$BASE_BRANCH"...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ insertion|[0-9]+ deletion' | grep -oE '[0-9]+' | paste -sd+ | bc 2>/dev/null || echo "0")
+        LINES_CHANGED=$(git diff "$BASE_BRANCH"...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ insertion|[0-9]+ deletion' | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}' 2>/dev/null || echo "0")
 
         if [[ "$RATE_LIMITED" == "true" ]]; then
             RESUME_AT=$(jq -r '.rate_limit.resume_at' status.json)
@@ -302,11 +302,11 @@ done
 Read final results from status.json and output summary:
 
 ```bash
-STATE=$(jq -r '.state' status.json)
-COMPLETED=$(jq -r '.progress.completed' status.json)
-FAILED=$(jq -r '.progress.failed' status.json)
-TOTAL=$(jq -r '.progress.total' status.json)
-LOG_DIR=$(jq -r '.log_dir' status.json)
+STATE=$(jq -r '.state // "unknown"' status.json)
+COMPLETED=$(jq -r '.progress.completed // 0' status.json)
+FAILED=$(jq -r '.progress.failed // 0' status.json)
+TOTAL=$(jq -r '.progress.total // 0' status.json)
+LOG_DIR=$(jq -r '.log_dir // "logs/"' status.json)
 
 echo ""
 echo "## Handle Issues Complete"
