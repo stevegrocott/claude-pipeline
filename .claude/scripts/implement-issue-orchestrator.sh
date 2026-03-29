@@ -5677,6 +5677,44 @@ The command will output the MR number. Use that as pr_number in your response."
         local pr_diff
         pr_diff=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null | head -500)
 
+        # Sibling-file scan: for each directory containing a changed file,
+        # collect other .ts/.tsx files (excluding tests), deduplicate, cap at 5.
+        local -a raw_siblings=()
+        local sib_dir sib_f
+        while IFS= read -r sib_f; do
+            [[ -z "$sib_f" ]] && continue
+            sib_dir="${sib_f%/*}"
+            [[ "$sib_dir" == "$sib_f" ]] && sib_dir="."
+            for f in "$sib_dir"/*.ts "$sib_dir"/*.tsx; do
+                [[ -f "$f" ]] || continue
+                [[ "$f" == *".test."* || "$f" == *".spec."* ]] && continue
+                raw_siblings+=("$f")
+            done
+        done < <(git diff --name-only "$BASE_BRANCH"...HEAD -- 2>/dev/null)
+
+        local -a sibling_files_list=()
+        local sib_dup sib_u
+        for sib_f in "${raw_siblings[@]}"; do
+            sib_dup=false
+            for sib_u in "${sibling_files_list[@]}"; do
+                [[ "$sib_u" == "$sib_f" ]] && sib_dup=true && break
+            done
+            $sib_dup && continue
+            sibling_files_list+=("$sib_f")
+            ((${#sibling_files_list[@]} >= 5)) && break
+        done
+
+        local sibling_files_prompt=""
+        if ((${#sibling_files_list[@]} > 0)); then
+            local sibling_list
+            sibling_list=$(printf '%s, ' "${sibling_files_list[@]}")
+            sibling_list="${sibling_list%, }"
+            sibling_files_prompt="
+
+Also check these sibling files for the same auth, schema, and N+1 patterns: ${sibling_list}
+For sibling files, only report major-severity findings (omit minor findings)."
+        fi
+
         local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
 Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
@@ -5691,10 +5729,10 @@ $pr_diff
 Checklist (verify each item explicitly):
 1. Response schemas declared for all routes
 2. Auth middleware applied to all protected routes
-3. No unbounded queries without `take` (pagination limit)
+3. No unbounded queries without \`take\` (pagination limit)
 4. No N+1 patterns (all related data fetched in a single query or batched)
 5. No hollow test assertions (every assertion checks a meaningful value)
-
+${sibling_files_prompt}
 Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
