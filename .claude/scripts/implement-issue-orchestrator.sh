@@ -5761,9 +5761,46 @@ ${major_descriptions}"
         # Comment #11: PR Combined Review Result
         local review_icon="✅"
         [[ "$review_verdict" == "changes_requested" ]] && review_icon="🔄"
+
+        # Create follow-up GH issues for adjacent_issues with major severity
+        local followup_comment=""
+        if [[ "$review_verdict" == "approved" ]]; then
+            local adjacent_json adj_count
+            adjacent_json=$(printf '%s' "$review_result" | \
+                jq -c '[.adjacent_issues // [] | .[] | select(.severity == "major")]' \
+                2>/dev/null || echo "[]")
+            adj_count=$(printf '%s' "$adjacent_json" | jq 'length' 2>/dev/null || echo "0")
+            if (( adj_count > 0 )); then
+                local created_nums=()
+                while IFS= read -r adj_item; do
+                    local adj_title adj_body
+                    adj_title=$(printf '%s' "$adj_item" | jq -r '.title // ""')
+                    adj_body=$(printf '%s' "$adj_item" | jq -r '.body // ""')
+                    [[ -z "$adj_title" ]] && continue
+                    local new_num
+                    new_num=$("$PLATFORM_DIR/create-issue.sh" \
+                        --title "$adj_title" --body "$adj_body" \
+                        --labels "pipeline-followup" 2>/dev/null || true)
+                    if [[ -n "$new_num" ]]; then
+                        created_nums+=("#$new_num")
+                        log "Created follow-up issue #$new_num: $adj_title"
+                    fi
+                done < <(printf '%s' "$adjacent_json" | jq -c '.[]'  2>/dev/null)
+                if (( ${#created_nums[@]} > 0 )); then
+                    local nums_joined
+                    nums_joined=$(printf '%s, ' "${created_nums[@]}")
+                    nums_joined="${nums_joined%, }"
+                    followup_comment="
+
+---
+📋 **Follow-up issues created:** $nums_joined"
+                fi
+            fi
+        fi
+
         comment_pr "$pr_number" "PR Review (Iteration $pr_iteration)" "$review_icon **Result:** $review_verdict
 
-$review_summary" "code-reviewer"
+$review_summary$followup_comment" "code-reviewer"
 
         if [[ "$review_verdict" == "approved" ]]; then
             pr_approved=true
