@@ -5678,31 +5678,36 @@ The command will output the MR number. Use that as pr_number in your response."
         pr_diff=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null | head -500)
 
         # Sibling-file scan: for each directory containing a changed file,
-        # collect other .ts/.tsx files (excluding tests), deduplicate, cap at 5.
-        local -a raw_siblings=()
-        local sib_dir sib_f
+        # collect other .ts/.tsx files (excluding tests and already-diffed files),
+        # deduplicate, cap at 5. Uses newline-delimited strings for bash 3 compat.
+        local repo_root
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+        # Collect changed files (newline-delimited for lookup)
+        local changed_files_nl
+        changed_files_nl=$(git diff --name-only "$BASE_BRANCH"...HEAD -- 2>/dev/null)
+
+        local -a sibling_files_list=()
+        local seen_nl="" sib_f sib_dir
         while IFS= read -r sib_f; do
             [[ -z "$sib_f" ]] && continue
             sib_dir="${sib_f%/*}"
             [[ "$sib_dir" == "$sib_f" ]] && sib_dir="."
-            for f in "$sib_dir"/*.ts "$sib_dir"/*.tsx; do
+            for f in "$repo_root/$sib_dir"/*.ts "$repo_root/$sib_dir"/*.tsx; do
                 [[ -f "$f" ]] || continue
                 [[ "$f" == *".test."* || "$f" == *".spec."* ]] && continue
-                raw_siblings+=("$f")
+                # Normalize back to repo-relative path
+                local rel="${f#"$repo_root"/}"
+                # Skip files already in the diff
+                printf '%s\n' "$changed_files_nl" | grep -qxF "$rel" && continue
+                # Deduplicate
+                printf '%s\n' "$seen_nl" | grep -qxF "$rel" && continue
+                seen_nl="${seen_nl}${rel}
+"
+                sibling_files_list+=("$rel")
+                ((${#sibling_files_list[@]} >= 5)) && break 2
             done
-        done < <(git diff --name-only "$BASE_BRANCH"...HEAD -- 2>/dev/null)
-
-        local -a sibling_files_list=()
-        local sib_dup sib_u
-        for sib_f in "${raw_siblings[@]}"; do
-            sib_dup=false
-            for sib_u in "${sibling_files_list[@]}"; do
-                [[ "$sib_u" == "$sib_f" ]] && sib_dup=true && break
-            done
-            $sib_dup && continue
-            sibling_files_list+=("$sib_f")
-            ((${#sibling_files_list[@]} >= 5)) && break
-        done
+        done <<< "$changed_files_nl"
 
         local sibling_files_prompt=""
         if ((${#sibling_files_list[@]} > 0)); then
@@ -5822,6 +5827,8 @@ ${major_descriptions}"
                     if [[ -n "$new_num" ]]; then
                         created_nums+=("#$new_num")
                         log "Created follow-up issue #$new_num: $adj_title"
+                    else
+                        log "WARN: failed to create follow-up issue for: $adj_title"
                     fi
                 done < <(printf '%s' "$adjacent_json" | jq -c '.[]'  2>/dev/null)
                 if (( ${#created_nums[@]} > 0 )); then
