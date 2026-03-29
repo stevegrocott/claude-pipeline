@@ -1536,6 +1536,13 @@ Check:
 - Security concerns
 - If any \$queryRaw or raw SQL strings are present, cross-reference them against existing similar queries in the codebase to verify table names and query patterns are consistent
 
+Checklist (verify each item explicitly):
+1. Response schemas declared for all routes
+2. Auth middleware applied to all protected routes
+3. No unbounded queries without \`take\` (pagination limit)
+4. No N+1 patterns (all related data fetched in a single query or batched)
+5. No hollow test assertions (every assertion checks a meaningful value)
+
 FILES CHANGED:
 $review_changed_files
 
@@ -5680,6 +5687,13 @@ Here is the diff to review (do NOT run git diff yourself — use this):
 \`\`\`diff
 $pr_diff
 \`\`\`
+
+Checklist (verify each item explicitly):
+1. Response schemas declared for all routes
+2. Auth middleware applied to all protected routes
+3. No unbounded queries without `take` (pagination limit)
+4. No N+1 patterns (all related data fetched in a single query or batched)
+5. No hollow test assertions (every assertion checks a meaningful value)
 
 Approve or request changes. Output a summary suitable for an issue comment."
 
