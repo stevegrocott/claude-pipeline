@@ -2747,10 +2747,14 @@ Commit your changes with a descriptive message."
 		impl_summary=$(printf '%s' "$impl_result" \
 			| jq -r '.summary // "Implementation completed"')
 
+		local files_changed_wt_json
+		files_changed_wt_json=$(git -C "$wt_path" diff --name-only HEAD~1 HEAD \
+			2>/dev/null | jq -R -s 'split("\n") | map(select(length>0))')
 		printf '%s' "{
 \"status\":\"success\",
 \"review_attempts\":$review_attempts,
 \"commit\":\"$commit_sha\",
+\"files_changed\":${files_changed_wt_json:-[]},
 \"summary\":$(printf '%s' "$impl_summary" | jq -Rs .)
 }" > "$result_file"
 		return 0
