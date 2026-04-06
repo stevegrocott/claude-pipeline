@@ -5439,7 +5439,8 @@ $impl_summary" "$tagent"
                 comment_issue "Already Implemented" \
                     "✅ All tasks for this issue were already completed in a prior run. No new changes are needed. Closing as done." \
                     "default"
-                set_final_state "completed"
+                set_final_state "already_implemented"
+                jq '.task_summary.sp_completed = 0 | .task_summary.sp_total = 0' status.json > status.json.tmp && mv status.json.tmp status.json
                 exit 0
             fi
         fi
