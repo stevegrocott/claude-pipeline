@@ -5411,6 +5411,9 @@ $impl_summary" "$tagent"
     if is_stage_completed "implement"; then
         local all_already_done=true
         local _rf _already_done _files_changed
+        # files_changed is now reliably written by execute_batch_serial (added in feat/issue-152),
+        # so a missing or empty array is a genuine signal that no files were changed, not a gap.
+        # The commits_ahead guard below remains as defence-in-depth against false-positive exits.
         for _rf in "${LOG_BASE}/stages"/task-*-worktree.log \
                    "${LOG_BASE}/stages"/task-*-serial.log; do
             [[ -f "$_rf" ]] || continue
