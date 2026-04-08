@@ -6105,7 +6105,6 @@ $complete_summary
 *This PR is ready for human review and merge.*"
 
         set_stage_completed "complete"
-        set_final_state "completed"
     fi
 
     # -------------------------------------------------------------------------
@@ -6116,6 +6115,7 @@ $complete_summary
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "merge_pr"; then
         log "Skipping merge_pr stage (already completed)"
+        set_final_state "completed"
     else
         set_stage_started "merge_pr"
         log "Merging PR #$pr_number into $BASE_BRANCH..."
@@ -6133,6 +6133,7 @@ $complete_summary
                 "✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully." \
                 "default"
             set_stage_completed "merge_pr"
+            set_final_state "completed"
         else
             log_error "Failed to merge PR #$pr_number"
             comment_issue "Merge: Failed" \
