@@ -332,6 +332,7 @@ init_status() {
             quality_iterations: 0,
             test_iterations: 0,
             pr_review_iterations: 0,
+            stage_started_at: null,
             last_update: (now | todate),
             log_dir: $log_dir,
             escalations: []
@@ -374,6 +375,7 @@ set_stage_started() {
        '.stages[$stage].started_at = (now | todate) |
         .stages[$stage].status = "in_progress" |
         .current_stage = $stage |
+        .stage_started_at = (now | todate) |
         .state = "running" |
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"

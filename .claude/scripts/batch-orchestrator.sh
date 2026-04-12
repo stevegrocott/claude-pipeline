@@ -227,6 +227,7 @@ init_status() {
             "error": null,
             "follow_ups": [],
             "started_at": null,
+            "stage_started_at": null,
             "completed_at": null
         }]')
     done
@@ -422,6 +423,7 @@ process_issue() {
     update_issue_field "$issue_num" "status" "in_progress"
     update_issue_field "$issue_num" "started_at" "$(date -Iseconds)"
     update_issue_field "$issue_num" "stage" "implement-issue"
+    update_issue_field "$issue_num" "stage_started_at" "$(date -Iseconds)"
     update_progress
 
     # Set up feature branch for this issue

@@ -256,6 +256,15 @@ echo ""
 BASE_BRANCH=$(jq -r '.base_branch' status.json)
 DEADLINE=$((SECONDS + 10800))  # 3-hour wall-clock guard
 
+# Expected timeouts per stage (seconds) — used for stuck detection
+_stage_timeout() {
+    case "$1" in
+        implement-issue) echo 3600 ;;  # 60 min
+        process-pr)      echo 1800 ;;  # 30 min
+        *)               echo 3600 ;;  # default 60 min
+    esac
+}
+
 while true; do
     # Wall-clock deadline guard
     if (( SECONDS > DEADLINE )); then
@@ -282,16 +291,45 @@ while true; do
         FAILED=$(jq -r '.progress.failed' status.json)
         TOTAL=$(jq -r '.progress.total' status.json)
         CURRENT=$(jq -r '.current_issue // "none"' status.json)
+        CURRENT_STAGE=$(jq -r '.current_stage // ""' status.json)
+        STAGE_STARTED_AT=$(jq -r '.stage_started_at // ""' status.json)
         RATE_LIMITED=$(jq -r '.rate_limit.waiting' status.json)
+
+        # Compute stage elapsed time
+        ELAPSED_STR=""
+        STUCK_WARNING=""
+        if [[ -n "$STAGE_STARTED_AT" && "$STAGE_STARTED_AT" != "null" ]]; then
+            NOW=$(date +%s)
+            # Parse ISO 8601 — try GNU date first, fall back to BSD date (macOS)
+            STAGE_START=$(date -d "$STAGE_STARTED_AT" +%s 2>/dev/null \
+                || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$STAGE_STARTED_AT" +%s 2>/dev/null \
+                || echo "")
+            if [[ -n "$STAGE_START" && "$STAGE_START" =~ ^[0-9]+$ ]]; then
+                ELAPSED=$(( NOW - STAGE_START ))
+                ELAPSED_MIN=$(( ELAPSED / 60 ))
+                ELAPSED_SEC=$(( ELAPSED % 60 ))
+                ELAPSED_STR=" (${ELAPSED_MIN}m ${ELAPSED_SEC}s running)"
+
+                STAGE_TIMEOUT=$(_stage_timeout "$CURRENT_STAGE")
+                THRESHOLD=$(( STAGE_TIMEOUT * 80 / 100 ))
+                if (( ELAPSED > THRESHOLD )); then
+                    STUCK_WARNING="⚠️ Stage running longer than expected — may need attention"
+                fi
+            fi
+        fi
 
         # Calculate lines changed since start (vs base branch)
         LINES_CHANGED=$(git diff "$BASE_BRANCH"...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ insertion|[0-9]+ deletion' | grep -oE '[0-9]+' | paste -sd+ | bc 2>/dev/null || echo "0")
 
         if [[ "$RATE_LIMITED" == "true" ]]; then
             RESUME_AT=$(jq -r '.rate_limit.resume_at' status.json)
-            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL complete, $FAILED failed | Current: #$CURRENT | Lines changed: $LINES_CHANGED | Rate limited until $RESUME_AT"
+            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL | #$CURRENT $CURRENT_STAGE$ELAPSED_STR | Lines changed: $LINES_CHANGED | Rate limited until $RESUME_AT"
         else
-            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL complete, $FAILED failed | Current: #$CURRENT | Lines changed: $LINES_CHANGED"
+            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL | #$CURRENT $CURRENT_STAGE$ELAPSED_STR | Lines changed: $LINES_CHANGED"
+        fi
+
+        if [[ -n "$STUCK_WARNING" ]]; then
+            echo "$STUCK_WARNING"
         fi
 
         # Exit conditions
@@ -300,7 +338,7 @@ while true; do
         fi
     fi
 
-    sleep 300  # 5 minutes
+    sleep 60  # 1 minute
 done
 
 # Output completion summary (same bash block — always executes after loop)
