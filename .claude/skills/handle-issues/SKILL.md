@@ -246,16 +246,23 @@ The orchestrator will:
 
 ### Step 6: Monitor Progress
 
-Check status.json every 5 minutes until complete. Also report lines changed vs base branch:
+Check status.json every minute until complete, then display the completion summary. Both the monitoring loop and summary are in a single bash block so they execute atomically:
 
 ```bash
 echo ""
-echo "Monitoring progress (checking every 5 minutes)..."
+echo "Monitoring progress (checking every minute)..."
 echo ""
 
 BASE_BRANCH=$(jq -r '.base_branch' status.json)
+DEADLINE=$((SECONDS + 10800))  # 3-hour wall-clock guard
 
 while true; do
+    # Wall-clock deadline guard
+    if (( SECONDS > DEADLINE )); then
+        echo "⚠️ Monitor timeout — check status.json manually"
+        break
+    fi
+
     # Check if orchestrator is still running
     if [[ -f logs/handle-issues/.orchestrator.pid ]]; then
         ORCHESTRATOR_PID=$(cat logs/handle-issues/.orchestrator.pid)
@@ -293,15 +300,10 @@ while true; do
         fi
     fi
 
-    sleep 300  # 5 minutes
+    sleep 60  # 1 minute
 done
-```
 
-### Step 7: Output Summary
-
-Read final results from status.json and output summary:
-
-```bash
+# Output completion summary (same bash block — always executes after loop)
 STATE=$(jq -r '.state' status.json)
 COMPLETED=$(jq -r '.progress.completed' status.json)
 FAILED=$(jq -r '.progress.failed' status.json)
