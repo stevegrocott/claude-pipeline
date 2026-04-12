@@ -551,30 +551,30 @@ process_issue() {
     # -------------------------------------------------------------------------
     log "Running: claude -p \"/process-pr $pr_number $issue_num $BRANCH\" --agent code-reviewer --json-schema ..."
 
-    local proc_output
     local proc_exit=0
 
-    proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+    echo "=== process-pr output ===" >> "$issue_log"
+    timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
         --agent code-reviewer \
         --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$PROCESS_SCHEMA" \
-        2>&1) || proc_exit=$?
-
-    echo "=== process-pr output ===" >> "$issue_log"
-    echo "$proc_output" >> "$issue_log"
+        2>&1 | tee -a "$issue_log"
+    proc_exit=${PIPESTATUS[0]}
     echo "=== exit code: $proc_exit ===" >> "$issue_log"
 
-    # Update session ID
-    session_id=$(printf '%s' "$proc_output" | jq -r '.session_id // empty' 2>/dev/null)
+    # Update session ID from last JSON line in log
+    session_id=$(grep -E '^\{' "$issue_log" | tail -1 | jq -r '.session_id // empty' 2>/dev/null)
     if [[ -n "$session_id" ]]; then
         update_issue_field "$issue_num" "session_id" "$session_id"
     fi
 
     # Check for rate limit
-    if detect_rate_limit "$proc_output" "$proc_exit"; then
+    local proc_last_json
+    proc_last_json=$(grep -E '^\{' "$issue_log" | tail -1)
+    if detect_rate_limit "$proc_last_json" "$proc_exit"; then
         local wait_time
-        wait_time=$(extract_wait_time "$proc_output")
+        wait_time=$(extract_wait_time "$proc_last_json")
         wait_time=$((wait_time + RATE_LIMIT_BUFFER))
         local resume_at
         resume_at=$(date -Iseconds -d "+${wait_time} seconds" 2>/dev/null || date -v+${wait_time}S -Iseconds 2>/dev/null)
@@ -587,25 +587,26 @@ process_issue() {
         set_rate_limit "false" "" ""
 
         # Resume
+        echo "=== process-pr resume output ===" >> "$issue_log"
         if [[ -n "$session_id" ]]; then
-            proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "please continue" \
+            timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "please continue" \
                 --resume "$session_id" \
                 --agent code-reviewer \
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$PROCESS_SCHEMA" \
-                2>&1) || proc_exit=$?
+                2>&1 | tee -a "$issue_log"
+            proc_exit=${PIPESTATUS[0]}
         else
-            proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+            timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
                 --agent code-reviewer \
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$PROCESS_SCHEMA" \
-                2>&1) || proc_exit=$?
+                2>&1 | tee -a "$issue_log"
+            proc_exit=${PIPESTATUS[0]}
         fi
-
-        echo "=== process-pr resume output ===" >> "$issue_log"
-        echo "$proc_output" >> "$issue_log"
+        proc_last_json=$(grep -E '^\{' "$issue_log" | tail -1)
     fi
 
     # Check for timeout
@@ -623,9 +624,9 @@ process_issue() {
     local follow_ups
     local proc_error
 
-    proc_status=$(printf '%s' "$proc_output" | jq -r '.structured_output.status // "error"' 2>/dev/null)
-    follow_ups=$(printf '%s' "$proc_output" | jq -c '.structured_output.follow_up_issues // []' 2>/dev/null)
-    proc_error=$(printf '%s' "$proc_output" | jq -r '.structured_output.error // empty' 2>/dev/null)
+    proc_status=$(printf '%s' "$proc_last_json" | jq -r '.structured_output.status // "error"' 2>/dev/null)
+    follow_ups=$(printf '%s' "$proc_last_json" | jq -c '.structured_output.follow_up_issues // []' 2>/dev/null)
+    proc_error=$(printf '%s' "$proc_last_json" | jq -r '.structured_output.error // empty' 2>/dev/null)
 
     log "process-pr status: $proc_status"
 
