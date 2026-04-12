@@ -300,7 +300,7 @@ while true; do
         fi
     fi
 
-    sleep 60  # 1 minute
+    sleep 300  # 5 minutes
 done
 
 # Output completion summary (same bash block — always executes after loop)
