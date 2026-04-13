@@ -5841,6 +5841,8 @@ $pr_creation_skill}"
         diff_lines=$(get_diff_line_count "$BASE_BRANCH")
         log "PR review config: model=$pr_review_model, timeout=${pr_review_timeout}s, max_iter=$pr_review_max_iter (diff: ${diff_lines} lines, profile: $pipeline_profile)"
 
+        local review_history_file="$LOG_BASE/context/pr-review-history.json"
+
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
         local pr_iteration
@@ -6055,6 +6057,25 @@ $review_summary$followup_comment" "code-reviewer"
             local review_comments
             review_comments=$(printf '%s' "$review_result" | jq -r '[.issues // [] | .[] | "\(.file // ""):\(.line // "") → \(.description // "")"] | join("\n- ")')
 
+            # Append current iteration issues to history file
+            local current_issues
+            current_issues=$(printf '%s' "$review_result" | jq -c '.issues // []')
+            if [[ -f "$review_history_file" ]]; then
+                local existing
+                existing=$(< "$review_history_file")
+                printf '%s' "$existing" | jq --argjson new "$current_issues" '. + [$new]' > "$review_history_file"
+            else
+                printf '[%s]' "$current_issues" > "$review_history_file"
+            fi
+
+            # Build cumulative findings from prior iterations
+            local cumulative_findings=""
+            if [[ -f "$review_history_file" ]]; then
+                cumulative_findings=$(jq -r '
+                    [.[-2:] | .[] | .[]? | .description] | unique | join("\n- ")
+                ' "$review_history_file" 2>/dev/null || printf '')
+            fi
+
             local fix_from_review_skill
             fix_from_review_skill=$(load_skill "fix-from-review")
 
@@ -6066,8 +6087,13 @@ $fix_from_review_skill
 
 }Address PR review feedback on branch $branch in the current working directory:
 
-Review feedback:
+Current iteration findings:
 $review_comments
+
+$(if [[ -n "$cumulative_findings" ]]; then
+    printf 'Cumulative findings across all iterations (ensure ALL are addressed):\n'
+    printf -- '- %s\n' "$cumulative_findings"
+fi)
 
 Fix the issues and commit. Output a summary of fixes applied."
 
