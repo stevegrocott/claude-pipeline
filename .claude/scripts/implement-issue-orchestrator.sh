@@ -6053,7 +6053,7 @@ $review_summary$followup_comment" "code-reviewer"
 
             # Collect feedback
             local review_comments
-            review_comments=$(printf '%s' "$review_result" | jq -r '.comments // ""')
+            review_comments=$(printf '%s' "$review_result" | jq -r '[.issues // [] | .[] | "\(.file // ""):\(.line // "") → \(.description // "")"] | join("\n- ")')
 
             local fix_from_review_skill
             fix_from_review_skill=$(load_skill "fix-from-review")
