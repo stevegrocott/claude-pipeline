@@ -245,7 +245,7 @@ main() {
 
 	# Locate the project root (where sync.sh and downstream-projects.txt live)
 	local project_root="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-	local registry="$project_root/downstream-projects.txt"
+	local registry="$project_root/.claude/config/downstream-projects.txt"
 
 	# No registry file — exit silently
 	[[ -f "$registry" ]] || exit 0

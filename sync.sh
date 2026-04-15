@@ -192,6 +192,48 @@ diff_file() {
     fi
 }
 
+# Register detect-core-edit.sh hook in a project's settings.json if not already present
+register_detect_hook() {
+    local settings_path="$1"
+
+    if [[ ! -f "$settings_path" ]]; then
+        return
+    fi
+
+    # Check if already registered
+    local already
+    already=$(jq -r '
+        .hooks.PostToolUse[]?
+        | select(.matcher == "Edit|Write")
+        | .hooks[]?
+        | select(.command != null)
+        | .command
+        | select(contains("detect-core-edit.sh"))
+    ' "$settings_path" 2>/dev/null)
+
+    if [[ -n "$already" ]]; then
+        return
+    fi
+
+    # Add the hook entry
+    local hook_entry='{"type":"command","command":"\"$CLAUDE_PROJECT_DIR/.claude/skills/pipeline-sync/scripts/detect-core-edit.sh\"","timeout":10}'
+
+    local tmp
+    tmp=$(mktemp)
+    jq --argjson entry "$hook_entry" '
+        .hooks.PostToolUse = [
+            .hooks.PostToolUse[]
+            | if .matcher == "Edit|Write" then
+                .hooks += [$entry]
+              else
+                .
+              end
+        ]
+    ' "$settings_path" > "$tmp" && mv "$tmp" "$settings_path"
+
+    echo "  HOOK detect-core-edit.sh registered in project settings.json"
+}
+
 # Diff universal skills
 diff_skills() {
     local src="$1" dst="$2"
@@ -264,6 +306,8 @@ case "$COMMAND" in
         echo ""
         echo "Syncing universal skills:"
         sync_skills "$PIPELINE_DIR" "$PROJECT_DIR"
+
+        register_detect_hook "$PROJECT_DIR/settings.json"
 
         echo ""
         echo "Done. Project-specific files (agents, config, prompts) untouched."
