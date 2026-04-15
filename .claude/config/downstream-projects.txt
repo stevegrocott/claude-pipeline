@@ -1,0 +1,17 @@
+# downstream-projects.txt
+# Registry of downstream projects that consume core pipeline files.
+#
+# FORMAT: One absolute path per line.
+#         Lines starting with '#' are comments and are ignored.
+#         Blank lines are ignored.
+#         Paths must be absolute (starting with /).
+#
+# PURPOSE: Read by .claude/hooks/sync-reminder.sh to produce reminders
+#          after core pipeline files are edited. For each listed project,
+#          the hook outputs the corresponding `./sync.sh to <path>` command.
+#
+# MAINTENANCE: Add a new line when a project adopts this pipeline.
+#              Remove or comment out a line when a project is retired.
+#              Stale paths are silently skipped by the hook.
+
+/Users/shinytrap/projects/beegee-farm-3
