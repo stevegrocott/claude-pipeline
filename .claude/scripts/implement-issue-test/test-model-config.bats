@@ -744,6 +744,24 @@ run_with_config() {
 	[[ "$output" == "haiku" ]]
 }
 
+@test "resolve_model matches docs prefix in docs-file-1" {
+	run_with_config 'resolve_model "docs-file-1"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
+@test "resolve_model matches docs prefix in docs-file-10" {
+	run_with_config 'resolve_model "docs-file-10"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
+@test "resolve_model matches docs prefix in docs-commit" {
+	run_with_config 'resolve_model "docs-commit"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
 @test "resolve_model matches complete prefix in complete-issue" {
 	run_with_config 'resolve_model "complete-issue"'
 	[ "$status" -eq 0 ]
