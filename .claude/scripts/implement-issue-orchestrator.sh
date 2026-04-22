@@ -1437,6 +1437,81 @@ for m in re.finditer(r'\[\s*\{', t):
         return 1
     fi
 
+    # Structured-error escalation — if the agent explicitly returned
+    # status:"error", try a better model before giving up (unless the failure
+    # was caused by a permission hook, which a better model can't bypass).
+    local structured_status
+    structured_status=$(printf '%s' "$structured" | jq -r '.status // empty' 2>/dev/null)
+
+    if [[ "$structured_status" == "error" ]]; then
+        # Check whether the failure was caused by permission denials embedded
+        # in the raw CLI output.  The CLI surfaces these as an array under
+        # .permission_denials[].tool_name.
+        local permission_denials
+        permission_denials=$(printf '%s' "$output" \
+            | jq -r '[.permission_denials[]?.tool_name // empty] | select(length > 0) | join(", ")' \
+            2>/dev/null || true)
+
+        if [[ -n "$permission_denials" ]]; then
+            log "WARN: $stage_name blocked by permission hook (tools: $permission_denials) — skipping escalation"
+        else
+            # No permission denial — escalate to the next model tier and retry once.
+            local struct_err_escalated_model
+            struct_err_escalated_model=$(_next_model_up "$model")
+
+            if [[ "$struct_err_escalated_model" != "$model" ]]; then
+                log "WARN: $stage_name returned status:error with $model — escalating to $struct_err_escalated_model"
+                printf '%s\n' "=== $stage_name structured-error escalation: $model → $struct_err_escalated_model ===" >> "$stage_log"
+
+                record_escalation "$stage_name" "$model" "$struct_err_escalated_model" "structured_error"
+
+                local -a struct_err_esc_fallback_args=()
+                local struct_err_esc_fallback
+                struct_err_esc_fallback=$(_next_model_up "$struct_err_escalated_model")
+                if [[ "$struct_err_esc_fallback" != "$struct_err_escalated_model" ]]; then
+                    struct_err_esc_fallback_args=(--fallback-model "$struct_err_esc_fallback")
+                fi
+
+                local struct_err_esc_exit_code=0
+                output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+                    ${agent_args[@]+"${agent_args[@]}"} \
+                    --model "$struct_err_escalated_model" \
+                    ${struct_err_esc_fallback_args[@]+"${struct_err_esc_fallback_args[@]}"} \
+                    --dangerously-skip-permissions \
+                    --output-format json \
+                    --json-schema "$schema" \
+                    2>&1) || struct_err_esc_exit_code=$?
+
+                printf '%s\n' "=== $stage_name structured-error escalation output ===" >> "$stage_log"
+                printf '%s\n' "$output" >> "$stage_log"
+                printf '%s\n' "=== structured-error escalation exit code: $struct_err_esc_exit_code ===" >> "$stage_log"
+
+                # Re-extract structured output from escalated run
+                structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
+                if [[ -n "$structured" ]]; then
+                    _CONSECUTIVE_TIMEOUTS=0
+                    _TIMED_OUT_STAGE_NAMES=""
+                    printf '%s\n' "$structured"
+                    return 0
+                fi
+
+                # Try .result fallback from escalated run
+                local struct_err_esc_fallback_result
+                struct_err_esc_fallback_result=$(printf '%s' "$output" | jq -c '
+                    select(.is_error == false and .result != null) |
+                    {status: "success", summary: .result}
+                ' 2>/dev/null)
+                if [[ -n "$struct_err_esc_fallback_result" ]]; then
+                    log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
+                    _CONSECUTIVE_TIMEOUTS=0
+                    _TIMED_OUT_STAGE_NAMES=""
+                    printf '%s\n' "$struct_err_esc_fallback_result"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
     _CONSECUTIVE_TIMEOUTS=0
     _TIMED_OUT_STAGE_NAMES=""
     printf '%s\n' "$structured"
