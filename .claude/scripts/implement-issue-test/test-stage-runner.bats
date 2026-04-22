@@ -842,6 +842,152 @@ teardown() {
 }
 
 # =============================================================================
+# MODEL ESCALATION — structured_error
+# =============================================================================
+
+@test "run_stage escalates when structured_output.status is error without permission_denials" {
+    # BATS runs each @test in a forked subprocess — re-source model-config to
+    # make readonly arrays available (same pattern as MODEL SELECTION tests).
+    source "$TEST_TMP/model-config.sh"
+    # record_escalation needs a minimal status.json to write into.
+    cat > "$STATUS_FILE" << 'EOF'
+{"escalations": [], "stages": {}}
+EOF
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        if (( n == 1 )); then
+            # Structured error with no permission_denials — must escalate
+            echo '{"result":"failed","structured_output":{"status":"error","error":"first attempt failed"}}'
+        else
+            # Escalated call: succeed
+            echo '{"result":"ok","structured_output":{"status":"success","data":"recovered"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    # test-iter-1 resolves to sonnet; sonnet escalates to opus on structured_error
+    local result
+    result=$(run_stage "test-iter-1" "prompt" "test-schema.json" "" "" | grep '^{')
+    [ -n "$result" ] || fail "run_stage returned no JSON output"
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || fail "Expected 2 claude calls (original + escalated), got $final_count"
+
+    # Second call must use escalated model (opus — next tier above sonnet)
+    local second_call_args
+    second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
+    [[ "$second_call_args" == *"--model opus"* ]] || \
+        fail "Expected --model opus in escalated retry. Args: $second_call_args"
+
+    # Final returned status must reflect the successful escalated run
+    local status_val
+    status_val=$(printf '%s' "$result" | jq -r '.status')
+    [ "$status_val" = "success" ] || \
+        fail "Expected 'success' after escalation, got: $status_val"
+}
+
+@test "run_stage skips escalation and logs warning when permission_denials is non-empty" {
+    source "$TEST_TMP/model-config.sh"
+    cat > "$STATUS_FILE" << 'EOF'
+{"escalations": [], "stages": {}}
+EOF
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        # status:error with non-empty permission_denials — escalation must be skipped
+        echo '{"result":"blocked","structured_output":{"status":"error","error":"permission denied"},"permission_denials":[{"tool_name":"Edit"},{"tool_name":"Write"}]}'
+    }
+    export -f timeout
+    export counter_file
+
+    run_stage "test-iter-1" "prompt" "test-schema.json" "" "" >/dev/null 2>/dev/null
+
+    # Only one claude call should have been made — escalation was skipped
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 1 )) || \
+        fail "Expected 1 claude call (escalation skipped), got $final_count"
+
+    # Warning log must name the denied tools and reference the permission hook
+    grep -q "blocked by permission hook" "$LOG_FILE" || \
+        fail "Expected permission-hook warning in log. Log: $(cat "$LOG_FILE")"
+    grep -q "Edit" "$LOG_FILE" || \
+        fail "Expected denied tool 'Edit' named in warning. Log: $(cat "$LOG_FILE")"
+    grep -q "Write" "$LOG_FILE" || \
+        fail "Expected denied tool 'Write' named in warning. Log: $(cat "$LOG_FILE")"
+
+    # No escalation should have been recorded
+    local escalation_count
+    escalation_count=$(jq '.escalations | length' "$STATUS_FILE")
+    [ "$escalation_count" = "0" ] || \
+        fail "Expected 0 escalations recorded, got: $escalation_count"
+}
+
+@test "run_stage records structured_error escalation with reason 'structured_error'" {
+    source "$TEST_TMP/model-config.sh"
+    cat > "$STATUS_FILE" << 'EOF'
+{"escalations": [], "stages": {}}
+EOF
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"result":"failed","structured_output":{"status":"error","error":"first attempt failed"}}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    run_stage "test-iter-1" "prompt" "test-schema.json" "" "" >/dev/null 2>/dev/null
+
+    local reason
+    reason=$(jq -r '.escalations[0].reason // empty' "$STATUS_FILE")
+    [ "$reason" = "structured_error" ] || \
+        fail "Expected escalation reason 'structured_error', got: $reason (status.json: $(cat "$STATUS_FILE"))"
+
+    # Escalation metadata should reflect sonnet → opus transition
+    local from_model
+    from_model=$(jq -r '.escalations[0].from_model // empty' "$STATUS_FILE")
+    [[ "$from_model" == *"sonnet"* ]] || \
+        fail "Expected from_model to contain 'sonnet', got: $from_model"
+
+    local to_model
+    to_model=$(jq -r '.escalations[0].to_model // empty' "$STATUS_FILE")
+    [[ "$to_model" == *"opus"* ]] || \
+        fail "Expected to_model to contain 'opus', got: $to_model"
+}
+
+# =============================================================================
 # COMPLEXITY-AWARE MAX-TURNS LOGIC
 # =============================================================================
 
