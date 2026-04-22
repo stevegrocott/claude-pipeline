@@ -5731,13 +5731,19 @@ $dv_summary" "default"
         else
             set_stage_started "docs"
 
-            local docs_prompt="Write JSDoc/TSDoc comments for all modified TypeScript files on branch $branch in the current working directory.
+            local file_idx=0
+            while IFS= read -r ts_file; do
+                [[ -z "$ts_file" ]] && continue
+                (( file_idx++ )) || true
+                local docs_file_prompt="Write JSDoc/TSDoc comments for the TypeScript file \`$ts_file\` on branch $branch in the current working directory.
 
-Modified TypeScript files:
-$files_for_prompt
+File: $ts_file
 
-Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSUE_NUMBER): add JSDoc comments"
-            run_stage "docs" "$docs_prompt" "implement-issue-implement.json" "default"
+Add comprehensive JSDoc/TSDoc comments to this file only. Stage the changes with \`git add $ts_file\` but do NOT commit."
+                run_stage "docs-file-$file_idx" "$docs_file_prompt" "implement-issue-implement.json" "default"
+            done <<< "$modified_ts_files"
+
+            run_stage "docs-commit" "Commit all staged docblock changes with message: docs(issue-$ISSUE_NUMBER): add JSDoc comments" "implement-issue-implement.json" "default"
 
             set_stage_completed "docs"
         fi
