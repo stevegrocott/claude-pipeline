@@ -160,6 +160,130 @@ Two test layers protect the triage system. Both must stay green:
   triage tier model. Run monthly to catch model drift.** Do NOT
   auto-update the manifest when fixtures flip — investigate first.
 
+## Proactive Usage Polling (skip exhausted models)
+
+When `seven_day_sonnet` hits 100% but the all-models weekly cap still has
+headroom, opus/haiku are still usable. Without this feature the orchestrator
+would sleep ~1h waiting for sonnet to reset. With it, the orchestrator polls
+the same private endpoint that menu-bar apps like Sneaky Penguin use, and
+escalates sonnet → opus on the fly.
+
+### How to enable
+
+1. **Get your sessionKey.** Open `https://claude.ai` in any browser logged
+   in to your account. Open DevTools (F12) → Console tab and paste:
+
+   ```js
+   document.cookie  // search the output for "sessionKey="
+   ```
+
+   If `sessionKey` isn't visible there (HttpOnly), use the Application tab →
+   Cookies → `https://claude.ai` → row named `sessionKey`. Copy the long
+   value starting `sk-ant-sid01-...`.
+
+2. **Get your org UUID.** In DevTools Console, paste:
+
+   ```js
+   fetch('/api/organizations', {credentials: 'include'}).then(r => r.json()).then(o => console.log(o[0]?.uuid))
+   ```
+
+3. **Configure the env vars** (e.g. in `~/.zshrc`):
+
+   ```bash
+   export CLAUDE_USAGE_SESSION_KEY="sk-ant-sid01-..."
+   export CLAUDE_USAGE_ORG_ID="your-org-uuid"
+   ```
+
+   For CI / shared boxes, prefer a 0600 file:
+
+   ```bash
+   echo "sk-ant-sid01-..." > ~/.claude-session-key && chmod 600 ~/.claude-session-key
+   export CLAUDE_USAGE_SESSION_KEY_FILE=~/.claude-session-key
+   ```
+
+### Configuration env vars
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `CLAUDE_USAGE_SESSION_KEY` | (required to enable) | sessionKey cookie from claude.ai |
+| `CLAUDE_USAGE_SESSION_KEY_FILE` | (alternative) | Path to 0600 file containing the key |
+| `CLAUDE_USAGE_ORG_ID` | (required) | Organization UUID |
+| `CLAUDE_USAGE_DISABLE` | `0` | `1` opts out — script behaves exactly as today |
+| `CLAUDE_USAGE_SESSION_THRESHOLD` | `95` | `five_hour` cap (5-hour rate window — overage cannot absorb) |
+| `CLAUDE_USAGE_MODEL_THRESHOLD` | `95` | `seven_day_sonnet` / `seven_day_opus` cap (per-model weekly) |
+| `CLAUDE_USAGE_WEEKLY_THRESHOLD` | `98` | `seven_day` all-models weekly cap (last-resort circuit-breaker) |
+| `CLAUDE_USAGE_EXTRA_THRESHOLD` | `90` | When `extra_usage.utilization` exceeds this, stop letting overage absorb |
+| `CLAUDE_USAGE_CACHE_TTL` | `30` | Seconds — cache one response per 30s ≈ one API call per ~30 stages |
+
+### Bucket-to-model mapping (verified against captured fixture)
+
+| Model | Per-model bucket | Falls back to | Session gate |
+|-------|------------------|---------------|--------------|
+| sonnet | `seven_day_sonnet` | `seven_day` if null | `five_hour` |
+| opus | `seven_day_opus` (often null) | `seven_day` if null | `five_hour` |
+| haiku | _none_ | `seven_day` | `five_hour` |
+| unknown | (not gated; returns 0) | — | — |
+
+### Behavior
+
+- **Hybrid fallback**: if `CLAUDE_USAGE_SESSION_KEY` is unset OR a fetch
+  fails, `is_model_exhausted` returns false for everything. The reactive
+  rate-limit handler (`handle_rate_limit`, sleeps for parsed wait time)
+  remains as the safety net — no regression for users without a key.
+- **Overage absorption**: paid plans with `extra_usage.is_enabled: true`
+  have per-model exhaustion absorbed by overage billing. The script does
+  NOT escalate when overage is below `EXTRA_THRESHOLD` — escalating
+  prematurely would burn opus when sonnet calls would still have succeeded
+  (just billed against overage).
+- **Mid-run model oscillation**: each stage is a fresh Claude CLI
+  invocation with no shared conversation context. If sonnet at 96%
+  triggers escalation in stage 1, then resets mid-run and stage 3 sees
+  it at 5%, stage 3 will use sonnet. This is expected and benign.
+- **Cache location**: `${XDG_CACHE_HOME:-$HOME/.cache}/claude-pipeline/usage.json`.
+  User-scoped, single source of truth across all worktrees and projects.
+  Never accidentally committed.
+- **`model_override` callsites bypass the gate**: stages with hard-coded
+  models (e.g. PR creation pinned to opus) honor the explicit caller
+  intent. If opus is exhausted in that case, the call surfaces an error
+  rather than silently demoting.
+
+### Security
+
+- sessionKey is a long-lived bearer-equivalent for your claude.ai account.
+- Read once into a local variable; passed to curl via `-H Cookie:` (header,
+  not visible in `ps`); never echoed; never logged; never written to
+  status.json or any artifact.
+- The `test-claude-usage.bats` suite includes an explicit grep-the-key-out
+  check on every code path's output.
+- Known limitation: child process environment may show the value in
+  `/proc/PID/environ` on some Linux configurations during the curl call.
+  Acceptable on a single-user box; use the file-based alternative on shared
+  hosts.
+
+### Known limitations
+
+- The endpoint at `https://claude.ai/api/organizations/{org}/usage` is
+  undocumented. If it changes shape, parse failure → graceful fallback to
+  reactive behavior + WARN log (ERROR if previous cache was valid, so the
+  regression is visible).
+- The double-timeout escalation path in `run_stage` (lines ~1188–1198)
+  bypasses `effective_model`. Rare edge case; addressed in a follow-up.
+- Empirical verification of whether `extra_usage` absorbs `five_hour` or
+  `seven_day` exhaustion is pending — current code treats both as hard
+  caps (conservative). Can be relaxed later if observed.
+
+### Re-capturing the API fixture
+
+If the response shape changes:
+
+```bash
+.claude/scripts/capture-usage-fixture.sh
+```
+
+(prompts for sessionKey + org UUID, writes to
+`.claude/scripts/implement-issue-test/fixtures/usage-response.json`,
+prints the discovered field names so the bucket mapping can be updated).
+
 ## Process
 
 ```dot

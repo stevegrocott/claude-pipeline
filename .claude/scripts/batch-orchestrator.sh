@@ -51,6 +51,10 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 source "$SCRIPT_DIR/../config/platform.sh"
+# claude-usage.sh provides is_model_exhausted / model_reset_at for the
+# pre-flight log line. Sourcing is no-op when CLAUDE_USAGE_SESSION_KEY is
+# unset (graceful fallback — see claude-usage.sh).
+source "$SCRIPT_DIR/claude-usage.sh"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 LOG_BASE="logs/batch-$(date +%Y%m%d-%H%M%S)"
 STATUS_FILE="status.json"
@@ -680,6 +684,24 @@ log "Timeout per issue: ${ISSUE_TIMEOUT}s"
 log "Max consecutive failures: $MAX_CONSECUTIVE_FAILURES"
 
 init_status
+
+# Pre-flight usage check. When the user has configured CLAUDE_USAGE_SESSION_KEY,
+# log current per-model utilization + reset times so operators can see at a
+# glance whether the batch will hit a wall. Per-stage escalation in the
+# subprocess (implement-issue-orchestrator.sh) handles actual routing — this
+# is an observability gate, not a control point.
+if [[ -n "${CLAUDE_USAGE_SESSION_KEY:-}${CLAUDE_USAGE_SESSION_KEY_FILE:-}" ]] \
+        && declare -F is_model_exhausted >/dev/null 2>&1; then
+    for _m in sonnet opus; do
+        _pct=$(usage_for_model "$_m" 2>/dev/null || echo "0")
+        _reset=$(model_reset_at "$_m" 2>/dev/null || echo "unknown")
+        if is_model_exhausted "$_m" 2>/dev/null; then
+            log "Pre-flight: $_m exhausted (utilization ${_pct}%, resets $_reset) — subprocess will escalate"
+        else
+            log "Pre-flight: $_m available (utilization ${_pct}%, resets $_reset)"
+        fi
+    done
+fi
 
 consecutive_failures=0
 exit_code=0

@@ -197,3 +197,57 @@ _next_model_up() {
 		*)      printf '%s' "opus" ;;
 	esac
 }
+
+# =============================================================================
+# USAGE-AWARE MODEL SELECTION (effective_model / effective_fallback)
+# =============================================================================
+#
+# Wraps resolve_model with a check against claude-usage.sh's
+# is_model_exhausted. When the picked model is exhausted (per-model bucket
+# full and overage isn't absorbing), escalate via _next_model_up until we
+# find one that isn't exhausted or hit the opus ceiling.
+#
+# When claude-usage.sh isn't loaded OR no sessionKey is configured,
+# is_model_exhausted returns false for everything and these wrappers
+# behave identically to resolve_model / _next_model_up — zero regression
+# for users who haven't opted into usage polling.
+#
+
+_usage_aware_escalate() {
+	local model="$1" next
+	# is_model_exhausted is provided by claude-usage.sh. If it isn't loaded
+	# (or the user opted out / hasn't configured), treat as not exhausted.
+	if ! declare -F is_model_exhausted >/dev/null 2>&1; then
+		printf '%s' "$model"
+		return 0
+	fi
+
+	# Walk the chain. _next_model_up returns the same model at the ceiling,
+	# which terminates the loop unconditionally — no infinite spin even if
+	# every tier is exhausted.
+	while is_model_exhausted "$model"; do
+		next=$(_next_model_up "$model")
+		if [[ "$next" == "$model" ]]; then
+			break
+		fi
+		model="$next"
+	done
+	printf '%s' "$model"
+}
+
+# effective_model(stage, complexity) — resolve_model with usage gating.
+effective_model() {
+	local resolved
+	resolved=$(resolve_model "$@")
+	_usage_aware_escalate "$resolved"
+	printf '\n'
+}
+
+# effective_fallback(model) — _next_model_up with usage gating.
+# Used to compute the --fallback-model arg for the Claude CLI.
+effective_fallback() {
+	local fallback
+	fallback=$(_next_model_up "$1")
+	_usage_aware_escalate "$fallback"
+	printf '\n'
+}

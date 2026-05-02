@@ -21,6 +21,10 @@ set -uo pipefail  # Note: not -e, we handle errors explicitly
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 source "$SCRIPT_DIR/model-config.sh"
+# claude-usage.sh provides is_model_exhausted, used by effective_model in
+# model-config.sh. Sourcing is no-op when CLAUDE_USAGE_SESSION_KEY is unset
+# (graceful fallback to today's behavior — see claude-usage.sh).
+source "$SCRIPT_DIR/claude-usage.sh"
 source "$SCRIPT_DIR/../config/platform.sh"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
@@ -1045,14 +1049,27 @@ run_stage() {
     local schema
     schema=$(jq -c . "$SCHEMA_DIR/$schema_file")
 
-    # Resolve model and fallback from stage name + complexity hint
-    local model fallback_model
+    # Resolve model and fallback from stage name + complexity hint.
+    # When model_override is set, the caller has expressed an explicit intent
+    # (e.g. PR creation hard-codes opus) — usage-aware escalation is bypassed
+    # so we don't silently demote/promote against operator wishes.
+    local model fallback_model resolved_pre_escalate=""
     if [[ -n "$model_override" ]]; then
         model="$model_override"
+        fallback_model=$(_next_model_up "$model")
     else
-        model=$(resolve_model "$stage_name" "$complexity")
+        resolved_pre_escalate=$(resolve_model "$stage_name" "$complexity")
+        model=$(effective_model "$stage_name" "$complexity")
+        fallback_model=$(effective_fallback "$model")
+        # Surface usage-driven escalation explicitly so operators can correlate
+        # cost spikes with bucket exhaustion.
+        if [[ -n "$resolved_pre_escalate" && "$model" != "$resolved_pre_escalate" ]] \
+                && declare -F model_reset_at >/dev/null 2>&1; then
+            local _reset
+            _reset=$(model_reset_at "$resolved_pre_escalate")
+            log "Usage gate: $resolved_pre_escalate exhausted (resets ${_reset}) — escalating to $model"
+        fi
     fi
-    fallback_model=$(_next_model_up "$model")
 
     # Record resolved model in status.json stage entry for export_metrics()
     if [[ -f "$STATUS_FILE" ]]; then
@@ -1237,7 +1254,10 @@ run_stage() {
     output_subtype=$(printf '%s' "$output" | jq -r '.subtype // empty' 2>/dev/null)
     if [[ "$output_subtype" == "error_max_turns" ]]; then
         local escalated_model
-        escalated_model=$(_next_model_up "$model")
+        # effective_fallback walks the chain skipping exhausted tiers — so if
+        # the next-up model is also rate-limited, we go straight to one that
+        # isn't. Falls back to plain _next_model_up when usage polling is off.
+        escalated_model=$(effective_fallback "$model")
 
         if [[ "$escalated_model" == "$model" ]]; then
             # Already at ceiling (opus) — can't escalate further
@@ -1254,7 +1274,7 @@ run_stage() {
 
         # Retry with escalated model and no --max-turns cap
         local escalated_fallback
-        escalated_fallback=$(_next_model_up "$escalated_model")
+        escalated_fallback=$(effective_fallback "$escalated_model")
         local -a escalated_fallback_args=()
         if [[ "$escalated_fallback" != "$escalated_model" ]]; then
             escalated_fallback_args=(--fallback-model "$escalated_fallback")
@@ -1381,9 +1401,10 @@ for m in re.finditer(r'\[\s*\{', t):
         log "Diagnostic fallback failure — Output byte count: $output_byte_count"
         log "Diagnostic fallback failure — First 500 characters: $output_preview"
 
-        # Empty/unparseable output — escalate to next model before failing
+        # Empty/unparseable output — escalate to next model before failing.
+        # effective_fallback skips exhausted tiers (no-op when usage polling off).
         local empty_escalated_model
-        empty_escalated_model=$(_next_model_up "$model")
+        empty_escalated_model=$(effective_fallback "$model")
 
         if [[ "$empty_escalated_model" != "$model" ]]; then
             log "WARN: No structured output from $stage_name with $model — escalating to $empty_escalated_model"
@@ -1393,7 +1414,7 @@ for m in re.finditer(r'\[\s*\{', t):
 
             local -a empty_esc_fallback_args=()
             local empty_esc_fallback
-            empty_esc_fallback=$(_next_model_up "$empty_escalated_model")
+            empty_esc_fallback=$(effective_fallback "$empty_escalated_model")
             if [[ "$empty_esc_fallback" != "$empty_escalated_model" ]]; then
                 empty_esc_fallback_args=(--fallback-model "$empty_esc_fallback")
             fi
@@ -1462,8 +1483,9 @@ for m in re.finditer(r'\[\s*\{', t):
             log "WARN: $stage_name blocked by permission hook (tools: $permission_denials) — skipping escalation"
         else
             # No permission denial — escalate to the next model tier and retry once.
+            # effective_fallback skips exhausted tiers (no-op when usage polling off).
             local struct_err_escalated_model
-            struct_err_escalated_model=$(_next_model_up "$model")
+            struct_err_escalated_model=$(effective_fallback "$model")
 
             if [[ "$struct_err_escalated_model" != "$model" ]]; then
                 log "WARN: $stage_name returned status:error with $model — escalating to $struct_err_escalated_model"
@@ -1473,7 +1495,7 @@ for m in re.finditer(r'\[\s*\{', t):
 
                 local -a struct_err_esc_fallback_args=()
                 local struct_err_esc_fallback
-                struct_err_esc_fallback=$(_next_model_up "$struct_err_escalated_model")
+                struct_err_esc_fallback=$(effective_fallback "$struct_err_escalated_model")
                 if [[ "$struct_err_esc_fallback" != "$struct_err_escalated_model" ]]; then
                     struct_err_esc_fallback_args=(--fallback-model "$struct_err_esc_fallback")
                 fi

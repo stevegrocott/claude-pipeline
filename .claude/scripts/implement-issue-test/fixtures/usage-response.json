@@ -1,0 +1,32 @@
+{
+  "_comment": "Real claude.ai /api/organizations/{org}/usage response captured 2026-05-02. Org UUID redacted. Field names ARE production; values are illustrative.",
+  "five_hour": {
+    "utilization": 2,
+    "resets_at": "2026-05-02T07:09:59.992712+00:00"
+  },
+  "seven_day": {
+    "utilization": 88,
+    "resets_at": "2026-05-02T05:59:59.992784+00:00"
+  },
+  "seven_day_oauth_apps": null,
+  "seven_day_opus": null,
+  "seven_day_sonnet": {
+    "utilization": 100,
+    "resets_at": "2026-05-02T05:59:59.992795+00:00"
+  },
+  "seven_day_cowork": null,
+  "seven_day_omelette": {
+    "utilization": 0,
+    "resets_at": null
+  },
+  "tangelo": null,
+  "iguana_necktie": null,
+  "omelette_promotional": null,
+  "extra_usage": {
+    "is_enabled": true,
+    "monthly_limit": 31000,
+    "used_credits": 366,
+    "utilization": 1.1806451612903226,
+    "currency": "AUD"
+  }
+}
