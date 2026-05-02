@@ -46,9 +46,15 @@ check_rate_limit_cluster() {
 
   [[ -f "$events_file" ]] || return 1
 
-  # Extract epoch timestamps of rate_limit_hit events for current run_id
+  # Extract epoch timestamps of rate_limit_hit events for current run_id.
+  # Read run_id from status.json (the orchestrator's authoritative source) —
+  # do NOT pull it from the first line of events.jsonl, which may belong to
+  # an earlier run if the file accumulates events across restarts.
+  local status_file="${events_file%/events.jsonl}/status.json"
   local run_id
-  run_id=$(jq -r '.run_id' "$events_file" 2>/dev/null | head -1)
+  run_id=$(jq -r '.log_dir // ""' "$status_file" 2>/dev/null)
+  run_id="${run_id##*/}"
+  [[ -n "$run_id" ]] || return 1
 
   local timestamps
   timestamps=$(jq -r --arg rid "$run_id" \
@@ -98,7 +104,7 @@ fi
 
 `rate_limit_hit` events look like:
 ```jsonl
-{"ts":"2026-04-09T18:34:59Z","run_id":"issue-158-20260409-183459","stage":"implement","event":"rate_limit_hit","model":"sonnet","retry_after":60}
+{"ts":"2026-04-09T18:34:59Z","run_id":"issue-158-20260409-183459","stage":"implement","event":"rate_limit_hit","model":"sonnet","retry_after_seconds":60}
 ```
 
 All events share the envelope fields: `ts`, `run_id`, `stage`, `event`. Optional: `task`.

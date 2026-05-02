@@ -367,13 +367,13 @@ Every event shares this envelope:
 | Event | When emitted | Key payload fields |
 |-------|-------------|-------------------|
 | `stage_start` | Stage begins | `model` |
-| `stage_end` | Stage completes | `status`, `duration_ms` |
+| `stage_end` | Stage completes | `status`, `duration_seconds` |
 | `escalation` | Model escalated | `from_model`, `to_model`, `reason` |
-| `retry` | Stage retried | `attempt`, `reason` |
-| `model_call` | LLM invoked | `model`, `prompt_tokens` |
-| `rate_limit_hit` | 429 received | `model`, `retry_after_s` |
+| `retry` | Stage retried | `reason`, `attempt`, `max_attempts` |
+| `model_call` | LLM invoked | `model`, `stage_attempt` |
+| `rate_limit_hit` | 429 received | `model`, `retry_after_seconds` |
 | `schema_validation_fail` | Output rejected | `schema`, `errors` |
-| `status_change` | `status.json` updated | `from`, `to` |
+| `status_change` | `status.json` updated | `from_state`, `to_state` |
 
 Batch-level events (`batch_start`, `batch_end`, `issue_start`, `issue_end`, `batch_paused`) follow the same envelope without a `task` field.
 

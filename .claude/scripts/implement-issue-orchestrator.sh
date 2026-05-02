@@ -346,17 +346,31 @@ emit_event() {
     )
     local filter='{ts: $ts, run_id: $run_id, event: $event}'
 
-    local kv key value safe_key
+    local kv key value safe_key json_value
     for kv in "$@"; do
-        key="${kv%%=*}"
-        value="${kv#*=}"
+        # Support `key:=value` for JSON-typed values (numbers, booleans, null)
+        # in addition to `key=value` for strings. Required because the schema
+        # types fields like attempt/max_attempts/stage_attempt as integer.
+        if [[ "$kv" == *":="* ]]; then
+            key="${kv%%:=*}"
+            value="${kv#*:=}"
+            json_value=true
+        else
+            key="${kv%%=*}"
+            value="${kv#*=}"
+            json_value=false
+        fi
         # Defensive: only allow alphanumeric/underscore in keys to keep the
         # generated jq filter safe.
         safe_key="${key//[^A-Za-z0-9_]/}"
         if [[ -z "$safe_key" ]]; then
             continue
         fi
-        jq_args+=(--arg "$safe_key" "$value")
+        if $json_value; then
+            jq_args+=(--argjson "$safe_key" "$value")
+        else
+            jq_args+=(--arg "$safe_key" "$value")
+        fi
         filter+=" | .${safe_key} = \$${safe_key}"
     done
 
@@ -449,6 +463,7 @@ update_stage() {
 
 set_stage_started() {
     local stage="$1"
+    local model="${2:-}"
     jq --arg stage "$stage" \
        '.stages[$stage].started_at = (now | todate) |
         .stages[$stage].status = "in_progress" |
@@ -458,7 +473,15 @@ set_stage_started() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
-    emit_event "stage_start" "stage=$stage"
+
+    # Resolve the model so the stage_start event satisfies the schema's
+    # required `model` field. If effective_model isn't usable yet, fall back
+    # to a stable placeholder so the event still validates.
+    if [[ -z "$model" ]]; then
+        model=$(effective_model "$stage" "" 2>/dev/null) || model=""
+        [[ -n "$model" ]] || model="unresolved"
+    fi
+    emit_event "stage_start" "stage=$stage" "model=$model"
 }
 
 set_stage_completed() {
@@ -469,7 +492,9 @@ set_stage_completed() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
-    emit_event "stage_end" "stage=$stage" "status=completed"
+    # Schema enum for stage_end.status is ["success","error","rate_limit"];
+    # "completed" is the status.json column name, not the event-stream value.
+    emit_event "stage_end" "stage=$stage" "status=success"
 }
 
 record_escalation() {
@@ -529,11 +554,22 @@ set_branch_info() {
 
 set_final_state() {
     local state="$1"
+    local prev_state stage
+    # Capture the previous state and current stage BEFORE we overwrite, so the
+    # status_change event can carry from_state/to_state per schema.
+    prev_state=$(jq -r '.state // "unknown"' "$STATUS_FILE" 2>/dev/null) \
+        || prev_state="unknown"
+    stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
+        || stage="unknown"
+
     jq --arg state "$state" \
        '.state = $state | .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
-    emit_event "status_change" "state=$state"
+    emit_event "status_change" \
+        "stage=$stage" \
+        "from_state=$prev_state" \
+        "to_state=$state"
 }
 
 increment_quality_iteration() {
@@ -1076,7 +1112,7 @@ handle_rate_limit() {
     log "Rate limit hit. Waiting ${wait_time}s until $resume_at"
     emit_event "rate_limit_hit" \
         "stage=${_RUN_STAGE_NAME:-}" \
-        "wait_seconds=$wait_time" \
+        "retry_after_seconds:=$wait_time" \
         "resume_at=${resume_at:-}"
     sleep "$wait_time"
 }
@@ -1172,7 +1208,7 @@ run_stage() {
         "agent=${agent:-default}" \
         "schema=$schema_file" \
         "complexity=${complexity:-}" \
-        "attempt=initial"
+        "stage_attempt:=1"
 
     local -a agent_args=()
     if [[ -n "$agent" ]]; then
@@ -1277,6 +1313,8 @@ run_stage() {
         emit_event "retry" \
             "stage=$stage_name" \
             "reason=timeout" \
+            "attempt:=2" \
+            "max_attempts:=2" \
             "model=$model" \
             "previous_timeout=$stage_timeout" \
             "retry_timeout=$retry_timeout"
@@ -1287,7 +1325,7 @@ run_stage() {
             "agent=${agent:-default}" \
             "schema=$schema_file" \
             "complexity=${complexity:-}" \
-            "attempt=timeout_retry"
+            "stage_attempt:=2"
 
         exit_code=0
         output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
@@ -1328,7 +1366,7 @@ run_stage() {
                     "agent=${agent:-default}" \
                     "schema=$schema_file" \
                     "complexity=${complexity:-}" \
-                    "attempt=timeout_escalation"
+                    "stage_attempt:=3"
 
                 exit_code=0
                 output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
@@ -1394,7 +1432,7 @@ run_stage() {
             "agent=${agent:-default}" \
             "schema=$schema_file" \
             "complexity=${complexity:-}" \
-            "attempt=max_turns_escalation"
+            "stage_attempt:=2"
 
         output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
@@ -1417,6 +1455,8 @@ run_stage() {
         emit_event "retry" \
             "stage=$stage_name" \
             "reason=rate_limit" \
+            "attempt:=2" \
+            "max_attempts:=2" \
             "model=$model"
         emit_event "model_call" \
             "stage=$stage_name" \
@@ -1425,7 +1465,7 @@ run_stage() {
             "agent=${agent:-default}" \
             "schema=$schema_file" \
             "complexity=${complexity:-}" \
-            "attempt=rate_limit_retry"
+            "stage_attempt:=2"
 
         output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
@@ -1564,7 +1604,7 @@ for m in re.finditer(r'\[\s*\{', t):
                 "agent=${agent:-default}" \
                 "schema=$schema_file" \
                 "complexity=${complexity:-}" \
-                "attempt=empty_output_escalation"
+                "stage_attempt:=2"
 
             local empty_esc_exit_code=0
             output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
@@ -1658,7 +1698,7 @@ for m in re.finditer(r'\[\s*\{', t):
                     "agent=${agent:-default}" \
                     "schema=$schema_file" \
                     "complexity=${complexity:-}" \
-                    "attempt=structured_error_escalation"
+                    "stage_attempt:=2"
 
                 local struct_err_esc_exit_code=0
                 output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
