@@ -26,17 +26,10 @@ readonly SCRIPT_NAME="${0##*/}"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 readonly SCHEMA_FILE="${SCRIPT_DIR}/schemas/pipeline-event.json"
 
-# ---------------------------------------------------------------------------
-# _err — write an error message to stderr
-# ---------------------------------------------------------------------------
 _err() {
 	printf '%s: %s\n' "$SCRIPT_NAME" "$*" >&2
 }
 
-# ---------------------------------------------------------------------------
-# _validate_json — confirm the argument is parseable JSON
-# Returns 0 on success, 1 on failure
-# ---------------------------------------------------------------------------
 _validate_json() {
 	local json="$1"
 	if ! jq -e . <<< "$json" > /dev/null 2>&1; then
@@ -45,35 +38,22 @@ _validate_json() {
 	fi
 }
 
-# ---------------------------------------------------------------------------
-# _check_required — verify top-level required fields are present in event
-# Reads required[] from the schema; returns 0 on success, 1 on failure
-# ---------------------------------------------------------------------------
 _check_required() {
-	local event="$1"
-	local field
+	local event="$1" schema="$2"
 	local -a missing=()
-
 	while IFS= read -r field; do
-		[[ -z "$field" ]] && continue
-		if ! jq -e --arg f "$field" 'has($f)' <<< "$event" \
-			> /dev/null 2>&1; then
-			missing+=("$field")
-		fi
-	done < <(jq -r '.required[]?' "$SCHEMA_FILE" 2>/dev/null)
-
+		[[ -n "$field" ]] && missing+=("$field")
+	done < <(jq -r --argjson ev "$event" \
+		'.required[]? | select(in($ev) | not)' \
+		<<< "$schema" 2>/dev/null)
 	if (( ${#missing[@]} > 0 )); then
 		_err "schema validation failed: missing required field(s): ${missing[*]}"
 		return 1
 	fi
 }
 
-# ---------------------------------------------------------------------------
-# _check_event_enum — verify 'event' field value is in the schema enum
-# Returns 0 on success, 1 on failure
-# ---------------------------------------------------------------------------
 _check_event_enum() {
-	local event="$1"
+	local event="$1" schema="$2"
 	local value in_enum
 
 	value=$(jq -r '.event // empty' <<< "$event")
@@ -83,7 +63,7 @@ _check_event_enum() {
 		--arg v "$value" \
 		'.properties.event.enum
 		| if . != null then (index($v) != null) else true end' \
-		"$SCHEMA_FILE" 2>/dev/null)
+		<<< "$schema" 2>/dev/null)
 
 	if [[ "$in_enum" != "true" ]]; then
 		_err "schema validation failed: \"event\" value \"$value\" not in enum"
@@ -91,33 +71,21 @@ _check_event_enum() {
 	fi
 }
 
-# ---------------------------------------------------------------------------
-# _check_oneof_required — verify per-event-type required fields via oneOf
-# Matches the oneOf branch by event const, checks its required[] fields
-# Returns 0 on success, 1 on failure
-# ---------------------------------------------------------------------------
 _check_oneof_required() {
-	local event="$1"
-	local event_type field
-	local -a missing=()
-
+	local event="$1" schema="$2"
+	local event_type
 	event_type=$(jq -r '.event // empty' <<< "$event")
 	[[ -z "$event_type" ]] && return 0  # absent — caught by _check_required
 
+	local -a missing=()
 	while IFS= read -r field; do
-		[[ -z "$field" ]] && continue
-		if ! jq -e --arg f "$field" 'has($f)' <<< "$event" \
-			> /dev/null 2>&1; then
-			missing+=("$field")
-		fi
-	done < <(
-		jq -r \
-			--arg et "$event_type" \
-			'.oneOf[]?
-			| select(.properties.event.const == $et)
-			| .required[]?' \
-			"$SCHEMA_FILE" 2>/dev/null
-	)
+		[[ -n "$field" ]] && missing+=("$field")
+	done < <(jq -r --argjson ev "$event" --arg et "$event_type" \
+		'.oneOf[]?
+		| select(.properties.event.const == $et)
+		| .required[]?
+		| select(in($ev) | not)' \
+		<<< "$schema" 2>/dev/null)
 
 	if (( ${#missing[@]} > 0 )); then
 		_err "schema validation failed: \"$event_type\" event" \
@@ -126,10 +94,6 @@ _check_oneof_required() {
 	fi
 }
 
-# ---------------------------------------------------------------------------
-# validate_event — validate JSON event against pipeline-event.json schema
-# Returns 0 on success, 1 on validation failure
-# ---------------------------------------------------------------------------
 validate_event() {
 	local event="$1"
 
@@ -141,15 +105,13 @@ validate_event() {
 		return 0
 	fi
 
-	_check_required "$event" || return 1
-	_check_event_enum "$event" || return 1
-	_check_oneof_required "$event" || return 1
+	local schema
+	schema=$(< "$SCHEMA_FILE")
+	_check_required "$event" "$schema" || return 1
+	_check_event_enum "$event" "$schema" || return 1
+	_check_oneof_required "$event" "$schema" || return 1
 }
 
-# ---------------------------------------------------------------------------
-# _mkdir_locked_append — portable lock fallback (mkdir advisory lock)
-# Cleans stale locks (lock dir whose PID marker is dead), then appends.
-# ---------------------------------------------------------------------------
 _mkdir_locked_append() {
 	local file="$1"
 	local data="$2"
@@ -158,7 +120,6 @@ _mkdir_locked_append() {
 	local attempts=0
 
 	while ! mkdir "$lockdir" 2>/dev/null; do
-		# Remove stale lock if the holding PID is no longer alive
 		if [[ -f "$pidfile" ]]; then
 			local lock_pid
 			lock_pid=$(cat "$pidfile" 2>/dev/null)
@@ -186,10 +147,6 @@ _mkdir_locked_append() {
 	return $rc
 }
 
-# ---------------------------------------------------------------------------
-# append_event — flock-safe JSONL append to ${LOG_DIR}/events.jsonl
-# Returns 0 on success, non-zero on failure
-# ---------------------------------------------------------------------------
 append_event() {
 	local event="$1"
 	local events_file="${LOG_DIR}/events.jsonl"
@@ -200,7 +157,6 @@ append_event() {
 	fi
 
 	if command -v flock > /dev/null 2>&1; then
-		# Acquire an exclusive lock on the events file, append, release
 		(
 			flock -x -w 10 9 || {
 				_err "timed out waiting for lock on $events_file"
@@ -214,9 +170,6 @@ append_event() {
 	fi
 }
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
 main() {
 	if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 		cat <<EOF
@@ -247,11 +200,6 @@ EOF
 
 	if [[ -z "${LOG_DIR:-}" ]]; then
 		_err "LOG_DIR is not set"
-		return 3
-	fi
-
-	if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
-		_err "cannot create LOG_DIR: $LOG_DIR"
 		return 3
 	fi
 
