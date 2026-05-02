@@ -344,6 +344,74 @@ Choose most relevant language:
 
 You're good at porting - one great example is enough.
 
+## Pipeline Event Stream
+
+**When your skill observes pipeline behavior, consume `events.jsonl` — never parse `orchestrator.log`.**
+
+The pipeline emits structured JSONL to `logs/implement-issue/<run_id>/events.jsonl`. Each line is a self-contained JSON object validated against `.claude/scripts/schemas/pipeline-event.json` before write. Text logs continue to exist for human debugging but are brittle data sources for skills.
+
+### Event Envelope
+
+Every event shares this envelope:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts` | ISO 8601 | Timestamp of event |
+| `run_id` | string | e.g. `issue-158-20260409-183459` |
+| `stage` | string | `implement`, `test`, `review`, … |
+| `event` | string | Event type (see below) |
+| `task` | integer? | Present when stage is task-scoped |
+
+### Event Types
+
+| Event | When emitted | Key payload fields |
+|-------|-------------|-------------------|
+| `stage_start` | Stage begins | `model` |
+| `stage_end` | Stage completes | `status`, `duration_ms` |
+| `escalation` | Model escalated | `from_model`, `to_model`, `reason` |
+| `retry` | Stage retried | `attempt`, `reason` |
+| `model_call` | LLM invoked | `model`, `prompt_tokens` |
+| `rate_limit_hit` | 429 received | `model`, `retry_after_s` |
+| `schema_validation_fail` | Output rejected | `schema`, `errors` |
+| `status_change` | `status.json` updated | `from`, `to` |
+
+Batch-level events (`batch_start`, `batch_end`, `issue_start`, `issue_end`, `batch_paused`) follow the same envelope without a `task` field.
+
+### Consumer Pattern
+
+```bash
+# Filter by event type
+jq 'select(.event == "rate_limit_hit")' logs/implement-issue/<run_id>/events.jsonl
+
+# Stream live events
+tail -f logs/implement-issue/<run_id>/events.jsonl | jq 'select(.event == "escalation")'
+
+# Count rate-limit hits in last 60 seconds (portable: macOS + Linux)
+cutoff=$(date -u -v-60S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+         || date -u -d '-60 seconds' +%Y-%m-%dT%H:%M:%SZ)
+jq --arg cutoff "$cutoff" \
+   'select(.event == "rate_limit_hit" and .ts >= $cutoff)' \
+   logs/implement-issue/<run_id>/events.jsonl | wc -l
+```
+
+Consumer robustness rules:
+- **Tolerate truncated final lines** — the producer may be mid-write; skip lines that fail `jq` parse
+- **Filter by `run_id`** when multiple runs share a log directory
+- **`status.json` is a crash-resume checkpoint; `events.jsonl` is canonical history** — use events for sequencing and counting
+
+### ❌ Anti-Pattern: Log Parsing
+
+```bash
+# ❌ Never — brittle, breaks on log-format changes
+grep -c "consecutive timeout" logs/implement-issue/<run_id>/orchestrator.log
+
+# ✅ Always — structured, schema-validated, stable
+jq 'select(.event == "escalation" and .reason == "consecutive_timeout")' \
+   logs/implement-issue/<run_id>/events.jsonl | wc -l
+```
+
+See `.claude/skills/pipeline-recovery/SKILL.md` for a worked example of a skill that reacts to a rate-limit cluster from `events.jsonl`.
+
 ## File Organization
 
 ### Self-Contained Skill
