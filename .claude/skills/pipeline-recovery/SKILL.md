@@ -44,6 +44,8 @@ check_rate_limit_cluster() {
   local window=60
   local threshold=3
 
+  [[ -f "$events_file" ]] || return 1
+
   # Extract epoch timestamps of rate_limit_hit events for current run_id
   local run_id
   run_id=$(jq -r '.run_id' "$events_file" 2>/dev/null | head -1)
@@ -52,7 +54,9 @@ check_rate_limit_cluster() {
   timestamps=$(jq -r --arg rid "$run_id" \
     'select(.run_id == $rid and .event == "rate_limit_hit") | .ts' \
     "$events_file" | \
-    xargs -I{} date -j -f "%Y-%m-%dT%H:%M:%SZ" "{}" "+%s" 2>/dev/null | \
+    while IFS= read -r ts; do
+      date -d "$ts" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null
+    done | \
     sort -n)
 
   # Sliding window: find any window of 60s with >=3 hits
