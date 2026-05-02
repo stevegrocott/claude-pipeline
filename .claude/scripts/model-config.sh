@@ -214,17 +214,17 @@ _next_model_up() {
 #
 
 _usage_aware_escalate() {
-	local model="$1" next
-	# is_model_exhausted is provided by claude-usage.sh. If it isn't loaded
-	# (or the user opted out / hasn't configured), treat as not exhausted.
+	local model="$1" original="$1" next
+	# is_model_exhausted comes from claude-usage.sh. When it isn't sourced
+	# (or polling is unconfigured), treat all models as not exhausted.
 	if ! declare -F is_model_exhausted >/dev/null 2>&1; then
-		printf '%s' "$model"
+		printf '%s\n' "$model"
 		return 0
 	fi
 
-	# Walk the chain. _next_model_up returns the same model at the ceiling,
-	# which terminates the loop unconditionally — no infinite spin even if
-	# every tier is exhausted.
+	# _next_model_up returns the same model at the opus ceiling, which
+	# terminates the loop unconditionally — no infinite spin if every
+	# tier is exhausted.
 	while is_model_exhausted "$model"; do
 		next=$(_next_model_up "$model")
 		if [[ "$next" == "$model" ]]; then
@@ -232,22 +232,26 @@ _usage_aware_escalate() {
 		fi
 		model="$next"
 	done
-	printf '%s' "$model"
+
+	# Surface the escalation so operators can correlate cost spikes with
+	# bucket exhaustion. Logged via the orchestrator's `log` if available,
+	# else stderr — see _usage_log in claude-usage.sh.
+	if [[ "$model" != "$original" ]] && declare -F model_reset_at >/dev/null 2>&1; then
+		local _reset
+		_reset=$(model_reset_at "$original")
+		_usage_log "Usage gate: $original exhausted (resets ${_reset}) — escalating to $model"
+	fi
+
+	printf '%s\n' "$model"
 }
 
 # effective_model(stage, complexity) — resolve_model with usage gating.
 effective_model() {
-	local resolved
-	resolved=$(resolve_model "$@")
-	_usage_aware_escalate "$resolved"
-	printf '\n'
+	_usage_aware_escalate "$(resolve_model "$@")"
 }
 
 # effective_fallback(model) — _next_model_up with usage gating.
 # Used to compute the --fallback-model arg for the Claude CLI.
 effective_fallback() {
-	local fallback
-	fallback=$(_next_model_up "$1")
-	_usage_aware_escalate "$fallback"
-	printf '\n'
+	_usage_aware_escalate "$(_next_model_up "$1")"
 }

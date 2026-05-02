@@ -137,32 +137,34 @@ fetch_usage() {
     session_key=""
 
     if [[ "$http_status" != "200" ]]; then
-        if (( had_valid_cache )); then
-            _usage_error "fetch failed (HTTP $http_status) after prior success — endpoint regression?"
-        else
-            _usage_warn "fetch failed (HTTP $http_status)"
-        fi
+        _log_fetch_failure "$had_valid_cache" "fetch failed (HTTP $http_status)" "endpoint regression?"
         rm -f "$body_file"
         return 1
     fi
 
     if ! jq empty "$body_file" 2>/dev/null; then
-        if (( had_valid_cache )); then
-            _usage_error "response is not valid JSON after prior success — endpoint shape changed?"
-        else
-            _usage_warn "response is not valid JSON"
-        fi
+        _log_fetch_failure "$had_valid_cache" "response is not valid JSON" "endpoint shape changed?"
         rm -f "$body_file"
         return 1
     fi
 
-    # Atomic install (tmp + mv). jq compact would lose the human-readable
-    # form; keep pretty-printed for ad-hoc inspection.
+    # Atomic install (tmp + mv). Pretty-printed for ad-hoc inspection.
     jq . "$body_file" > "${_CLAUDE_USAGE_CACHE_FILE}.tmp" && \
         mv "${_CLAUDE_USAGE_CACHE_FILE}.tmp" "$_CLAUDE_USAGE_CACHE_FILE"
 
     rm -f "$body_file"
     return 0
+}
+
+# Cache-was-valid escalates WARN to ERROR — a regression-after-success is
+# louder than first-time failure (which usually means unconfigured / new user).
+_log_fetch_failure() {
+    local had_valid="$1" msg="$2" regression_suffix="$3"
+    if (( had_valid )); then
+        _usage_error "$msg after prior success — $regression_suffix"
+    else
+        _usage_warn "$msg"
+    fi
 }
 
 # --- bucket-mapped accessors ----------------------------------------------
@@ -186,6 +188,18 @@ _is_known_model() {
     esac
 }
 
+# Pick PER_MODEL_FIELD.PROP if non-null, else seven_day.PROP, else DEFAULT.
+# One jq invocation, returns the resolved value via stdout.
+_bucket_pick() {
+    local field="$1" prop="$2" default="$3"
+    jq -r --arg f "$field" --arg p "$prop" --arg d "$default" '
+        def pick(p): . as $o | if $o[p] == null or $o[p] == "" then null else $o[p] end;
+        (if $f != "" then (.[$f] // {}) | pick($p) else null end) //
+        ((.seven_day // {}) | pick($p)) //
+        $d
+    ' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null
+}
+
 # usage_for_model MODEL → integer 0..100 (or 0 on unknown / no data)
 usage_for_model() {
     local model="$1"
@@ -194,21 +208,8 @@ usage_for_model() {
     fetch_usage || { printf '0\n'; return 0; }
     [[ -f "$_CLAUDE_USAGE_CACHE_FILE" ]] || { printf '0\n'; return 0; }
 
-    local field val
-    field=$(_per_model_field "$model")
-
-    if [[ -n "$field" ]]; then
-        val=$(jq -r --arg f "$field" '
-            (.[$f] // empty) | (.utilization // empty)
-        ' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
-    fi
-
-    # Fall back to seven_day (all-models weekly) when per-model bucket is
-    # null or this is a known model with no per-model bucket (haiku).
-    if [[ -z "$val" || "$val" == "null" ]]; then
-        val=$(jq -r '.seven_day.utilization // 0' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
-    fi
-
+    local val
+    val=$(_bucket_pick "$(_per_model_field "$model")" utilization 0)
     printf '%.0f\n' "${val:-0}"
 }
 
@@ -216,26 +217,11 @@ usage_for_model() {
 model_reset_at() {
     local model="$1"
     fetch_usage || { printf 'unknown\n'; return 0; }
-
     [[ -f "$_CLAUDE_USAGE_CACHE_FILE" ]] || { printf 'unknown\n'; return 0; }
 
-    local field val
-    field=$(_per_model_field "$model")
-
-    if [[ -n "$field" ]]; then
-        val=$(jq -r --arg f "$field" '(.[$f] // empty) | (.resets_at // empty)' \
-            "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
-    fi
-
-    if [[ -z "$val" || "$val" == "null" ]]; then
-        val=$(jq -r '.seven_day.resets_at // empty' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
-    fi
-
-    if [[ -z "$val" || "$val" == "null" ]]; then
-        printf 'unknown\n'
-    else
-        printf '%s\n' "$val"
-    fi
+    local val
+    val=$(_bucket_pick "$(_per_model_field "$model")" resets_at unknown)
+    printf '%s\n' "${val:-unknown}"
 }
 
 # --- is_model_exhausted ----------------------------------------------------
@@ -255,19 +241,27 @@ is_model_exhausted() {
     fi
 
     fetch_usage || return 1   # graceful: no data, treat as not exhausted
-
     [[ -f "$_CLAUDE_USAGE_CACHE_FILE" ]] || return 1
 
-    local five_hour_pct seven_day_pct extra_enabled extra_pct
-    five_hour_pct=$(jq -r '.five_hour.utilization // 0' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
-    seven_day_pct=$(jq -r '.seven_day.utilization // 0' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
-    extra_enabled=$(jq -r '.extra_usage.is_enabled // false' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
-    extra_pct=$(jq -r '.extra_usage.utilization // 0' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
+    # One jq, five fields, TSV. Empty string for missing per-model bucket
+    # (haiku, unknowns) — bash arithmetic later treats it as 0 / not-exhausted.
+    local field five_hour_pct seven_day_pct extra_enabled extra_pct per_model_pct
+    field=$(_per_model_field "$model")
+    IFS=$'\t' read -r five_hour_pct seven_day_pct extra_enabled extra_pct per_model_pct < <(
+        jq -r --arg f "$field" '
+            [
+                (.five_hour.utilization // 0),
+                (.seven_day.utilization // 0),
+                (.extra_usage.is_enabled // false),
+                (.extra_usage.utilization // 0),
+                (if $f != "" then (.[$f] // {}) | (.utilization // "") else "" end)
+            ] | @tsv
+        ' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null
+    )
 
-    # Round to integer for comparison.
-    five_hour_pct=$(printf '%.0f' "$five_hour_pct")
-    seven_day_pct=$(printf '%.0f' "$seven_day_pct")
-    extra_pct=$(printf '%.0f' "$extra_pct")
+    five_hour_pct=$(printf '%.0f' "${five_hour_pct:-0}")
+    seven_day_pct=$(printf '%.0f' "${seven_day_pct:-0}")
+    extra_pct=$(printf '%.0f' "${extra_pct:-0}")
 
     # 1. Session gate — overage cannot absorb a rate window.
     if (( five_hour_pct >= CLAUDE_USAGE_SESSION_THRESHOLD )); then
@@ -275,22 +269,13 @@ is_model_exhausted() {
     fi
 
     # 2. Per-model weekly with overage absorption guard.
-    local field per_model_pct
-    field=$(_per_model_field "$model")
-    if [[ -n "$field" ]]; then
-        per_model_pct=$(jq -r --arg f "$field" '
-            (.[$f] // empty) | (.utilization // empty)
-        ' "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
-
-        if [[ -n "$per_model_pct" && "$per_model_pct" != "null" ]]; then
-            per_model_pct=$(printf '%.0f' "$per_model_pct")
-            if (( per_model_pct >= CLAUDE_USAGE_MODEL_THRESHOLD )); then
-                # Overage absorbs per-model overflow if enabled and below cap.
-                if [[ "$extra_enabled" == "true" ]] && (( extra_pct < CLAUDE_USAGE_EXTRA_THRESHOLD )); then
-                    : # overage absorbing — fall through
-                else
-                    return 0
-                fi
+    if [[ -n "$per_model_pct" ]]; then
+        per_model_pct=$(printf '%.0f' "$per_model_pct")
+        if (( per_model_pct >= CLAUDE_USAGE_MODEL_THRESHOLD )); then
+            if [[ "$extra_enabled" == "true" ]] && (( extra_pct < CLAUDE_USAGE_EXTRA_THRESHOLD )); then
+                : # overage absorbing — fall through to weekly check
+            else
+                return 0
             fi
         fi
     fi

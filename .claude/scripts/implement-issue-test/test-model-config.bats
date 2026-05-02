@@ -1043,13 +1043,16 @@ _setup_usage_cache() {
 	cat > "$XDG_CACHE_HOME/claude-pipeline/usage.json"
 }
 
-# Source both modules in a subshell with cache pre-seeded.
+# Source both modules in a subshell with cache pre-seeded. Stderr suppressed
+# so $output captures the function's return value cleanly — _usage_aware_escalate
+# logs to stderr when it escalates, which is correct production behavior but
+# noise in these tests.
 run_with_usage() {
 	local cmd="$1"
 	run bash -c "
 		source '$SCRIPT_DIR/model-config.sh'
 		source '$SCRIPT_DIR/claude-usage.sh'
-		$cmd
+		$cmd 2>/dev/null
 	"
 }
 

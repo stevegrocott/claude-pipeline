@@ -42,20 +42,15 @@ err() { printf 'error: %s\n' "$*" >&2; }
 command -v curl >/dev/null 2>&1 || { err "curl required"; exit 2; }
 command -v jq >/dev/null 2>&1 || { err "jq required"; exit 2; }
 
+# Source the runtime module so we share its env-var > file resolution
+# (_session_key_value) — keeps both paths in sync if it ever grows.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/claude-usage.sh"
+
 # --- session key (env var > file > prompt) ---------------------------------
 
-session_key="${CLAUDE_USAGE_SESSION_KEY:-}"
-
-if [[ -z "$session_key" && -n "${CLAUDE_USAGE_SESSION_KEY_FILE:-}" ]]; then
-    if [[ ! -r "$CLAUDE_USAGE_SESSION_KEY_FILE" ]]; then
-        err "key file not readable: $CLAUDE_USAGE_SESSION_KEY_FILE"
-        exit 2
-    fi
-    # Strip trailing whitespace; never echo the value.
-    session_key="$(tr -d '[:space:]' < "$CLAUDE_USAGE_SESSION_KEY_FILE")"
-fi
-
-if [[ -z "$session_key" ]]; then
+session_key=""
+if ! session_key=$(_session_key_value 2>/dev/null) || [[ -z "$session_key" ]]; then
     printf 'Paste sessionKey (input hidden, starts with sk-ant-sid01-): ' >&2
     # -s suppresses echo; -r preserves backslashes in the value.
     IFS= read -rs session_key
