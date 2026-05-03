@@ -326,3 +326,37 @@ teardown() {
 	assert_event_field_set "$LOG_BASE/events.jsonl" '.consecutive_failures'
 	assert_event_field_set "$LOG_BASE/events.jsonl" '.max_failures'
 }
+
+# =============================================================================
+# rate_limit_hit — emitted when a 429/quota exhaustion is encountered
+# =============================================================================
+
+@test "emit_event rate_limit_hit: event field is 'rate_limit_hit'" {
+	emit_event "rate_limit_hit" "retry_after_seconds:=60"
+
+	assert_event_field "$LOG_BASE/events.jsonl" '.event' "rate_limit_hit"
+}
+
+@test "emit_event rate_limit_hit: retry_after_seconds carries numeric value" {
+	emit_event "rate_limit_hit" "retry_after_seconds:=60"
+
+	local val
+	val=$(jq -r '.retry_after_seconds' "$LOG_BASE/events.jsonl" | tail -1)
+	[ "$val" = "60" ]
+}
+
+# =============================================================================
+# batch_end — emitted when the batch finishes all issues
+# =============================================================================
+
+@test "emit_event batch_end: event field is 'batch_end'" {
+	emit_event "batch_end" "outcome=completed"
+
+	assert_event_field "$LOG_BASE/events.jsonl" '.event' "batch_end"
+}
+
+@test "emit_event batch_end: outcome field carries emitted value" {
+	emit_event "batch_end" "outcome=completed"
+
+	assert_event_field "$LOG_BASE/events.jsonl" '.outcome' "completed"
+}

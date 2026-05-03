@@ -1,7 +1,7 @@
 {
   "description": "Append-only JSONL event envelope for the pipeline event stream. Each line is one event.",
   "type": "object",
-  "required": ["ts", "run_id", "stage", "event"],
+  "required": ["ts", "run_id", "event"],
   "properties": {
     "ts": {
       "type": "string",
