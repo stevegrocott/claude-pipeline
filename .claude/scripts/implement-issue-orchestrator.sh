@@ -377,7 +377,7 @@ emit_event() {
     local event_json
     event_json=$(jq -nc "${jq_args[@]}" "$filter" 2>/dev/null) || return 0
 
-    LOG_DIR="$LOG_BASE" "$emit_script" "$event_json" >/dev/null 2>&1 || true
+    LOG_DIR="$LOG_BASE" "$emit_script" "$event_json" >/dev/null 2>>"$LOG_BASE/orchestrator.log" || true
 }
 
 # =============================================================================
@@ -557,8 +557,8 @@ set_final_state() {
     local prev_state stage
     # Capture the previous state and current stage BEFORE we overwrite, so the
     # status_change event can carry from_state/to_state per schema.
-    prev_state=$(jq -r '.state // "unknown"' "$STATUS_FILE" 2>/dev/null) \
-        || prev_state="unknown"
+    prev_state=$(jq -r '.state // "running"' "$STATUS_FILE" 2>/dev/null) \
+        || prev_state="running"
     stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
         || stage="unknown"
 
