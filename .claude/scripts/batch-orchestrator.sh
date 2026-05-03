@@ -836,7 +836,6 @@ log "Batch Complete"
 log "=========================================="
 log "Final state: $(jq -r '.state' "$STATUS_FILE")"
 log "Progress: $(jq -c '.progress' "$STATUS_FILE")"
-local _batch_outcome
 _batch_outcome=$(jq -r '.state' "$STATUS_FILE" 2>/dev/null)
 [[ -z "$_batch_outcome" || "$_batch_outcome" == "null" ]] && _batch_outcome="failed"
 emit_event "batch_end" "outcome=$_batch_outcome"
