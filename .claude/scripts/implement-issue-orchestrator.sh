@@ -377,7 +377,7 @@ emit_event() {
     local event_json
     event_json=$(jq -nc "${jq_args[@]}" "$filter" 2>/dev/null) || return 0
 
-    LOG_DIR="$LOG_BASE" "$emit_script" "$event_json" >/dev/null 2>&1 || true
+    LOG_DIR="$LOG_BASE" "$emit_script" "$event_json" >/dev/null 2>>"$LOG_BASE/orchestrator.log" || true
 }
 
 # =============================================================================
