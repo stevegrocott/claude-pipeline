@@ -216,6 +216,88 @@ log_warn() {
 }
 
 # =============================================================================
+# STRUCTURED EVENT EMISSION
+# =============================================================================
+#
+# emit_event <event_type> [key=value ...]
+#
+# Builds a JSON envelope with ts/run_id/event/stage and forwards it to
+# event-emit.sh, which validates against schemas/pipeline-event.json and
+# appends one JSONL line to $LOG_BASE/events.jsonl under flock.
+#
+# Design notes:
+#   - Parallel to existing text logs: every text-log call site that maps to one
+#     of the 8 event types (stage_start, stage_end, escalation, retry,
+#     model_call, rate_limit_hit, schema_validation_fail, status_change) gets
+#     a parallel emit_event call.  Text logs are retained verbatim for human
+#     debugging — see issue #180.
+#   - Safe-by-default: silently no-ops when event-emit.sh is missing or
+#     LOG_BASE is unset (e.g. during early init or when the helper has not yet
+#     landed in this branch).  A schema-invalid emit exits non-zero from
+#     event-emit.sh but never crashes the orchestrator (stderr-redirected,
+#     `|| true`).
+#   - run_id is derived from the LOG_BASE basename which already encodes
+#     issue+timestamp (e.g. "issue-180-20260502-183541").
+emit_event() {
+    local event_type="$1"
+    shift
+
+    # Parallel-task safety: if the helper hasn't been added yet (sub-issue
+    # tasks land out of order), skip silently rather than break the pipeline.
+    local emit_script="$SCRIPT_DIR/event-emit.sh"
+    if [[ ! -x "$emit_script" ]]; then
+        return 0
+    fi
+
+    # Skip if LOG_BASE isn't established yet (very early init paths).
+    if [[ -z "${LOG_BASE:-}" ]]; then
+        return 0
+    fi
+
+    local run_id="${LOG_BASE##*/}"
+
+    local -a jq_args=(
+        --arg ts "$(date -Iseconds)"
+        --arg run_id "$run_id"
+        --arg event "$event_type"
+    )
+    local filter='{ts: $ts, run_id: $run_id, event: $event}'
+
+    local kv key value safe_key json_value
+    for kv in "$@"; do
+        # Support `key:=value` for JSON-typed values (numbers, booleans, null)
+        # in addition to `key=value` for strings. Required because the schema
+        # types fields like attempt/max_attempts/stage_attempt as integer.
+        if [[ "$kv" == *":="* ]]; then
+            key="${kv%%:=*}"
+            value="${kv#*:=}"
+            json_value=true
+        else
+            key="${kv%%=*}"
+            value="${kv#*=}"
+            json_value=false
+        fi
+        # Defensive: only allow alphanumeric/underscore in keys to keep the
+        # generated jq filter safe.
+        safe_key="${key//[^A-Za-z0-9_]/}"
+        if [[ -z "$safe_key" ]]; then
+            continue
+        fi
+        if $json_value; then
+            jq_args+=(--argjson "$safe_key" "$value")
+        else
+            jq_args+=(--arg "$safe_key" "$value")
+        fi
+        filter+=" | .${safe_key} = \$${safe_key}"
+    done
+
+    local event_json
+    event_json=$(jq -nc "${jq_args[@]}" "$filter" 2>/dev/null) || return 0
+
+    LOG_DIR="$LOG_BASE" "$emit_script" "$event_json" >/dev/null 2>&1 || true
+}
+
+# =============================================================================
 # STATUS FILE MANAGEMENT
 # =============================================================================
 
@@ -422,6 +504,7 @@ process_issue() {
     log "=========================================="
     log "Starting issue #$issue_num"
     log "=========================================="
+    emit_event "issue_start" "issue_num=$issue_num"
 
     set_current_issue "$issue_num"
     update_issue_field "$issue_num" "status" "in_progress"
@@ -587,6 +670,7 @@ process_issue() {
         resume_at=$(date -Iseconds -d "+${wait_time} seconds" 2>/dev/null || date -v+${wait_time}S -Iseconds 2>/dev/null)
 
         log "Rate limit hit during process-pr. Waiting ${wait_time}s"
+        emit_event "rate_limit_hit" "stage=process-pr" "retry_after_seconds:=$wait_time"
         set_rate_limit "true" "$resume_at" "$session_id"
 
         sleep "$wait_time"
@@ -682,6 +766,7 @@ log "Process-PR agent: code-reviewer"
 log "Log dir: $LOG_BASE"
 log "Timeout per issue: ${ISSUE_TIMEOUT}s"
 log "Max consecutive failures: $MAX_CONSECUTIVE_FAILURES"
+emit_event "batch_start" "total_issues:=${#ISSUE_ARRAY[@]}" "branch=$BRANCH"
 
 init_status
 
@@ -718,14 +803,17 @@ for issue in "${ISSUE_ARRAY[@]}"; do
     if process_issue "$issue"; then
         consecutive_failures=0
         log "Issue #$issue processed successfully"
+        emit_event "issue_end" "issue_num=$issue" "outcome=success"
     else
         consecutive_failures=$((consecutive_failures + 1))
         exit_code=1
         log "Issue #$issue failed. Consecutive failures: $consecutive_failures / $MAX_CONSECUTIVE_FAILURES"
+        emit_event "issue_end" "issue_num=$issue" "outcome=failed"
 
         if (( consecutive_failures >= MAX_CONSECUTIVE_FAILURES )); then
             log_error "CIRCUIT BREAKER: $MAX_CONSECUTIVE_FAILURES consecutive failures. Stopping batch."
             set_state "circuit_breaker"
+            emit_event "batch_paused" "consecutive_failures:=$consecutive_failures" "max_failures:=$MAX_CONSECUTIVE_FAILURES"
             exit_code=2
             break
         fi
@@ -748,6 +836,7 @@ log "Batch Complete"
 log "=========================================="
 log "Final state: $(jq -r '.state' "$STATUS_FILE")"
 log "Progress: $(jq -c '.progress' "$STATUS_FILE")"
+emit_event "batch_end" "outcome=$(jq -r '.state' "$STATUS_FILE")"
 
 # Write summary
 jq '{
