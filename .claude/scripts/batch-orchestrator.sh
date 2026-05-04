@@ -677,26 +677,18 @@ process_issue() {
 
         set_rate_limit "false" "" ""
 
-        # Resume
+        # Resume — retry-with-backoff: parent already slept for the rate-limit
+        # window; restart fresh rather than resuming with "please continue"
+        # (the --resume subprocess is replaced by a clean retry here).
         printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
-        if [[ -n "$session_id" ]]; then
-            timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "please continue" \
-                --resume "$session_id" \
-                --agent code-reviewer \
-                --dangerously-skip-permissions \
-                --output-format json \
-                --json-schema "$PROCESS_SCHEMA" \
-                2>&1 | tee -a "$issue_log"
-            proc_exit=${PIPESTATUS[0]}
-        else
-            timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
-                --agent code-reviewer \
-                --dangerously-skip-permissions \
-                --output-format json \
-                --json-schema "$PROCESS_SCHEMA" \
-                2>&1 | tee -a "$issue_log"
-            proc_exit=${PIPESTATUS[0]}
-        fi
+        timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude \
+            -p "/process-pr $pr_number $issue_num $BRANCH" \
+            --agent code-reviewer \
+            --dangerously-skip-permissions \
+            --output-format json \
+            --json-schema "$PROCESS_SCHEMA" \
+            2>&1 | tee -a "$issue_log"
+        proc_exit=${PIPESTATUS[0]}
         proc_last_json=$(grep -E '^\{' "$issue_log" | tail -1)
     fi
 
