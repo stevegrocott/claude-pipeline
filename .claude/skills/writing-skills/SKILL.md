@@ -93,19 +93,45 @@ skills/
 ## SKILL.md Structure
 
 **Frontmatter (YAML):**
-- Only two fields supported: `name` and `description`
-- Max 1024 characters total
-- `name`: Use letters, numbers, and hyphens only (no parentheses, special chars)
+
+Required fields:
+- `name`: Letters, numbers, and hyphens only (no parentheses, special chars)
 - `description`: Third-person, describes ONLY when to use (NOT what it does)
   - Start with "Use when..." to focus on triggering conditions
   - Include specific symptoms, situations, and contexts
   - **NEVER summarize the skill's process or workflow** (see CSO section for why)
   - Keep under 500 characters if possible
 
-```markdown
+Optional fields (fill in when the skill will be composed by other skills or meta-skills):
+- `argument-hint`: Short hint shown to the operator when invoking this skill with an argument
+- `inputs`: List of named inputs the skill consumes (enables pre-invocation validation)
+- `outputs`: List of named outputs callers can rely on (enables piping to other skills)
+- `side_effects`: List of external changes (files written, issues created, processes spawned)
+- `composes`: List of sub-skill names invoked via the Skill tool (builds dependency graph)
+- `failure_modes`: Known failure ids and mitigations (enables recovery skills to take action)
+
+```yaml
 ---
-name: Skill-Name-With-Hyphens
+name: skill-name
 description: Use when [specific triggering conditions and symptoms]
+argument-hint: "<optional short hint for CLI invocation>"
+inputs:
+  - name: param_name
+    type: string          # string | url | file_path | boolean | number
+    required: true
+    description: What this input represents
+outputs:
+  - name: result_name
+    type: url             # string | url | file_path | boolean | number
+    description: What callers can rely on receiving
+side_effects:
+  - creates_github_issue
+  - writes_log: logs/<skill>/<skill>-<id>-<ts>/status.json
+composes:
+  - other-skill-name
+failure_modes:
+  - id: short_snake_case_id
+    mitigation: What callers should do when this failure occurs
 ---
 
 # Skill Name
@@ -604,7 +630,7 @@ Deploying untested skills = deploying untested code. It's a violation of quality
 
 **GREEN Phase - Write Minimal Skill:**
 - [ ] Name uses only letters, numbers, hyphens (no parentheses/special chars)
-- [ ] YAML frontmatter with only name and description (max 1024 chars)
+- [ ] YAML frontmatter: required `name` and `description`; add `inputs`, `outputs`, `side_effects`, `composes`, `failure_modes` when skill will be composed or orchestrated
 - [ ] Description starts with "Use when..." and includes specific triggers/symptoms
 - [ ] Description written in third person
 - [ ] Keywords throughout for search (errors, symptoms, tools)
