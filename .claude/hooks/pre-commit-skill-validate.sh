@@ -35,13 +35,10 @@ readonly SCRIPT_NAME="${0##*/}"
 # script.
 # ---------------------------------------------------------------------------
 HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$HOOK_DIR/.." && pwd)}"
-SKILL_VALIDATE="${SKILL_VALIDATE_SCRIPT:-$PROJECT_DIR/scripts/skill-validate.sh}"
-
-if [[ ! -f "$SKILL_VALIDATE" ]]; then
-	# Try the canonical .claude/scripts location relative to project root.
-	SKILL_VALIDATE="${PROJECT_DIR%/.claude}/.claude/scripts/skill-validate.sh"
-fi
+# Resolve to the project root: CLAUDE_PROJECT_DIR when set by the harness,
+# otherwise two levels up from this hook (hooks/ → .claude/ → project root).
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$HOOK_DIR/../.." && pwd)}"
+SKILL_VALIDATE="${SKILL_VALIDATE_SCRIPT:-$PROJECT_DIR/.claude/scripts/skill-validate.sh}"
 
 # ---------------------------------------------------------------------------
 # Python helper that does the JSON parsing, post-edit reconstruction, and
