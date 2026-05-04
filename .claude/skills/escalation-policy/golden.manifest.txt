@@ -1,0 +1,19 @@
+# golden.manifest.txt — escalation-policy skill
+#
+# Format: fixture_basename|expected_action|expected_criterion_or_*
+#   fixture_basename  - filename in fixtures/escalation-policy/ (without extension)
+#   expected_action   - accept | bail | escalate | retry_same
+#   expected_criterion - specific criterion name from the skill output, or "*" to accept any
+#
+# The criterion is only checked when the action is "escalate" or "retry_same".
+# Use a specific name when the prompt must pinpoint a particular reason
+# (e.g. timeout must escalate specifically due to timeout, not permission_denied).
+# Use "*" when only the routing decision is the contract.
+#
+# DO NOT AUTO-UPDATE THIS MANIFEST. A fixture flip means the prompt or the
+# underlying model changed in a way that altered a routing decision. Investigate
+# before updating the expected value.
+#
+# Populated by #178 PR-B. One seed entry below proves the harness contract.
+#
+timeout-first-attempt|escalate|*
