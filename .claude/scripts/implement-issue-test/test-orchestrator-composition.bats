@@ -1,29 +1,37 @@
 #!/usr/bin/env bats
 #
 # test-orchestrator-composition.bats
-# Tests for composition routing: Skill-tool vs subprocess dispatch
+# Tests for composition routing: standard vs isolated subprocess dispatch
 #
-# This file covers the composition backend added by issue #179:
-# skills that orchestrate (decision-making, planning, routing) call
-# sub-skills via the Skill tool; skills that delegate (worktree-isolated
-# work, parallel fanout) keep subprocess invocation.
+# This file covers the composition backend added by issue #179 and updated
+# in issue #199 to remove the misleading "Skill-tool path" terminology.
+#
+# ARCHITECTURAL CONSTRAINT: bash cannot invoke the Skill tool.
+# Both dispatch paths are `claude -p` subprocess calls.  The distinction is
+# only in whether --dangerously-skip-permissions is forwarded:
+#   - standard (isolated=false): no --dangerously-skip-permissions; for
+#     decision/review tasks like process-pr
+#   - isolated subprocess (isolated=true): with --dangerously-skip-permissions;
+#     for worktree-isolated implementation tasks
 #
 # Cases covered:
 #
-#   (a) Skill-tool path — non-isolated cases:
-#     1. dispatch_composition with isolated=false routes to skill path by default
-#     2. Skill path does NOT invoke the claude subprocess
-#     3. dispatch_composition with no second arg defaults to skill path
+#   (a) Standard subprocess path — non-isolated cases:
+#     1. dispatch_composition with isolated=false routes to standard path by default
+#     2. Standard path does NOT invoke the isolated subprocess
+#     3. dispatch_composition with no second arg defaults to standard path
 #
-#   (b) Subprocess path — worktree/isolated cases:
-#     1. dispatch_composition with isolated=true routes to subprocess by default
-#     2. Subprocess path invokes run_composition_subprocess
-#     3. batch-runner.sh implement-issue call is still a subprocess invocation
+#   (b) Isolated subprocess path — worktree/isolated cases:
+#     1. dispatch_composition with isolated=true routes to isolated subprocess by default
+#     2. Isolated subprocess path invokes run_composition_subprocess
+#     3. batch-runner.sh implement-issue call is still an isolated subprocess invocation
 #        (worktree isolation is the point)
 #
 #   (c) Kill-switch — COMPOSITION_BACKEND env var overrides routing:
-#     1. COMPOSITION_BACKEND=subprocess forces subprocess even when isolated=false
-#     2. COMPOSITION_BACKEND=skill forces skill path even when isolated=true
+#     1. COMPOSITION_BACKEND=subprocess forces isolated subprocess even when isolated=false
+#     2. COMPOSITION_BACKEND=skill forces standard path even when isolated=true
+#        NOTE: "skill" is a legacy value name; it selects run_composition_standard(),
+#        not the Skill tool (bash cannot invoke the Skill tool)
 #     3. Unknown COMPOSITION_BACKEND value exits non-zero with an error message
 #     4. Unset COMPOSITION_BACKEND leaves auto-routing in effect
 #
@@ -55,10 +63,12 @@ source_batch_dispatch_composition() {
 	local func_file="$TEST_TMP/batch_dispatch_composition.bash"
 
 	# Extract all three related function definitions using awk.
+	# Note: run_composition_skill() was renamed to run_composition_standard()
+	# (architectural constraint: bash cannot invoke the Skill tool).
 	awk '
 		/^dispatch_composition\(\) \{$/,/^\}$/        { print; next }
 		/^run_composition_subprocess\(\) \{$/,/^\}$/  { print; next }
-		/^run_composition_skill\(\) \{$/,/^\}$/       { print; next }
+		/^run_composition_standard\(\) \{$/,/^\}$/    { print; next }
 	' "$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
 
 	if ! grep -q "dispatch_composition()" "$func_file" 2>/dev/null; then
@@ -75,14 +85,19 @@ source_batch_dispatch_composition() {
 }
 
 # Install call-tracking mocks for run_composition_subprocess and
-# run_composition_skill.  Each mock writes the supplied prompt to a
+# run_composition_standard.  Each mock writes the supplied prompt to a
 # sentinel file so tests can assert which path was taken.
 #
+# Note: run_composition_skill() was renamed to run_composition_standard()
+# because bash cannot invoke the Skill tool — both composition paths are
+# plain `claude -p` subprocess calls; the distinction is only in whether
+# --dangerously-skip-permissions is forwarded.
+#
 # After calling, check:
-#   "$TEST_TMP/subprocess_called"  — exists iff subprocess path was taken
-#   "$TEST_TMP/skill_called"       — exists iff skill path was taken
-#   "$TEST_TMP/subprocess_prompt"  — prompt passed to subprocess path
-#   "$TEST_TMP/skill_prompt"       — prompt passed to skill path
+#   "$TEST_TMP/subprocess_called"  — exists iff isolated subprocess path was taken
+#   "$TEST_TMP/standard_called"    — exists iff standard subprocess path was taken
+#   "$TEST_TMP/subprocess_prompt"  — prompt passed to isolated subprocess path
+#   "$TEST_TMP/standard_prompt"    — prompt passed to standard subprocess path
 install_composition_mocks() {
 	run_composition_subprocess() {
 		printf '%s' "$1" > "$TEST_TMP/subprocess_prompt"
@@ -91,12 +106,12 @@ install_composition_mocks() {
 	}
 	export -f run_composition_subprocess
 
-	run_composition_skill() {
-		printf '%s' "$1" > "$TEST_TMP/skill_prompt"
-		touch "$TEST_TMP/skill_called"
+	run_composition_standard() {
+		printf '%s' "$1" > "$TEST_TMP/standard_prompt"
+		touch "$TEST_TMP/standard_called"
 		return 0
 	}
-	export -f run_composition_skill
+	export -f run_composition_standard
 }
 
 # Skip the current test when dispatch_composition() has not yet been merged.
@@ -135,18 +150,18 @@ teardown() {
 }
 
 # =============================================================================
-# (a) SKILL-TOOL PATH — non-isolated cases
+# (a) STANDARD SUBPROCESS PATH — non-isolated cases
 # =============================================================================
 
-@test "(a) dispatch_composition isolated=false routes to skill path by default" {
+@test "(a) dispatch_composition isolated=false routes to standard path by default" {
 	require_dispatch_composition
 
 	dispatch_composition "/process-pr 123 456 main" "false"
 
-	[ -f "$TEST_TMP/skill_called" ]
+	[ -f "$TEST_TMP/standard_called" ]
 }
 
-@test "(a) dispatch_composition isolated=false does NOT invoke subprocess" {
+@test "(a) dispatch_composition isolated=false does NOT invoke isolated subprocess" {
 	require_dispatch_composition
 
 	dispatch_composition "/process-pr 123 456 main" "false"
@@ -154,28 +169,28 @@ teardown() {
 	[ ! -f "$TEST_TMP/subprocess_called" ]
 }
 
-@test "(a) skill path receives the prompt unchanged" {
+@test "(a) standard path receives the prompt unchanged" {
 	require_dispatch_composition
 
 	dispatch_composition "/process-pr 99 77 feature" "false"
 
-	[ -f "$TEST_TMP/skill_prompt" ]
+	[ -f "$TEST_TMP/standard_prompt" ]
 	local actual
-	actual=$(< "$TEST_TMP/skill_prompt")
+	actual=$(< "$TEST_TMP/standard_prompt")
 	[[ "$actual" == "/process-pr 99 77 feature" ]]
 }
 
-@test "(a) dispatch_composition with no isolated arg defaults to skill path" {
+@test "(a) dispatch_composition with no isolated arg defaults to standard path" {
 	require_dispatch_composition
 
 	# Omitting the second arg should behave the same as isolated=false.
 	dispatch_composition "/process-pr 1 2 main"
 
-	[ -f "$TEST_TMP/skill_called" ]
+	[ -f "$TEST_TMP/standard_called" ]
 	[ ! -f "$TEST_TMP/subprocess_called" ]
 }
 
-@test "(a) dispatch_composition exits 0 on skill path" {
+@test "(a) dispatch_composition exits 0 on standard path" {
 	require_dispatch_composition
 
 	run dispatch_composition "/process-pr 1 2 main" "false"
@@ -200,7 +215,7 @@ teardown() {
 
 	dispatch_composition "/implement-issue 123 main" "true"
 
-	[ ! -f "$TEST_TMP/skill_called" ]
+	[ ! -f "$TEST_TMP/standard_called" ]
 }
 
 @test "(b) subprocess path receives the prompt unchanged" {
@@ -248,7 +263,7 @@ teardown() {
 	dispatch_composition "/process-pr 123 456 main" "false"
 
 	[ -f "$TEST_TMP/subprocess_called" ]
-	[ ! -f "$TEST_TMP/skill_called" ]
+	[ ! -f "$TEST_TMP/standard_called" ]
 }
 
 @test "(c) COMPOSITION_BACKEND=subprocess prompt is passed to subprocess path" {
@@ -262,24 +277,27 @@ teardown() {
 	[[ "$actual" == "/process-pr 7 8 main" ]]
 }
 
-@test "(c) COMPOSITION_BACKEND=skill forces skill path even when isolated=true" {
+@test "(c) COMPOSITION_BACKEND=skill forces standard path even when isolated=true" {
+	# NOTE: COMPOSITION_BACKEND=skill is a legacy value name; it routes to
+	# run_composition_standard() (the non-sandboxed subprocess path).
+	# It does NOT invoke the Skill tool — bash cannot do that.
 	require_dispatch_composition
 	export COMPOSITION_BACKEND="skill"
 
 	dispatch_composition "/implement-issue 123 main" "true"
 
-	[ -f "$TEST_TMP/skill_called" ]
+	[ -f "$TEST_TMP/standard_called" ]
 	[ ! -f "$TEST_TMP/subprocess_called" ]
 }
 
-@test "(c) COMPOSITION_BACKEND=skill prompt is passed to skill path" {
+@test "(c) COMPOSITION_BACKEND=skill prompt is passed to standard path" {
 	require_dispatch_composition
 	export COMPOSITION_BACKEND="skill"
 
 	dispatch_composition "/implement-issue 9 feature" "true"
 
 	local actual
-	actual=$(< "$TEST_TMP/skill_prompt")
+	actual=$(< "$TEST_TMP/standard_prompt")
 	[[ "$actual" == "/implement-issue 9 feature" ]]
 }
 
@@ -301,14 +319,14 @@ teardown() {
 	[[ "$output" == *"bogus"* ]]
 }
 
-@test "(c) unset COMPOSITION_BACKEND leaves auto-routing in effect for skill path" {
+@test "(c) unset COMPOSITION_BACKEND leaves auto-routing in effect for standard path" {
 	require_dispatch_composition
 	unset COMPOSITION_BACKEND
 
 	dispatch_composition "/process-pr 1 2 main" "false"
 
-	# Auto-routing: non-isolated → skill
-	[ -f "$TEST_TMP/skill_called" ]
+	# Auto-routing: non-isolated → standard subprocess
+	[ -f "$TEST_TMP/standard_called" ]
 	[ ! -f "$TEST_TMP/subprocess_called" ]
 }
 
@@ -320,7 +338,7 @@ teardown() {
 
 	# Auto-routing: isolated → subprocess
 	[ -f "$TEST_TMP/subprocess_called" ]
-	[ ! -f "$TEST_TMP/skill_called" ]
+	[ ! -f "$TEST_TMP/standard_called" ]
 }
 
 @test "(c) COMPOSITION_BACKEND=subprocess exits 0" {

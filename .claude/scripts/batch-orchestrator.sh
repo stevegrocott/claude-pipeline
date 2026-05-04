@@ -497,21 +497,39 @@ extract_wait_time() {
 # COMPOSITION ROUTING
 # =============================================================================
 #
-# dispatch_composition routes a skill invocation to the Skill-tool path
-# (non-isolated, decision/review skills) or the subprocess path (worktree-
-# isolated implementation skills).
+# dispatch_composition routes a claude invocation to one of two subprocess
+# paths:
+#
+#   1. isolated  (isolated=true)  — worktree-isolated subprocess with
+#      --dangerously-skip-permissions.  Used for implementation tasks that
+#      need to modify files in a fresh git worktree.
+#
+#   2. standard  (isolated=false) — plain subprocess WITHOUT
+#      --dangerously-skip-permissions.  Used for decision/review tasks like
+#      process-pr that orchestrate via interactive tools.
+#
+# ARCHITECTURAL CONSTRAINT: bash cannot invoke the Skill tool.
+# The Skill tool is a Claude Code API feature available only inside a Claude
+# session; it cannot be called from a bash subprocess.  Both paths therefore
+# call `claude -p` as a child process — the distinction is only in which
+# permission flags are forwarded.  Any "skill-tool path" naming in prior
+# versions of this file was aspirational and has been removed to avoid
+# confusion.
 #
 # Usage:
 #   dispatch_composition "<prompt>" [isolated] [extra claude args...]
 #
 # Arguments:
 #   prompt   — slash-command prompt (e.g. "/process-pr 1 2 main")
-#   isolated — "true" for subprocess path, "false"/omitted for skill path
+#   isolated — "true" for isolated subprocess, "false"/omitted for standard
 #   ...      — additional flags forwarded to the claude invocation
 #
 # Kill-switch: COMPOSITION_BACKEND env var overrides auto-routing.
-#   subprocess — always use subprocess path
-#   skill      — always use skill path
+#   subprocess — always use isolated subprocess path
+#   skill      — always use standard (non-sandboxed) subprocess path
+#                NOTE: "skill" is a legacy name; it does NOT invoke the Skill
+#                tool.  It selects the standard subprocess without
+#                --dangerously-skip-permissions.
 #   (unset)    — auto-route based on the isolated argument
 
 dispatch_composition() {
@@ -545,8 +563,11 @@ dispatch_composition() {
 		subprocess)
 			run_composition_subprocess "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
 			;;
+		# "skill" is the legacy kill-switch value; routes to the standard
+		# (non-sandboxed) subprocess path.  See ARCHITECTURAL CONSTRAINT note
+		# above.
 		skill)
-			run_composition_skill "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+			run_composition_standard "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
 			;;
 	esac
 }
@@ -564,19 +585,24 @@ run_composition_subprocess() {
 		2>&1
 }
 
-# run_composition_skill — invoke a skill via the Skill-tool path.
-# Used for skills that orchestrate decisions without worktree isolation
+# run_composition_standard — invoke claude as a standard (non-sandboxed) subprocess.
+# Used for decision/review skills that do not require worktree isolation
 # (e.g. process-pr, plan, review).
 #
-# Unlike run_composition_subprocess, this path does NOT set
-# --dangerously-skip-permissions, so the sub-Claude session can use
-# interactive tools (including the Skill tool itself) and AskUserQuestion.
+# ARCHITECTURAL CONSTRAINT: bash cannot invoke the Skill tool.
+# This function is the successor to the former run_composition_skill(); it was
+# renamed because the old name implied a Skill-tool invocation, which bash
+# subprocesses cannot perform.  The implementation is a plain `claude -p`
+# call — identical to run_composition_subprocess() except that it omits
+# --dangerously-skip-permissions, allowing the spawned session to use
+# interactive tools and AskUserQuestion.
+#
 # Output format is not forced here — callers that need structured JSON must
 # pass --output-format json (and --json-schema) explicitly.
-run_composition_skill() {
+run_composition_standard() {
 	local prompt="$1"
 	shift
-	log "Composition dispatch → skill: $prompt"
+	log "Composition dispatch → standard: $prompt"
 	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
 		"$@" \
 		2>&1
