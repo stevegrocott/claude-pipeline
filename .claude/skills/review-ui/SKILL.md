@@ -1,8 +1,9 @@
-<!-- STACK-SPECIFIC: Keep if web project; delete during /adapting-claude-pipeline otherwise. -->
 ---
 name: review-ui
 description: Comprehensive UI/CSS review using parallel agents. Each agent reviews against a specific UI design fundamentals section. Use when reviewing frontend code, CSS, Blade templates, or components.
 ---
+
+<!-- STACK-SPECIFIC: Keep if web project; delete during /adapting-claude-pipeline otherwise. -->
 
 # UI Review Skill
 

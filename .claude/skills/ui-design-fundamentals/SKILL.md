@@ -1,8 +1,9 @@
-	<!-- STACK-SPECIFIC: Keep if web project; delete during /adapting-claude-pipeline otherwise. -->
 ---
 name: ui-design-fundamentals
 description: Use when designing UI components, reviewing frontend code, choosing colors, spacing, typography, or layout. Use when CSS looks off, components feel unbalanced, or accessibility is unclear.
 ---
+
+<!-- STACK-SPECIFIC: Keep if web project; delete during /adapting-claude-pipeline otherwise. -->
 
 # UI Design Fundamentals
 
