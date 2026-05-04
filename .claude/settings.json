@@ -35,6 +35,11 @@
             "type": "command",
             "command": "python3 -c \"import json,sys; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path',''); sys.exit(2 if any(x in p for x in ['.env','.git/','credentials','package-lock.json']) else 0)\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-commit-skill-validate.sh\"",
+            "timeout": 15
           }
         ]
       },
