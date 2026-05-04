@@ -341,6 +341,9 @@ teardown() {
 
 	[ "$status" -eq 1 ]
 
+	# Verify the last error output is surfaced to the caller (not swallowed).
+	[[ "$output" == *"rate limit exceeded"* ]]
+
 	# Verify the mock was called exactly SG_MAX_ATTEMPTS times
 	local call_count
 	call_count=$(cat "$MOCK_CLAUDE_CALL_FILE")
@@ -348,15 +351,16 @@ teardown() {
 }
 
 @test "sg_invoke_claude does not retry on non-transient errors" {
-	# Non-retryable error: authentication / schema failure.
-	# The function surfaces the error output and returns without looping.
-	# Note: due to bash's if-compound exit status, return code may be 0 even
-	# when claude fails with a non-retryable error — the key observable is
-	# that the mock is called exactly once (no retry loop).
+	# Non-retryable error (e.g. authentication / schema failure): the function
+	# must surface the error output, return non-zero, and invoke claude exactly
+	# once — no retry loop.
 	export MOCK_CLAUDE_EXIT_CODE=1
 	export MOCK_CLAUDE_OUTPUT="Error: authentication failed, check API key"
 
 	run sg_invoke_claude "test prompt" "haiku" "$TEST_TMP/schemas/test-skill.json"
+
+	# Non-transient failures must return 1.
+	[ "$status" -eq 1 ]
 
 	# Output must contain the error message (surfaced from claude).
 	[[ "$output" == *"authentication failed"* ]]
