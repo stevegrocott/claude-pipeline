@@ -321,3 +321,52 @@ typo_field: oops"
 	run bash "$SKILL_VALIDATE_SCRIPT" --all 2>&1
 	[ "$status" -ne 0 ]
 }
+
+# =============================================================================
+# (e) ISSUE #204 BATCH-1 INTEGRATION — validate 6 real Batch-1 skill files
+#
+# These tests use the actual SKILL.md files and the real schema.  They act as
+# regression guards: if a later edit breaks a skill's frontmatter the suite
+# will catch it without needing a separate manual run.
+# =============================================================================
+
+_real_skill_run() {
+	local skill_name="$1"
+	local real_skills="$SCRIPT_DIR/../skills"
+	local real_schema="$SCRIPT_DIR/schemas/skill-frontmatter.json"
+
+	run env \
+		SKILLS_DIR="$real_skills" \
+		SKILL_SCHEMA="$real_schema" \
+		bash "$SKILL_VALIDATE_SCRIPT" --skill "$skill_name" 2>&1
+}
+
+@test "(e) issue-204 using-skills SKILL.md exits 0" {
+	_real_skill_run using-skills
+	[ "$status" -eq 0 ]
+}
+
+@test "(e) issue-204 writing-skills SKILL.md exits 0" {
+	_real_skill_run writing-skills
+	[ "$status" -eq 0 ]
+}
+
+@test "(e) issue-204 writing-plans SKILL.md exits 0" {
+	_real_skill_run writing-plans
+	[ "$status" -eq 0 ]
+}
+
+@test "(e) issue-204 writing-agents SKILL.md exits 0" {
+	_real_skill_run writing-agents
+	[ "$status" -eq 0 ]
+}
+
+@test "(e) issue-204 brainstorming SKILL.md exits 0" {
+	_real_skill_run brainstorming
+	[ "$status" -eq 0 ]
+}
+
+@test "(e) issue-204 adapting-claude-pipeline SKILL.md exits 0" {
+	_real_skill_run adapting-claude-pipeline
+	[ "$status" -eq 0 ]
+}
