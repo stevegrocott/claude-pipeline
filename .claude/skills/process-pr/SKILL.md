@@ -2,6 +2,8 @@
 name: process-pr
 description: Process PR/MR based on code review - if approved, create follow-up issues, merge, close; if changes requested, re-run implement-issue
 argument-hint: "<pr_number> <issue_number> <base_branch>"
+composes:
+  - implement-issue
 ---
 
 # Process PR/MR
