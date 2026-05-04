@@ -416,13 +416,15 @@ teardown() {
 }
 
 @test "sg_check_setup returns 2 when SG_CLAUDE_CLI is not found" {
-	# Use `run` so BATS does not abort on the expected non-zero exit.
-	# The env-var prefix is applied to the run command itself, then
-	# propagated to the function under test via export semantics.
-	SG_CLAUDE_CLI="no-such-claude-binary-xyzzy" \
-		run sg_check_setup \
-			"$TEST_TMP/fixtures" \
-			"$TEST_TMP/schemas/test-skill.json"
+	# VAR=val before a bash function (run) does not propagate the variable
+	# into subshells spawned by that function — only external commands honour
+	# the temporary env-var prefix.  Export explicitly instead, then restore.
+	local _saved_cli="${SG_CLAUDE_CLI:-}"
+	export SG_CLAUDE_CLI="no-such-claude-binary-xyzzy"
+	run sg_check_setup \
+		"$TEST_TMP/fixtures" \
+		"$TEST_TMP/schemas/test-skill.json"
+	export SG_CLAUDE_CLI="$_saved_cli"
 	[ "$status" -eq 2 ]
 	[[ "$output" == *"no-such-claude-binary-xyzzy"* ]]
 }
