@@ -1,6 +1,20 @@
 ---
 name: writing-skills
 description: Use when creating new skills, editing existing skills, or verifying skills work before deployment
+outputs:
+  - name: skill_file
+    type: file_path
+    description: SKILL.md written to skills/<skill-name>/SKILL.md
+side_effects:
+  - writes_skill_file
+  - commits_to_git
+composes:
+  - test-driven-development
+failure_modes:
+  - id: skip_red_phase
+    mitigation: Delete the skill and restart from RED phase — run baseline scenario without the skill before writing it
+  - id: deploy_without_test
+    mitigation: Run pressure scenarios with and without the skill before committing or sharing
 ---
 
 # Writing Skills
