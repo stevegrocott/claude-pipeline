@@ -494,6 +494,91 @@ extract_wait_time() {
 }
 
 # =============================================================================
+# COMPOSITION ROUTING
+# =============================================================================
+#
+# dispatch_composition routes a skill invocation to the Skill-tool path
+# (non-isolated, decision/review skills) or the subprocess path (worktree-
+# isolated implementation skills).
+#
+# Usage:
+#   dispatch_composition "<prompt>" [isolated] [extra claude args...]
+#
+# Arguments:
+#   prompt   — slash-command prompt (e.g. "/process-pr 1 2 main")
+#   isolated — "true" for subprocess path, "false"/omitted for skill path
+#   ...      — additional flags forwarded to the claude invocation
+#
+# Kill-switch: COMPOSITION_BACKEND env var overrides auto-routing.
+#   subprocess — always use subprocess path
+#   skill      — always use skill path
+#   (unset)    — auto-route based on the isolated argument
+
+dispatch_composition() {
+	local prompt="$1"
+	local isolated="${2:-false}"
+	local -a extra_args=()
+	if (( $# > 2 )); then
+		shift 2
+		extra_args=("$@")
+	fi
+
+	local backend
+	if [[ -n "${COMPOSITION_BACKEND:-}" ]]; then
+		case "$COMPOSITION_BACKEND" in
+			subprocess|skill)
+				backend="$COMPOSITION_BACKEND"
+				;;
+			*)
+				printf 'ERROR: unknown COMPOSITION_BACKEND value: %s\n' \
+					"$COMPOSITION_BACKEND" >&2
+				return 1
+				;;
+		esac
+	elif [[ "$isolated" == "true" ]]; then
+		backend="subprocess"
+	else
+		backend="skill"
+	fi
+
+	case "$backend" in
+		subprocess)
+			run_composition_subprocess "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+			;;
+		skill)
+			run_composition_skill "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+			;;
+	esac
+}
+
+# run_composition_subprocess — invoke a skill as a worktree-isolated subprocess.
+# Used for skills that require git worktree isolation (e.g. implement-issue).
+run_composition_subprocess() {
+	local prompt="$1"
+	shift
+	log "Composition dispatch → subprocess: $prompt"
+	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+		--dangerously-skip-permissions \
+		--output-format json \
+		"$@" \
+		2>&1
+}
+
+# run_composition_skill — invoke a skill via the Skill-tool path.
+# Used for skills that orchestrate decisions without worktree isolation
+# (e.g. process-pr, plan, review).
+run_composition_skill() {
+	local prompt="$1"
+	shift
+	log "Composition dispatch → skill: $prompt"
+	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+		--dangerously-skip-permissions \
+		--output-format json \
+		"$@" \
+		2>&1
+}
+
+# =============================================================================
 # ISSUE PROCESSING
 # =============================================================================
 
@@ -643,12 +728,10 @@ process_issue() {
     local proc_exit=0
 
     printf '%s\n' "=== process-pr output ===" >> "$issue_log"
-    timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+    dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
         --agent code-reviewer \
-        --dangerously-skip-permissions \
-        --output-format json \
         --json-schema "$PROCESS_SCHEMA" \
-        2>&1 | tee -a "$issue_log"
+        | tee -a "$issue_log"
     proc_exit=${PIPESTATUS[0]}
     printf '%s\n' "=== exit code: $proc_exit ===" >> "$issue_log"
 
@@ -681,13 +764,10 @@ process_issue() {
         # window; restart fresh rather than resuming with "please continue"
         # (the --resume subprocess is replaced by a clean retry here).
         printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
-        timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude \
-            -p "/process-pr $pr_number $issue_num $BRANCH" \
+        dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
             --agent code-reviewer \
-            --dangerously-skip-permissions \
-            --output-format json \
             --json-schema "$PROCESS_SCHEMA" \
-            2>&1 | tee -a "$issue_log"
+            | tee -a "$issue_log"
         proc_exit=${PIPESTATUS[0]}
         proc_last_json=$(grep -E '^\{' "$issue_log" | tail -1)
     fi
