@@ -42,14 +42,16 @@
 #   2 — environment / setup error (claude CLI missing, jq missing, etc.)
 #
 
-set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIXTURE_DIR="$SCRIPT_DIR/implement-issue-test/fixtures/triage"
 SCHEMA_FILE="$SCRIPT_DIR/schemas/implement-issue-triage.json"
-
-CLAUDE_CLI="${CLAUDE_CLI:-claude}"
 TRIAGE_MODEL="${TRIAGE_MODEL:-haiku}"
+
+# Propagate legacy CLAUDE_CLI to the library variable (lib default: "claude").
+: "${SG_CLAUDE_CLI:=${CLAUDE_CLI:-claude}}"
+
+# shellcheck source=skill-golden-lib.sh
+source "$SCRIPT_DIR/skill-golden-lib.sh"
 
 # =============================================================================
 # MANIFEST: fixture -> expected_route[:expected_disqualifying_criterion]
@@ -62,43 +64,24 @@ TRIAGE_MODEL="${TRIAGE_MODEL:-haiku}"
 #   on no_security_concerns specifically — no other reason is acceptable).
 #
 MANIFEST=(
-    "issue-2836|fast-path|*"
-    "issue-2837|fast-path|*"
-    "issue-2838|fast-path|*"
-    "issue-2839|fast-path|*"
-    "issue-2752|full|test_only_scope"
-    "issue-2754|full|test_only_scope"
-    "issue-2776|full|test_only_scope"
-    "issue-auth-test|full|no_security_concerns"
-    "issue-vague|full|precise_specification"
-    "issue-novel-pattern|full|established_pattern"
+	"issue-2836|fast-path|*"
+	"issue-2837|fast-path|*"
+	"issue-2838|fast-path|*"
+	"issue-2839|fast-path|*"
+	"issue-2752|full|test_only_scope"
+	"issue-2754|full|test_only_scope"
+	"issue-2776|full|test_only_scope"
+	"issue-auth-test|full|no_security_concerns"
+	"issue-vague|full|precise_specification"
+	"issue-novel-pattern|full|established_pattern"
 )
-
-# =============================================================================
-
-red()    { printf '\033[31m%s\033[0m' "$1"; }
-green()  { printf '\033[32m%s\033[0m' "$1"; }
-yellow() { printf '\033[33m%s\033[0m' "$1"; }
-dim()    { printf '\033[2m%s\033[0m' "$1"; }
-
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        printf 'error: required command not found: %s\n' "$1" >&2
-        exit 2
-    }
-}
-
-require_cmd jq
-require_cmd "$CLAUDE_CLI"
-[[ -f "$SCHEMA_FILE" ]] || { printf 'error: schema not found: %s\n' "$SCHEMA_FILE" >&2; exit 2; }
-[[ -d "$FIXTURE_DIR" ]] || { printf 'error: fixture dir not found: %s\n' "$FIXTURE_DIR" >&2; exit 2; }
 
 # Build the same prompt the orchestrator uses. Kept verbatim with
 # build_triage_prompt() in implement-issue-orchestrator.sh — if you edit one,
 # edit the other and re-run this script.
 build_prompt() {
-    local issue_body="$1"
-    cat <<TRIAGE_PROMPT
+	local issue_body="$1"
+	cat <<TRIAGE_PROMPT
 You are the triage classifier for an issue-implementation pipeline. Classify
 the GitHub issue below into one of two routes:
 
@@ -160,115 +143,7 @@ ${issue_body}
 TRIAGE_PROMPT
 }
 
-run_one() {
-    local entry="$1"
-    local fixture expected_route expected_dq
-    IFS='|' read -r fixture expected_route expected_dq <<<"$entry"
-
-    local body_file="$FIXTURE_DIR/${fixture}.md"
-    if [[ ! -f "$body_file" ]]; then
-        printf '  %s missing fixture: %s\n' "$(red "FAIL")" "$body_file"
-        return 1
-    fi
-
-    local prompt schema_compact start end elapsed_ms output
-    prompt=$(build_prompt "$(cat "$body_file")")
-    schema_compact=$(jq -c . "$SCHEMA_FILE")
-
-    start=$(date +%s%N 2>/dev/null || echo 0)
-    if ! output=$(env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
-        --model "$TRIAGE_MODEL" \
-        --dangerously-skip-permissions \
-        --output-format json \
-        --json-schema "$schema_compact" 2>&1); then
-        printf '  %s %-28s claude invocation failed\n' "$(red "FAIL")" "$fixture"
-        printf '%s\n' "$output" | head -5 | sed 's/^/      /'
-        return 1
-    fi
-    end=$(date +%s%N 2>/dev/null || echo 0)
-    elapsed_ms=$(( (end - start) / 1000000 ))
-
-    local result_payload route confidence dq summary
-    # Claude CLI with --json-schema returns the validated payload as a JSON
-    # object on .structured_output. Older CLIs put it on .result (sometimes
-    # as a stringified JSON). Fall back to the top-level object if neither
-    # field exists. This MUST mirror run_stage's extraction in the
-    # orchestrator — if these diverge, the validator stops reflecting prod.
-    result_payload=$(printf '%s' "$output" \
-        | jq -c '.structured_output // (.result | if type == "string" then fromjson? else . end) // .' \
-        2>/dev/null || echo '{}')
-    if ! printf '%s' "$result_payload" | jq -e . >/dev/null 2>&1; then
-        result_payload='{}'
-    fi
-
-    route=$(printf '%s' "$result_payload" | jq -r '.route // "MISSING"' 2>/dev/null || echo "PARSE_ERROR")
-    confidence=$(printf '%s' "$result_payload" | jq -r '.confidence // "MISSING"' 2>/dev/null || echo "PARSE_ERROR")
-    dq=$(printf '%s' "$result_payload" | jq -r '.disqualifying_criterion // ""' 2>/dev/null || echo "")
-    summary=$(printf '%s' "$result_payload" | jq -r '.summary // ""' 2>/dev/null || echo "")
-
-    local label="$fixture" timing_label
-    timing_label=$(printf '%6dms' "$elapsed_ms")
-
-    if [[ "$route" != "$expected_route" ]]; then
-        printf '  %s %-28s %s  expected=%s got=%s confidence=%s\n' \
-            "$(red "FAIL")" "$label" "$timing_label" "$expected_route" "$route" "$confidence"
-        [[ -n "$summary" ]] && printf '      %s\n' "$(dim "summary: $summary")"
-        return 1
-    fi
-
-    if [[ "$expected_route" == "full" && "$expected_dq" != "*" && "$dq" != "$expected_dq" ]]; then
-        printf '  %s %-28s %s  route=full ok, but dq=%s expected=%s\n' \
-            "$(yellow "WARN")" "$label" "$timing_label" "${dq:-<empty>}" "$expected_dq"
-        [[ -n "$summary" ]] && printf '      %s\n' "$(dim "summary: $summary")"
-        # WARN does not fail the run — the route is the primary contract.
-        # Tighten manifest entries to "*" if a specific dq is too brittle.
-        return 0
-    fi
-
-    printf '  %s %-28s %s  route=%s confidence=%s\n' \
-        "$(green "PASS")" "$label" "$timing_label" "$route" "$confidence"
-    return 0
-}
-
-# =============================================================================
-
-filter="${1:-}"
-total=0
-passed=0
-failed=0
-run_start=$(date +%s)
-
-printf 'triage-validate: %d fixtures, model=%s\n' "${#MANIFEST[@]}" "$TRIAGE_MODEL"
-printf '\n'
-
-for entry in "${MANIFEST[@]}"; do
-    fixture="${entry%%|*}"
-    if [[ -n "$filter" && "$fixture" != "$filter" ]]; then
-        continue
-    fi
-    total=$((total + 1))
-    if run_one "$entry"; then
-        passed=$((passed + 1))
-    else
-        failed=$((failed + 1))
-    fi
-done
-
-run_end=$(date +%s)
-elapsed=$((run_end - run_start))
-
-printf '\n'
-printf 'triage-validate: %d/%d passed in %ds\n' "$passed" "$total" "$elapsed"
-
-if (( total == 0 )); then
-    printf 'no fixtures matched filter: %s\n' "$filter" >&2
-    exit 2
-fi
-
-if (( failed > 0 )); then
-    printf '%s\n' "$(red "FAIL")"
-    exit 1
-fi
-
-printf '%s\n' "$(green "PASS")"
-exit 0
+sg_check_setup "$FIXTURE_DIR" "$SCHEMA_FILE" || exit 2
+sg_run_manifest "$FIXTURE_DIR" "$SCHEMA_FILE" "$TRIAGE_MODEL" \
+	build_prompt "${1:-}" "${MANIFEST[@]}"
+exit $?
