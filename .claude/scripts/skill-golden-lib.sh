@@ -168,15 +168,20 @@ sg_invoke_claude() {
 	fi
 
 	while ((attempt <= SG_MAX_ATTEMPTS)); do
-		if output=$(env -u CLAUDECODE "$SG_CLAUDE_CLI" -p "$prompt" \
+		# NB: capture rc separately, not via `rc=$?` after `if...fi`.
+		# Bash sets $? to 0 after a failed `if` with no `else` branch,
+		# so the post-fi capture would always read 0 and silently
+		# convert non-retryable failures into "success" returns.
+		output=$(env -u CLAUDECODE "$SG_CLAUDE_CLI" -p "$prompt" \
 			--model "$model" \
 			--dangerously-skip-permissions \
 			--output-format json \
-			--json-schema "$schema_compact" 2>&1); then
+			--json-schema "$schema_compact" 2>&1)
+		rc=$?
+		if ((rc == 0)); then
 			printf '%s' "$output"
 			return 0
 		fi
-		rc=$?
 
 		# Retry on transient signals only. Anything else is a real
 		# error (auth, schema mismatch, missing flag) — surface it.
