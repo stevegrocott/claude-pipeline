@@ -9,7 +9,7 @@
 # Exit codes: 0 all passed, 1 one or more flipped, 2 setup error.
 #
 
-set -o pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIXTURE_DIR="$SCRIPT_DIR/implement-issue-test/fixtures/triage"
@@ -117,10 +117,6 @@ TRIAGE_PROMPT
 filter=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-		-h|--help)
-			printf 'Usage: %s [<fixture-basename>]\n' "${0##*/}"
-			exit 0
-			;;
 		--)
 			shift
 			break
