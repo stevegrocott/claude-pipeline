@@ -2,6 +2,23 @@
 name: pipeline-feedback
 description: Use when an operator observes a triage misclassification, prompt regression, criterion drift, agent misroute, or escalation loop and needs to record structured feedback for downstream audit. Prompts for kind and fields, invokes feedback-record.sh, and confirms the appended record.
 argument-hint: "[kind]"
+inputs:
+  - name: kind
+    type: string
+    required: false
+    description: Feedback kind (triage_misclassification, prompt_regression, criterion_drift, agent_misroute, escalation_loop); prompted interactively if omitted
+outputs:
+  - name: feedback_record
+    type: jsonl_line
+    description: One JSONL record appended to logs/feedback/<kind>.jsonl
+side_effects:
+  - appends_to_file: logs/feedback/<kind>.jsonl
+composes: []
+failure_modes:
+  - id: invalid_kind
+    mitigation: feedback-record.sh exits non-zero; surface the error message verbatim and do not confirm the record
+  - id: missing_required_fields
+    mitigation: re-prompt the operator for the missing fields before invoking feedback-record.sh
 ---
 
 # Pipeline Feedback
