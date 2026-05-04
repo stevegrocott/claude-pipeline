@@ -61,17 +61,6 @@ run_feedback() {
     run bash "$FEEDBACK_SCRIPT" "$@"
 }
 
-# Standard valid record args used across multiple tests.
-default_valid_args() {
-    printf '%s\n' \
-        --kind triage_misclassification \
-        --issue 2840 \
-        --observed fast_path \
-        --expected full \
-        --evidence "logs/triage/issue-2840.json" \
-        --notes "Security concern missed by classifier"
-}
-
 # =============================================================================
 # (a) VALID RECORD APPENDS ONE LINE
 # =============================================================================
