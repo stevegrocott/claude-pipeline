@@ -26,8 +26,8 @@
 #
 #   Typical call pattern:
 #     result=$(run_stage "implement" "$prompt_file" ...)
-#     result=$(_apply_stage_action "$result")
-#     action=$(printf '%s' "$result" | jq -r '.action')
+#     # Caller inspects .error_kind / .status to determine the action:
+#     _apply_stage_action "$result" "accept"   # or "bail" / "escalate" / "retry_same"
 #
 
 set -uo pipefail  # Note: not -e, we handle errors explicitly
@@ -78,6 +78,14 @@ MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
+
+# Kill-switch for emergency bash fallback after PR-B introduces the
+# escalation-policy skill.  Defined here for discoverability; PR-B will
+# honour it when deciding whether to delegate to the skill or stay with the
+# inline bash decision tree.
+#   Unset / empty  → use escalation-policy skill when available (PR-B+)
+#   "bash"         → always use inline bash escalation branches
+ESCALATION_POLICY_BACKEND="${ESCALATION_POLICY_BACKEND:-}"
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
 readonly RATE_LIMIT_BUFFER=60
@@ -1198,11 +1206,13 @@ run_stage() {
         log_error "Schema file not found: $SCHEMA_DIR/$schema_file"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
-        _emit_stage_result \
+        local _sr
+        _sr=$(_emit_stage_result \
             "error" "null" "" "[]" \
             "$result_model" '"schema_not_found"' \
-            "$(( $(_epoch_ms) - result_start_ms ))"
-        return 1
+            "$(( $(_epoch_ms) - result_start_ms ))")
+        _apply_stage_action "$_sr" "bail" "schema_not_found"
+        return $?
     fi
 
     local schema
@@ -1316,12 +1326,14 @@ run_stage() {
         timeout_structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
         if [[ -n "$timeout_structured" ]]; then
             log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced structured output — using it"
-            _emit_stage_result \
+            local _sr
+            _sr=$(_emit_stage_result \
                 "success" "$timeout_structured" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))"
-            return 0
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr" "accept"
+            return $?
         fi
 
         # Fallback: if no structured output, try .result text wrapping
@@ -1334,12 +1346,14 @@ run_stage() {
 
         if [[ -n "$timeout_fallback_result" ]]; then
             log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced .result — using fallback"
-            _emit_stage_result \
+            local _sr
+            _sr=$(_emit_stage_result \
                 "success" "$timeout_fallback_result" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))"
-            return 0
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr" "accept"
+            return $?
         fi
 
         # Retry with a 20% longer timeout before giving up
@@ -1406,12 +1420,14 @@ run_stage() {
                     log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
                         "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
                 fi
-                _emit_stage_result \
+                local _sr
+                _sr=$(_emit_stage_result \
                     "error" "null" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" '"timeout"' \
-                    "$(( $(_epoch_ms) - result_start_ms ))"
-                return 1
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+                _apply_stage_action "$_sr" "bail" "timeout"
+                return $?
             fi
         fi
     fi
@@ -1428,12 +1444,14 @@ run_stage() {
         if [[ "$escalated_model" == "$model" ]]; then
             # Already at ceiling (opus) — can't escalate further
             log_error "Stage $stage_name hit max turns with $model (ceiling) — cannot escalate"
-            _emit_stage_result \
+            local _sr
+            _sr=$(_emit_stage_result \
                 "error" "null" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" '"max_turns_exhausted_at_ceiling"' \
-                "$(( $(_epoch_ms) - result_start_ms ))"
-            return 1
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr" "bail" "max_turns_exhausted_at_ceiling"
+            return $?
         fi
 
         log "WARN: Stage $stage_name hit max turns with $model — escalating to $escalated_model (no turn cap)"
@@ -1562,12 +1580,14 @@ for m in re.finditer(r'\[\s*\{', t):
                 fi
             fi
 
-            _emit_stage_result \
+            local _sr
+            _sr=$(_emit_stage_result \
                 "success" "$fallback_result" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))"
-            return 0
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr" "accept"
+            return $?
         fi
 
         # Diagnostic: log raw output first 500 chars and byte count when both
@@ -1618,12 +1638,14 @@ for m in re.finditer(r'\[\s*\{', t):
             if [[ -n "$structured" ]]; then
                 _CONSECUTIVE_TIMEOUTS=0
                 _TIMED_OUT_STAGE_NAMES=""
-                _emit_stage_result \
+                local _sr
+                _sr=$(_emit_stage_result \
                     "success" "$structured" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" "null" \
-                    "$(( $(_epoch_ms) - result_start_ms ))"
-                return 0
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+                _apply_stage_action "$_sr" "accept"
+                return $?
             fi
 
             # Try .result fallback from escalated run
@@ -1636,24 +1658,28 @@ for m in re.finditer(r'\[\s*\{', t):
                 log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
                 _CONSECUTIVE_TIMEOUTS=0
                 _TIMED_OUT_STAGE_NAMES=""
-                _emit_stage_result \
+                local _sr
+                _sr=$(_emit_stage_result \
                     "success" "$esc_fallback_result" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" "null" \
-                    "$(( $(_epoch_ms) - result_start_ms ))"
-                return 0
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+                _apply_stage_action "$_sr" "accept"
+                return $?
             fi
         fi
 
         log_error "No structured output from $stage_name"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
-        _emit_stage_result \
+        local _sr
+        _sr=$(_emit_stage_result \
             "error" "null" "$output" \
             "$(_extract_denials "$output")" \
             "$result_model" '"no_structured_output"' \
-            "$(( $(_epoch_ms) - result_start_ms ))"
-        return 1
+            "$(( $(_epoch_ms) - result_start_ms ))")
+        _apply_stage_action "$_sr" "bail" "no_structured_output"
+        return $?
     fi
 
     # Structured-error escalation — if the agent explicitly returned
@@ -1679,6 +1705,18 @@ for m in re.finditer(r'\[\s*\{', t):
             struct_err_escalated_model=$(effective_fallback "$model")
 
             if [[ "$struct_err_escalated_model" != "$model" ]]; then
+                # PR-A escalation shim: establish _apply_stage_action dispatch
+                # surface. Discard stdout — run_stage emits the final envelope
+                # after the re-run. PR-B replaces this with skill invocation.
+                {
+                    local _sr_shim
+                    _sr_shim=$(_emit_stage_result \
+                        "error" "$structured" "$output" \
+                        "$(_extract_denials "$output")" \
+                        "$result_model" "null" \
+                        "$(( $(_epoch_ms) - result_start_ms ))")
+                    _apply_stage_action "$_sr_shim" "escalate" "structured_error"
+                } >/dev/null
                 log "WARN: $stage_name returned status:error with $model — escalating to $struct_err_escalated_model"
                 printf '%s\n' "=== $stage_name structured-error escalation: $model → $struct_err_escalated_model ===" >> "$stage_log"
 
@@ -1714,12 +1752,14 @@ for m in re.finditer(r'\[\s*\{', t):
                 if [[ -n "$structured" ]]; then
                     _CONSECUTIVE_TIMEOUTS=0
                     _TIMED_OUT_STAGE_NAMES=""
-                    _emit_stage_result \
+                    local _sr
+                    _sr=$(_emit_stage_result \
                         "success" "$structured" "$output" \
                         "$(_extract_denials "$output")" \
                         "$result_model" "null" \
-                        "$(( $(_epoch_ms) - result_start_ms ))"
-                    return 0
+                        "$(( $(_epoch_ms) - result_start_ms ))")
+                    _apply_stage_action "$_sr" "accept"
+                    return $?
                 fi
 
                 # Try .result fallback from escalated run
@@ -1732,12 +1772,14 @@ for m in re.finditer(r'\[\s*\{', t):
                     log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
                     _CONSECUTIVE_TIMEOUTS=0
                     _TIMED_OUT_STAGE_NAMES=""
-                    _emit_stage_result \
+                    local _sr
+                    _sr=$(_emit_stage_result \
                         "success" "$struct_err_esc_fallback_result" "$output" \
                         "$(_extract_denials "$output")" \
                         "$result_model" "null" \
-                        "$(( $(_epoch_ms) - result_start_ms ))"
-                    return 0
+                        "$(( $(_epoch_ms) - result_start_ms ))")
+                    _apply_stage_action "$_sr" "accept"
+                    return $?
                 fi
             fi
         fi
@@ -1745,11 +1787,14 @@ for m in re.finditer(r'\[\s*\{', t):
 
     _CONSECUTIVE_TIMEOUTS=0
     _TIMED_OUT_STAGE_NAMES=""
-    _emit_stage_result \
+    local _sr
+    _sr=$(_emit_stage_result \
         "success" "$structured" "$output" \
         "$(_extract_denials "$output")" \
         "$result_model" "null" \
-        "$(( $(_epoch_ms) - result_start_ms ))"
+        "$(( $(_epoch_ms) - result_start_ms ))")
+    _apply_stage_action "$_sr" "accept"
+    return $?
 }
 
 # =============================================================================
