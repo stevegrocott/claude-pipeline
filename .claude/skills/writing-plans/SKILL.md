@@ -15,6 +15,7 @@ outputs:
     description: Structured GitHub Issue body with parseable task list (--github mode only)
 side_effects:
   - writes_file: "docs/plans/YYYY-MM-DD-<feature-name>.md"
+  - commits_to_git
 composes:
   - subagent-driven-development
   - executing-plans
