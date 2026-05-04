@@ -41,6 +41,7 @@ usage() {
 	cat <<EOF
 Usage: $SCRIPT_NAME --skill <name>
        $SCRIPT_NAME --all
+       $SCRIPT_NAME <skill-file>
 
 Validate SKILL.md YAML frontmatter against the JSON schema.
 
@@ -48,6 +49,9 @@ Options:
     --skill <name>   Validate one skill directory in SKILLS_DIR
     --all            Validate all skill directories in SKILLS_DIR
     -h, --help       Show this message
+
+Arguments:
+    <skill-file>     Direct path to a SKILL.md file to validate
 
 Environment:
     SKILLS_DIR       Root of skill directories
@@ -193,6 +197,7 @@ validate_all() {
 main() {
 	local mode=""
 	local skill_name=""
+	local skill_file_arg=""
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -218,17 +223,21 @@ main() {
 				die "unknown option: $1"
 				;;
 			*)
-				break
+				mode="file"
+				skill_file_arg="$1"
+				shift
 				;;
 		esac
 	done
 
-	[[ -n "$mode" ]] || die "missing --skill <name> or --all"
+	[[ -n "$mode" ]] \
+		|| die "missing --skill <name>, --all, or <skill-file>"
 	[[ -f "$SKILL_SCHEMA" ]] || die "schema not found: $SKILL_SCHEMA"
 
 	case "$mode" in
 		skill)	validate_skill "$skill_name" ;;
 		all)	validate_all ;;
+		file)	_validate_file "$skill_file_arg" ;;
 	esac
 }
 
