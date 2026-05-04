@@ -598,6 +598,45 @@ child_output=$("$SCRIPT_DIR/child-orchestrator.sh" \
 
 ---
 
+## Architectural Constraints
+
+### Skill Tool Is Not Available from Bash
+
+**The Skill tool cannot be invoked from bash orchestration scripts.**
+
+The Skill tool (`Skill("skill-name")`) is a Claude Code harness feature available only within an
+active interactive Claude Code session. When a bash script calls `claude -p "..."`, the spawned
+subprocess runs in a non-interactive mode that does not have access to the Skill tool.
+
+**Consequence:** You cannot write a bash stage that tells Claude to "use the writing-skills skill"
+via the Skill tool. Any attempt to embed Skill-tool invocations in a `claude -p` prompt will be
+ignored or produce an error.
+
+**Workaround — embed the skill content in the prompt:**
+```bash
+# WRONG: Skill tool does not exist in non-interactive mode
+prompt='Use the Skill tool to invoke "code-reviewer" and review this PR.'
+
+# CORRECT: Pass skill instructions directly in the prompt, or reference the skill file content
+skill_content=$(cat "$SCRIPT_DIR/../skills/code-reviewer/SKILL.md")
+prompt="Follow these review instructions:
+
+${skill_content}
+
+Now review the following PR: ${pr_url}"
+
+output=$(timeout "$stage_timeout" claude -p "$prompt" \
+    --dangerously-skip-permissions \
+    --output-format json \
+    --json-schema "$schema" 2>&1)
+```
+
+**Or use `--agent` to pre-load a specialised agent** that already embeds the skill behaviour in
+its system prompt — agent `.md` files in `.claude/agents/` are the bash-friendly equivalent of
+skill composition.
+
+---
+
 ## Coordination Patterns
 
 ### Agent Assignment Per Task

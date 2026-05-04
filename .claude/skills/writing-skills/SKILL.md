@@ -329,6 +329,13 @@ When invoking another skill from within a skill, use the **isolation decision ru
 
 **Default (no isolated arg):** routes to Skill tool path.
 
+> **Architectural constraint — Skill tool only works inside interactive sessions.**
+> The Skill tool is a Claude Code harness feature. Bash scripts that call `claude -p` (or
+> `claude --print`) create non-interactive subprocess sessions where the Skill tool is **not
+> available**. You cannot invoke a skill via the Skill tool from within a bash orchestration
+> script. Use the Subprocess path (`claude --print "/skill-name"`) or embed skill content
+> directly in the prompt instead.
+
 **Kill-switch:** `COMPOSITION_BACKEND` env var overrides auto-routing:
 - `skill` → forces Skill tool even for isolated work
 - `subprocess` → forces subprocess even for non-isolated work
