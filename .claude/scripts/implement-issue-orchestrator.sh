@@ -18,15 +18,18 @@
 #     value and pass it to _apply_stage_action for routing — never inspect the
 #     raw exit code or attempt to parse stage output directly.
 #
-#   _apply_stage_action <stage_result>
-#     The single decision point for all post-stage routing.  It reads the
-#     "action" field from the stage_result envelope and dispatches accordingly
-#     (CONTINUE, ABORT, RETRY, ESCALATE).  All new escalation or retry logic
-#     belongs here, not in the callers of run_stage.
+#   _apply_stage_action <stage_result> <action> [reason]
+#     The single dispatch point for all post-stage outcome handling.  The
+#     caller (run_stage) inspects the stage_result envelope (.error_kind /
+#     .output.status) to determine which action to take, then passes both the
+#     envelope and the action string as arguments — the action is NOT embedded
+#     in the stage_result envelope (schema: schemas/stage-result.json).
+#     Actions: "accept" | "bail" | "escalate" | "retry_same"
+#     All new escalation or retry logic belongs here, not in run_stage callers.
 #
 #   Typical call pattern:
 #     result=$(run_stage "implement" "$prompt_file" ...)
-#     # Caller inspects .error_kind / .status to determine the action:
+#     # Caller inspects .error_kind / .output.status to decide the action:
 #     _apply_stage_action "$result" "accept"   # or "bail" / "escalate" / "retry_same"
 #
 
