@@ -1,46 +1,15 @@
 #!/usr/bin/env bash
 #
-# triage-validate.sh
-#
-# Real-Claude golden tests for the triage classifier prompt. Asks the live
-# Haiku model to classify each fixture in implement-issue-test/fixtures/triage/
-# and compares the returned route against the expected outcome encoded in
-# the manifest below.
-#
-# WHY THIS EXISTS (vs the bats mock tests):
-#   - test-surgical-fast-path.bats locks down the *shell logic* around the
-#     classifier (kill switch, confidence demotion, grep verification, status
-#     bookkeeping). It mocks the model — so it can't catch prompt regressions.
-#   - This script locks down the *prompt itself*. If a Haiku update or a
-#     prompt edit causes the model to flip a fixture's route, this is how
-#     we find out before shipping.
-#
-# RUN CADENCE (READ BEFORE TOUCHING):
-#   - Cost:    ~10 fixtures x 1 Haiku call = ~$0.05–$0.10 per run.
-#   - Latency: ~5–15s per fixture, ~60–150s total wall clock.
-#   - Run BEFORE merging changes to:
-#       * .claude/scripts/implement-issue-orchestrator.sh
-#         (build_triage_prompt, run_triage_stage, schema)
-#       * .claude/scripts/schemas/implement-issue-triage.json
-#       * .claude/scripts/model-config.sh (triage tier)
-#   - Run MONTHLY as a regression sweep against model drift.
-#   - Run after upgrading the Haiku tier model in model-config.sh.
-#
-# DO NOT AUTO-UPDATE FIXTURES OR EXPECTATIONS.
-#   If a fixture flips, that is signal — investigate before changing the
-#   manifest. The manifest is the contract; flips mean the prompt or the
-#   model changed behavior, and that needs a human decision.
+# triage-validate.sh — golden tests for the triage classifier prompt
 #
 # Usage:
-#   .claude/scripts/triage-validate.sh                  # run all fixtures
-#   .claude/scripts/triage-validate.sh issue-2836       # run one fixture
-#   TRIAGE_MODEL=sonnet .claude/scripts/triage-validate.sh   # override model
+#   triage-validate.sh [<fixture-basename>]
+#   TRIAGE_MODEL=sonnet triage-validate.sh
 #
-# Exit codes:
-#   0 — all fixtures classified as expected
-#   1 — one or more fixtures flipped
-#   2 — environment / setup error (claude CLI missing, jq missing, etc.)
+# Exit codes: 0 all passed, 1 one or more flipped, 2 setup error.
 #
+
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIXTURE_DIR="$SCRIPT_DIR/implement-issue-test/fixtures/triage"
@@ -54,15 +23,10 @@ TRIAGE_MODEL="${TRIAGE_MODEL:-haiku}"
 source "$SCRIPT_DIR/skill-golden-lib.sh"
 
 # =============================================================================
-# MANIFEST: fixture -> expected_route[:expected_disqualifying_criterion]
+# Manifest: fixture -> expected_route|expected_disqualifying_criterion
+# Use "*" to accept any criterion; name a specific criterion to pin it.
 # =============================================================================
-#
-# Format: "fixture_basename|expected_route|expected_dq_or_*"
-#   expected_dq is checked only when route is "full". Use "*" to accept any
-#   reason (the route alone is the contract). Use a specific name when the
-#   prompt should pinpoint a particular criterion (e.g. auth-test must fail
-#   on no_security_concerns specifically — no other reason is acceptable).
-#
+
 MANIFEST=(
 	"issue-2836|fast-path|*"
 	"issue-2837|fast-path|*"
@@ -76,9 +40,11 @@ MANIFEST=(
 	"issue-novel-pattern|full|established_pattern"
 )
 
-# Build the same prompt the orchestrator uses. Kept verbatim with
-# build_triage_prompt() in implement-issue-orchestrator.sh — if you edit one,
-# edit the other and re-run this script.
+# =============================================================================
+# Prompt builder — kept verbatim with build_triage_prompt() in
+# implement-issue-orchestrator.sh; edit both together and re-run.
+# =============================================================================
+
 build_prompt() {
 	local issue_body="$1"
 	cat <<TRIAGE_PROMPT
@@ -143,7 +109,37 @@ ${issue_body}
 TRIAGE_PROMPT
 }
 
+# =============================================================================
+# Argument parsing
+# =============================================================================
+
+filter=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		-h|--help)
+			printf 'Usage: %s [<fixture-basename>]\n' "${0##*/}"
+			exit 0
+			;;
+		--)
+			shift
+			break
+			;;
+		-*)
+			printf '%s: unknown option: %s\n' "${0##*/}" "$1" >&2
+			exit 2
+			;;
+		*)
+			filter="$1"
+			shift
+			;;
+	esac
+done
+
+# =============================================================================
+# Dispatch
+# =============================================================================
+
 sg_check_setup "$FIXTURE_DIR" "$SCHEMA_FILE" || exit 2
 sg_run_manifest "$FIXTURE_DIR" "$SCHEMA_FILE" "$TRIAGE_MODEL" \
-	build_prompt "${1:-}" "${MANIFEST[@]}"
+	build_prompt "$filter" "${MANIFEST[@]}"
 exit $?
