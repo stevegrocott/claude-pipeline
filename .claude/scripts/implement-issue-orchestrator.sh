@@ -1096,6 +1096,63 @@ _emit_stage_result() {
           model: $model, error_kind: $error_kind, elapsed_ms: $elapsed_ms}'
 }
 
+# Apply a stage outcome action to a stage_result envelope.
+#
+# This is the single bash entry point for stage outcome handling. Callers
+# determine which action to take (via the existing bash decision tree), then
+# delegate execution to this function. PR-B will replace the bash decision
+# tree with an escalation-policy skill invocation; this shim keeps the code
+# path uniform so tests can target the action interface independently.
+#
+# Arguments:
+#   $1 - stage_result: JSON envelope (see schemas/stage-result.json)
+#   $2 - action:       "accept" | "bail" | "escalate" | "retry_same"
+#   $3 - reason:       (optional) human-readable reason for logging / diagnostics
+#
+# Stdout:
+#   Emits the stage_result JSON envelope unchanged (PR-A pass-through).
+#   PR-B will replace the escalate/retry_same branches with skill invocations
+#   that may produce a new envelope.
+#
+# Returns:
+#   0 for accept / escalate / retry_same
+#   1 for bail (signals caller that stage result is terminal)
+_apply_stage_action() {
+	local stage_result="$1"
+	local action="$2"
+	local reason="${3:-}"
+
+	case "$action" in
+		accept)
+			printf '%s\n' "$stage_result"
+			return 0
+			;;
+		bail)
+			log_error "Stage bailed: ${reason:-action=bail}"
+			printf '%s\n' "$stage_result"
+			return 1
+			;;
+		escalate)
+			# PR-A shim: emit stage_result as-is; the re-run logic lives in
+			# run_stage. PR-B will replace this branch with a skill invocation
+			# that returns the next action + target model.
+			printf '%s\n' "$stage_result"
+			return 0
+			;;
+		retry_same)
+			# PR-A shim: emit stage_result as-is; the retry logic lives in
+			# run_stage. PR-B will replace this branch with explicit retry.
+			printf '%s\n' "$stage_result"
+			return 0
+			;;
+		*)
+			log_error "_apply_stage_action: unknown action '$action'"
+			printf '%s\n' "$stage_result"
+			return 1
+			;;
+	esac
+}
+
 # =============================================================================
 # STAGE RUNNERS
 # =============================================================================

@@ -1143,3 +1143,150 @@ EOF
     grep -q "Max turns: 25 (sonnet with S/empty complexity)" "$LOG_FILE" || \
         fail "Max turns logging not found in log. Log: $(cat "$LOG_FILE")"
 }
+
+# =============================================================================
+# _APPLY_STAGE_ACTION — STAGE_RESULT ENVELOPE SHAPE
+#
+# The same 4 escalation behaviors (max_turns, timeout, empty, structured-error)
+# expressed via the stage_result + _apply_stage_action interface
+# (issue #178 PR-A, task 4). No behavior change — these tests verify the new
+# dispatch surface is consistent with the run_stage test assertions above.
+#
+# Convention: bail exits 1 and emits the envelope; accept/escalate/retry_same
+# exit 0 and emit the envelope.  The error_kind field in the envelope
+# identifies which escalation path triggered the bail/escalate decision.
+# =============================================================================
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for max_turns_exhausted_at_ceiling" {
+	# max_turns behavior: run_stage calls _apply_stage_action with bail when
+	# opus (ceiling) hits error_max_turns. The envelope must survive intact so
+	# callers can inspect error_kind without re-running the stage.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "{\"subtype\":\"error_max_turns\"}",
+		denials: [],
+		model: "opus",
+		error_kind: "max_turns_exhausted_at_ceiling",
+		elapsed_ms: 5000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "max_turns_exhausted_at_ceiling"
+	[ "$status" -eq 1 ]
+
+	# Envelope must be emitted on stdout so callers can inspect error_kind.
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "max_turns_exhausted_at_ceiling" ] || \
+		fail "Expected error_kind=max_turns_exhausted_at_ceiling, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for timeout" {
+	# timeout behavior: run_stage calls _apply_stage_action with bail when
+	# both initial attempt and retry time out at the ceiling model.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "",
+		denials: [],
+		model: "opus",
+		error_kind: "timeout",
+		elapsed_ms: 60000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "timeout"
+	[ "$status" -eq 1 ]
+
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "timeout" ] || \
+		fail "Expected error_kind=timeout, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for no_structured_output" {
+	# empty behavior: run_stage calls _apply_stage_action with bail when no
+	# structured output can be extracted even after escalation attempts.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "{\"result\":\"some text\",\"is_error\":true}",
+		denials: [],
+		model: "sonnet",
+		error_kind: "no_structured_output",
+		elapsed_ms: 10000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "no_structured_output"
+	[ "$status" -eq 1 ]
+
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "no_structured_output" ] || \
+		fail "Expected error_kind=no_structured_output, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: escalate exits 0 and emits envelope for structured_error" {
+	# structured-error behavior: run_stage calls _apply_stage_action with
+	# escalate when the agent returned status:error without permission_denials.
+	# The shim emits the envelope and exits 0; the re-run lives in run_stage
+	# (PR-A pass-through; PR-B will invoke escalation-policy skill here).
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: {status: "error", error: "first attempt failed"},
+		raw: "{\"structured_output\":{\"status\":\"error\"}}",
+		denials: [],
+		model: "haiku",
+		error_kind: null,
+		elapsed_ms: 3000
+	}')
+
+	run _apply_stage_action "$stage_result" "escalate" "structured_error"
+	[ "$status" -eq 0 ]
+
+	# Envelope must be emitted so callers can inspect output.status.
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action escalate must emit stage_result on stdout"
+
+	# The structured error's .output.status must survive in the emitted envelope
+	# so the caller (run_stage / future PR-B skill) can act on the original result.
+	local agent_status
+	agent_status=$(printf '%s' "$emitted_envelope" | jq -r '.output.status // empty')
+	[ "$agent_status" = "error" ] || \
+		fail "Expected output.status=error in emitted envelope, got: $agent_status"
+}
