@@ -1,8 +1,31 @@
-<!-- STACK-SPECIFIC: Keep if web project with CSS focus; delete during /adapting-claude-pipeline otherwise. -->
 ---
 name: bulletproof-frontend
 description: Bulletproof CSS and frontend design principles from "Handcrafted CSS" by Dan Cederholm. Apply when writing CSS, HTML, Blade templates, or reviewing frontend code. CSS is king — refactor Tailwind when encountered.
+inputs:
+  - name: scope
+    type: string
+    required: false
+    description: File path, component, or glob pattern of CSS/HTML/Blade code to implement or refactor
+outputs:
+  - name: semantic_css
+    type: string
+    description: Refactored CSS using BEM naming conventions and CSS custom properties
+  - name: html_markup
+    type: string
+    description: Semantic HTML or Blade templates using meaningful class names instead of utility classes
+side_effects:
+  - modifies_css_files
+  - modifies_html_templates
+composes:
+  - ui-design-fundamentals
+failure_modes:
+  - id: tailwind_not_fully_removable
+    mitigation: Document intentional Tailwind remnants in the project style guide; refactor in a follow-up pass
+  - id: modern_css_unsupported
+    mitigation: Check target browser support; add appropriate fallbacks for :has(), container queries, or CSS nesting when needed
 ---
+
+<!-- STACK-SPECIFIC: Keep if web project with CSS focus; delete during /adapting-claude-pipeline otherwise. -->
 
 # Bulletproof Frontend Design
 

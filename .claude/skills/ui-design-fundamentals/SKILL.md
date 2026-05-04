@@ -1,8 +1,32 @@
-	<!-- STACK-SPECIFIC: Keep if web project; delete during /adapting-claude-pipeline otherwise. -->
 ---
 name: ui-design-fundamentals
 description: Use when designing UI components, reviewing frontend code, choosing colors, spacing, typography, or layout. Use when CSS looks off, components feel unbalanced, or accessibility is unclear.
+inputs:
+  - name: component_type
+    type: string
+    required: false
+    description: Type of UI component being designed or evaluated (e.g. button, form, card, navigation)
+  - name: design_context
+    type: string
+    required: false
+    description: Description of the design problem, screen, or component being evaluated
+outputs:
+  - name: design_guidelines
+    type: string
+    description: Applicable spacing, typography, color, and accessibility specifications for the component
+  - name: wcag_requirements
+    type: string
+    description: Contrast ratio minimums and tap-target sizes required for the given context
+side_effects: []
+composes: []
+failure_modes:
+  - id: contrast_not_achievable
+    mitigation: Escalate to the design team for a brand palette adjustment that meets the 4.5:1 minimum
+  - id: platform_tap_target_conflict
+    mitigation: Use the stricter value (48px) when designing for both iOS and Android to satisfy both guidelines
 ---
+
+<!-- STACK-SPECIFIC: Keep if web project; delete during /adapting-claude-pipeline otherwise. -->
 
 # UI Design Fundamentals
 
