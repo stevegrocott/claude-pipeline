@@ -97,6 +97,8 @@ Would you like me to run an improvement cycle to update it? This would involve:
 
 ## The Five-Step Cycle
 
+> **Before improving, record the observation via `pipeline-feedback`**
+
 ### Step 1: Capture the Problem
 
 Document what happened before details fade:
