@@ -49,8 +49,6 @@ source "$SCRIPT_DIR/claude-usage.sh"
 # shellcheck source=prompts/triage-prompt.sh
 source "$SCRIPT_DIR/prompts/triage-prompt.sh"
 source "$SCRIPT_DIR/../config/platform.sh"
-# shellcheck source=prompts/triage-prompt.sh
-source "$SCRIPT_DIR/prompts/triage-prompt.sh"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
 # Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work regardless of CWD

@@ -5,6 +5,23 @@
 # Defines a single function with no external dependencies. Source this file
 # wherever a triage prompt is needed.
 #
+# ─── Prompt File Convention ───────────────────────────────────────────────────
+# Each file in this directory follows the pattern:
+#
+#   prompts/<stage>-prompt.sh
+#
+# Rules for skill/pipeline authors adding a new stage prompt:
+#   1. Name the file  prompts/<stage>-prompt.sh  (e.g. implement-prompt.sh)
+#   2. Define exactly one function — build_prompt() — with no global side-effects
+#   3. Accept stage-specific arguments as positional parameters ($1, $2, …)
+#   4. Declare no globals; output the prompt text to stdout via cat <<HEREDOC
+#   5. Source the file once from the orchestrator, before first use:
+#        # shellcheck source=prompts/<stage>-prompt.sh
+#        source "$SCRIPT_DIR/prompts/<stage>-prompt.sh"
+#
+# This keeps all stage prompt logic isolated from the orchestrator and easy to
+# unit-test independently.
+# ──────────────────────────────────────────────────────────────────────────────
 
 build_prompt() {
 	local issue_body="$1"
