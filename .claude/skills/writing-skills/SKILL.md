@@ -351,7 +351,7 @@ When invoking another skill from within a skill, use the **isolation decision ru
 > directly in the prompt instead.
 
 **Kill-switch:** `COMPOSITION_BACKEND` env var overrides auto-routing:
-- `skill` → forces Skill tool even for isolated work
+- `skill` → routes to `run_composition_standard()` (bash subprocess, non-sandboxed; legacy alias — does NOT invoke the Skill tool)
 - `subprocess` → forces subprocess even for non-isolated work
 - Unknown value → exits non-zero with error
 
