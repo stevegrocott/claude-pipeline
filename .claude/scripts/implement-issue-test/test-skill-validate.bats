@@ -243,7 +243,12 @@ description: This one is fine"
 @test "(c) tab-indented block sequence in frontmatter is rejected" {
 	local target="$TEST_SKILLS_DIR/tab-indent/SKILL.md"
 	mkdir -p "$TEST_SKILLS_DIR/tab-indent"
-	# YAML forbids tabs as indentation; the \t must be a hard tab character.
+	# YAML 1.1/1.2 forbids tabs as indentation (spec §6.1). Ruby's Psych parser
+	# (the engine used by skill-validate.sh) enforces this and raises a
+	# Psych::SyntaxError for tab-indented block sequences. If skill-validate.sh
+	# is ever ported to a Python-based parser, note that PyYAML tolerates tabs
+	# in some positions by default — the test would need to be re-evaluated.
+	# The \t below must be a hard tab character, not spaces.
 	printf -- '%s\n' \
 		'---' \
 		'name: tab-indent' \

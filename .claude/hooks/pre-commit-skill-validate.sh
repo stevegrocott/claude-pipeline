@@ -24,6 +24,7 @@
 # resolved skill name.
 #
 
+set -u
 set -o pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
