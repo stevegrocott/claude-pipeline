@@ -192,6 +192,66 @@ Updated [file] with [change]. This prevents [problem] which occurred during [tas
 
 **For new skills and agents:** The writing-skills and writing-agents skills have their own TDD cycles. Follow them — don't shortcut.
 
+## Triage Misclassifications: Promoting to Golden Fixtures
+
+When the resolved issue is a triage misclassification, the highest-value improvement
+is promoting the case to a **golden fixture** in `triage-validate.sh`. Golden fixtures
+lock the correct route into the live regression suite so the same misroute cannot
+recur silently across model updates or prompt edits.
+
+**Source:** Check `logs/feedback/triage_misclassification.jsonl` for recorded observations
+(recorded via the `pipeline-feedback` skill).
+
+### Fixture Promotion Steps
+
+1. **Save the issue body as a fixture file**
+
+   ```bash
+   cp <issue-body-source> \
+     .claude/scripts/implement-issue-test/fixtures/triage/<issue-id>.md
+   ```
+
+   The file must contain the raw issue body that the triage classifier will see.
+
+2. **Determine the expected route and disqualifying criterion**
+
+   From the feedback record's `expected` field, derive:
+   - `expected_route` — `fast-path` or `full`
+   - `expected_dq` — the disqualifying criterion name if `full`, or `*` to accept any
+
+3. **Add a MANIFEST entry to `triage-validate.sh`**
+
+   In `.claude/scripts/triage-validate.sh`, append one line to the `MANIFEST` array:
+
+   ```bash
+   "<issue-id>|<expected_route>|<expected_dq>"
+   ```
+
+4. **Verify the new fixture passes**
+
+   ```bash
+   .claude/scripts/triage-validate.sh <issue-id>
+   ```
+
+   The fixture must pass before committing. If it fails, the prompt or the expected
+   outcome needs investigation — do not update the manifest to match the wrong answer.
+
+5. **Commit both files**
+
+   ```bash
+   git add .claude/scripts/triage-validate.sh \
+           .claude/scripts/implement-issue-test/fixtures/triage/<issue-id>.md
+   git commit -m "improve: triage-validate — add golden fixture for <issue-id>"
+   ```
+
+### When to promote vs. when to fix the prompt
+
+| Situation | Action |
+|-----------|--------|
+| Misclassification was a one-off (unique issue structure) | Promote fixture only — no prompt change |
+| Misclassification reveals a criterion gap in the prompt | Fix the prompt AND promote fixture |
+| Multiple fixtures now flip after a prompt change | Investigate before changing the manifest |
+
 ## Preventing Improvement Drift
 
 Improvements can spiral. Guard against these anti-patterns:
