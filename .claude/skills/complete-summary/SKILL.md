@@ -1,3 +1,30 @@
+---
+name: complete-summary
+description: Generate a structured completion summary for a PR comment using only the issue number, branch name, PR number, and prompt context — no file exploration
+inputs:
+  - name: issue_number
+    type: string
+    required: true
+    description: GitHub issue number being closed by this PR
+  - name: branch_name
+    type: string
+    required: true
+    description: Feature branch name that was implemented
+  - name: pr_number
+    type: string
+    required: true
+    description: Pull request number to reference in the summary
+outputs:
+  - name: pr_comment
+    type: string
+    description: Formatted PR comment text ready to post, following the standard Implementation Complete template
+side_effects: []
+composes: []
+failure_modes:
+  - id: missing_context
+    mitigation: request the missing issue_number, branch_name, or pr_number from the caller before generating output; do not guess or explore
+---
+
 # Complete Summary
 
 Generate a structured completion summary for a PR comment. Fill in the template from data already available — do not explore.
