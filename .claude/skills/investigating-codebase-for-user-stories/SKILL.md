@@ -14,8 +14,8 @@ outputs:
     description: Auto-generated batch script at docs/user-stories/create-issues.sh for creating GitHub issues from stories
 side_effects:
   - writes_files: docs/user-stories/
-  - may_create_github_labels
-  - may_create_github_issues
+  - may_create_github_labels: true
+  - may_create_github_issues: true
 composes: []
 failure_modes:
   - id: no_routes_found
