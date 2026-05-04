@@ -11,6 +11,24 @@
 #   - status.json: Real-time progress
 #   - logs/implement-issue/<timestamp>/: Per-stage logs
 #
+# Stage Execution Contract:
+#   run_stage <name> <prompt_file> [options]
+#     Runs a single pipeline stage and emits a stage_result JSON envelope on
+#     stdout (schema: schemas/stage-result.json).  Callers must capture this
+#     value and pass it to _apply_stage_action for routing — never inspect the
+#     raw exit code or attempt to parse stage output directly.
+#
+#   _apply_stage_action <stage_result>
+#     The single decision point for all post-stage routing.  It reads the
+#     "action" field from the stage_result envelope and dispatches accordingly
+#     (CONTINUE, ABORT, RETRY, ESCALATE).  All new escalation or retry logic
+#     belongs here, not in the callers of run_stage.
+#
+#   Typical call pattern:
+#     result=$(run_stage "implement" "$prompt_file" ...)
+#     result=$(_apply_stage_action "$result")
+#     action=$(printf '%s' "$result" | jq -r '.action')
+#
 
 set -uo pipefail  # Note: not -e, we handle errors explicitly
 
