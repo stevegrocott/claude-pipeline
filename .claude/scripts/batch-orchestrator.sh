@@ -567,13 +567,17 @@ run_composition_subprocess() {
 # run_composition_skill — invoke a skill via the Skill-tool path.
 # Used for skills that orchestrate decisions without worktree isolation
 # (e.g. process-pr, plan, review).
+#
+# Unlike run_composition_subprocess, this path does NOT set
+# --dangerously-skip-permissions, so the sub-Claude session can use
+# interactive tools (including the Skill tool itself) and AskUserQuestion.
+# Output format is not forced here — callers that need structured JSON must
+# pass --output-format json (and --json-schema) explicitly.
 run_composition_skill() {
 	local prompt="$1"
 	shift
 	log "Composition dispatch → skill: $prompt"
 	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
-		--dangerously-skip-permissions \
-		--output-format json \
 		"$@" \
 		2>&1
 }
@@ -730,6 +734,7 @@ process_issue() {
     printf '%s\n' "=== process-pr output ===" >> "$issue_log"
     dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
         --agent code-reviewer \
+        --output-format json \
         --json-schema "$PROCESS_SCHEMA" \
         | tee -a "$issue_log"
     proc_exit=${PIPESTATUS[0]}
@@ -766,6 +771,7 @@ process_issue() {
         printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
         dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
             --agent code-reviewer \
+            --output-format json \
             --json-schema "$PROCESS_SCHEMA" \
             | tee -a "$issue_log"
         proc_exit=${PIPESTATUS[0]}

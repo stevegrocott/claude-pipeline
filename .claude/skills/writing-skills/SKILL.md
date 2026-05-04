@@ -339,6 +339,37 @@ When invoking another skill from within a skill, use the **isolation decision ru
 **Reference implementation:** `dispatch_composition()` in `.claude/scripts/batch-orchestrator.sh`
 **Test coverage:** `.claude/scripts/implement-issue-test/test-orchestrator-composition.bats`
 
+### Canary Measurement (gates merge of backend changes)
+
+Before merging changes that alter the composition backend, run a 10-issue canary
+and verify regressions are within budget:
+
+| Metric             | Budget                                  | Source                                                            |
+|--------------------|-----------------------------------------|-------------------------------------------------------------------|
+| Tokens per issue   | ≤10% median regression vs. baseline     | summed from per-session transcripts in `~/.claude/projects/`      |
+| Wall-clock per issue | ≤25% median regression vs. baseline   | `total_duration_seconds` from each issue's `metrics.json`         |
+
+**Procedure (use `.claude/scripts/canary-measure.sh`):**
+
+1. Select 10 representative issues.
+2. Baseline run: `COMPOSITION_BACKEND=subprocess ./batch-orchestrator.sh …` against the chosen issues, then capture results:
+   ```bash
+   ./canary-measure.sh --logs-dir logs/ --label baseline > canary-baseline.json
+   ```
+3. Candidate run: same issues with default auto-routing (or `COMPOSITION_BACKEND=skill`):
+   ```bash
+   ./canary-measure.sh --logs-dir logs/ --label candidate > canary-candidate.json
+   ```
+4. Compute deltas and gate decision:
+   ```bash
+   ./canary-measure.sh --compute-deltas \
+       --before canary-baseline.json --after canary-candidate.json \
+       --format markdown
+   ```
+5. **Block merge** if `gates.tokens_within_limit` is `false` (>10% median) or `gates.wall_clock_within_limit` is `false` (>25% median). Otherwise paste the markdown report into the PR description.
+
+**Test coverage:** `.claude/scripts/implement-issue-test/test-canary-measure.bats`
+
 ## Flowchart Usage
 
 ```dot
