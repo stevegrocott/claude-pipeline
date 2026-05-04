@@ -210,7 +210,7 @@ teardown() {
 	[ -f "$TEST_TMP/subprocess_called" ]
 }
 
-@test "(b) dispatch_composition isolated=true does NOT invoke skill path" {
+@test "(b) dispatch_composition isolated=true does NOT invoke standard path" {
 	require_dispatch_composition
 
 	dispatch_composition "/implement-issue 123 main" "true"
