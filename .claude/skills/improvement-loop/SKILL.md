@@ -1,6 +1,26 @@
 ---
 name: improvement-loop
 description: Use after resolving a bug, failed task, or unexpected agent behavior to improve the pipeline skills, agents, hooks, or scripts that contributed to the problem. Also proactively suggest improvements when recurring patterns or inefficiencies are observed.
+inputs:
+  - name: resolved_issue
+    type: string
+    required: true
+    description: Description of the bug, failed task, or agent behavior that was just resolved and the root cause identified
+outputs:
+  - name: pipeline_diff
+    type: file
+    description: Minimal change committed to the affected pipeline file (skill, agent, hook, or script)
+side_effects:
+  - modifies_pipeline_file: .claude/{skills,agents,hooks,scripts}/
+composes:
+  - pipeline-feedback
+  - writing-skills
+  - writing-agents
+failure_modes:
+  - id: premature_invocation
+    mitigation: gate check prevents improvement work while issue is unresolved; stop and return to fixing the issue first
+  - id: improvement_drift
+    mitigation: make only the minimal change for the identified problem; flag additional opportunities as separate improvement cycles
 ---
 
 # The Improvement Loop

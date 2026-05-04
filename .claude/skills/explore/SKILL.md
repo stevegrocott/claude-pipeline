@@ -2,6 +2,25 @@
 name: explore
 description: Turn a vague idea or bug observation into a fully-planned issue with research, evaluation, implementation tasks, and acceptance criteria
 argument-hint: "<description of idea or problem>"
+inputs:
+  - name: description
+    type: string
+    required: true
+    description: Vague idea, bug observation, or feature request to research and plan
+outputs:
+  - name: issue_url
+    type: url
+    description: GitHub issue URL created and ready for /implement-issue
+side_effects:
+  - creates_github_issue
+  - writes_log: logs/explore/explore-<issue>-<ts>/status.json
+composes:
+  - mcp-tools
+failure_modes:
+  - id: gh_api_unauthorized
+    mitigation: surface the gh auth error to the operator, do not retry
+  - id: vague_input_unanswered
+    mitigation: ask 1-2 AskUserQuestion clarifications then proceed; do not block indefinitely
 ---
 
 # Explore
