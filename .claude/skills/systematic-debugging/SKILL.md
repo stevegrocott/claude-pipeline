@@ -1,6 +1,38 @@
 ---
 name: systematic-debugging
 description: Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes
+inputs:
+  - name: bug_description
+    type: string
+    required: true
+    description: The bug, test failure, or unexpected behaviour to investigate
+  - name: error_output
+    type: string
+    description: Error messages, stack traces, or test failure output to analyze
+outputs:
+  - name: root_cause
+    type: string
+    description: The identified root cause of the bug
+  - name: failing_test
+    type: file_path
+    description: Minimal automated test case that reproduces the bug
+  - name: fix_description
+    type: string
+    description: Description of the fix applied at the root cause
+side_effects:
+  - adds_diagnostic_instrumentation
+  - runs_test_suite
+  - modifies_production_code
+composes:
+  - test-driven-development
+  - verification-before-completion
+failure_modes:
+  - id: three_fixes_failed
+    mitigation: Stop attempting further fixes. Question the architecture and discuss with your human partner before proceeding.
+  - id: unable_to_reproduce
+    mitigation: Gather evidence from all component boundaries before forming any hypothesis. Do not guess.
+  - id: symptom_fix_not_root_cause
+    mitigation: Return to Phase 1, trace the data flow upward to find the true source of the problem.
 ---
 
 # Systematic Debugging

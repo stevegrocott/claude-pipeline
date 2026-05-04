@@ -1,3 +1,29 @@
+---
+name: fix-from-review
+description: Use when applying code review feedback — reads specific file and line locations from review comments and applies targeted fixes
+inputs:
+  - name: review_feedback
+    type: string
+    required: true
+    description: Code review comments containing file paths, line numbers, and descriptions of what to fix
+outputs:
+  - name: fixes_applied
+    type: json
+    description: Summary of each review item and the fix applied
+  - name: commit_sha
+    type: string
+    description: SHA of the single commit containing all fixes
+side_effects:
+  - modifies_source_files
+  - runs_lint_on_changed_files
+  - creates_git_commit
+failure_modes:
+  - id: fix_requires_broad_context
+    mitigation: For minor issues defer and note in the summary. For major issues read the minimum additional context needed.
+  - id: review_item_ambiguous
+    mitigation: Note the item as ambiguous in the summary. Do not guess at the file or line location.
+---
+
 # Fix From Review
 
 Address code review feedback by making targeted fixes. Work from the review comments — do not explore.

@@ -1,3 +1,30 @@
+---
+name: test-validation
+description: Use when tests need to be run and validated for quality — checks for hollow assertions, missing assertions, and commented-out tests in changed files
+inputs:
+  - name: test_command
+    type: string
+    required: true
+    description: The test command to execute, provided in the invoking prompt
+outputs:
+  - name: result
+    type: string
+    description: Overall test outcome — "passed" or "failed"
+  - name: validation_result
+    type: string
+    description: Validation outcome — "passed" or "failed" based on assertion quality checks
+  - name: validation_issues
+    type: json
+    description: Array of hollow assertion, empty body, or commented-out test findings with file and line
+side_effects:
+  - runs_test_suite
+failure_modes:
+  - id: test_command_fails
+    mitigation: Report failure details (count, messages) and stop. Do not proceed to validation checks.
+  - id: validation_issue_found
+    mitigation: Report all findings in the structured JSON output. Do not fix the issues; report only.
+---
+
 # Test Validation
 
 Run the test suite and validate test quality. Execute commands, check results, report findings — do not explore the codebase.
