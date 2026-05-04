@@ -2,8 +2,44 @@
 name: process-pr
 description: Process PR/MR based on code review - if approved, create follow-up issues, merge, close; if changes requested, re-run implement-issue
 argument-hint: "<pr_number> <issue_number> <base_branch>"
+inputs:
+  - name: pr_number
+    type: integer
+    required: true
+    description: PR/MR number to process
+  - name: issue_number
+    type: integer
+    required: true
+    description: Issue number that the PR/MR addresses
+  - name: base_branch
+    type: string
+    required: true
+    description: Base branch for re-implementation if changes are requested
+outputs:
+  - name: status
+    type: string
+    description: Outcome — one of merged, changes_requested, error, or rate_limit
+  - name: follow_up_issues
+    type: array
+    description: Issue numbers created from follow-up items found in review comments
+side_effects:
+  - merges_pr
+  - closes_github_issue
+  - deletes_branch
+  - creates_github_issues
+  - comments_on_issue
+  - spawns_claude_subprocess
 composes:
   - implement-issue
+failure_modes:
+  - id: validation_failed
+    mitigation: Stop and report error — verify PR/MR and issue numbers are correct and open
+  - id: no_review_status
+    mitigation: Stop and report — a code review comment with Status line is required before processing
+  - id: merge_failed
+    mitigation: Stop and return failure; do NOT close the issue
+  - id: rerun_failed
+    mitigation: Log error and include in output; do not retry automatically
 ---
 
 # Process PR/MR

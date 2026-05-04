@@ -1,6 +1,33 @@
 ---
 name: subagent-driven-development
 description: Use when executing implementation plans with independent tasks in the current session
+inputs:
+  - name: issue_number
+    type: integer
+    required: true
+    description: GitHub issue number containing the implementation plan with tasks in an Implementation Tasks section
+  - name: feature_branch
+    type: string
+    required: true
+    description: Git branch name where all implementation commits must land; included in every subagent dispatch
+outputs:
+  - name: completed_tasks
+    type: array
+    description: Tasks completed and verified through two-stage review (spec compliance then code quality), each committed to the feature branch
+side_effects:
+  - creates_git_commits
+  - modifies_repository_files
+  - writes_session_summary
+composes:
+  - finishing-a-development-branch
+  - create-session-summary
+failure_modes:
+  - id: subagent_on_wrong_branch
+    mitigation: Verify branch with git branch --show-current after each task; re-dispatch to correct branch if needed
+  - id: review_rejected_repeatedly
+    mitigation: Escalate to human partner with full context; do not loop indefinitely
+  - id: headless_question_unanswerable
+    mitigation: Answer from plan/issue context autonomously and track the decision for PR comment
 ---
 
 # Subagent-Driven Development
