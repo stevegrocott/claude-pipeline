@@ -727,15 +727,15 @@ is_stage_completed() {
 
 # Check if a stage result is a timeout error
 # Arguments:
-#   $1 - JSON string from run_stage output
+#   $1 - stage_result JSON envelope from run_stage (see schemas/stage-result.json)
 # Returns 0 if timeout, 1 if not
 is_stage_timeout() {
     local result="${1:-}"
     [[ -z "$result" ]] && return 1
-    local err_status err_type
+    local err_status err_kind
     err_status=$(printf '%s' "$result" | jq -r '.status // empty' 2>/dev/null)
-    err_type=$(printf '%s' "$result" | jq -r '.error // empty' 2>/dev/null)
-    [[ "$err_status" == "error" && "$err_type" == "timeout" ]]
+    err_kind=$(printf '%s' "$result" | jq -r '.error_kind // empty' 2>/dev/null)
+    [[ "$err_status" == "error" && "$err_kind" == "timeout" ]]
 }
 
 # Get count of completed tasks
@@ -1023,6 +1023,80 @@ load_skill() {
 }
 
 # =============================================================================
+# STAGE RESULT ENVELOPE
+# =============================================================================
+#
+# run_stage accumulates execution state into local variables and emits a
+# single stage_result JSON envelope (see schemas/stage-result.json) at every
+# exit point. The envelope wraps the parsed structured output under .output
+# and carries the run-level metadata callers need to make escalation
+# decisions: status, raw stdout, permission denials, resolved model,
+# error_kind, and elapsed_ms.
+#
+# Callers reach into .output.<field> for the agent's structured response
+# (e.g., .output.tasks instead of .tasks) — see AC1 of issue #178.
+
+# Get current epoch in milliseconds. EPOCHREALTIME (bash 5+) preferred;
+# python3 fallback covers macOS bash 3.2; date +%s last resort (1s resolution).
+_epoch_ms() {
+    if [[ -n "${EPOCHREALTIME:-}" ]]; then
+        local us="${EPOCHREALTIME//./}"
+        printf '%s\n' "$((us / 1000))"
+    elif command -v python3 &>/dev/null; then
+        python3 -c 'import time; print(int(time.time()*1000))'
+    else
+        printf '%s000\n' "$(date +%s)"
+    fi
+}
+
+# Extract permission_denials tool_name array from raw CLI output as a JSON
+# array. Returns "[]" when absent, malformed, or jq fails.
+_extract_denials() {
+    local raw="$1"
+    local denials
+    denials=$(printf '%s' "$raw" \
+        | jq -c '[.permission_denials[]?.tool_name // empty]' 2>/dev/null)
+    if [[ -z "$denials" || "$denials" == "null" ]]; then
+        printf '[]\n'
+    else
+        printf '%s\n' "$denials"
+    fi
+}
+
+# Emit a stage_result JSON envelope on stdout. All payload args are
+# JSON-encoded so callers can pass nested objects/arrays safely via
+# --argjson without shell-quoting hazards.
+#
+# Arguments:
+#   $1 - status:           "success" | "error" | "rate_limit"
+#   $2 - output_json:      JSON object or "null"
+#   $3 - raw:              raw stdout from CLI (string)
+#   $4 - denials_json:     JSON array of tool names
+#   $5 - model:            resolved model id (e.g. haiku|sonnet|opus)
+#   $6 - error_kind_json:  "null" or JSON-encoded string (e.g. "\"timeout\"")
+#   $7 - elapsed_ms:       integer milliseconds
+_emit_stage_result() {
+    local status="$1"
+    local output_json="$2"
+    local raw="$3"
+    local denials_json="$4"
+    local model="$5"
+    local error_kind_json="$6"
+    local elapsed_ms="$7"
+
+    jq -nc \
+        --arg status "$status" \
+        --argjson output "$output_json" \
+        --arg raw "$raw" \
+        --argjson denials "$denials_json" \
+        --arg model "$model" \
+        --argjson error_kind "$error_kind_json" \
+        --argjson elapsed_ms "$elapsed_ms" \
+        '{status: $status, output: $output, raw: $raw, denials: $denials,
+          model: $model, error_kind: $error_kind, elapsed_ms: $elapsed_ms}'
+}
+
+# =============================================================================
 # STAGE RUNNERS
 # =============================================================================
 
@@ -1037,12 +1111,22 @@ run_stage() {
 
     local stage_log="$LOG_BASE/stages/$(next_stage_log "$stage_name")"
 
+    # Stage result accumulator — every exit point funnels through
+    # _emit_stage_result so callers receive a uniform stage_result envelope.
+    # See schemas/stage-result.json. result_model tracks the model that
+    # produced the final output (escalation paths reassign it).
+    local result_start_ms result_model=""
+    result_start_ms=$(_epoch_ms)
+
     # Validate schema file exists
     if [[ ! -f "$SCHEMA_DIR/$schema_file" ]]; then
         log_error "Schema file not found: $SCHEMA_DIR/$schema_file"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
-        echo '{"status":"error","error":"schema not found"}'
+        _emit_stage_result \
+            "error" "null" "" "[]" \
+            "$result_model" '"schema_not_found"' \
+            "$(( $(_epoch_ms) - result_start_ms ))"
         return 1
     fi
 
@@ -1059,6 +1143,10 @@ run_stage() {
         model=$(effective_model "$stage_name" "$complexity")
         fallback_model=$(effective_fallback "$model")
     fi
+
+    # Track final model for stage_result envelope. Reassigned by escalation
+    # branches when they produce output via a different model.
+    result_model="$model"
 
     # Record resolved model in status.json stage entry for export_metrics()
     if [[ -f "$STATUS_FILE" ]]; then
@@ -1153,7 +1241,11 @@ run_stage() {
         timeout_structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
         if [[ -n "$timeout_structured" ]]; then
             log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced structured output — using it"
-            printf '%s\n' "$timeout_structured"
+            _emit_stage_result \
+                "success" "$timeout_structured" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" "null" \
+                "$(( $(_epoch_ms) - result_start_ms ))"
             return 0
         fi
 
@@ -1167,7 +1259,11 @@ run_stage() {
 
         if [[ -n "$timeout_fallback_result" ]]; then
             log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced .result — using fallback"
-            printf '%s\n' "$timeout_fallback_result"
+            _emit_stage_result \
+                "success" "$timeout_fallback_result" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" "null" \
+                "$(( $(_epoch_ms) - result_start_ms ))"
             return 0
         fi
 
@@ -1219,6 +1315,11 @@ run_stage() {
                     --json-schema "$schema" \
                     2>&1) || exit_code=$?
 
+                # Escalation produced output via a different model — track it
+                # so the stage_result envelope reports the model that actually
+                # ran rather than the original tier we escalated from.
+                result_model="$timeout_escalated_model"
+
                 printf '%s\n' "=== $stage_name timeout escalation output ===" >> "$stage_log"
                 printf '%s\n' "$output" >> "$stage_log"
                 printf '%s\n' "=== timeout escalation exit code: $exit_code ===" >> "$stage_log"
@@ -1230,7 +1331,11 @@ run_stage() {
                     log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
                         "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
                 fi
-                echo '{"status":"error","error":"timeout"}'
+                _emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"timeout"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))"
                 return 1
             fi
         fi
@@ -1248,7 +1353,11 @@ run_stage() {
         if [[ "$escalated_model" == "$model" ]]; then
             # Already at ceiling (opus) — can't escalate further
             log_error "Stage $stage_name hit max turns with $model (ceiling) — cannot escalate"
-            echo '{"status":"error","error":"max_turns_exhausted_at_ceiling"}'
+            _emit_stage_result \
+                "error" "null" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" '"max_turns_exhausted_at_ceiling"' \
+                "$(( $(_epoch_ms) - result_start_ms ))"
             return 1
         fi
 
@@ -1274,6 +1383,9 @@ run_stage() {
             --output-format json \
             --json-schema "$schema" \
             2>&1) || exit_code=$?
+
+        # Escalation produced output via $escalated_model — track for envelope.
+        result_model="$escalated_model"
 
         printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
         printf '%s\n' "$output" >> "$stage_log"
@@ -1375,7 +1487,11 @@ for m in re.finditer(r'\[\s*\{', t):
                 fi
             fi
 
-            printf '%s\n' "$fallback_result"
+            _emit_stage_result \
+                "success" "$fallback_result" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" "null" \
+                "$(( $(_epoch_ms) - result_start_ms ))"
             return 0
         fi
 
@@ -1414,6 +1530,10 @@ for m in re.finditer(r'\[\s*\{', t):
                 --json-schema "$schema" \
                 2>&1) || empty_esc_exit_code=$?
 
+            # Escalation produced output via $empty_escalated_model — track it
+            # so the envelope reports the model that actually produced output.
+            result_model="$empty_escalated_model"
+
             printf '%s\n' "=== $stage_name empty output escalation output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' "=== empty output escalation exit code: $empty_esc_exit_code ===" >> "$stage_log"
@@ -1423,7 +1543,11 @@ for m in re.finditer(r'\[\s*\{', t):
             if [[ -n "$structured" ]]; then
                 _CONSECUTIVE_TIMEOUTS=0
                 _TIMED_OUT_STAGE_NAMES=""
-                printf '%s\n' "$structured"
+                _emit_stage_result \
+                    "success" "$structured" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" "null" \
+                    "$(( $(_epoch_ms) - result_start_ms ))"
                 return 0
             fi
 
@@ -1437,7 +1561,11 @@ for m in re.finditer(r'\[\s*\{', t):
                 log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
                 _CONSECUTIVE_TIMEOUTS=0
                 _TIMED_OUT_STAGE_NAMES=""
-                printf '%s\n' "$esc_fallback_result"
+                _emit_stage_result \
+                    "success" "$esc_fallback_result" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" "null" \
+                    "$(( $(_epoch_ms) - result_start_ms ))"
                 return 0
             fi
         fi
@@ -1445,7 +1573,11 @@ for m in re.finditer(r'\[\s*\{', t):
         log_error "No structured output from $stage_name"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
-        echo '{"status":"error","error":"no structured output"}'
+        _emit_stage_result \
+            "error" "null" "$output" \
+            "$(_extract_denials "$output")" \
+            "$result_model" '"no_structured_output"' \
+            "$(( $(_epoch_ms) - result_start_ms ))"
         return 1
     fi
 
@@ -1494,6 +1626,10 @@ for m in re.finditer(r'\[\s*\{', t):
                     --json-schema "$schema" \
                     2>&1) || struct_err_esc_exit_code=$?
 
+                # Escalation produced output via the next-tier model — track
+                # it so the envelope reports the actual producing model.
+                result_model="$struct_err_escalated_model"
+
                 printf '%s\n' "=== $stage_name structured-error escalation output ===" >> "$stage_log"
                 printf '%s\n' "$output" >> "$stage_log"
                 printf '%s\n' "=== structured-error escalation exit code: $struct_err_esc_exit_code ===" >> "$stage_log"
@@ -1503,7 +1639,11 @@ for m in re.finditer(r'\[\s*\{', t):
                 if [[ -n "$structured" ]]; then
                     _CONSECUTIVE_TIMEOUTS=0
                     _TIMED_OUT_STAGE_NAMES=""
-                    printf '%s\n' "$structured"
+                    _emit_stage_result \
+                        "success" "$structured" "$output" \
+                        "$(_extract_denials "$output")" \
+                        "$result_model" "null" \
+                        "$(( $(_epoch_ms) - result_start_ms ))"
                     return 0
                 fi
 
@@ -1517,7 +1657,11 @@ for m in re.finditer(r'\[\s*\{', t):
                     log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
                     _CONSECUTIVE_TIMEOUTS=0
                     _TIMED_OUT_STAGE_NAMES=""
-                    printf '%s\n' "$struct_err_esc_fallback_result"
+                    _emit_stage_result \
+                        "success" "$struct_err_esc_fallback_result" "$output" \
+                        "$(_extract_denials "$output")" \
+                        "$result_model" "null" \
+                        "$(( $(_epoch_ms) - result_start_ms ))"
                     return 0
                 fi
             fi
@@ -1526,7 +1670,11 @@ for m in re.finditer(r'\[\s*\{', t):
 
     _CONSECUTIVE_TIMEOUTS=0
     _TIMED_OUT_STAGE_NAMES=""
-    printf '%s\n' "$structured"
+    _emit_stage_result \
+        "success" "$structured" "$output" \
+        "$(_extract_denials "$output")" \
+        "$result_model" "null" \
+        "$(( $(_epoch_ms) - result_start_ms ))"
 }
 
 # =============================================================================
@@ -1639,13 +1787,14 @@ run_triage_stage() {
     local raw
     raw=$(run_stage "triage" "$prompt" "implement-issue-triage.json" "" "" "" "$triage_model") || true
 
-    # Extract Claude's classification. If parse fails, default to full.
+    # Extract Claude's classification from the stage_result envelope's .output.
+    # If parse fails, default to full.
     local route confidence dq pattern criteria
-    route=$(printf '%s' "$raw" | jq -r '.route // "full"')
-    confidence=$(printf '%s' "$raw" | jq -r '.confidence // "low"')
-    dq=$(printf '%s' "$raw" | jq -r '.disqualifying_criterion // empty')
-    pattern=$(printf '%s' "$raw" | jq -r '.established_pattern_grep // empty')
-    criteria=$(printf '%s' "$raw" | jq -c '.criteria // {}')
+    route=$(printf '%s' "$raw" | jq -r '.output.route // "full"')
+    confidence=$(printf '%s' "$raw" | jq -r '.output.confidence // "low"')
+    dq=$(printf '%s' "$raw" | jq -r '.output.disqualifying_criterion // empty')
+    pattern=$(printf '%s' "$raw" | jq -r '.output.established_pattern_grep // empty')
+    criteria=$(printf '%s' "$raw" | jq -c '.output.criteria // {}')
 
     # Post-processing: defense in depth on top of the prompt.
     local kill_switch_engaged=false
@@ -1699,7 +1848,7 @@ run_triage_stage() {
         --argjson criteria "${criteria:-\{\}}" \
         --argjson grep_count "$pattern_grep_count" \
         --argjson kill_switch "$kill_switch_engaged" \
-        --arg summary "$(printf '%s' "$raw" | jq -r '.summary // ""')" \
+        --arg summary "$(printf '%s' "$raw" | jq -r '.output.summary // ""')" \
         '{
             route: $route,
             confidence: $confidence,
@@ -1808,7 +1957,7 @@ Output a summary of changes made."
             local simplify_result
             simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
 
-            simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.summary // "No changes"')
+            simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.output.summary // "No changes"')
 
             # If simplify reported no changes, skip it on the next iteration until a
             # fix stage runs (which may introduce new simplification opportunities).
@@ -1881,13 +2030,13 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         fi
 
         local review_verdict review_summary verdict_source
-        review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
+        review_summary=$(printf '%s' "$review_result" | jq -r '.output.summary // "Review completed"')
         local has_result_field
-        has_result_field=$(printf '%s' "$review_result" | jq 'has("result")' 2>/dev/null)
+        has_result_field=$(printf '%s' "$review_result" | jq '.output | has("result")' 2>/dev/null)
 
         if [[ "$has_result_field" == "true" ]]; then
-            # Structured output available: extract verdict from .result field
-            review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+            # Structured output available: extract verdict from .output.result field
+            review_verdict=$(printf '%s' "$review_result" | jq -r '.output.result')
             verdict_source="structured output"
             log "Verdict extracted from structured output: $review_verdict"
         else
@@ -1913,7 +2062,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
 
         # Append current iteration findings to review history
         local current_issues
-        current_issues=$(printf '%s' "$review_result" | jq -c "{iteration: $loop_iteration, issues: (.issues // []), result: (.result // .status // \"unknown\")}" 2>/dev/null)
+        current_issues=$(printf '%s' "$review_result" | jq -c "{iteration: $loop_iteration, issues: (.output.issues // []), result: (.output.result // .output.status // \"unknown\")}" 2>/dev/null)
         if [[ -n "$current_issues" ]]; then
             if [[ -f "$review_history_file" ]]; then
                 local existing
@@ -1929,10 +2078,10 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             local repeat_ratio repeat_issues
             repeat_ratio=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
                 . as $root |
-                ($root.issues // []) | length as $current_count |
+                ($root.output.issues // []) | length as $current_count |
                 if $current_count == 0 then 0
                 else
-                    [$root.issues[] | .description] as $current |
+                    [$root.output.issues[] | .description] as $current |
                     [$history[0][] | .issues[]? | .description] as $prior |
                     [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
                     ($repeats | length * 100 / $current_count)
@@ -1940,10 +2089,10 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             ' 2>/dev/null || echo 0)
             repeat_issues=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
                 . as $root |
-                ($root.issues // []) | length as $current_count |
+                ($root.output.issues // []) | length as $current_count |
                 if $current_count == 0 then ""
                 else
-                    [$root.issues[] | .description] as $current |
+                    [$root.output.issues[] | .description] as $current |
                     [$history[0][] | .issues[]? | .description] as $prior |
                     [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
                     ($repeats | join("\n- "))
@@ -1992,7 +2141,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         local major_issue_override=false
         if [[ "$review_verdict" == "approved" ]]; then
             local major_issue_count
-            major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
+            major_issue_count=$(printf '%s' "$review_result" | jq '[.output.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
             if (( major_issue_count > 0 )); then
                 log_warn "Quality review for $stage_prefix approved but $major_issue_count major issue(s) found — overriding to changes_requested"
                 review_verdict="changes_requested"
@@ -2007,9 +2156,9 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             local review_comments
             if $major_issue_override; then
                 # Filter to include only major-severity issues
-                review_comments=$(printf '%s' "$review_result" | jq -r '[.issues // [] | .[] | select(.severity == "major") | .description] | join("\n- ")')
+                review_comments=$(printf '%s' "$review_result" | jq -r '[.output.issues // [] | .[] | select(.severity == "major") | .description] | join("\n- ")')
             else
-                review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
+                review_comments=$(printf '%s' "$review_result" | jq -r '.output.comments // "No comments"')
             fi
             printf '%s\n' "$review_comments" >> "$LOG_BASE/context/review-comments.json"
 
@@ -2047,7 +2196,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
 
             # Fix stage introduced new changes — simplify should run next iteration.
             skip_simplify=false
@@ -3006,7 +3155,7 @@ Commit your changes with a descriptive message."
 
 		local impl_status
 		impl_status=$(printf '%s' "$impl_result" \
-			| jq -r '.status')
+			| jq -r '.output.status')
 
 		if [[ "$impl_status" == "success" ]]; then
 			task_succeeded=true
@@ -3036,10 +3185,10 @@ Commit your changes with a descriptive message."
 
 		local commit_sha
 		commit_sha=$(printf '%s' "$impl_result" \
-			| jq -r '.commit')
+			| jq -r '.output.commit')
 		local impl_summary
 		impl_summary=$(printf '%s' "$impl_result" \
-			| jq -r '.summary // "Implementation completed"')
+			| jq -r '.output.summary // "Implementation completed"')
 
 		local files_changed_wt_json
 		files_changed_wt_json=$(git -C "$wt_path" diff --name-only HEAD~1 HEAD \
@@ -3588,7 +3737,7 @@ Commit your changes with a descriptive message."
 
 					local _pw_status
 					_pw_status=$(printf '%s' "$_pw_result" \
-						| jq -r '.status')
+						| jq -r '.output.status')
 
 					if [[ "$_pw_status" == "success" ]]; then
 						# Find new spec files added by the playwright task
@@ -3744,7 +3893,7 @@ Commit your changes with a descriptive message."
 
 			local impl_status
 			impl_status=$(printf '%s' "$impl_result" \
-				| jq -r '.status')
+				| jq -r '.output.status')
 
 			if [[ "$impl_status" == "success" ]]; then
 				task_succeeded=true
@@ -3773,11 +3922,11 @@ Commit your changes with a descriptive message."
 			# Write result file for main loop
 			local commit_sha
 			commit_sha=$(printf '%s' "$impl_result" \
-				| jq -r '.commit')
+				| jq -r '.output.commit')
 			local impl_summary
 			impl_summary=$(printf '%s' "$impl_result" \
 				| jq -r \
-				'.summary // "Implementation completed"')
+				'.output.summary // "Implementation completed"')
 			local files_changed_json
 			files_changed_json=$(git diff --name-only HEAD~1 HEAD \
 				2>/dev/null | jq -R -s \
@@ -4364,12 +4513,12 @@ Output both test results and validation findings in one structured response.
         fi
 
         local test_status test_summary
-        test_status=$(printf '%s' "$test_result" | jq -r '.result')
-        test_summary=$(printf '%s' "$test_result" | jq -r '.summary // "Tests completed"')
+        test_status=$(printf '%s' "$test_result" | jq -r '.output.result')
+        test_summary=$(printf '%s' "$test_result" | jq -r '.output.summary // "Tests completed"')
 
         local validate_status validate_summary
-        validate_status=$(printf '%s' "$test_result" | jq -r '.validation_result // "skipped"')
-        validate_summary=$(printf '%s' "$test_result" | jq -r '.validation_summary // ""')
+        validate_status=$(printf '%s' "$test_result" | jq -r '.output.validation_result // "skipped"')
+        validate_summary=$(printf '%s' "$test_result" | jq -r '.output.validation_summary // ""')
 
         # -----------------------------------------------------------------
         # HANDLE TEST FAILURES
@@ -4380,7 +4529,7 @@ Output both test results and validation findings in one structured response.
 $test_summary" "default"
             log "Tests failed. Getting failures and fixing..."
             local failures
-            failures=$(printf '%s' "$test_result" | jq -c '.failures')
+            failures=$(printf '%s' "$test_result" | jq -c '.output.failures')
 
             # Filter failures: only include failures from PR-changed test files.
             # Explicit mode (changed_test_files non-empty): all failures are from
@@ -4496,7 +4645,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
 
             # Comment: Fix results
             comment_issue "Test Loop: Test Fix ($test_iteration/$max_test_iter)" "$fix_summary" "$loop_agent"
@@ -4536,8 +4685,8 @@ $validate_summary" "default"
             log "Test validation found issues. Fixing... (validation fix iteration $validation_fix_iteration/$MAX_VALIDATION_FIX_ITERATIONS)"
             local validate_issues
             validate_issues=$(printf '%s' "$test_result" | jq -r '
-                if .validation_issues then (.validation_issues | tostring)
-                elif .validation_summary then .validation_summary
+                if .output.validation_issues then (.output.validation_issues | tostring)
+                elif .output.validation_summary then .output.validation_summary
                 else "Fix test quality issues"
                 end
             ')
@@ -4559,7 +4708,7 @@ Output a summary of fixes applied."
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
 
             # Comment: Fix results
             comment_issue "Test Loop: Validation Fix ($test_iteration/$max_test_iter)" "$fix_summary" "$loop_agent"
@@ -4788,9 +4937,9 @@ Report result as 'passed' or 'failed' with a detailed summary."
 
 			local e2e_verify_status e2e_verify_summary
 			e2e_verify_status=$(printf '%s' "$e2e_verify_result" \
-				| jq -r '.result')
+				| jq -r '.output.result')
 			e2e_verify_summary=$(printf '%s' "$e2e_verify_result" \
-				| jq -r '.summary // "E2E verification completed"')
+				| jq -r '.output.summary // "E2E verification completed"')
 
 			local e2e_icon="✅"
 			[[ "$e2e_verify_status" == "failed" ]] \
@@ -4875,10 +5024,10 @@ Output result as 'passed' or 'failed' with a detailed summary."
 
 				local acceptance_status acceptance_summary
 				acceptance_status=$(printf '%s' "$acceptance_result" \
-					| jq -r '.result')
+					| jq -r '.output.result')
 				acceptance_summary=$(printf '%s' "$acceptance_result" \
 					| jq -r \
-					'.summary // "Acceptance test completed"')
+					'.output.summary // "Acceptance test completed"')
 
 				local acceptance_icon="✅"
 				[[ "$acceptance_status" == "failed" ]] \
@@ -4975,7 +5124,7 @@ Commit your changes."
 
 			local e2e_fix_summary
 			e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
-				| jq -r '.summary // "Fix applied"')
+				| jq -r '.output.summary // "Fix applied"')
 			comment_issue "E2E Fix (iteration $e2e_fix_iter)" \
 				"🔧 $e2e_fix_summary" "$AGENT"
 
@@ -5017,9 +5166,9 @@ Report result as 'passed' or 'failed' with a detailed summary."
 
 			local rerun_status rerun_summary
 			rerun_status=$(printf '%s' "$rerun_result" \
-				| jq -r '.result')
+				| jq -r '.output.result')
 			rerun_summary=$(printf '%s' "$rerun_result" \
-				| jq -r '.summary // "E2E rerun completed"')
+				| jq -r '.output.summary // "E2E rerun completed"')
 
 			local rerun_icon="✅"
 			[[ "$rerun_status" == "failed" ]] && rerun_icon="❌"
@@ -5085,7 +5234,7 @@ Investigate the root cause and fix the issue. Commit your changes."
 		local acceptance_fix_summary
 		acceptance_fix_summary=$(printf '%s' \
 			"$acceptance_fix_result" \
-			| jq -r '.summary // "Fix applied"')
+			| jq -r '.output.summary // "Fix applied"')
 		comment_issue "Acceptance Test Fix" \
 			"$acceptance_fix_summary" "$AGENT"
 	fi
@@ -5974,9 +6123,9 @@ STEPS:
                     deploy_verify_result=$(run_stage "deploy-verify" "$deploy_verify_prompt" "implement-issue-deploy-verify.json" "default")
 
                     local dv_status dv_health dv_summary
-                    dv_status=$(printf '%s' "$deploy_verify_result" | jq -r '.status // "unknown"')
-                    dv_health=$(printf '%s' "$deploy_verify_result" | jq -r '.health_status // "unknown"')
-                    dv_summary=$(printf '%s' "$deploy_verify_result" | jq -r '.summary // "Deploy verification completed"')
+                    dv_status=$(printf '%s' "$deploy_verify_result" | jq -r '.output.status // "unknown"')
+                    dv_health=$(printf '%s' "$deploy_verify_result" | jq -r '.output.health_status // "unknown"')
+                    dv_summary=$(printf '%s' "$deploy_verify_result" | jq -r '.output.summary // "Deploy verification completed"')
 
                     local dv_icon="✅"
                     [[ "$dv_status" == "error" ]] && dv_icon="❌"
@@ -6092,8 +6241,8 @@ $pr_creation_skill}"
         pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "opus")
 
         local pr_status
-        pr_status=$(printf '%s' "$pr_result" | jq -r '.status')
-        pr_number=$(printf '%s' "$pr_result" | jq -r '.pr_number')
+        pr_status=$(printf '%s' "$pr_result" | jq -r '.output.status')
+        pr_number=$(printf '%s' "$pr_result" | jq -r '.output.pr_number')
 
         if [[ "$pr_status" != "success" ]]; then
             log_error "PR creation failed"
@@ -6263,13 +6412,13 @@ Approve or request changes. Output a summary suitable for an issue comment."
         fi
 
         local review_verdict review_summary verdict_source
-        review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
+        review_summary=$(printf '%s' "$review_result" | jq -r '.output.summary // "Review completed"')
         local has_result_field
-        has_result_field=$(printf '%s' "$review_result" | jq 'has("result")' 2>/dev/null)
+        has_result_field=$(printf '%s' "$review_result" | jq '.output | has("result")' 2>/dev/null)
 
         if [[ "$has_result_field" == "true" ]]; then
-            # Structured output available: extract verdict from .result field
-            review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+            # Structured output available: extract verdict from .output.result field
+            review_verdict=$(printf '%s' "$review_result" | jq -r '.output.result')
             verdict_source="structured output"
             log "Verdict extracted from structured output: $review_verdict"
         else
@@ -6300,12 +6449,12 @@ Approve or request changes. Output a summary suitable for an issue comment."
         # -------------------------------------------------------------------------
         if [[ "$review_verdict" == "approved" ]]; then
             local major_issue_count
-            major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
+            major_issue_count=$(printf '%s' "$review_result" | jq '[.output.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
             if (( major_issue_count > 0 )); then
                 log_warn "Review verdict was 'approved' but $major_issue_count major issue(s) found — overriding to changes_requested"
                 review_verdict="changes_requested"
                 local major_descriptions
-                major_descriptions=$(printf '%s' "$review_result" | jq -r '[.issues[] | select(.severity == "major") | .description] | join("; ")' 2>/dev/null || echo "")
+                major_descriptions=$(printf '%s' "$review_result" | jq -r '[.output.issues[] | select(.severity == "major") | .description] | join("; ")' 2>/dev/null || echo "")
                 review_summary="${review_summary}
 
 ⚠️ **Override:** Reviewer approved but $major_issue_count major issue(s) must be resolved first:
@@ -6367,11 +6516,11 @@ $review_summary$followup_comment" "code-reviewer"
 
             # Collect feedback
             local review_comments
-            review_comments=$(printf '%s' "$review_result" | jq -r '[.issues // [] | .[] | "\(.file // ""):\(.line // "") → \(.description // "")"] | join("\n- ")')
+            review_comments=$(printf '%s' "$review_result" | jq -r '[.output.issues // [] | .[] | "\(.file // ""):\(.line // "") → \(.description // "")"] | join("\n- ")')
 
             # Append current iteration issues to history file
             local current_issues
-            current_issues=$(printf '%s' "$review_result" | jq -c '.issues // []')
+            current_issues=$(printf '%s' "$review_result" | jq -c '.output.issues // []')
             if [[ -f "$review_history_file" ]]; then
                 local existing
                 existing=$(< "$review_history_file")
@@ -6415,7 +6564,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
 
             local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
 
             # Comment #12: PR Fix Result
             comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" "$fix_summary" "$AGENT"
@@ -6454,7 +6603,7 @@ $complete_skill
         complete_result=$(run_stage "complete" "$complete_prompt" "implement-issue-complete.json")
 
         local complete_summary
-        complete_summary=$(printf '%s' "$complete_result" | jq -r '.summary // "Implementation completed successfully"')
+        complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
 
         # Add degradation warning to completion comment if any stages soft-failed
         local degraded_warning=""
