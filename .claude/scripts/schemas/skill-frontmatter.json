@@ -116,7 +116,7 @@
     },
     "golden": {
       "type": "object",
-      "description": "Golden test configuration for decision skills — declares the model, manifest path, and fixture directory used by skill-golden.sh",
+      "description": "Golden test configuration for decision skills — declares the model, manifest path, fixture directory, and output schema used by skill-golden.sh",
       "required": ["model", "manifest", "fixture_dir"],
       "additionalProperties": false,
       "properties": {
@@ -131,6 +131,10 @@
         "fixture_dir": {
           "type": "string",
           "description": "Path to the directory containing fixture files (relative to repo root)"
+        },
+        "schema": {
+          "type": "string",
+          "description": "Path to the JSON schema file used to validate Claude's structured output (relative to repo root). Falls back to .claude/scripts/schemas/<skill-name>.json when omitted."
         }
       }
     }

@@ -195,9 +195,9 @@ Updated [file] with [change]. This prevents [problem] which occurred during [tas
 ## Triage Misclassifications: Promoting to Golden Fixtures
 
 When the resolved issue is a triage misclassification, the highest-value improvement
-is promoting the case to a **golden fixture** in `triage-validate.sh`. Golden fixtures
-lock the correct route into the live regression suite so the same misroute cannot
-recur silently across model updates or prompt edits.
+is promoting the case to a **golden fixture** in the triage-classify golden suite.
+Golden fixtures lock the correct route into the live regression suite so the same
+misroute cannot recur silently across model updates or prompt edits.
 
 **Source:** Check `logs/feedback/triage_misclassification.jsonl` for recorded observations
 (recorded via the `pipeline-feedback` skill).
@@ -219,18 +219,18 @@ recur silently across model updates or prompt edits.
    - `expected_route` — `fast-path` or `full`
    - `expected_dq` — the disqualifying criterion name if `full`, or `*` to accept any
 
-3. **Add a MANIFEST entry to `triage-validate.sh`**
+3. **Add a manifest entry to `.claude/skills/triage-classify/golden.manifest.txt`**
 
-   In `.claude/scripts/triage-validate.sh`, append one line to the `MANIFEST` array:
+   Append one pipe-delimited line:
 
-   ```bash
-   "<issue-id>|<expected_route>|<expected_dq>"
+   ```
+   <issue-id>|<expected_route>|<expected_dq>
    ```
 
 4. **Verify the new fixture passes**
 
    ```bash
-   .claude/scripts/triage-validate.sh <issue-id>
+   .claude/scripts/skill-golden.sh triage-classify <issue-id>
    ```
 
    The fixture must pass before committing. If it fails, the prompt or the expected
@@ -239,9 +239,9 @@ recur silently across model updates or prompt edits.
 5. **Commit both files**
 
    ```bash
-   git add .claude/scripts/triage-validate.sh \
+   git add .claude/skills/triage-classify/golden.manifest.txt \
            .claude/scripts/implement-issue-test/fixtures/triage/<issue-id>.md
-   git commit -m "improve: triage-validate — add golden fixture for <issue-id>"
+   git commit -m "improve: triage-classify — add golden fixture for <issue-id>"
    ```
 
 ### When to promote vs. when to fix the prompt

@@ -294,10 +294,15 @@ sg_run_fixture() {
 	local fixture expected_route expected_criterion
 	IFS='|' read -r fixture expected_route expected_criterion <<<"$entry"
 
+	# Try .md first (issue-body fixtures), then .json (structured-event
+	# fixtures such as escalation-policy stage results).
 	local body_file="$fixture_dir/${fixture}.md"
 	if [[ ! -f "$body_file" ]]; then
-		printf '  %s missing fixture: %s\n' \
-			"$(sg_red "FAIL")" "$body_file"
+		body_file="$fixture_dir/${fixture}.json"
+	fi
+	if [[ ! -f "$body_file" ]]; then
+		printf '  %s missing fixture: %s.{md,json}\n' \
+			"$(sg_red "FAIL")" "$fixture_dir/$fixture"
 		return 1
 	fi
 
