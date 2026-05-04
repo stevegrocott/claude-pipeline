@@ -19,7 +19,7 @@ TRIAGE_MODEL="${TRIAGE_MODEL:-haiku}"
 # Propagate legacy CLAUDE_CLI to the library variable (lib default: "claude").
 : "${SG_CLAUDE_CLI:=${CLAUDE_CLI:-claude}}"
 
-# shellcheck source=skill-golden-lib.sh
+# shellcheck source=/dev/null
 source "$SCRIPT_DIR/skill-golden-lib.sh"
 
 # =============================================================================
@@ -45,6 +45,7 @@ MANIFEST=(
 # implement-issue-orchestrator.sh; edit both together and re-run.
 # =============================================================================
 
+# shellcheck disable=SC2329  # called indirectly as a string arg to sg_run_manifest
 build_prompt() {
 	local issue_body="$1"
 	cat <<TRIAGE_PROMPT
