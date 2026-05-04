@@ -113,6 +113,26 @@
           }
         }
       }
+    },
+    "golden": {
+      "type": "object",
+      "description": "Golden test configuration for decision skills — declares the model, manifest path, and fixture directory used by skill-golden.sh",
+      "required": ["model", "manifest", "fixture_dir"],
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model tier to use for golden test runs (e.g. haiku, sonnet)"
+        },
+        "manifest": {
+          "type": "string",
+          "description": "Path to the golden manifest file (relative to repo root) listing fixture|expected_route|expected_criterion entries"
+        },
+        "fixture_dir": {
+          "type": "string",
+          "description": "Path to the directory containing fixture files (relative to repo root)"
+        }
+      }
     }
   }
 }
