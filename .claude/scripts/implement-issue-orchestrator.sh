@@ -46,6 +46,8 @@ source "$SCRIPT_DIR/model-config.sh"
 # model-config.sh. Sourcing is no-op when CLAUDE_USAGE_SESSION_KEY is unset
 # (graceful fallback to today's behavior — see claude-usage.sh).
 source "$SCRIPT_DIR/claude-usage.sh"
+# shellcheck source=prompts/triage-prompt.sh
+source "$SCRIPT_DIR/prompts/triage-prompt.sh"
 source "$SCRIPT_DIR/../config/platform.sh"
 # shellcheck source=prompts/triage-prompt.sh
 source "$SCRIPT_DIR/prompts/triage-prompt.sh"
@@ -1822,6 +1824,10 @@ for m in re.finditer(r'\[\s*\{', t):
 # Output (stdout):
 #   - The final route string ("fast-path" or "full")
 
+# build_triage_prompt is a thin wrapper around build_prompt() sourced from
+# prompts/triage-prompt.sh. The sourced build_prompt() is the single source
+# of truth for the triage classifier prompt and is shared with
+# triage-validate.sh's golden tests.
 build_triage_prompt() {
     build_prompt "$@"
 }
