@@ -29,7 +29,7 @@
 #   1 - Validation failure (invalid kind, missing required field, write error)
 #
 
-set -uo pipefail
+set -euo pipefail
 
 # =============================================================================
 # CONSTANTS
@@ -45,6 +45,14 @@ readonly -a VALID_KINDS=(
 
 readonly IDEMPOTENT_WINDOW=60
 
+# Schema file — used for jq validation before append
+if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+	SCHEMA_FILE="${CLAUDE_PROJECT_DIR}/.claude/scripts/schemas/pipeline-feedback.json"
+else
+	SCHEMA_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/schemas/pipeline-feedback.json"
+fi
+readonly SCHEMA_FILE
+
 # =============================================================================
 # ARGUMENT PARSING
 # =============================================================================
@@ -59,27 +67,33 @@ NOTES=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--kind)
-			KIND="${2:-}"
+			[[ $# -ge 2 ]] || { printf 'ERROR: %s requires a value\n' "$1" >&2; exit 1; }
+			KIND="$2"
 			shift 2
 			;;
 		--issue)
-			ISSUE="${2:-}"
+			[[ $# -ge 2 ]] || { printf 'ERROR: %s requires a value\n' "$1" >&2; exit 1; }
+			ISSUE="$2"
 			shift 2
 			;;
 		--observed)
-			OBSERVED="${2:-}"
+			[[ $# -ge 2 ]] || { printf 'ERROR: %s requires a value\n' "$1" >&2; exit 1; }
+			OBSERVED="$2"
 			shift 2
 			;;
 		--expected)
-			EXPECTED="${2:-}"
+			[[ $# -ge 2 ]] || { printf 'ERROR: %s requires a value\n' "$1" >&2; exit 1; }
+			EXPECTED="$2"
 			shift 2
 			;;
 		--evidence)
-			EVIDENCE="${2:-}"
+			[[ $# -ge 2 ]] || { printf 'ERROR: %s requires a value\n' "$1" >&2; exit 1; }
+			EVIDENCE="$2"
 			shift 2
 			;;
 		--notes)
-			NOTES="${2:-}"
+			[[ $# -ge 2 ]] || { printf 'ERROR: %s requires a value\n' "$1" >&2; exit 1; }
+			NOTES="$2"
 			shift 2
 			;;
 		*)
@@ -154,6 +168,21 @@ RECORD=$(jq -cn \
 	}
 	+ (if $evidence != "" then {evidence_path: $evidence} else {} end)
 	+ (if $notes    != "" then {notes: $notes}            else {} end)')
+
+# =============================================================================
+# SCHEMA VALIDATION
+# =============================================================================
+
+if [[ -f "$SCHEMA_FILE" ]]; then
+	while IFS= read -r _req_field; do
+		_field_val=$(printf '%s' "$RECORD" | jq -r ".${_req_field} // empty" 2>/dev/null)
+		if [[ -z "$_field_val" ]]; then
+			printf 'ERROR: schema validation failed — required field "%s" missing or empty\n' \
+				"$_req_field" >&2
+			exit 1
+		fi
+	done < <(jq -r '.required[]' "$SCHEMA_FILE" 2>/dev/null)
+fi
 
 # =============================================================================
 # IDEMPOTENCY CHECK
