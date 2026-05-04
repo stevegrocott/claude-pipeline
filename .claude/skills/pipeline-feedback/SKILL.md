@@ -90,3 +90,19 @@ Recorded $KIND for $ISSUE → logs/feedback/$KIND.jsonl
 ```
 
 If the script exits non-zero, surface the error message verbatim and do not confirm.
+
+## Triage Misclassifications: Promote to Fixture
+
+When `kind` is `triage_misclassification` and the record was appended successfully,
+surface this follow-up prompt to the operator:
+
+```
+Recorded. Would you like to promote this case to a golden fixture in
+triage-validate.sh so the same misroute cannot recur silently?
+(See improvement-loop → "Triage Misclassifications: Promoting to Golden Fixtures".)
+```
+
+If the operator confirms, invoke the **improvement-loop** skill and pass the
+misclassification details (issue, observed route, correct route) as the
+`resolved_issue` input. The improvement-loop skill's fixture promotion steps will
+guide the rest of the process.
