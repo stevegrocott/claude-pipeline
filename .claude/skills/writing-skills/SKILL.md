@@ -313,6 +313,32 @@ Use skill name only, with explicit requirement markers:
 
 **Why no @ links:** `@` syntax force-loads files immediately, consuming 200k+ context before you need them.
 
+## Sub-Skill Invocation
+
+When invoking another skill from within a skill, use the **isolation decision rule**:
+
+- **Subprocess** (`claude --print "/skill args"`) — worktree-isolated, parallel fanout, or sandbox execution
+- **Skill tool** — everything else (orchestration, routing, planning, review)
+
+### Composition Taxonomy (Canonical Reference)
+
+| Path | Method | Use When | Examples |
+|------|--------|----------|---------|
+| Skill-tool | Skill tool | Non-isolated: decision-making, routing, orchestration | `process-pr`, `code-reviewer` |
+| Subprocess | `claude --print` | Isolated: worktree, parallel, sandbox | `implement-issue` |
+
+**Default (no isolated arg):** routes to Skill tool path.
+
+**Kill-switch:** `COMPOSITION_BACKEND` env var overrides auto-routing:
+- `skill` → forces Skill tool even for isolated work
+- `subprocess` → forces subprocess even for non-isolated work
+- Unknown value → exits non-zero with error
+
+**Frontmatter:** List Skill-tool sub-skills in `composes:`. Subprocess sub-skills are not listed (they run in separate agent sessions).
+
+**Reference implementation:** `dispatch_composition()` in `.claude/scripts/batch-orchestrator.sh`
+**Test coverage:** `.claude/scripts/implement-issue-test/test-orchestrator-composition.bats`
+
 ## Flowchart Usage
 
 ```dot
