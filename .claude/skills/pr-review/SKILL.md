@@ -1,3 +1,29 @@
+---
+name: pr-review
+description: Review a pull request diff against issue requirements and return an approved or changes_requested verdict
+inputs:
+  - name: diff
+    type: string
+    required: true
+    description: The PR diff to review, provided inline in the prompt
+  - name: issue_number
+    type: integer
+    required: true
+    description: GitHub issue number to fetch acceptance criteria and requirements from
+outputs:
+  - name: verdict
+    type: string
+    description: Review outcome — approved or changes_requested
+  - name: issues
+    type: array
+    description: List of findings with severity (major or minor) and supporting evidence from the diff
+failure_modes:
+  - id: review_timeout
+    mitigation: Stop exploring the codebase — review only the provided diff; complete in 3-5 turns maximum
+  - id: issue_fetch_failed
+    mitigation: Stop and report error — cannot review without fetching the requirements
+---
+
 # PR Review
 
 Review a pull request diff against the issue requirements. Produce a verdict (approved / changes_requested) with evidence.

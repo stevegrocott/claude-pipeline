@@ -1,7 +1,7 @@
 {
   "description": "Append-only JSONL event envelope for the pipeline event stream. Each line is one event.",
   "type": "object",
-  "required": ["ts", "run_id", "stage", "event"],
+  "required": ["ts", "run_id", "event"],
   "properties": {
     "ts": {
       "type": "string",
@@ -26,7 +26,12 @@
         "schema_validation_fail",
         "status_change",
         "stage_start",
-        "stage_end"
+        "stage_end",
+        "batch_start",
+        "batch_end",
+        "issue_start",
+        "issue_end",
+        "batch_paused"
       ],
       "description": "Event type discriminator"
     },
@@ -183,6 +188,67 @@
         }
       },
       "required": ["event", "status"]
+    },
+    {
+      "description": "A batch run began processing its issue list",
+      "properties": {
+        "event": { "const": "batch_start" }
+      },
+      "required": ["event"]
+    },
+    {
+      "description": "A batch run finished processing all issues",
+      "properties": {
+        "event": { "const": "batch_end" },
+        "outcome": {
+          "type": "string",
+          "enum": ["completed", "circuit_breaker", "failed"],
+          "description": "How the batch terminated"
+        }
+      },
+      "required": ["event", "outcome"]
+    },
+    {
+      "description": "Processing began for a single issue within a batch",
+      "properties": {
+        "event": { "const": "issue_start" },
+        "issue_num": {
+          "type": "string",
+          "description": "Issue number being processed, e.g. 158"
+        }
+      },
+      "required": ["event", "issue_num"]
+    },
+    {
+      "description": "Processing finished for a single issue within a batch",
+      "properties": {
+        "event": { "const": "issue_end" },
+        "issue_num": {
+          "type": "string",
+          "description": "Issue number that finished processing"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["success", "failed"],
+          "description": "Whether the issue was processed successfully"
+        }
+      },
+      "required": ["event", "issue_num", "outcome"]
+    },
+    {
+      "description": "The batch was paused by the circuit breaker due to consecutive failures",
+      "properties": {
+        "event": { "const": "batch_paused" },
+        "consecutive_failures": {
+          "type": "integer",
+          "description": "Number of consecutive issue failures that triggered the circuit breaker"
+        },
+        "max_failures": {
+          "type": "integer",
+          "description": "Configured threshold that was exceeded"
+        }
+      },
+      "required": ["event", "consecutive_failures", "max_failures"]
     }
   ]
 }

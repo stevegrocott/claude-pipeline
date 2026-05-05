@@ -49,7 +49,9 @@ teardown() {
 @test "run_stage fails with missing schema file" {
     run run_stage "test-stage" "test prompt" "nonexistent.json"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"schema not found"* ]]
+    # New stage_result envelope reports error_kind="schema_not_found"
+    # (snake_case; see schemas/stage-result.json enum).
+    [[ "$output" == *"schema_not_found"* ]]
 }
 
 @test "run_stage uses correct schema file" {
@@ -149,8 +151,10 @@ teardown() {
     result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
 
+    # Envelope: .status reflects run-level outcome; .output carries the
+    # parsed structured output from the agent (issue #178 PR-A).
     local extracted_status
-    extracted_status=$(echo "$result" | jq -r '.status')
+    extracted_status=$(echo "$result" | jq -r '.output.status')
     [ "$extracted_status" = "success" ]
 }
 
@@ -160,7 +164,8 @@ teardown() {
 
     run run_stage "test" "prompt" "test-schema.json"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"no structured output"* ]]
+    # Envelope reports error_kind="no_structured_output" (snake_case enum).
+    [[ "$output" == *"no_structured_output"* ]]
 }
 
 # =============================================================================
@@ -180,7 +185,7 @@ teardown() {
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
 	local pr_number
-	pr_number=$(printf '%s' "$result" | jq -r '.pr_number // empty')
+	pr_number=$(printf '%s' "$result" | jq -r '.output.pr_number // empty')
 	[ "$pr_number" = "42" ] || \
 		fail "Expected pr_number=42, got: $pr_number (full output: $result)"
 }
@@ -199,7 +204,7 @@ teardown() {
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
 	local pr_number
-	pr_number=$(printf '%s' "$result" | jq -r '.pr_number // empty')
+	pr_number=$(printf '%s' "$result" | jq -r '.output.pr_number // empty')
 	[ -z "$pr_number" ] || \
 		fail "pr_number should be empty for bare issue ref, got: $pr_number"
 }
@@ -217,7 +222,7 @@ teardown() {
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
 	local branch
-	branch=$(printf '%s' "$result" | jq -r '.branch // empty')
+	branch=$(printf '%s' "$result" | jq -r '.output.branch // empty')
 	[ "$branch" = "feature/issue-52" ] || \
 		fail "Expected branch=feature/issue-52, got: $branch (full output: $result)"
 }
@@ -239,7 +244,7 @@ teardown() {
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
 	local tasks_count
-	tasks_count=$(printf '%s' "$result" | jq -r 'if .tasks then (.tasks | length) else 0 end')
+	tasks_count=$(printf '%s' "$result" | jq -r 'if .output.tasks then (.output.tasks | length) else 0 end')
 	[ "$tasks_count" = "2" ] || \
 		fail "Expected 2 tasks, got: $tasks_count (full output: $result)"
 }
@@ -256,10 +261,12 @@ teardown() {
 	result=$(run_stage "implement" "prompt" "test-schema.json" | grep '^{')
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
+	# Envelope-level status reflects run-level success even when no fields
+	# extracted from .result text — agent's status sits under .output.status.
 	local status_val
-	status_val=$(printf '%s' "$result" | jq -r '.status')
+	status_val=$(printf '%s' "$result" | jq -r '.output.status')
 	[ "$status_val" = "success" ] || \
-		fail "Expected status=success, got: $status_val (full output: $result)"
+		fail "Expected output.status=success, got: $status_val (full output: $result)"
 }
 
 # =============================================================================
@@ -612,6 +619,7 @@ teardown() {
     result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
 
+    # Envelope-level status: run completed (recovered structured output).
     local status_val
     status_val=$(printf '%s' "$result" | jq -r '.status')
     [ "$status_val" = "success" ] || \
@@ -645,13 +653,15 @@ teardown() {
 	result=$(run_stage "test" "prompt" "test-schema.json" | grep '^{')
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
+	# Envelope-level status: run completed via .result-text fallback.
 	local status_val
 	status_val=$(printf '%s' "$result" | jq -r '.status')
 	[ "$status_val" = "success" ] || \
 		fail "Expected status=success, got: $status_val (result: $result)"
 
+	# Agent-reported summary lives under .output.summary in the envelope.
 	local summary_val
-	summary_val=$(printf '%s' "$result" | jq -r '.summary')
+	summary_val=$(printf '%s' "$result" | jq -r '.output.summary')
 	[ "$summary_val" = "Summary of work done" ] || \
 		fail "Expected summary='Summary of work done', got: $summary_val"
 
@@ -891,11 +901,18 @@ EOF
     [[ "$second_call_args" == *"--model opus"* ]] || \
         fail "Expected --model opus in escalated retry. Args: $second_call_args"
 
-    # Final returned status must reflect the successful escalated run
+    # Final envelope status must reflect the successful escalated run.
+    # Both envelope .status and agent .output.status are "success" here
+    # because the escalated agent returned status:"success".
     local status_val
     status_val=$(printf '%s' "$result" | jq -r '.status')
     [ "$status_val" = "success" ] || \
         fail "Expected 'success' after escalation, got: $status_val"
+
+    local agent_status
+    agent_status=$(printf '%s' "$result" | jq -r '.output.status')
+    [ "$agent_status" = "success" ] || \
+        fail "Expected output.status='success' after escalation, got: $agent_status"
 }
 
 @test "run_stage skips escalation and logs warning when permission_denials is non-empty" {
@@ -1125,4 +1142,151 @@ EOF
 
     grep -q "Max turns: 25 (sonnet with S/empty complexity)" "$LOG_FILE" || \
         fail "Max turns logging not found in log. Log: $(cat "$LOG_FILE")"
+}
+
+# =============================================================================
+# _APPLY_STAGE_ACTION — STAGE_RESULT ENVELOPE SHAPE
+#
+# The same 4 escalation behaviors (max_turns, timeout, empty, structured-error)
+# expressed via the stage_result + _apply_stage_action interface
+# (issue #178 PR-A, task 4). No behavior change — these tests verify the new
+# dispatch surface is consistent with the run_stage test assertions above.
+#
+# Convention: bail exits 1 and emits the envelope; accept/escalate/retry_same
+# exit 0 and emit the envelope.  The error_kind field in the envelope
+# identifies which escalation path triggered the bail/escalate decision.
+# =============================================================================
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for max_turns_exhausted_at_ceiling" {
+	# max_turns behavior: run_stage calls _apply_stage_action with bail when
+	# opus (ceiling) hits error_max_turns. The envelope must survive intact so
+	# callers can inspect error_kind without re-running the stage.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "{\"subtype\":\"error_max_turns\"}",
+		denials: [],
+		model: "opus",
+		error_kind: "max_turns_exhausted_at_ceiling",
+		elapsed_ms: 5000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "max_turns_exhausted_at_ceiling"
+	[ "$status" -eq 1 ]
+
+	# Envelope must be emitted on stdout so callers can inspect error_kind.
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "max_turns_exhausted_at_ceiling" ] || \
+		fail "Expected error_kind=max_turns_exhausted_at_ceiling, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for timeout" {
+	# timeout behavior: run_stage calls _apply_stage_action with bail when
+	# both initial attempt and retry time out at the ceiling model.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "",
+		denials: [],
+		model: "opus",
+		error_kind: "timeout",
+		elapsed_ms: 60000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "timeout"
+	[ "$status" -eq 1 ]
+
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "timeout" ] || \
+		fail "Expected error_kind=timeout, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: bail exits 1 and preserves error_kind for no_structured_output" {
+	# empty behavior: run_stage calls _apply_stage_action with bail when no
+	# structured output can be extracted even after escalation attempts.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "{\"result\":\"some text\",\"is_error\":true}",
+		denials: [],
+		model: "sonnet",
+		error_kind: "no_structured_output",
+		elapsed_ms: 10000
+	}')
+
+	run _apply_stage_action "$stage_result" "bail" "no_structured_output"
+	[ "$status" -eq 1 ]
+
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action bail must emit stage_result on stdout"
+
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "no_structured_output" ] || \
+		fail "Expected error_kind=no_structured_output, got: $error_kind"
+
+	local envelope_status
+	envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+	[ "$envelope_status" = "error" ] || \
+		fail "Expected envelope status=error, got: $envelope_status"
+}
+
+@test "_apply_stage_action: escalate exits 0 and emits envelope for structured_error" {
+	# structured-error behavior: run_stage calls _apply_stage_action with
+	# escalate when the agent returned status:error without permission_denials.
+	# The shim emits the envelope and exits 0; the re-run lives in run_stage
+	# (PR-A pass-through; PR-B will invoke escalation-policy skill here).
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: {status: "error", error: "first attempt failed"},
+		raw: "{\"structured_output\":{\"status\":\"error\"}}",
+		denials: [],
+		model: "haiku",
+		error_kind: null,
+		elapsed_ms: 3000
+	}')
+
+	run _apply_stage_action "$stage_result" "escalate" "structured_error"
+	[ "$status" -eq 0 ]
+
+	# Envelope must be emitted so callers can inspect output.status.
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action escalate must emit stage_result on stdout"
+
+	# The structured error's .output.status must survive in the emitted envelope
+	# so the caller (run_stage / future PR-B skill) can act on the original result.
+	local agent_status
+	agent_status=$(printf '%s' "$emitted_envelope" | jq -r '.output.status // empty')
+	[ "$agent_status" = "error" ] || \
+		fail "Expected output.status=error in emitted envelope, got: $agent_status"
 }

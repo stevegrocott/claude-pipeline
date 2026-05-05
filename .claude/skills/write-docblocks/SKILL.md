@@ -1,8 +1,30 @@
-<!-- STACK-SPECIFIC: Replace with language-specific doc skill or delete during /adapting-claude-pipeline. This is an example skill for PHP docblocks. -->
 ---
 name: write-docblocks
 description: Use when documentation coverage is low, after composer docs:coverage shows gaps, or when asked to batch-write PHPDoc blocks across multiple files
+inputs:
+  - name: target_files
+    type: string
+    description: Optional comma-separated file paths to document; if omitted the skill runs composer docs:coverage:missing to discover undocumented files
+outputs:
+  - name: coverage_report
+    type: string
+    description: Output from composer docs:coverage showing documentation percentage after the run
+  - name: documented_files
+    type: json
+    description: List of files that had PHPDoc blocks added in this run
+side_effects:
+  - runs_composer_command
+  - modifies_php_source_files
+  - runs_pint_on_changed_files
+  - dispatches_subagents
+failure_modes:
+  - id: subagent_fails_on_file
+    mitigation: Note the failure and continue processing remaining files in the batch. Retry the failed file individually after the batch completes.
+  - id: coverage_target_not_met
+    mitigation: Re-run composer docs:coverage:missing to find remaining undocumented files and process another batch.
 ---
+
+<!-- STACK-SPECIFIC: Replace with language-specific doc skill or delete during /adapting-claude-pipeline. This is an example skill for PHP docblocks. -->
 
 # Write Docblocks
 

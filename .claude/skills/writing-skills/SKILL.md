@@ -1,6 +1,20 @@
 ---
 name: writing-skills
 description: Use when creating new skills, editing existing skills, or verifying skills work before deployment
+outputs:
+  - name: skill_file
+    type: file_path
+    description: SKILL.md written to skills/<skill-name>/SKILL.md
+side_effects:
+  - writes_skill_file
+  - commits_to_git
+composes:
+  - test-driven-development
+failure_modes:
+  - id: skip_red_phase
+    mitigation: Delete the skill and restart from RED phase — run baseline scenario without the skill before writing it
+  - id: deploy_without_test
+    mitigation: Run pressure scenarios with and without the skill before committing or sharing
 ---
 
 # Writing Skills
@@ -93,19 +107,45 @@ skills/
 ## SKILL.md Structure
 
 **Frontmatter (YAML):**
-- Only two fields supported: `name` and `description`
-- Max 1024 characters total
-- `name`: Use letters, numbers, and hyphens only (no parentheses, special chars)
+
+Required fields:
+- `name`: Letters, numbers, and hyphens only (no parentheses, special chars)
 - `description`: Third-person, describes ONLY when to use (NOT what it does)
   - Start with "Use when..." to focus on triggering conditions
   - Include specific symptoms, situations, and contexts
   - **NEVER summarize the skill's process or workflow** (see CSO section for why)
   - Keep under 500 characters if possible
 
-```markdown
+Optional fields (fill in when the skill will be composed by other skills or meta-skills):
+- `argument-hint`: Short hint shown to the operator when invoking this skill with an argument
+- `inputs`: List of named inputs the skill consumes (enables pre-invocation validation)
+- `outputs`: List of named outputs callers can rely on (enables piping to other skills)
+- `side_effects`: List of external changes (files written, issues created, processes spawned)
+- `composes`: List of sub-skill names invoked via the Skill tool (builds dependency graph)
+- `failure_modes`: Known failure ids and mitigations (enables recovery skills to take action)
+
+```yaml
 ---
-name: Skill-Name-With-Hyphens
+name: skill-name
 description: Use when [specific triggering conditions and symptoms]
+argument-hint: "<optional short hint for CLI invocation>"
+inputs:
+  - name: param_name
+    type: string          # string | url | file_path | boolean | number
+    required: true
+    description: What this input represents
+outputs:
+  - name: result_name
+    type: url             # string | url | file_path | boolean | number
+    description: What callers can rely on receiving
+side_effects:
+  - creates_github_issue
+  - writes_log: logs/<skill>/<skill>-<id>-<ts>/status.json
+composes:
+  - other-skill-name
+failure_modes:
+  - id: short_snake_case_id
+    mitigation: What callers should do when this failure occurs
 ---
 
 # Skill Name
@@ -286,6 +326,70 @@ Use skill name only, with explicit requirement markers:
 - ❌ Bad: `@skills/testing/test-driven-development/SKILL.md` (force-loads, burns context)
 
 **Why no @ links:** `@` syntax force-loads files immediately, consuming 200k+ context before you need them.
+
+## Sub-Skill Invocation
+
+When invoking another skill from within a skill, use the **isolation decision rule**:
+
+- **Subprocess** (`claude --print "/skill args"`) — worktree-isolated, parallel fanout, or sandbox execution
+- **Skill tool** — everything else (orchestration, routing, planning, review)
+
+### Composition Taxonomy (Canonical Reference)
+
+| Path | Method | Use When | Examples |
+|------|--------|----------|---------|
+| Skill-tool | Skill tool | Non-isolated: decision-making, routing, orchestration | `process-pr`, `code-reviewer` |
+| Subprocess | `claude --print` | Isolated: worktree, parallel, sandbox | `implement-issue` |
+
+**Default (no isolated arg):** routes to Skill tool path.
+
+> **Architectural constraint — Skill tool only works inside interactive sessions.**
+> The Skill tool is a Claude Code harness feature. Bash scripts that call `claude -p` (or
+> `claude --print`) create non-interactive subprocess sessions where the Skill tool is **not
+> available**. You cannot invoke a skill via the Skill tool from within a bash orchestration
+> script. Use the Subprocess path (`claude --print "/skill-name"`) or embed skill content
+> directly in the prompt instead.
+
+**Kill-switch:** `COMPOSITION_BACKEND` env var overrides auto-routing:
+- `skill` → routes to `run_composition_standard()` (bash subprocess, non-sandboxed; legacy alias — does NOT invoke the Skill tool)
+- `subprocess` → forces subprocess even for non-isolated work
+- Unknown value → exits non-zero with error
+
+**Frontmatter:** List Skill-tool sub-skills in `composes:`. Subprocess sub-skills are not listed (they run in separate agent sessions).
+
+**Reference implementation:** `dispatch_composition()` in `.claude/scripts/batch-orchestrator.sh`
+**Test coverage:** `.claude/scripts/implement-issue-test/test-orchestrator-composition.bats`
+
+### Canary Measurement (gates merge of backend changes)
+
+Before merging changes that alter the composition backend, run a 10-issue canary
+and verify regressions are within budget:
+
+| Metric             | Budget                                  | Source                                                            |
+|--------------------|-----------------------------------------|-------------------------------------------------------------------|
+| Tokens per issue   | ≤10% median regression vs. baseline     | summed from per-session transcripts in `~/.claude/projects/`      |
+| Wall-clock per issue | ≤25% median regression vs. baseline   | `total_duration_seconds` from each issue's `metrics.json`         |
+
+**Procedure (use `.claude/scripts/canary-measure.sh`):**
+
+1. Select 10 representative issues.
+2. Baseline run: `COMPOSITION_BACKEND=subprocess ./batch-orchestrator.sh …` against the chosen issues, then capture results:
+   ```bash
+   ./canary-measure.sh --logs-dir logs/ --label baseline > canary-baseline.json
+   ```
+3. Candidate run: same issues with default auto-routing (or `COMPOSITION_BACKEND=skill`):
+   ```bash
+   ./canary-measure.sh --logs-dir logs/ --label candidate > canary-candidate.json
+   ```
+4. Compute deltas and gate decision:
+   ```bash
+   ./canary-measure.sh --compute-deltas \
+       --before canary-baseline.json --after canary-candidate.json \
+       --format markdown
+   ```
+5. **Block merge** if `gates.tokens_within_limit` is `false` (>10% median) or `gates.wall_clock_within_limit` is `false` (>25% median). Otherwise paste the markdown report into the PR description.
+
+**Test coverage:** `.claude/scripts/implement-issue-test/test-canary-measure.bats`
 
 ## Flowchart Usage
 
@@ -672,7 +776,7 @@ Deploying untested skills = deploying untested code. It's a violation of quality
 
 **GREEN Phase - Write Minimal Skill:**
 - [ ] Name uses only letters, numbers, hyphens (no parentheses/special chars)
-- [ ] YAML frontmatter with only name and description (max 1024 chars)
+- [ ] YAML frontmatter: required `name` and `description`; add `inputs`, `outputs`, `side_effects`, `composes`, `failure_modes` when skill will be composed or orchestrated
 - [ ] Description starts with "Use when..." and includes specific triggers/symptoms
 - [ ] Description written in third person
 - [ ] Keywords throughout for search (errors, symptoms, tools)

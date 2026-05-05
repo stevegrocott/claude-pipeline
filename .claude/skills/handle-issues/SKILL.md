@@ -2,6 +2,35 @@
 name: handle-issues
 description: Batch process issues via batch-orchestrator.sh with rate limit handling and session resumption
 argument-hint: "[context query]"
+inputs:
+  - name: context_query
+    type: string
+    required: true
+    description: Natural language query describing which issues to process and how (e.g. "issues assigned to @me ordered by priority")
+outputs:
+  - name: status_json
+    type: file
+    description: Batch status with per-issue results written to status.json
+  - name: per_issue_prs
+    type: url[]
+    description: One pull request URL per successfully processed issue
+side_effects:
+  - spawns_background_process: batch-orchestrator.sh
+  - creates_git_branches
+  - creates_pull_requests
+  - merges_pull_requests
+  - writes_manifest: logs/handle-issues/manifest-<ts>.json
+  - writes_logs: logs/batch-*/
+composes:
+  - implement-issue
+  - process-pr
+failure_modes:
+  - id: circuit_breaker
+    mitigation: fix the failing issues then run /handle-issues "resume" to continue the batch
+  - id: rate_limit
+    mitigation: orchestrator handles automatically — waits for reset then resumes; no operator action needed
+  - id: incomplete_batch
+    mitigation: on next run operator is offered resume or fresh start; choose resume to skip completed issues
 ---
 
 # Handle Issues

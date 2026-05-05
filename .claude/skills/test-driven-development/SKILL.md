@@ -1,6 +1,32 @@
 ---
 name: test-driven-development
 description: Use when implementing any feature or bugfix, before writing implementation code
+inputs:
+  - name: task_description
+    type: string
+    required: true
+    description: The feature, bug fix, or behaviour change to implement
+outputs:
+  - name: test_file
+    type: file_path
+    description: Test file written first, containing the failing test(s)
+  - name: implementation_file
+    type: file_path
+    description: Implementation file written to make the failing tests pass
+  - name: test_results
+    type: string
+    description: Test runner output confirming all tests pass after implementation
+side_effects:
+  - writes_test_files
+  - writes_implementation_files
+  - runs_test_suite
+failure_modes:
+  - id: test_passes_immediately
+    mitigation: Test is testing existing behaviour, not the new feature. Rewrite the test to target the missing behaviour.
+  - id: implementation_written_before_test
+    mitigation: Delete all implementation code and start over with a failing test first.
+  - id: test_errors_on_run
+    mitigation: Fix the setup or import error and re-run until the test fails for the expected reason before writing implementation.
 ---
 
 # Test-Driven Development (TDD)
