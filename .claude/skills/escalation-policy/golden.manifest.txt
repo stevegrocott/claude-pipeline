@@ -14,6 +14,10 @@
 # underlying model changed in a way that altered a routing decision. Investigate
 # before updating the expected value.
 #
-# Populated by #178 PR-B. One seed entry below proves the harness contract.
+# Populated by #178 PR-B (escalate seed) and #211 task-2 (remaining three).
+# All four routing actions are represented.
 #
+accept-success|accept|*
 timeout-first-attempt|escalate|*
+bail-permission-denied|bail|*
+retry-same-rate-limit|retry_same|*

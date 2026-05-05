@@ -1,0 +1,12 @@
+{
+  "status": "success",
+  "output": {"status": "ok"},
+  "raw": "",
+  "denials": [],
+  "model": "haiku",
+  "error_kind": null,
+  "elapsed_ms": 100,
+  "_fixture_meta": {
+    "description": "Successful stage with valid output — expect accept"
+  }
+}
