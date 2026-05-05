@@ -1533,188 +1533,59 @@ run_stage() {
         printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"
 
         if (( exit_code == 124 )); then
-            # Double timeout at same model tier — escalate to next model
-            local timeout_escalated_model
-            timeout_escalated_model=$(_next_model_up "$model")
-
-            if [[ "$timeout_escalated_model" != "$model" ]]; then
-                log "WARN: Stage $stage_name timed out twice with $model — escalating to $timeout_escalated_model"
-                printf '%s\n' "=== $stage_name timeout escalation: $model → $timeout_escalated_model ===" >> "$stage_log"
-
-                record_escalation "$stage_name" "$model" "$timeout_escalated_model" "double_timeout"
-
-                local -a timeout_esc_fallback_args=()
-                local timeout_esc_fallback
-                timeout_esc_fallback=$(_next_model_up "$timeout_escalated_model")
-                if [[ "$timeout_esc_fallback" != "$timeout_escalated_model" ]]; then
-                    timeout_esc_fallback_args=(--fallback-model "$timeout_esc_fallback")
-                fi
-
-                emit_event "model_call" \
-                    "stage=$stage_name" \
-                    "model=$timeout_escalated_model" \
-                    "fallback_model=$timeout_esc_fallback" \
-                    "agent=${agent:-default}" \
-                    "schema=$schema_file" \
-                    "complexity=${complexity:-}" \
-                    "stage_attempt:=3"
-
-                exit_code=0
-                output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
-                    ${agent_args[@]+"${agent_args[@]}"} \
-                    --model "$timeout_escalated_model" \
-                    ${timeout_esc_fallback_args[@]+"${timeout_esc_fallback_args[@]}"} \
-                    --dangerously-skip-permissions \
-                    --output-format json \
-                    --json-schema "$schema" \
-                    2>&1) || exit_code=$?
-
-                # Escalation produced output via a different model — track it
-                # so the stage_result envelope reports the model that actually
-                # ran rather than the original tier we escalated from.
-                result_model="$timeout_escalated_model"
-
-                printf '%s\n' "=== $stage_name timeout escalation output ===" >> "$stage_log"
-                printf '%s\n' "$output" >> "$stage_log"
-                printf '%s\n' "=== timeout escalation exit code: $exit_code ===" >> "$stage_log"
-            else
-                log_error "Stage $stage_name timed out twice with $model (ceiling) — cannot escalate"
-                _TIMED_OUT_STAGE_NAMES="${_TIMED_OUT_STAGE_NAMES:+$_TIMED_OUT_STAGE_NAMES, }$stage_name"
-                (( _CONSECUTIVE_TIMEOUTS++ )) || true
-                if (( _CONSECUTIVE_TIMEOUTS >= 2 )); then
-                    log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
-                        "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
-                fi
-                local _sr
-                _sr=$(_emit_stage_result \
-                    "error" "null" "$output" \
-                    "$(_extract_denials "$output")" \
-                    "$result_model" '"timeout"' \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
-                _apply_stage_action "$_sr" "bail" "timeout"
-                return $?
+            # Second timeout at same model tier — fall through to the
+            # consolidated decide-action.sh call below.
+            _TIMED_OUT_STAGE_NAMES="${_TIMED_OUT_STAGE_NAMES:+$_TIMED_OUT_STAGE_NAMES, }$stage_name"
+            (( _CONSECUTIVE_TIMEOUTS++ )) || true
+            if (( _CONSECUTIVE_TIMEOUTS >= 2 )); then
+                log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
+                    "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
             fi
+            log "WARN: Stage $stage_name timed out twice with $model — deferring to decide-action.sh"
+            printf '%s\n' "=== $stage_name double timeout ===" >> "$stage_log"
         fi
     fi
 
-    # Check for max turns exhaustion — escalate to next model up and retry.
-    # CLI returns subtype:"error_max_turns" with exit code 0 and is_error:false,
-    # but no structured_output, so we detect it before the structured output check.
+    # =========================================================================
+    # CONSOLIDATED ESCALATION DECISION via decide-action.sh
+    # =========================================================================
+    # Determine error_kind from the run outcome; build a stage_result envelope;
+    # call decide-action.sh exactly once (AC1); execute the returned action.
+    # _apply_stage_action is always called with the action decide-action.sh
+    # returned (AC2).  ESCALATION_POLICY_BACKEND=bash is honoured inside
+    # decide-action.sh itself (AC3).
+
+    # Detect max-turns exhaustion
     local output_subtype
     output_subtype=$(printf '%s' "$output" | jq -r '.subtype // empty' 2>/dev/null)
-    if [[ "$output_subtype" == "error_max_turns" ]]; then
-        local escalated_model
-        escalated_model=$(effective_fallback "$model")
 
-        if [[ "$escalated_model" == "$model" ]]; then
-            # Already at ceiling (opus) — can't escalate further
-            log_error "Stage $stage_name hit max turns with $model (ceiling) — cannot escalate"
-            local _sr
-            _sr=$(_emit_stage_result \
-                "error" "null" "$output" \
-                "$(_extract_denials "$output")" \
-                "$result_model" '"max_turns_exhausted_at_ceiling"' \
-                "$(( $(_epoch_ms) - result_start_ms ))")
-            _apply_stage_action "$_sr" "bail" "max_turns_exhausted_at_ceiling"
-            return $?
-        fi
+    # Detect permission denials early (needed for structured-error classification)
+    local _permission_denials
+    _permission_denials=$(printf '%s' "$output" \
+        | jq -r '[.permission_denials[]?.tool_name // empty] | select(length > 0) | join(", ")' \
+        2>/dev/null || true)
 
-        log "WARN: Stage $stage_name hit max turns with $model — escalating to $escalated_model (no turn cap)"
-        printf '%s\n' "=== $stage_name escalating: $model → $escalated_model ===" >> "$stage_log"
-
-        # Record escalation event
-        record_escalation "$stage_name" "$model" "$escalated_model" "max_turns_exhausted"
-
-        # Retry with escalated model and no --max-turns cap
-        local escalated_fallback
-        escalated_fallback=$(effective_fallback "$escalated_model")
-        local -a escalated_fallback_args=()
-        if [[ "$escalated_fallback" != "$escalated_model" ]]; then
-            escalated_fallback_args=(--fallback-model "$escalated_fallback")
-        fi
-
-        emit_event "model_call" \
-            "stage=$stage_name" \
-            "model=$escalated_model" \
-            "fallback_model=$escalated_fallback" \
-            "agent=${agent:-default}" \
-            "schema=$schema_file" \
-            "complexity=${complexity:-}" \
-            "stage_attempt:=2"
-
-        output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
-            ${agent_args[@]+"${agent_args[@]}"} \
-            --model "$escalated_model" \
-            ${escalated_fallback_args[@]+"${escalated_fallback_args[@]}"} \
-            --dangerously-skip-permissions \
-            --output-format json \
-            --json-schema "$schema" \
-            2>&1) || exit_code=$?
-
-        # Escalation produced output via $escalated_model — track for envelope.
-        result_model="$escalated_model"
-
-        printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
-        printf '%s\n' "$output" >> "$stage_log"
-        printf '%s\n' "=== escalation exit code: $exit_code ===" >> "$stage_log"
-    fi
-
-    # Check rate limit
-    if detect_rate_limit "$output"; then
-        handle_rate_limit "$output"
-        # Retry
-        emit_event "retry" \
-            "stage=$stage_name" \
-            "reason=rate_limit" \
-            "attempt:=2" \
-            "max_attempts:=2" \
-            "model=$model"
-        emit_event "model_call" \
-            "stage=$stage_name" \
-            "model=$model" \
-            "fallback_model=$fallback_model" \
-            "agent=${agent:-default}" \
-            "schema=$schema_file" \
-            "complexity=${complexity:-}" \
-            "stage_attempt:=2"
-
-        output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
-            ${agent_args[@]+"${agent_args[@]}"} \
-            --model "$model" \
-            ${fallback_args[@]+"${fallback_args[@]}"} \
-            ${turns_args[@]+"${turns_args[@]}"} \
-            --dangerously-skip-permissions \
-            --output-format json \
-            --json-schema "$schema" \
-            2>&1) || exit_code=$?
-
-        printf '%s\n' "=== $stage_name retry output ===" >> "$stage_log"
-        printf '%s\n' "$output" >> "$stage_log"
-    fi
-
-    # Extract structured output — try .structured_output first, fall back to
-    # wrapping .result text as a success payload (subagents sometimes return
-    # plain .result without matching the JSON schema)
+    # Extract structured output from the run
     local structured
     structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
 
+    # .result fallback — build (with field extraction) when .structured_output
+    # is absent but the CLI returned a text result.
+    local _fallback_result=""
     if [[ -z "$structured" ]]; then
-        # Fallback: if the CLI returned successfully (.is_error == false) and
-        # has a .result string, wrap it as a synthetic structured output
-        local fallback_result
-        fallback_result=$(printf '%s' "$output" | jq -c '
+        local _basic_fallback
+        _basic_fallback=$(printf '%s' "$output" | jq -c '
             select(.is_error == false and .result != null) |
             {status: "success", summary: .result}
         ' 2>/dev/null)
 
-        if [[ -n "$fallback_result" ]]; then
+        if [[ -n "$_basic_fallback" ]]; then
             log "WARNING: No .structured_output from $stage_name — using .result fallback"
-
-            # Field-aware recovery: extract known fields from .result text
             local result_text
             result_text=$(printf '%s' "$output" \
                 | jq -r '.result // empty' 2>/dev/null)
 
+            _fallback_result="$_basic_fallback"
             if [[ -n "$result_text" ]]; then
                 # Extract pr_number from "PR #N", "MR #N", or "!N"
                 # Deliberately omits bare "#N" — too ambiguous (issue refs,
@@ -1724,7 +1595,7 @@ run_stage() {
                 if [[ "$result_text" =~ $pr_re ]] \
                     || [[ "$result_text" =~ $bang_re ]]; then
                     local pr_num="${BASH_REMATCH[1]}"
-                    fallback_result=$(printf '%s' "$fallback_result" \
+                    _fallback_result=$(printf '%s' "$_fallback_result" \
                         | jq -c --argjson n "$pr_num" \
                             '.pr_number = $n')
                 fi
@@ -1733,7 +1604,7 @@ run_stage() {
                 local branch_re='[Bb]ranch[: ]+([a-zA-Z0-9/_.-]+)'
                 if [[ "$result_text" =~ $branch_re ]]; then
                     local br="${BASH_REMATCH[1]}"
-                    fallback_result=$(printf '%s' "$fallback_result" \
+                    _fallback_result=$(printf '%s' "$_fallback_result" \
                         | jq -c --arg b "$br" \
                             '.branch = $b')
                 fi
@@ -1762,263 +1633,278 @@ for m in re.finditer(r'\[\s*\{', t):
                         | jq -c 'if type == "array" then . else empty end' \
                             2>/dev/null)
                     if [[ -n "$valid_tasks" ]]; then
-                        fallback_result=$(printf '%s' "$fallback_result" \
+                        _fallback_result=$(printf '%s' "$_fallback_result" \
                             | jq -c --argjson t "$valid_tasks" \
                                 '.tasks = $t')
                     fi
                 fi
             fi
-
-            local _sr
-            _sr=$(_emit_stage_result \
-                "success" "$fallback_result" "$output" \
-                "$(_extract_denials "$output")" \
-                "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))")
-            _apply_stage_action "$_sr" "accept"
-            return $?
         fi
+    fi
 
-        # Diagnostic: log raw output first 500 chars and byte count when both
-        # .structured_output and .result extraction fail
-        local output_byte_count
+    # Classify error_kind based on the run outcome
+    local _error_kind="null"
+
+    if (( exit_code == 124 )); then
+        # Timed out even after same-model retry
+        _error_kind="timeout"
+    elif [[ "$output_subtype" == "error_max_turns" ]]; then
+        if [[ "$(effective_fallback "$model")" == "$model" ]]; then
+            log_error "Stage $stage_name hit max turns with $model (ceiling) — cannot escalate"
+            _error_kind="max_turns_exhausted_at_ceiling"
+        else
+            _error_kind="max_turns_exhausted"
+        fi
+    elif detect_rate_limit "$output"; then
+        handle_rate_limit "$output"
+        _error_kind="rate_limit"
+    elif [[ -z "$structured" && -z "$_fallback_result" ]]; then
+        # No parseable output of any kind
+        local output_byte_count output_preview
         output_byte_count=$(printf '%s' "$output" | wc -c)
-        local output_preview="${output:0:500}"
+        output_preview="${output:0:500}"
         log "Diagnostic fallback failure — Output byte count: $output_byte_count"
         log "Diagnostic fallback failure — First 500 characters: $output_preview"
-
-        # Empty/unparseable output — escalate to next model before failing.
-        local empty_escalated_model
-        empty_escalated_model=$(effective_fallback "$model")
-
-        # The CLI completed but produced no parseable structured output. From
-        # the orchestrator's perspective this is a schema-shaped failure of the
-        # stage's contract, so emit schema_validation_fail in addition to the
-        # escalation that follows.
         emit_event "schema_validation_fail" \
             "stage=$stage_name" \
             "reason=no_structured_output" \
             "model=$model" \
             "schema=$schema_file" \
             "errors:=[]"
-
-        if [[ "$empty_escalated_model" != "$model" ]]; then
-            log "WARN: No structured output from $stage_name with $model — escalating to $empty_escalated_model"
-            printf '%s\n' "=== $stage_name empty output escalation: $model → $empty_escalated_model ===" >> "$stage_log"
-
-            record_escalation "$stage_name" "$model" "$empty_escalated_model" "empty_output"
-
-            local -a empty_esc_fallback_args=()
-            local empty_esc_fallback
-            empty_esc_fallback=$(effective_fallback "$empty_escalated_model")
-            if [[ "$empty_esc_fallback" != "$empty_escalated_model" ]]; then
-                empty_esc_fallback_args=(--fallback-model "$empty_esc_fallback")
+        _error_kind="no_structured_output"
+    else
+        # We have some output — check for a structured error status
+        local _structured_status=""
+        _structured_status=$(printf '%s' "${structured:-$_fallback_result}" \
+            | jq -r '.status // empty' 2>/dev/null)
+        if [[ "$_structured_status" == "error" ]]; then
+            if [[ -n "$_permission_denials" ]]; then
+                log "WARN: $stage_name blocked by permission hook" \
+                    "(tools: $_permission_denials) — bailing"
+                _error_kind="permission_denied"
+            else
+                _error_kind="structured_error"
             fi
+        fi
+    fi
+
+    # Build the interim stage_result that decide-action.sh will inspect
+    local _interim_status _interim_structured _error_kind_json
+    if [[ "$_error_kind" == "null" ]]; then
+        _interim_status="success"
+        _interim_structured="${structured:-$_fallback_result}"
+        _error_kind_json="null"
+    else
+        _interim_status="error"
+        _interim_structured="null"
+        _error_kind_json="\"${_error_kind}\""
+    fi
+
+    local _sr_interim
+    _sr_interim=$(_emit_stage_result \
+        "$_interim_status" "${_interim_structured}" "$output" \
+        "$(_extract_denials "$output")" \
+        "$result_model" "$_error_kind_json" \
+        "$(( $(_epoch_ms) - result_start_ms ))")
+
+    # Escalation history from status file
+    local _history="[]"
+    if [[ -f "$STATUS_FILE" ]]; then
+        _history=$(jq -c '.escalations // []' "$STATUS_FILE" 2>/dev/null \
+            || printf '[]')
+    fi
+
+    # ── Single decide-action.sh call (AC1) ───────────────────────────────────
+    local _da_json _da_action _da_target_model _da_reason
+    _da_json=$(bash "$SCRIPT_DIR/decide-action.sh" \
+        "$_sr_interim" "$_history" 2>/dev/null) \
+        || _da_json='{"action":"bail","reason":"decide-action.sh invocation failed"}'
+    _da_action=$(printf '%s' "$_da_json" \
+        | jq -r '.action // "bail"' 2>/dev/null)
+    _da_target_model=$(printf '%s' "$_da_json" \
+        | jq -r '.model // empty' 2>/dev/null)
+    _da_reason=$(printf '%s' "$_da_json" \
+        | jq -r '.reason // ""' 2>/dev/null)
+
+    log "decide-action.sh → action=$_da_action${_da_target_model:+ model=$_da_target_model}"
+
+    # ── Dispatch: _apply_stage_action called with the action returned by ──────
+    # ── decide-action.sh (AC2)                                           ──────
+    case "$_da_action" in
+        accept)
+            _CONSECUTIVE_TIMEOUTS=0
+            _TIMED_OUT_STAGE_NAMES=""
+            local _sr_accept
+            _sr_accept=$(_emit_stage_result \
+                "success" "$_interim_structured" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" "null" \
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr_accept" "accept"
+            return $?
+            ;;
+        bail)
+            _CONSECUTIVE_TIMEOUTS=0
+            _TIMED_OUT_STAGE_NAMES=""
+            _apply_stage_action "$_sr_interim" "bail" "$_da_reason"
+            return $?
+            ;;
+        escalate)
+            # Re-run with the model decide-action.sh selected
+            local _esc_model="${_da_target_model:-$(effective_fallback "$model")}"
+            local _esc_fallback
+            _esc_fallback=$(effective_fallback "$_esc_model")
+            local -a _esc_fallback_args=()
+            if [[ "$_esc_fallback" != "$_esc_model" ]]; then
+                _esc_fallback_args=(--fallback-model "$_esc_fallback")
+            fi
+
+            log "WARN: Stage $stage_name $_da_reason — escalating $model → $_esc_model"
+            printf '%s\n' \
+                "=== $stage_name escalation: $model → $_esc_model ===" >> "$stage_log"
+            record_escalation "$stage_name" "$model" "$_esc_model" "$_da_reason"
 
             emit_event "model_call" \
                 "stage=$stage_name" \
-                "model=$empty_escalated_model" \
-                "fallback_model=$empty_esc_fallback" \
+                "model=$_esc_model" \
+                "fallback_model=$_esc_fallback" \
                 "agent=${agent:-default}" \
                 "schema=$schema_file" \
                 "complexity=${complexity:-}" \
                 "stage_attempt:=2"
 
-            local empty_esc_exit_code=0
-            output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+            # For max_turns escalation, omit --max-turns so the escalated
+            # model can complete without an artificial turn cap.
+            local -a _esc_turns_args=()
+            if [[ "$_error_kind" != "max_turns_exhausted" ]]; then
+                _esc_turns_args=("${turns_args[@]+"${turns_args[@]}"}")
+            fi
+
+            local _esc_exit_code=0
+            output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+                -p "$prompt" \
                 ${agent_args[@]+"${agent_args[@]}"} \
-                --model "$empty_escalated_model" \
-                ${empty_esc_fallback_args[@]+"${empty_esc_fallback_args[@]}"} \
+                --model "$_esc_model" \
+                ${_esc_fallback_args[@]+"${_esc_fallback_args[@]}"} \
+                ${_esc_turns_args[@]+"${_esc_turns_args[@]}"} \
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$schema" \
-                2>&1) || empty_esc_exit_code=$?
+                2>&1) || _esc_exit_code=$?
 
-            # Escalation produced output via $empty_escalated_model — track it
-            # so the envelope reports the model that actually produced output.
-            result_model="$empty_escalated_model"
-
-            printf '%s\n' "=== $stage_name empty output escalation output ===" >> "$stage_log"
+            result_model="$_esc_model"
+            printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
-            printf '%s\n' "=== empty output escalation exit code: $empty_esc_exit_code ===" >> "$stage_log"
+            printf '%s\n' \
+                "=== escalation exit code: $_esc_exit_code ===" >> "$stage_log"
 
-            # Re-extract structured output from escalated run
-            structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
-            if [[ -n "$structured" ]]; then
-                _CONSECUTIVE_TIMEOUTS=0
-                _TIMED_OUT_STAGE_NAMES=""
-                local _sr
-                _sr=$(_emit_stage_result \
-                    "success" "$structured" "$output" \
-                    "$(_extract_denials "$output")" \
-                    "$result_model" "null" \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
-                _apply_stage_action "$_sr" "accept"
-                return $?
-            fi
-
-            # Try .result fallback from escalated run
-            local esc_fallback_result
-            esc_fallback_result=$(printf '%s' "$output" | jq -c '
-                select(.is_error == false and .result != null) |
-                {status: "success", summary: .result}
-            ' 2>/dev/null)
-            if [[ -n "$esc_fallback_result" ]]; then
-                log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
-                _CONSECUTIVE_TIMEOUTS=0
-                _TIMED_OUT_STAGE_NAMES=""
-                local _sr
-                _sr=$(_emit_stage_result \
-                    "success" "$esc_fallback_result" "$output" \
-                    "$(_extract_denials "$output")" \
-                    "$result_model" "null" \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
-                _apply_stage_action "$_sr" "accept"
-                return $?
-            fi
-        fi
-
-        log_error "No structured output from $stage_name"
-        emit_event "schema_validation_fail" \
-            "stage=$stage_name" \
-            "reason=no_structured_output_after_escalation" \
-            "model=$model" \
-            "schema=$schema_file" \
-            "errors:=[]"
-        _CONSECUTIVE_TIMEOUTS=0
-        _TIMED_OUT_STAGE_NAMES=""
-        local _sr
-        _sr=$(_emit_stage_result \
-            "error" "null" "$output" \
-            "$(_extract_denials "$output")" \
-            "$result_model" '"no_structured_output"' \
-            "$(( $(_epoch_ms) - result_start_ms ))")
-        _apply_stage_action "$_sr" "bail" "no_structured_output"
-        return $?
-    fi
-
-    # Structured-error escalation — if the agent explicitly returned
-    # status:"error", try a better model before giving up (unless the failure
-    # was caused by a permission hook, which a better model can't bypass).
-    local structured_status
-    structured_status=$(printf '%s' "$structured" | jq -r '.status // empty' 2>/dev/null)
-
-    if [[ "$structured_status" == "error" ]]; then
-        # Check whether the failure was caused by permission denials embedded
-        # in the raw CLI output.  The CLI surfaces these as an array under
-        # .permission_denials[].tool_name.
-        local permission_denials
-        permission_denials=$(printf '%s' "$output" \
-            | jq -r '[.permission_denials[]?.tool_name // empty] | select(length > 0) | join(", ")' \
-            2>/dev/null || true)
-
-        if [[ -n "$permission_denials" ]]; then
-            log "WARN: $stage_name blocked by permission hook (tools: $permission_denials) — skipping escalation"
-        else
-            # No permission denial — escalate to the next model tier and retry once.
-            local struct_err_escalated_model
-            struct_err_escalated_model=$(effective_fallback "$model")
-
-            if [[ "$struct_err_escalated_model" != "$model" ]]; then
-                # PR-A escalation shim: establish _apply_stage_action dispatch
-                # surface. Discard stdout — run_stage emits the final envelope
-                # after the re-run. PR-B replaces this with skill invocation.
-                {
-                    local _sr_shim
-                    _sr_shim=$(_emit_stage_result \
-                        "error" "$structured" "$output" \
-                        "$(_extract_denials "$output")" \
-                        "$result_model" "null" \
-                        "$(( $(_epoch_ms) - result_start_ms ))")
-                    _apply_stage_action "$_sr_shim" "escalate" "structured_error"
-                } >/dev/null
-                log "WARN: $stage_name returned status:error with $model — escalating to $struct_err_escalated_model"
-                printf '%s\n' "=== $stage_name structured-error escalation: $model → $struct_err_escalated_model ===" >> "$stage_log"
-
-                record_escalation "$stage_name" "$model" "$struct_err_escalated_model" "structured_error"
-
-                local -a struct_err_esc_fallback_args=()
-                local struct_err_esc_fallback
-                struct_err_esc_fallback=$(effective_fallback "$struct_err_escalated_model")
-                if [[ "$struct_err_esc_fallback" != "$struct_err_escalated_model" ]]; then
-                    struct_err_esc_fallback_args=(--fallback-model "$struct_err_esc_fallback")
-                fi
-
-                emit_event "model_call" \
-                    "stage=$stage_name" \
-                    "model=$struct_err_escalated_model" \
-                    "fallback_model=$struct_err_esc_fallback" \
-                    "agent=${agent:-default}" \
-                    "schema=$schema_file" \
-                    "complexity=${complexity:-}" \
-                    "stage_attempt:=2"
-
-                local struct_err_esc_exit_code=0
-                output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
-                    ${agent_args[@]+"${agent_args[@]}"} \
-                    --model "$struct_err_escalated_model" \
-                    ${struct_err_esc_fallback_args[@]+"${struct_err_esc_fallback_args[@]}"} \
-                    --dangerously-skip-permissions \
-                    --output-format json \
-                    --json-schema "$schema" \
-                    2>&1) || struct_err_esc_exit_code=$?
-
-                # Escalation produced output via the next-tier model — track
-                # it so the envelope reports the actual producing model.
-                result_model="$struct_err_escalated_model"
-
-                printf '%s\n' "=== $stage_name structured-error escalation output ===" >> "$stage_log"
-                printf '%s\n' "$output" >> "$stage_log"
-                printf '%s\n' "=== structured-error escalation exit code: $struct_err_esc_exit_code ===" >> "$stage_log"
-
-                # Re-extract structured output from escalated run
-                structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
-                if [[ -n "$structured" ]]; then
-                    _CONSECUTIVE_TIMEOUTS=0
-                    _TIMED_OUT_STAGE_NAMES=""
-                    local _sr
-                    _sr=$(_emit_stage_result \
-                        "success" "$structured" "$output" \
-                        "$(_extract_denials "$output")" \
-                        "$result_model" "null" \
-                        "$(( $(_epoch_ms) - result_start_ms ))")
-                    _apply_stage_action "$_sr" "accept"
-                    return $?
-                fi
-
-                # Try .result fallback from escalated run
-                local struct_err_esc_fallback_result
-                struct_err_esc_fallback_result=$(printf '%s' "$output" | jq -c '
+            # Extract output from the escalated run
+            local _esc_structured
+            _esc_structured=$(printf '%s' "$output" \
+                | jq -c '.structured_output // empty' 2>/dev/null)
+            if [[ -z "$_esc_structured" ]]; then
+                _esc_structured=$(printf '%s' "$output" | jq -c '
                     select(.is_error == false and .result != null) |
                     {status: "success", summary: .result}
                 ' 2>/dev/null)
-                if [[ -n "$struct_err_esc_fallback_result" ]]; then
-                    log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
-                    _CONSECUTIVE_TIMEOUTS=0
-                    _TIMED_OUT_STAGE_NAMES=""
-                    local _sr
-                    _sr=$(_emit_stage_result \
-                        "success" "$struct_err_esc_fallback_result" "$output" \
-                        "$(_extract_denials "$output")" \
-                        "$result_model" "null" \
-                        "$(( $(_epoch_ms) - result_start_ms ))")
-                    _apply_stage_action "$_sr" "accept"
-                    return $?
-                fi
             fi
-        fi
-    fi
 
-    _CONSECUTIVE_TIMEOUTS=0
-    _TIMED_OUT_STAGE_NAMES=""
-    local _sr
-    _sr=$(_emit_stage_result \
-        "success" "$structured" "$output" \
-        "$(_extract_denials "$output")" \
-        "$result_model" "null" \
-        "$(( $(_epoch_ms) - result_start_ms ))")
-    _apply_stage_action "$_sr" "accept"
-    return $?
+            _CONSECUTIVE_TIMEOUTS=0
+            _TIMED_OUT_STAGE_NAMES=""
+            local _sr_esc
+            if [[ -n "$_esc_structured" ]]; then
+                _sr_esc=$(_emit_stage_result \
+                    "success" "$_esc_structured" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" "null" \
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+            else
+                emit_event "schema_validation_fail" \
+                    "stage=$stage_name" \
+                    "reason=no_structured_output_after_escalation" \
+                    "model=$_esc_model" \
+                    "schema=$schema_file" \
+                    "errors:=[]"
+                log_error "No structured output from $stage_name after escalation"
+                _sr_esc=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"no_structured_output"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+            fi
+            _apply_stage_action "$_sr_esc" "escalate" "$_da_reason"
+            return $?
+            ;;
+        retry_same)
+            # handle_rate_limit() was already called during error_kind
+            # classification above; emit the retry/model_call events now.
+            emit_event "retry" \
+                "stage=$stage_name" \
+                "reason=rate_limit" \
+                "attempt:=2" \
+                "max_attempts:=2" \
+                "model=$model"
+            emit_event "model_call" \
+                "stage=$stage_name" \
+                "model=$model" \
+                "fallback_model=$fallback_model" \
+                "agent=${agent:-default}" \
+                "schema=$schema_file" \
+                "complexity=${complexity:-}" \
+                "stage_attempt:=2"
+
+            local _retry_exit_code=0
+            output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+                -p "$prompt" \
+                ${agent_args[@]+"${agent_args[@]}"} \
+                --model "$model" \
+                ${fallback_args[@]+"${fallback_args[@]}"} \
+                ${turns_args[@]+"${turns_args[@]}"} \
+                --dangerously-skip-permissions \
+                --output-format json \
+                --json-schema "$schema" \
+                2>&1) || _retry_exit_code=$?
+
+            printf '%s\n' "=== $stage_name retry output ===" >> "$stage_log"
+            printf '%s\n' "$output" >> "$stage_log"
+            printf '%s\n' \
+                "=== retry exit code: $_retry_exit_code ===" >> "$stage_log"
+
+            local _retry_structured
+            _retry_structured=$(printf '%s' "$output" \
+                | jq -c '.structured_output // empty' 2>/dev/null)
+            if [[ -z "$_retry_structured" ]]; then
+                _retry_structured=$(printf '%s' "$output" | jq -c '
+                    select(.is_error == false and .result != null) |
+                    {status: "success", summary: .result}
+                ' 2>/dev/null)
+            fi
+
+            _CONSECUTIVE_TIMEOUTS=0
+            _TIMED_OUT_STAGE_NAMES=""
+            local _sr_retry
+            if [[ -n "$_retry_structured" ]]; then
+                _sr_retry=$(_emit_stage_result \
+                    "success" "$_retry_structured" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" "null" \
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+            else
+                _sr_retry=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"no_structured_output"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+            fi
+            _apply_stage_action "$_sr_retry" "retry_same" "$_da_reason"
+            return $?
+            ;;
+        *)
+            log_error "decide-action.sh returned unknown action '$_da_action'"
+            _apply_stage_action "$_sr_interim" "bail" "unknown_action_from_decide"
+            return $?
+            ;;
+    esac
 }
 
 # =============================================================================
