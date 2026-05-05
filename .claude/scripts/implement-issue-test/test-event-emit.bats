@@ -407,6 +407,19 @@ _valid_stage_end() {
 	[[ "$output" == *"error"* ]]
 }
 
+# =============================================================================
+# (e) SCHEMA_VALIDATION_FAIL EVENT WITH errors=[] IS ACCEPTED
+# =============================================================================
+
+@test "(e) schema_validation_fail event with errors=[] passes schema validation" {
+	local event
+	event='{"ts":"2026-01-01T00:00:00Z","run_id":"test-run","stage":"test",'
+	event+='"event":"schema_validation_fail","schema":"implement-issue-triage.json","errors":[]}'
+
+	run bash "$EVENT_EMIT_SCRIPT" "$event"
+	[ "$status" -eq 0 ]
+}
+
 @test "(d) prune script prunes only events.jsonl — not other old log files" {
 	local dir="$TEST_TMP/mixed/logs"
 	mkdir -p "$dir"
