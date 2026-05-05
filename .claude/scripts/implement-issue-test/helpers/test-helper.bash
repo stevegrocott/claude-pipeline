@@ -352,7 +352,7 @@ HEADER
         /^main "\$@"$/ { next }
 
         # Extract function definitions (function_name() { ... })
-        /^[a-z_]+\(\) \{$/,/^\}$/ { print; next }
+        /^[a-z_][a-z_0-9]*\(\) \{$/,/^\}$/ { print; next }
 
         # Skip platform config sourcing (test setup creates platform.sh in the right place)
         /^source "\$SCRIPT_DIR\/\.\.\/config\/platform\.sh"/ { next }
