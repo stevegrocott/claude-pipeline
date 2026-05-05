@@ -48,7 +48,7 @@ This skill is the **intra-tier** counterpart to `escalation-policy`. Escalation-
 
 ### `retry_count`
 
-Integer. Number of times the stage has already been attempted at the **current model tier**. Starts at `0` for the first attempt.
+Integer. Number of retries already attempted at the **current model tier**. Starts at `0` before the first retry (i.e. the initial stage run just failed and no retry has been attempted yet).
 
 ### `error_history`
 
@@ -88,6 +88,11 @@ Filter to records where `model == stage_result.model` before reasoning.
 | `max_turns_exhausted_at_ceiling`| 0                     | bail immediately |
 | `permission_denied`             | 0                     | bail immediately |
 | `schema_not_found`              | 0                     | bail immediately |
+| *(unknown)*                     | 0                     | bail immediately |
+
+> **Unknown `error_kind` fails closed.** Any `error_kind` not listed above receives
+> `max_retries = 0`, causing the script to bail immediately rather than silently
+> retrying with an unknown policy.
 
 **`max_turns` at non-ceiling model:** 0 retries — escalate immediately (same model cannot run more turns).
 
@@ -102,14 +107,17 @@ Filter to records where `model == stage_result.model` before reasoning.
 Only `rate_limit` errors use back-off. Compute `backoff_ms` as:
 
 ```
-backoff_ms = min(30_000 × 2^(retry_count - 1), 120_000)
+backoff_ms = min(30_000 × 2^retry_count, 120_000)
 ```
+
+`retry_count` starts at `0` (no retries done yet), so the first retry always
+waits 30 seconds.
 
 | `retry_count` | `backoff_ms` |
 |---------------|-------------|
-| 1             | 30,000 ms   |
-| 2             | 60,000 ms   |
-| 3             | 120,000 ms  |
+| 0             | 30,000 ms   |
+| 1             | 60,000 ms   |
+| 2             | 120,000 ms  |
 
 All other error classes: no back-off. Retry immediately (or escalate).
 
@@ -156,7 +164,7 @@ error_kind == "rate_limit"? → include backoff_ms
 ```json
 {
   "action":     "retry",
-  "reason":     "rate_limit: transient throttle, retry_count=1, waiting 30s",
+  "reason":     "rate_limit: transient throttle, retry_count=0, waiting 30000ms",
   "backoff_ms": 30000
 }
 ```

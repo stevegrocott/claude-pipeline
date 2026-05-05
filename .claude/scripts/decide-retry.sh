@@ -55,7 +55,10 @@ _max_retries() {
 		no_structured_output) printf '1' ;;
 		timeout)              printf '1' ;;
 		structured_error)     printf '1' ;;
-		*)                    printf '1' ;;
+		# Unknown error_kind: fail closed — 0 retries causes immediate bail.
+		# This prevents silent retries when the policy table has no entry for
+		# an unrecognised class.
+		*)                    printf '0' ;;
 	esac
 }
 
@@ -159,6 +162,9 @@ main() {
 		return 0
 	fi
 
+	# TODO: implement live Claude skill invocation so the retry policy can be
+	# driven by the full SKILL.md prompt without requiring RETRY_POLICY_BACKEND=bash.
+	# Tracked in the follow-up issue for issue #212 (live skill invocation path).
 	die "live retry-policy skill invocation not yet implemented;" \
 		"use RETRY_POLICY_BACKEND=bash"
 }
