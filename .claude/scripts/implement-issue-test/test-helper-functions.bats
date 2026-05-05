@@ -323,18 +323,21 @@ teardown() {
 # is_stage_timeout() — timeout detection helper
 # =============================================================================
 
+# is_stage_timeout consumes the stage_result envelope (issue #178 PR-A).
+# Envelope shape: {status, output, raw, denials, model, error_kind, elapsed_ms}.
+# Timeout is signalled by status=="error" AND error_kind=="timeout".
 @test "is_stage_timeout returns 0 (true) for timeout error JSON" {
-    run is_stage_timeout '{"status":"error","error":"timeout"}'
+    run is_stage_timeout '{"status":"error","output":null,"error_kind":"timeout"}'
     [ "$status" -eq 0 ]
 }
 
 @test "is_stage_timeout returns 1 (false) for successful result" {
-    run is_stage_timeout '{"status":"success","result":"passed","summary":"All tests passed"}'
+    run is_stage_timeout '{"status":"success","output":{"result":"passed","summary":"All tests passed"},"error_kind":null}'
     [ "$status" -eq 1 ]
 }
 
 @test "is_stage_timeout returns 1 (false) for non-timeout error" {
-    run is_stage_timeout '{"status":"error","error":"no structured output"}'
+    run is_stage_timeout '{"status":"error","output":null,"error_kind":"no_structured_output"}'
     [ "$status" -eq 1 ]
 }
 
@@ -344,7 +347,7 @@ teardown() {
 }
 
 @test "is_stage_timeout returns 1 (false) for schema-not-found error" {
-    run is_stage_timeout '{"status":"error","error":"schema not found"}'
+    run is_stage_timeout '{"status":"error","output":null,"error_kind":"schema_not_found"}'
     [ "$status" -eq 1 ]
 }
 

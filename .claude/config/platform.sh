@@ -16,11 +16,19 @@ GIT_CLI="${GIT_CLI:-gh}"                  # gh | glab
 
 # Merge strategy
 MERGE_STYLE="${MERGE_STYLE:-squash}"      # squash | merge | rebase
+# AUTO_MERGE: set to 1 to automatically merge the PR after all checks pass.
+# Set to 0 to leave the PR open for manual review and merging.
+# MERGE_STYLE (above) controls the merge method used when AUTO_MERGE=1.
+AUTO_MERGE="${AUTO_MERGE:-0}"             # 0 = manual merge | 1 = auto-merge when checks pass
 
 # Test commands (set during /adapt based on project stack)
 TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpunit", "pytest"
 TEST_E2E_CMD="${TEST_E2E_CMD:-}"          # e.g., "npx playwright test" — empty if no E2E
 TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
+# TDD reordering for E2E: default true when TEST_E2E_CMD is set; set false to keep smoke tests only without TDD reordering
+if [[ -z "${E2E_TDD_ENABLED:-}" ]]; then
+  [[ -n "${TEST_E2E_CMD:-}" ]] && E2E_TDD_ENABLED=true || E2E_TDD_ENABLED=false
+fi
 
 # Frontend path patterns — pipe-separated globs used by _matches_frontend_pattern()
 # to decide whether a branch touches frontend code (gates E2E verification)
@@ -49,11 +57,16 @@ fi
 LINT_CMD="${LINT_CMD:-}"
 FORMAT_CMD="${FORMAT_CMD:-}"
 
+# Project context file — project teams write their patterns, conventions, and
+# architecture notes here so that agents have consistent codebase context.
+# The orchestrator injects this file into agent prompts when it exists.
+PLATFORM_CONTEXT_FILE="${PLATFORM_CONTEXT_FILE:-.claude/config/context.md}"
+
 # Orchestrator iteration limits (override defaults from implement-issue-orchestrator.sh)
 MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
 MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
 MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_E2E_FIX_ITERATIONS="${MAX_E2E_FIX_ITERATIONS:-2}"
-MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"  # seconds (default 1 hour)
+MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-10800}" # seconds (default 3 hours — long-running issues with many tasks or slow test suites can easily exceed 1 hour)
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-900}"        # seconds per parallel task (default 15 min)

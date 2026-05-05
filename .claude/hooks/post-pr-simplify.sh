@@ -52,8 +52,20 @@ printf 'PR/MR URL found, triggering simplifier\n' >> "$debug_log"
 changed_files=$(git diff --name-only main...HEAD 2>/dev/null | head -20 | tr '\n' ',')
 changed_files=${changed_files%,}
 
+# Compute diff stats to decide whether to block or allow
+lines_added=$(git diff --numstat main...HEAD 2>/dev/null | awk '{s+=$1} END {print s+0}')
+files_changed=$(git diff --name-only main...HEAD 2>/dev/null | wc -l | tr -d ' ')
+
+printf 'lines_added=%s files_changed=%s\n' "$lines_added" "$files_changed" >> "$debug_log"
+
 # Build the reason message
 reason="PR/MR created successfully. Now run the code-simplifier agent to review and simplify the code in this PR/MR. Changed files: ${changed_files}. Use the Task tool with subagent_type='code-simplifier' to simplify the changed code. After simplification, commit any changes and push to update the PR/MR."
 
-# Output JSON to prompt Claude to run the simplifier
-printf '%s\n' "$reason" | jq -Rs '{decision: "block", reason: .}'
+# Small PRs (<100 lines added AND <10 files changed) get a suggestion instead of blocking
+if [[ "$lines_added" -lt 100 ]] && [[ "$files_changed" -lt 10 ]]; then
+    skip_reason="PR/MR created successfully. This is a small PR (${lines_added} lines added, ${files_changed} files changed) — code simplification skipped. Consider running the code-simplifier manually if needed. Changed files: ${changed_files}."
+    printf '%s\n' "$skip_reason" | jq -Rs '{decision: "allow", reason: .}'
+else
+    # Output JSON to prompt Claude to run the simplifier
+    printf '%s\n' "$reason" | jq -Rs '{decision: "block", reason: .}'
+fi

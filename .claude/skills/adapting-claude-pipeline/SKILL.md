@@ -1,6 +1,21 @@
 ---
 name: adapting-claude-pipeline
 description: Use when adapting the generic .claude pipeline folder to a specific codebase - adjusting skills, agents, hooks, scripts, prompts, and settings for the target project's tech stack and workflows
+side_effects:
+  - modifies_claude_local_directory
+  - runs_apply_local_sh
+composes:
+  - brainstorming
+  - writing-plans
+  - writing-skills
+  - writing-agents
+  - subagent-driven-development
+  - dispatching-parallel-agents
+failure_modes:
+  - id: orphaned_references
+    mitigation: Grep for deleted skill and agent names in all remaining .claude/ files and update or remove broken references before completing
+  - id: skip_web_research
+    mitigation: Always WebSearch for domain-specific best practices and anti-patterns before creating or modifying agents
 ---
 
 # Adapting Claude Pipeline to a Codebase

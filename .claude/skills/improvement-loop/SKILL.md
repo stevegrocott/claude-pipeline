@@ -1,6 +1,26 @@
 ---
 name: improvement-loop
 description: Use after resolving a bug, failed task, or unexpected agent behavior to improve the pipeline skills, agents, hooks, or scripts that contributed to the problem. Also proactively suggest improvements when recurring patterns or inefficiencies are observed.
+inputs:
+  - name: resolved_issue
+    type: string
+    required: true
+    description: Description of the bug, failed task, or agent behavior that was just resolved and the root cause identified
+outputs:
+  - name: pipeline_diff
+    type: file
+    description: Minimal change committed to the affected pipeline file (skill, agent, hook, or script)
+side_effects:
+  - modifies_pipeline_file: .claude/{skills,agents,hooks,scripts}/
+composes:
+  - pipeline-feedback
+  - writing-skills
+  - writing-agents
+failure_modes:
+  - id: premature_invocation
+    mitigation: gate check prevents improvement work while issue is unresolved; stop and return to fixing the issue first
+  - id: improvement_drift
+    mitigation: make only the minimal change for the identified problem; flag additional opportunities as separate improvement cycles
 ---
 
 # The Improvement Loop
@@ -97,6 +117,8 @@ Would you like me to run an improvement cycle to update it? This would involve:
 
 ## The Five-Step Cycle
 
+> **Before improving, record the observation via `pipeline-feedback`**
+
 ### Step 1: Capture the Problem
 
 Document what happened before details fade:
@@ -169,6 +191,66 @@ Updated [file] with [change]. This prevents [problem] which occurred during [tas
 | **settings.json** | Edit directly |
 
 **For new skills and agents:** The writing-skills and writing-agents skills have their own TDD cycles. Follow them — don't shortcut.
+
+## Triage Misclassifications: Promoting to Golden Fixtures
+
+When the resolved issue is a triage misclassification, the highest-value improvement
+is promoting the case to a **golden fixture** in the triage-classify golden suite.
+Golden fixtures lock the correct route into the live regression suite so the same
+misroute cannot recur silently across model updates or prompt edits.
+
+**Source:** Check `logs/feedback/triage_misclassification.jsonl` for recorded observations
+(recorded via the `pipeline-feedback` skill).
+
+### Fixture Promotion Steps
+
+1. **Save the issue body as a fixture file**
+
+   ```bash
+   cp <issue-body-source> \
+     .claude/scripts/implement-issue-test/fixtures/triage/<issue-id>.md
+   ```
+
+   The file must contain the raw issue body that the triage classifier will see.
+
+2. **Determine the expected route and disqualifying criterion**
+
+   From the feedback record's `expected` field, derive:
+   - `expected_route` — `fast-path` or `full`
+   - `expected_dq` — the disqualifying criterion name if `full`, or `*` to accept any
+
+3. **Add a manifest entry to `.claude/skills/triage-classify/golden.manifest.txt`**
+
+   Append one pipe-delimited line:
+
+   ```
+   <issue-id>|<expected_route>|<expected_dq>
+   ```
+
+4. **Verify the new fixture passes**
+
+   ```bash
+   .claude/scripts/skill-golden.sh triage-classify <issue-id>
+   ```
+
+   The fixture must pass before committing. If it fails, the prompt or the expected
+   outcome needs investigation — do not update the manifest to match the wrong answer.
+
+5. **Commit both files**
+
+   ```bash
+   git add .claude/skills/triage-classify/golden.manifest.txt \
+           .claude/scripts/implement-issue-test/fixtures/triage/<issue-id>.md
+   git commit -m "improve: triage-classify — add golden fixture for <issue-id>"
+   ```
+
+### When to promote vs. when to fix the prompt
+
+| Situation | Action |
+|-----------|--------|
+| Misclassification was a one-off (unique issue structure) | Promote fixture only — no prompt change |
+| Misclassification reveals a criterion gap in the prompt | Fix the prompt AND promote fixture |
+| Multiple fixtures now flip after a prompt change | Investigate before changing the manifest |
 
 ## Preventing Improvement Drift
 

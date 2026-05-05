@@ -13,7 +13,12 @@
         "properties": {
           "id": { "type": "integer" },
           "description": { "type": "string" },
-          "agent": { "type": "string" }
+          "agent": { "type": "string" },
+          "affected_files": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "File paths this task will modify (from 'Affected files:' line in issue)"
+          }
         },
         "required": ["id", "description", "agent"]
       },

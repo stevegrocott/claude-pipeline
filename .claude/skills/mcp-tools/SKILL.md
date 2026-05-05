@@ -1,6 +1,32 @@
 ---
 name: mcp-tools
 description: Use when you need framework documentation, structured code navigation, or are unsure which exploration tool to use. Reference for available MCP tools and when to prefer each.
+inputs:
+  - name: query
+    type: string
+    required: true
+    description: What you are looking for — framework docs, code structure, or a text/file pattern
+  - name: library_name
+    type: string
+    required: false
+    description: Library or framework name when resolving documentation via Context7
+outputs:
+  - name: documentation
+    type: string
+    description: Framework API reference or usage patterns retrieved from Context7
+  - name: code_structure
+    type: string
+    description: Class hierarchy, method signatures, or call graph from Serena
+  - name: search_results
+    type: string
+    description: Matching file paths or text lines from Grep or Glob
+side_effects: []
+composes: []
+failure_modes:
+  - id: tool_not_found
+    mitigation: Fall back to the next option in the decision matrix (Context7 → web search; Serena → Grep + manual reading); note the unavailability in output
+  - id: library_not_in_context7
+    mitigation: If context7.resolve_library_id returns no match, fall back to web search for the library's documentation
 ---
 
 # MCP Tools Reference

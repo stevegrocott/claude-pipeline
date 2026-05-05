@@ -1,6 +1,26 @@
 ---
 name: dispatching-parallel-agents
 description: Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies
+inputs:
+  - name: problem_domains
+    type: array
+    required: true
+    description: List of independent failures or tasks to investigate concurrently; each must be solvable without context from the others
+outputs:
+  - name: agent_summaries
+    type: array
+    description: Summaries returned by each dispatched agent describing root cause findings and changes made
+side_effects:
+  - spawns_parallel_subagents
+  - modifies_repository_files
+  - creates_git_commits
+failure_modes:
+  - id: agent_conflict
+    mitigation: Check summaries for overlapping file edits before integrating; resolve conflicts manually
+  - id: related_failures
+    mitigation: Switch to single-agent investigation — fixing one failure may fix others
+  - id: agent_returns_no_fix
+    mitigation: Re-dispatch with a more specific scope or fall back to sequential debugging
 ---
 
 # Dispatching Parallel Agents

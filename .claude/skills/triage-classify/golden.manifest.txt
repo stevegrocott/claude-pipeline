@@ -1,0 +1,28 @@
+# golden.manifest.txt — triage-classify skill
+#
+# Format: fixture_basename|expected_route|expected_criterion_or_*
+#   fixture_basename   - filename in fixtures/triage/ (without .md extension)
+#   expected_route     - fast-path | full
+#   expected_criterion - disqualifying_criterion name, or "*" to accept any
+#
+# The criterion is only checked when the route is "full".  Use a specific name
+# when the prompt must pinpoint a particular reason (e.g. auth-test must fail
+# on no_security_concerns specifically — not another reason).
+# Use "*" when only the routing decision is the contract.
+#
+# DO NOT AUTO-UPDATE THIS MANIFEST.  A fixture flip means the prompt or the
+# underlying model changed in a way that altered a routing decision.
+# Investigate before updating the expected value.
+#
+# Source: migrated from triage-validate.sh MANIFEST array.
+#
+issue-2836|fast-path|*
+issue-2837|fast-path|*
+issue-2838|fast-path|*
+issue-2839|fast-path|*
+issue-2752|full|test_only_scope
+issue-2754|full|test_only_scope
+issue-2776|full|test_only_scope
+issue-auth-test|full|no_security_concerns
+issue-vague|full|precise_specification
+issue-novel-pattern|full|established_pattern

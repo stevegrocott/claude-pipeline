@@ -744,6 +744,24 @@ run_with_config() {
 	[[ "$output" == "haiku" ]]
 }
 
+@test "resolve_model matches docs prefix in docs-file-1" {
+	run_with_config 'resolve_model "docs-file-1"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
+@test "resolve_model matches docs prefix in docs-file-10" {
+	run_with_config 'resolve_model "docs-file-10"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
+@test "resolve_model matches docs prefix in docs-commit" {
+	run_with_config 'resolve_model "docs-commit"'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "haiku" ]]
+}
+
 @test "resolve_model matches complete prefix in complete-issue" {
 	run_with_config 'resolve_model "complete-issue"'
 	[ "$status" -eq 0 ]
@@ -1001,6 +1019,133 @@ run_with_config() {
 
 @test "_next_model_up handles empty input" {
 	run_with_config '_next_model_up ""'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "opus" ]]
+}
+
+# =============================================================================
+# effective_model — usage-aware escalation
+# =============================================================================
+#
+# These tests source claude-usage.sh (which model-config.sh's effective_model
+# delegates to). To exercise behavior without hitting the network we set up
+# a fake cache file at $XDG_CACHE_HOME/claude-pipeline/usage.json before
+# calling effective_model.
+#
+
+# Helper: configure usage env so claude-usage.sh treats us as authenticated.
+_setup_usage_cache() {
+	export XDG_CACHE_HOME="$TEST_TMP/cache"
+	export CLAUDE_USAGE_SESSION_KEY="sk-ant-sid01-fake"
+	export CLAUDE_USAGE_ORG_ID="00000000-0000-0000-0000-000000000000"
+	export CLAUDE_USAGE_CACHE_TTL=300
+	mkdir -p "$XDG_CACHE_HOME/claude-pipeline"
+	cat > "$XDG_CACHE_HOME/claude-pipeline/usage.json"
+}
+
+# Source both modules in a subshell with cache pre-seeded. Stderr suppressed
+# so $output captures the function's return value cleanly — _usage_aware_escalate
+# logs to stderr when it escalates, which is correct production behavior but
+# noise in these tests.
+run_with_usage() {
+	local cmd="$1"
+	run bash -c "
+		source '$SCRIPT_DIR/model-config.sh'
+		source '$SCRIPT_DIR/claude-usage.sh'
+		$cmd 2>/dev/null
+	"
+}
+
+@test "effective_model defaults to resolve_model when no cooldown applies" {
+	_setup_usage_cache <<'JSON'
+{
+  "five_hour": {"utilization": 2, "resets_at": "2026-05-02T07:09:59+00:00"},
+  "seven_day": {"utilization": 5, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_sonnet": {"utilization": 5, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+	run_with_usage 'effective_model implement M'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "sonnet" ]]
+}
+
+@test "effective_model escalates sonnet to opus when seven_day_sonnet >= threshold (no overage)" {
+	_setup_usage_cache <<'JSON'
+{
+  "five_hour": {"utilization": 2, "resets_at": "2026-05-02T07:09:59+00:00"},
+  "seven_day": {"utilization": 50, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_sonnet": {"utilization": 100, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+	run_with_usage 'effective_model implement M'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "opus" ]]
+}
+
+@test "effective_model returns opus (ceiling) when sonnet AND seven_day are exhausted" {
+	_setup_usage_cache <<'JSON'
+{
+  "five_hour": {"utilization": 5, "resets_at": "2026-05-02T07:09:59+00:00"},
+  "seven_day": {"utilization": 99, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_sonnet": {"utilization": 100, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+	run_with_usage 'effective_model implement M'
+	[ "$status" -eq 0 ]
+	# Both sonnet and (via fallback to seven_day at 99%) opus are exhausted.
+	# Loop should hit the ceiling and return opus rather than spinning.
+	[[ "$output" == "opus" ]]
+}
+
+@test "effective_model honors CLAUDE_USAGE_DISABLE=1 (no escalation)" {
+	export CLAUDE_USAGE_DISABLE=1
+	_setup_usage_cache <<'JSON'
+{
+  "five_hour": {"utilization": 2, "resets_at": "2026-05-02T07:09:59+00:00"},
+  "seven_day": {"utilization": 5, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_sonnet": {"utilization": 100, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+	run_with_usage 'effective_model implement M'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "sonnet" ]]
+}
+
+@test "effective_model handles missing CLAUDE_USAGE_SESSION_KEY gracefully (no escalation)" {
+	unset CLAUDE_USAGE_SESSION_KEY || true
+	# No cache, no key → effective_model must not escalate.
+	run bash -c "
+		unset CLAUDE_USAGE_SESSION_KEY
+		export XDG_CACHE_HOME='$TEST_TMP/cache-empty'
+		source '$SCRIPT_DIR/model-config.sh'
+		source '$SCRIPT_DIR/claude-usage.sh'
+		effective_model implement M
+	"
+	[ "$status" -eq 0 ]
+	[[ "$output" == "sonnet" ]]
+}
+
+@test "effective_fallback also walks the escalation loop" {
+	_setup_usage_cache <<'JSON'
+{
+  "five_hour": {"utilization": 2, "resets_at": "2026-05-02T07:09:59+00:00"},
+  "seven_day": {"utilization": 50, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_sonnet": {"utilization": 100, "resets_at": "2026-05-02T05:59:59+00:00"},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+	# fallback for haiku would normally be sonnet — but sonnet is exhausted,
+	# so effective_fallback should escalate to opus.
+	run_with_usage 'effective_fallback haiku'
 	[ "$status" -eq 0 ]
 	[[ "$output" == "opus" ]]
 }

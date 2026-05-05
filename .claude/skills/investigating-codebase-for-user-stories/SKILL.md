@@ -1,6 +1,29 @@
 ---
 name: investigating-codebase-for-user-stories
 description: Use when asked to create user stories from a codebase, document existing features as stories, or reverse-engineer requirements from code
+inputs: []
+outputs:
+  - name: story_files
+    type: file_path
+    description: Individual user story markdown files written to docs/user-stories/<feature-area>/<story>.md
+  - name: readme_file
+    type: file_path
+    description: Coverage matrix and dependency graph index at docs/user-stories/README.md
+  - name: create_issues_script
+    type: file_path
+    description: Auto-generated batch script at docs/user-stories/create-issues.sh for creating GitHub issues from stories
+side_effects:
+  - writes_files: docs/user-stories/
+  - may_create_github_labels: true
+  - may_create_github_issues: true
+composes: []
+failure_modes:
+  - id: no_routes_found
+    mitigation: document what structure was found, produce partial stories, and note which feature areas could not be mapped
+  - id: no_auth_middleware
+    mitigation: label user types as "Unknown" in stories and ask the user to clarify roles before finalising
+  - id: circular_dependencies
+    mitigation: flag the circular chain in the README dependency graph and ask the user whether to split or merge the affected stories
 ---
 
 # Investigating Codebase for User Stories

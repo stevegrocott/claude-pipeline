@@ -1,6 +1,15 @@
 ---
 name: brainstorming
 description: "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation."
+outputs:
+  - name: design_document
+    type: file_path
+    description: Validated design saved to docs/plans/YYYY-MM-DD-<topic>-design.md (standalone invocation only)
+side_effects:
+  - writes_file: "docs/plans/YYYY-MM-DD-<topic>-design.md"
+  - commits_to_git
+composes:
+  - writing-plans
 ---
 
 # Brainstorming Ideas Into Designs

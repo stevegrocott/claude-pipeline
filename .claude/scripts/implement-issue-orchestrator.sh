@@ -11,6 +11,27 @@
 #   - status.json: Real-time progress
 #   - logs/implement-issue/<timestamp>/: Per-stage logs
 #
+# Stage Execution Contract:
+#   run_stage <name> <prompt_file> [options]
+#     Runs a single pipeline stage and emits a stage_result JSON envelope on
+#     stdout (schema: schemas/stage-result.json).  Callers must capture this
+#     value and pass it to _apply_stage_action for routing — never inspect the
+#     raw exit code or attempt to parse stage output directly.
+#
+#   _apply_stage_action <stage_result> <action> [reason]
+#     The single dispatch point for all post-stage outcome handling.  The
+#     caller (run_stage) inspects the stage_result envelope (.error_kind /
+#     .output.status) to determine which action to take, then passes both the
+#     envelope and the action string as arguments — the action is NOT embedded
+#     in the stage_result envelope (schema: schemas/stage-result.json).
+#     Actions: "accept" | "bail" | "escalate" | "retry_same"
+#     All new escalation or retry logic belongs here, not in run_stage callers.
+#
+#   Typical call pattern:
+#     result=$(run_stage "implement" "$prompt_file" ...)
+#     # Caller inspects .error_kind / .output.status to decide the action:
+#     _apply_stage_action "$result" "accept"   # or "bail" / "escalate" / "retry_same"
+#
 
 set -uo pipefail  # Note: not -e, we handle errors explicitly
 
@@ -21,8 +42,38 @@ set -uo pipefail  # Note: not -e, we handle errors explicitly
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 source "$SCRIPT_DIR/model-config.sh"
+# claude-usage.sh provides is_model_exhausted, used by effective_model in
+# model-config.sh. Sourcing is no-op when CLAUDE_USAGE_SESSION_KEY is unset
+# (graceful fallback to today's behavior — see claude-usage.sh).
+source "$SCRIPT_DIR/claude-usage.sh"
+# shellcheck source=prompts/triage-prompt.sh
+source "$SCRIPT_DIR/prompts/triage-prompt.sh"
 source "$SCRIPT_DIR/../config/platform.sh"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
+
+# Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work regardless of CWD
+if [[ -n "${PLATFORM_CONTEXT_FILE:-}" && "${PLATFORM_CONTEXT_FILE}" != /* ]]; then
+    PLATFORM_CONTEXT_FILE="$(cd "$SCRIPT_DIR/../.." && pwd)/$PLATFORM_CONTEXT_FILE"
+fi
+
+# Read project context file for agent prompt injection
+# PLATFORM_CONTEXT_FILE is configured in platform.sh; defaults to .claude/config/context.md
+PLATFORM_CONTEXT_CONTENT=""
+if [[ -n "${PLATFORM_CONTEXT_FILE:-}" && -f "$PLATFORM_CONTEXT_FILE" ]]; then
+    PLATFORM_CONTEXT_CONTENT="$(< "$PLATFORM_CONTEXT_FILE")"
+fi
+
+# Build the prefix block injected before task descriptions in implement, fix, and review prompts.
+# Defined once at startup so every prompt inherits a consistent project patterns header.
+if [[ -n "$PLATFORM_CONTEXT_CONTENT" ]]; then
+    PLATFORM_PATTERNS_PREFIX="## Project Patterns
+
+$PLATFORM_CONTEXT_CONTENT
+
+"
+else
+    PLATFORM_PATTERNS_PREFIX=""
+fi
 
 # Timeouts and limits
 # These can be overridden by platform.sh (sourced above) or env vars
@@ -31,6 +82,15 @@ MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
 MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"
+MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
+
+# Kill-switch for emergency bash fallback after PR-B introduces the
+# escalation-policy skill.  Defined here for discoverability; PR-B will
+# honour it when deciding whether to delegate to the skill or stay with the
+# inline bash decision tree.
+#   Unset / empty  → use escalation-policy skill when available (PR-B+)
+#   "bash"         → always use inline bash escalation branches
+ESCALATION_POLICY_BACKEND="${ESCALATION_POLICY_BACKEND:-}"
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
 readonly RATE_LIMIT_BUFFER=60
@@ -66,6 +126,7 @@ fi
 
 get_stage_timeout() {
     local stage_name="${1:-}"
+    local complexity="${2:-}"
 
     case "$stage_name" in
         test-iter*)     printf '%s' 900 ;;
@@ -75,7 +136,13 @@ get_stage_timeout() {
         fix-e2e*)       printf '%s' 900 ;;
         test*|docs*|pr*) printf '%s' 600 ;;
         task-review*)    printf '%s' 900 ;;
-        implement*|fix*) printf '%s' 1800 ;;
+        implement*|fix*)
+            if [[ "$complexity" == "L" ]]; then
+                printf '%s' 3600
+            else
+                printf '%s' 1800
+            fi
+            ;;
         *)               printf '%s' 1800 ;;
     esac
 }
@@ -263,6 +330,88 @@ next_stage_log() {
 }
 
 # =============================================================================
+# STRUCTURED EVENT EMISSION
+# =============================================================================
+#
+# emit_event <event_type> [key=value ...]
+#
+# Builds a JSON envelope with ts/run_id/event/stage and forwards it to
+# event-emit.sh, which validates against schemas/pipeline-event.json and
+# appends one JSONL line to $LOG_BASE/events.jsonl under flock.
+#
+# Design notes:
+#   - Parallel to existing text logs: every text-log call site that maps to one
+#     of the 8 event types (stage_start, stage_end, escalation, retry,
+#     model_call, rate_limit_hit, schema_validation_fail, status_change) gets
+#     a parallel emit_event call.  Text logs are retained verbatim for human
+#     debugging — see issue #180.
+#   - Safe-by-default: silently no-ops when event-emit.sh is missing or
+#     LOG_BASE is unset (e.g. during early init or when the helper has not yet
+#     landed in this branch).  A schema-invalid emit exits non-zero from
+#     event-emit.sh but never crashes the orchestrator (stderr-redirected,
+#     `|| true`).
+#   - run_id is derived from the LOG_BASE basename which already encodes
+#     issue+timestamp (e.g. "issue-180-20260502-183541").
+emit_event() {
+    local event_type="$1"
+    shift
+
+    # Parallel-task safety: if the helper hasn't been added yet (sub-issue
+    # tasks land out of order), skip silently rather than break the pipeline.
+    local emit_script="$SCRIPT_DIR/event-emit.sh"
+    if [[ ! -x "$emit_script" ]]; then
+        return 0
+    fi
+
+    # Skip if LOG_BASE isn't established yet (very early init paths).
+    if [[ -z "${LOG_BASE:-}" ]]; then
+        return 0
+    fi
+
+    local run_id="${LOG_BASE##*/}"
+
+    local -a jq_args=(
+        --arg ts "$(date -Iseconds)"
+        --arg run_id "$run_id"
+        --arg event "$event_type"
+    )
+    local filter='{ts: $ts, run_id: $run_id, event: $event}'
+
+    local kv key value safe_key json_value
+    for kv in "$@"; do
+        # Support `key:=value` for JSON-typed values (numbers, booleans, null)
+        # in addition to `key=value` for strings. Required because the schema
+        # types fields like attempt/max_attempts/stage_attempt as integer.
+        if [[ "$kv" == *":="* ]]; then
+            key="${kv%%:=*}"
+            value="${kv#*:=}"
+            json_value=true
+        else
+            key="${kv%%=*}"
+            value="${kv#*=}"
+            json_value=false
+        fi
+        # Defensive: only allow alphanumeric/underscore in keys to keep the
+        # generated jq filter safe.
+        safe_key="${key//[^A-Za-z0-9_]/}"
+        if [[ -z "$safe_key" ]]; then
+            continue
+        fi
+        if $json_value; then
+            jq_args+=(--argjson "$safe_key" "$value")
+        else
+            jq_args+=(--arg "$safe_key" "$value")
+        fi
+        filter+=" | .${safe_key} = \$${safe_key}"
+    done
+
+    local event_json
+    event_json=$(jq -nc "${jq_args[@]}" "$filter" 2>/dev/null) || return 0
+
+    LOG_DIR="$LOG_BASE" "$emit_script" "$event_json" >/dev/null 2>>"$LOG_BASE/orchestrator.log" || true
+}
+
+# =============================================================================
 # STATUS FILE MANAGEMENT
 # =============================================================================
 
@@ -282,8 +431,11 @@ init_status() {
             branch: $branch,
             current_stage: $current_stage,
             current_task: $current_task,
+            route: null,
             stages: {
                 parse_issue: {status: "pending", started_at: null, completed_at: null},
+                triage: {status: "pending", started_at: null, completed_at: null,
+                         route: null, confidence: null, disqualifying_criterion: null},
                 validate_plan: {status: "pending", started_at: null, completed_at: null},
                 implement: {status: "pending", task_progress: "0/0"},
                 quality_loop: {status: "pending", iteration: 0},
@@ -294,12 +446,16 @@ init_status() {
                 docs: {status: "pending"},
                 pr: {status: "pending"},
                 pr_review: {status: "pending", iteration: 0},
-                complete: {status: "pending"}
+                complete: {status: "pending"},
+                fast_path_implement: {status: "pending"},
+                fast_path_pr: {status: "pending"},
+                fast_path_merge: {status: "pending"}
             },
             tasks: [],
             quality_iterations: 0,
             test_iterations: 0,
             pr_review_iterations: 0,
+            stage_started_at: null,
             last_update: (now | todate),
             log_dir: $log_dir,
             escalations: []
@@ -338,14 +494,25 @@ update_stage() {
 
 set_stage_started() {
     local stage="$1"
+    local model="${2:-}"
     jq --arg stage "$stage" \
        '.stages[$stage].started_at = (now | todate) |
         .stages[$stage].status = "in_progress" |
         .current_stage = $stage |
+        .stage_started_at = (now | todate) |
         .state = "running" |
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
+
+    # Resolve the model so the stage_start event satisfies the schema's
+    # required `model` field. If effective_model isn't usable yet, fall back
+    # to a stable placeholder so the event still validates.
+    if [[ -z "$model" ]]; then
+        model=$(effective_model "$stage" "" 2>/dev/null) || model=""
+        [[ -n "$model" ]] || model="unresolved"
+    fi
+    emit_event "stage_start" "stage=$stage" "model=$model"
 }
 
 set_stage_completed() {
@@ -356,6 +523,9 @@ set_stage_completed() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
+    # Schema enum for stage_end.status is ["success","error","rate_limit"];
+    # "completed" is the status.json column name, not the event-stream value.
+    emit_event "stage_end" "stage=$stage" "status=success"
 }
 
 record_escalation() {
@@ -372,6 +542,11 @@ record_escalation() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
+    emit_event "escalation" \
+        "stage=$stage" \
+        "from_model=$from_model" \
+        "to_model=$to_model" \
+        "reason=$reason"
 }
 
 update_task() {
@@ -410,10 +585,22 @@ set_branch_info() {
 
 set_final_state() {
     local state="$1"
+    local prev_state stage
+    # Capture the previous state and current stage BEFORE we overwrite, so the
+    # status_change event can carry from_state/to_state per schema.
+    prev_state=$(jq -r '.state // "running"' "$STATUS_FILE" 2>/dev/null) \
+        || prev_state="running"
+    stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
+        || stage="unknown"
+
     jq --arg state "$state" \
        '.state = $state | .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
+    emit_event "status_change" \
+        "stage=$stage" \
+        "from_state=$prev_state" \
+        "to_state=$state"
 }
 
 increment_quality_iteration() {
@@ -683,15 +870,15 @@ is_stage_completed() {
 
 # Check if a stage result is a timeout error
 # Arguments:
-#   $1 - JSON string from run_stage output
+#   $1 - stage_result JSON envelope from run_stage (see schemas/stage-result.json)
 # Returns 0 if timeout, 1 if not
 is_stage_timeout() {
     local result="${1:-}"
     [[ -z "$result" ]] && return 1
-    local err_status err_type
+    local err_status err_kind
     err_status=$(printf '%s' "$result" | jq -r '.status // empty' 2>/dev/null)
-    err_type=$(printf '%s' "$result" | jq -r '.error // empty' 2>/dev/null)
-    [[ "$err_status" == "error" && "$err_type" == "timeout" ]]
+    err_kind=$(printf '%s' "$result" | jq -r '.error_kind // empty' 2>/dev/null)
+    [[ "$err_status" == "error" && "$err_kind" == "timeout" ]]
 }
 
 # Get count of completed tasks
@@ -954,7 +1141,163 @@ handle_rate_limit() {
     resume_at=$(date -Iseconds -d "+${wait_time} seconds" 2>/dev/null || date -v+${wait_time}S -Iseconds 2>/dev/null)
 
     log "Rate limit hit. Waiting ${wait_time}s until $resume_at"
+    emit_event "rate_limit_hit" \
+        "stage=${_RUN_STAGE_NAME:-}" \
+        "retry_after_seconds:=$wait_time" \
+        "resume_at=${resume_at:-}"
     sleep "$wait_time"
+}
+
+# =============================================================================
+# SKILL LOADER
+# =============================================================================
+
+# Load a skill's SKILL.md content for injection into stage prompts.
+# Usage: local content; content=$(load_skill "pr-creation")
+# Returns empty string if skill file not found (non-fatal).
+load_skill() {
+    local skill_name="$1"
+    # CLAUDE_PROJECT_DIR is set by Claude Code but absent when run from batch/shell directly.
+    # Fall back to the script's own repo root so skills load correctly in both contexts.
+    local _project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    local skill_file="$_project_dir/.claude/skills/$skill_name/SKILL.md"
+    if [[ -f "$skill_file" ]]; then
+        cat "$skill_file"
+    else
+        log_warn "Skill file not found: $skill_file"
+        echo ""
+    fi
+}
+
+# =============================================================================
+# STAGE RESULT ENVELOPE
+# =============================================================================
+#
+# run_stage accumulates execution state into local variables and emits a
+# single stage_result JSON envelope (see schemas/stage-result.json) at every
+# exit point. The envelope wraps the parsed structured output under .output
+# and carries the run-level metadata callers need to make escalation
+# decisions: status, raw stdout, permission denials, resolved model,
+# error_kind, and elapsed_ms.
+#
+# Callers reach into .output.<field> for the agent's structured response
+# (e.g., .output.tasks instead of .tasks) — see AC1 of issue #178.
+
+# Get current epoch in milliseconds. EPOCHREALTIME (bash 5+) preferred;
+# python3 fallback covers macOS bash 3.2; date +%s last resort (1s resolution).
+_epoch_ms() {
+    if [[ -n "${EPOCHREALTIME:-}" ]]; then
+        local us="${EPOCHREALTIME//./}"
+        printf '%s\n' "$((us / 1000))"
+    elif command -v python3 &>/dev/null; then
+        python3 -c 'import time; print(int(time.time()*1000))'
+    else
+        printf '%s000\n' "$(date +%s)"
+    fi
+}
+
+# Extract permission_denials tool_name array from raw CLI output as a JSON
+# array. Returns "[]" when absent, malformed, or jq fails.
+_extract_denials() {
+    local raw="$1"
+    local denials
+    denials=$(printf '%s' "$raw" \
+        | jq -c '[.permission_denials[]?.tool_name // empty]' 2>/dev/null)
+    if [[ -z "$denials" || "$denials" == "null" ]]; then
+        printf '[]\n'
+    else
+        printf '%s\n' "$denials"
+    fi
+}
+
+# Emit a stage_result JSON envelope on stdout. All payload args are
+# JSON-encoded so callers can pass nested objects/arrays safely via
+# --argjson without shell-quoting hazards.
+#
+# Arguments:
+#   $1 - status:           "success" | "error" | "rate_limit"
+#   $2 - output_json:      JSON object or "null"
+#   $3 - raw:              raw stdout from CLI (string)
+#   $4 - denials_json:     JSON array of tool names
+#   $5 - model:            resolved model id (e.g. haiku|sonnet|opus)
+#   $6 - error_kind_json:  "null" or JSON-encoded string (e.g. "\"timeout\"")
+#   $7 - elapsed_ms:       integer milliseconds
+_emit_stage_result() {
+    local status="$1"
+    local output_json="$2"
+    local raw="$3"
+    local denials_json="$4"
+    local model="$5"
+    local error_kind_json="$6"
+    local elapsed_ms="$7"
+
+    jq -nc \
+        --arg status "$status" \
+        --argjson output "$output_json" \
+        --arg raw "$raw" \
+        --argjson denials "$denials_json" \
+        --arg model "$model" \
+        --argjson error_kind "$error_kind_json" \
+        --argjson elapsed_ms "$elapsed_ms" \
+        '{status: $status, output: $output, raw: $raw, denials: $denials,
+          model: $model, error_kind: $error_kind, elapsed_ms: $elapsed_ms}'
+}
+
+# Apply a stage outcome action to a stage_result envelope.
+#
+# This is the single bash entry point for stage outcome handling. Callers
+# determine which action to take (via the existing bash decision tree), then
+# delegate execution to this function. PR-B will replace the bash decision
+# tree with an escalation-policy skill invocation; this shim keeps the code
+# path uniform so tests can target the action interface independently.
+#
+# Arguments:
+#   $1 - stage_result: JSON envelope (see schemas/stage-result.json)
+#   $2 - action:       "accept" | "bail" | "escalate" | "retry_same"
+#   $3 - reason:       (optional) human-readable reason for logging / diagnostics
+#
+# Stdout:
+#   Emits the stage_result JSON envelope unchanged (PR-A pass-through).
+#   PR-B will replace the escalate/retry_same branches with skill invocations
+#   that may produce a new envelope.
+#
+# Returns:
+#   0 for accept / escalate / retry_same
+#   1 for bail (signals caller that stage result is terminal)
+_apply_stage_action() {
+	local stage_result="$1"
+	local action="$2"
+	local reason="${3:-}"
+
+	case "$action" in
+		accept)
+			printf '%s\n' "$stage_result"
+			return 0
+			;;
+		bail)
+			log_error "Stage bailed: ${reason:-action=bail}"
+			printf '%s\n' "$stage_result"
+			return 1
+			;;
+		escalate)
+			# PR-A shim: emit stage_result as-is; the re-run logic lives in
+			# run_stage. PR-B will replace this branch with a skill invocation
+			# that returns the next action + target model.
+			printf '%s\n' "$stage_result"
+			return 0
+			;;
+		retry_same)
+			# PR-A shim: emit stage_result as-is; the retry logic lives in
+			# run_stage. PR-B will replace this branch with explicit retry.
+			printf '%s\n' "$stage_result"
+			return 0
+			;;
+		*)
+			log_error "_apply_stage_action: unknown action '$action'"
+			printf '%s\n' "$stage_result"
+			return 1
+			;;
+	esac
 }
 
 # =============================================================================
@@ -970,28 +1313,54 @@ run_stage() {
     local timeout_override="${6:-}"   # optional: override stage timeout (seconds)
     local model_override="${7:-}"    # optional: override model (haiku|sonnet|opus)
 
+    # Track stage in a global so handle_rate_limit() (called from inside this
+    # function) can attribute its rate_limit_hit event to the right stage.
+    _RUN_STAGE_NAME="$stage_name"
+
     local stage_log="$LOG_BASE/stages/$(next_stage_log "$stage_name")"
+
+    # Stage result accumulator — every exit point funnels through
+    # _emit_stage_result so callers receive a uniform stage_result envelope.
+    # See schemas/stage-result.json. result_model tracks the model that
+    # produced the final output (escalation paths reassign it).
+    local result_start_ms result_model=""
+    result_start_ms=$(_epoch_ms)
 
     # Validate schema file exists
     if [[ ! -f "$SCHEMA_DIR/$schema_file" ]]; then
         log_error "Schema file not found: $SCHEMA_DIR/$schema_file"
+        emit_event "schema_validation_fail" \
+            "stage=$stage_name" \
+            "reason=schema_not_found" \
+            "schema_file=$schema_file"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
-        echo '{"status":"error","error":"schema not found"}'
-        return 1
+        local _sr
+        _sr=$(_emit_stage_result \
+            "error" "null" "" "[]" \
+            "$result_model" '"schema_not_found"' \
+            "$(( $(_epoch_ms) - result_start_ms ))")
+        _apply_stage_action "$_sr" "bail" "schema_not_found"
+        return $?
     fi
 
     local schema
     schema=$(jq -c . "$SCHEMA_DIR/$schema_file")
 
-    # Resolve model and fallback from stage name + complexity hint
+    # Resolve model and fallback. model_override (e.g. PR stage pinned to opus)
+    # bypasses usage gating — explicit caller intent overrides the auto-skip.
     local model fallback_model
     if [[ -n "$model_override" ]]; then
         model="$model_override"
+        fallback_model=$(_next_model_up "$model")
     else
-        model=$(resolve_model "$stage_name" "$complexity")
+        model=$(effective_model "$stage_name" "$complexity")
+        fallback_model=$(effective_fallback "$model")
     fi
-    fallback_model=$(_next_model_up "$model")
+
+    # Track final model for stage_result envelope. Reassigned by escalation
+    # branches when they produce output via a different model.
+    result_model="$model"
 
     # Record resolved model in status.json stage entry for export_metrics()
     if [[ -f "$STATUS_FILE" ]]; then
@@ -1010,6 +1379,15 @@ run_stage() {
     fi
     log "  Log: $stage_log"
 
+    emit_event "model_call" \
+        "stage=$stage_name" \
+        "model=$model" \
+        "fallback_model=$fallback_model" \
+        "agent=${agent:-default}" \
+        "schema=$schema_file" \
+        "complexity=${complexity:-}" \
+        "stage_attempt:=1"
+
     local -a agent_args=()
     if [[ -n "$agent" ]]; then
         agent_args=(--agent "$agent")
@@ -1019,7 +1397,7 @@ run_stage() {
     if [[ -n "$timeout_override" ]]; then
         stage_timeout="$timeout_override"
     else
-        stage_timeout=$(get_stage_timeout "$stage_name")
+        stage_timeout=$(get_stage_timeout "$stage_name" "$complexity")
     fi
     log "  Timeout: ${stage_timeout}s"
 
@@ -1029,15 +1407,24 @@ run_stage() {
         fallback_args=(--fallback-model "$fallback_model")
     fi
 
-    # Cap exploration for inherently light-tier stages (parse, pr, complete, etc.)
+    # Cap exploration for inherently light-tier stages (parse, complete, docs, etc.)
     # These are mechanical and should complete in a few turns.
     # Do NOT cap implement/review/fix stages that use haiku via S-complexity override —
     # those still need enough turns to read files, make edits, and produce output.
+    #
+    # PR creation gets a separate cap — it only needs to run glab/gh mr create,
+    # push if needed, and format a description. 10 turns is plenty.
     local -a turns_args=()
     local _matched_prefix _inherent_tier
     _matched_prefix=$(_match_stage_prefix "$stage_name") || true
     _inherent_tier=$(_stage_to_tier "${_matched_prefix:-}")
-    if [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
+    if [[ "${_matched_prefix:-}" == "pr" && "${_matched_prefix:-}" != "pr-review" && "${_matched_prefix:-}" != "pr-fix" ]]; then
+        turns_args=(--max-turns 5)
+        log "  Max turns: 5 (PR creation — push + create MR)"
+    elif [[ "${_matched_prefix:-}" == "pr-review" ]]; then
+        turns_args=(--max-turns 10)
+        log "  Max turns: 10 (PR review — focused diff analysis)"
+    elif [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (inherently light stage)"
     elif [[ "$model" == "haiku" ]]; then
@@ -1077,8 +1464,14 @@ run_stage() {
         timeout_structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
         if [[ -n "$timeout_structured" ]]; then
             log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced structured output — using it"
-            printf '%s\n' "$timeout_structured"
-            return 0
+            local _sr
+            _sr=$(_emit_stage_result \
+                "success" "$timeout_structured" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" "null" \
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr" "accept"
+            return $?
         fi
 
         # Fallback: if no structured output, try .result text wrapping
@@ -1091,8 +1484,14 @@ run_stage() {
 
         if [[ -n "$timeout_fallback_result" ]]; then
             log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced .result — using fallback"
-            printf '%s\n' "$timeout_fallback_result"
-            return 0
+            local _sr
+            _sr=$(_emit_stage_result \
+                "success" "$timeout_fallback_result" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" "null" \
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr" "accept"
+            return $?
         fi
 
         # Retry with a 20% longer timeout before giving up
@@ -1100,6 +1499,23 @@ run_stage() {
         retry_timeout=$(( stage_timeout + stage_timeout / 5 ))
         log "WARN: Stage $stage_name timed out after ${stage_timeout}s — retrying with ${retry_timeout}s timeout"
         printf '%s\n' "=== $stage_name timeout retry (${retry_timeout}s) ===" >> "$stage_log"
+
+        emit_event "retry" \
+            "stage=$stage_name" \
+            "reason=timeout" \
+            "attempt:=2" \
+            "max_attempts:=2" \
+            "model=$model" \
+            "previous_timeout=$stage_timeout" \
+            "retry_timeout=$retry_timeout"
+        emit_event "model_call" \
+            "stage=$stage_name" \
+            "model=$model" \
+            "fallback_model=$fallback_model" \
+            "agent=${agent:-default}" \
+            "schema=$schema_file" \
+            "complexity=${complexity:-}" \
+            "stage_attempt:=2"
 
         exit_code=0
         output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
@@ -1133,6 +1549,15 @@ run_stage() {
                     timeout_esc_fallback_args=(--fallback-model "$timeout_esc_fallback")
                 fi
 
+                emit_event "model_call" \
+                    "stage=$stage_name" \
+                    "model=$timeout_escalated_model" \
+                    "fallback_model=$timeout_esc_fallback" \
+                    "agent=${agent:-default}" \
+                    "schema=$schema_file" \
+                    "complexity=${complexity:-}" \
+                    "stage_attempt:=3"
+
                 exit_code=0
                 output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
                     ${agent_args[@]+"${agent_args[@]}"} \
@@ -1142,6 +1567,11 @@ run_stage() {
                     --output-format json \
                     --json-schema "$schema" \
                     2>&1) || exit_code=$?
+
+                # Escalation produced output via a different model — track it
+                # so the stage_result envelope reports the model that actually
+                # ran rather than the original tier we escalated from.
+                result_model="$timeout_escalated_model"
 
                 printf '%s\n' "=== $stage_name timeout escalation output ===" >> "$stage_log"
                 printf '%s\n' "$output" >> "$stage_log"
@@ -1154,8 +1584,14 @@ run_stage() {
                     log_warn "Cascade timeout detected: $_CONSECUTIVE_TIMEOUTS consecutive stage(s)" \
                         "timed out: $_TIMED_OUT_STAGE_NAMES. Consider increasing timeout or reducing complexity."
                 fi
-                echo '{"status":"error","error":"timeout"}'
-                return 1
+                local _sr
+                _sr=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"timeout"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+                _apply_stage_action "$_sr" "bail" "timeout"
+                return $?
             fi
         fi
     fi
@@ -1167,13 +1603,19 @@ run_stage() {
     output_subtype=$(printf '%s' "$output" | jq -r '.subtype // empty' 2>/dev/null)
     if [[ "$output_subtype" == "error_max_turns" ]]; then
         local escalated_model
-        escalated_model=$(_next_model_up "$model")
+        escalated_model=$(effective_fallback "$model")
 
         if [[ "$escalated_model" == "$model" ]]; then
             # Already at ceiling (opus) — can't escalate further
             log_error "Stage $stage_name hit max turns with $model (ceiling) — cannot escalate"
-            echo '{"status":"error","error":"max_turns_exhausted_at_ceiling"}'
-            return 1
+            local _sr
+            _sr=$(_emit_stage_result \
+                "error" "null" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" '"max_turns_exhausted_at_ceiling"' \
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr" "bail" "max_turns_exhausted_at_ceiling"
+            return $?
         fi
 
         log "WARN: Stage $stage_name hit max turns with $model — escalating to $escalated_model (no turn cap)"
@@ -1184,11 +1626,20 @@ run_stage() {
 
         # Retry with escalated model and no --max-turns cap
         local escalated_fallback
-        escalated_fallback=$(_next_model_up "$escalated_model")
+        escalated_fallback=$(effective_fallback "$escalated_model")
         local -a escalated_fallback_args=()
         if [[ "$escalated_fallback" != "$escalated_model" ]]; then
             escalated_fallback_args=(--fallback-model "$escalated_fallback")
         fi
+
+        emit_event "model_call" \
+            "stage=$stage_name" \
+            "model=$escalated_model" \
+            "fallback_model=$escalated_fallback" \
+            "agent=${agent:-default}" \
+            "schema=$schema_file" \
+            "complexity=${complexity:-}" \
+            "stage_attempt:=2"
 
         output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
@@ -1199,6 +1650,9 @@ run_stage() {
             --json-schema "$schema" \
             2>&1) || exit_code=$?
 
+        # Escalation produced output via $escalated_model — track for envelope.
+        result_model="$escalated_model"
+
         printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
         printf '%s\n' "$output" >> "$stage_log"
         printf '%s\n' "=== escalation exit code: $exit_code ===" >> "$stage_log"
@@ -1208,6 +1662,21 @@ run_stage() {
     if detect_rate_limit "$output"; then
         handle_rate_limit "$output"
         # Retry
+        emit_event "retry" \
+            "stage=$stage_name" \
+            "reason=rate_limit" \
+            "attempt:=2" \
+            "max_attempts:=2" \
+            "model=$model"
+        emit_event "model_call" \
+            "stage=$stage_name" \
+            "model=$model" \
+            "fallback_model=$fallback_model" \
+            "agent=${agent:-default}" \
+            "schema=$schema_file" \
+            "complexity=${complexity:-}" \
+            "stage_attempt:=2"
+
         output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
             --model "$model" \
@@ -1299,8 +1768,14 @@ for m in re.finditer(r'\[\s*\{', t):
                 fi
             fi
 
-            printf '%s\n' "$fallback_result"
-            return 0
+            local _sr
+            _sr=$(_emit_stage_result \
+                "success" "$fallback_result" "$output" \
+                "$(_extract_denials "$output")" \
+                "$result_model" "null" \
+                "$(( $(_epoch_ms) - result_start_ms ))")
+            _apply_stage_action "$_sr" "accept"
+            return $?
         fi
 
         # Diagnostic: log raw output first 500 chars and byte count when both
@@ -1311,9 +1786,19 @@ for m in re.finditer(r'\[\s*\{', t):
         log "Diagnostic fallback failure — Output byte count: $output_byte_count"
         log "Diagnostic fallback failure — First 500 characters: $output_preview"
 
-        # Empty/unparseable output — escalate to next model before failing
+        # Empty/unparseable output — escalate to next model before failing.
         local empty_escalated_model
-        empty_escalated_model=$(_next_model_up "$model")
+        empty_escalated_model=$(effective_fallback "$model")
+
+        # The CLI completed but produced no parseable structured output. From
+        # the orchestrator's perspective this is a schema-shaped failure of the
+        # stage's contract, so emit schema_validation_fail in addition to the
+        # escalation that follows.
+        emit_event "schema_validation_fail" \
+            "stage=$stage_name" \
+            "reason=no_structured_output" \
+            "model=$model" \
+            "schema=$schema_file"
 
         if [[ "$empty_escalated_model" != "$model" ]]; then
             log "WARN: No structured output from $stage_name with $model — escalating to $empty_escalated_model"
@@ -1323,10 +1808,19 @@ for m in re.finditer(r'\[\s*\{', t):
 
             local -a empty_esc_fallback_args=()
             local empty_esc_fallback
-            empty_esc_fallback=$(_next_model_up "$empty_escalated_model")
+            empty_esc_fallback=$(effective_fallback "$empty_escalated_model")
             if [[ "$empty_esc_fallback" != "$empty_escalated_model" ]]; then
                 empty_esc_fallback_args=(--fallback-model "$empty_esc_fallback")
             fi
+
+            emit_event "model_call" \
+                "stage=$stage_name" \
+                "model=$empty_escalated_model" \
+                "fallback_model=$empty_esc_fallback" \
+                "agent=${agent:-default}" \
+                "schema=$schema_file" \
+                "complexity=${complexity:-}" \
+                "stage_attempt:=2"
 
             local empty_esc_exit_code=0
             output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
@@ -1338,6 +1832,10 @@ for m in re.finditer(r'\[\s*\{', t):
                 --json-schema "$schema" \
                 2>&1) || empty_esc_exit_code=$?
 
+            # Escalation produced output via $empty_escalated_model — track it
+            # so the envelope reports the model that actually produced output.
+            result_model="$empty_escalated_model"
+
             printf '%s\n' "=== $stage_name empty output escalation output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' "=== empty output escalation exit code: $empty_esc_exit_code ===" >> "$stage_log"
@@ -1347,8 +1845,14 @@ for m in re.finditer(r'\[\s*\{', t):
             if [[ -n "$structured" ]]; then
                 _CONSECUTIVE_TIMEOUTS=0
                 _TIMED_OUT_STAGE_NAMES=""
-                printf '%s\n' "$structured"
-                return 0
+                local _sr
+                _sr=$(_emit_stage_result \
+                    "success" "$structured" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" "null" \
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+                _apply_stage_action "$_sr" "accept"
+                return $?
             fi
 
             # Try .result fallback from escalated run
@@ -1361,21 +1865,302 @@ for m in re.finditer(r'\[\s*\{', t):
                 log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
                 _CONSECUTIVE_TIMEOUTS=0
                 _TIMED_OUT_STAGE_NAMES=""
-                printf '%s\n' "$esc_fallback_result"
-                return 0
+                local _sr
+                _sr=$(_emit_stage_result \
+                    "success" "$esc_fallback_result" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" "null" \
+                    "$(( $(_epoch_ms) - result_start_ms ))")
+                _apply_stage_action "$_sr" "accept"
+                return $?
             fi
         fi
 
         log_error "No structured output from $stage_name"
+        emit_event "schema_validation_fail" \
+            "stage=$stage_name" \
+            "reason=no_structured_output_after_escalation" \
+            "model=$model" \
+            "schema=$schema_file"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
-        echo '{"status":"error","error":"no structured output"}'
-        return 1
+        local _sr
+        _sr=$(_emit_stage_result \
+            "error" "null" "$output" \
+            "$(_extract_denials "$output")" \
+            "$result_model" '"no_structured_output"' \
+            "$(( $(_epoch_ms) - result_start_ms ))")
+        _apply_stage_action "$_sr" "bail" "no_structured_output"
+        return $?
+    fi
+
+    # Structured-error escalation — if the agent explicitly returned
+    # status:"error", try a better model before giving up (unless the failure
+    # was caused by a permission hook, which a better model can't bypass).
+    local structured_status
+    structured_status=$(printf '%s' "$structured" | jq -r '.status // empty' 2>/dev/null)
+
+    if [[ "$structured_status" == "error" ]]; then
+        # Check whether the failure was caused by permission denials embedded
+        # in the raw CLI output.  The CLI surfaces these as an array under
+        # .permission_denials[].tool_name.
+        local permission_denials
+        permission_denials=$(printf '%s' "$output" \
+            | jq -r '[.permission_denials[]?.tool_name // empty] | select(length > 0) | join(", ")' \
+            2>/dev/null || true)
+
+        if [[ -n "$permission_denials" ]]; then
+            log "WARN: $stage_name blocked by permission hook (tools: $permission_denials) — skipping escalation"
+        else
+            # No permission denial — escalate to the next model tier and retry once.
+            local struct_err_escalated_model
+            struct_err_escalated_model=$(effective_fallback "$model")
+
+            if [[ "$struct_err_escalated_model" != "$model" ]]; then
+                # PR-A escalation shim: establish _apply_stage_action dispatch
+                # surface. Discard stdout — run_stage emits the final envelope
+                # after the re-run. PR-B replaces this with skill invocation.
+                {
+                    local _sr_shim
+                    _sr_shim=$(_emit_stage_result \
+                        "error" "$structured" "$output" \
+                        "$(_extract_denials "$output")" \
+                        "$result_model" "null" \
+                        "$(( $(_epoch_ms) - result_start_ms ))")
+                    _apply_stage_action "$_sr_shim" "escalate" "structured_error"
+                } >/dev/null
+                log "WARN: $stage_name returned status:error with $model — escalating to $struct_err_escalated_model"
+                printf '%s\n' "=== $stage_name structured-error escalation: $model → $struct_err_escalated_model ===" >> "$stage_log"
+
+                record_escalation "$stage_name" "$model" "$struct_err_escalated_model" "structured_error"
+
+                local -a struct_err_esc_fallback_args=()
+                local struct_err_esc_fallback
+                struct_err_esc_fallback=$(effective_fallback "$struct_err_escalated_model")
+                if [[ "$struct_err_esc_fallback" != "$struct_err_escalated_model" ]]; then
+                    struct_err_esc_fallback_args=(--fallback-model "$struct_err_esc_fallback")
+                fi
+
+                emit_event "model_call" \
+                    "stage=$stage_name" \
+                    "model=$struct_err_escalated_model" \
+                    "fallback_model=$struct_err_esc_fallback" \
+                    "agent=${agent:-default}" \
+                    "schema=$schema_file" \
+                    "complexity=${complexity:-}" \
+                    "stage_attempt:=2"
+
+                local struct_err_esc_exit_code=0
+                output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+                    ${agent_args[@]+"${agent_args[@]}"} \
+                    --model "$struct_err_escalated_model" \
+                    ${struct_err_esc_fallback_args[@]+"${struct_err_esc_fallback_args[@]}"} \
+                    --dangerously-skip-permissions \
+                    --output-format json \
+                    --json-schema "$schema" \
+                    2>&1) || struct_err_esc_exit_code=$?
+
+                # Escalation produced output via the next-tier model — track
+                # it so the envelope reports the actual producing model.
+                result_model="$struct_err_escalated_model"
+
+                printf '%s\n' "=== $stage_name structured-error escalation output ===" >> "$stage_log"
+                printf '%s\n' "$output" >> "$stage_log"
+                printf '%s\n' "=== structured-error escalation exit code: $struct_err_esc_exit_code ===" >> "$stage_log"
+
+                # Re-extract structured output from escalated run
+                structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
+                if [[ -n "$structured" ]]; then
+                    _CONSECUTIVE_TIMEOUTS=0
+                    _TIMED_OUT_STAGE_NAMES=""
+                    local _sr
+                    _sr=$(_emit_stage_result \
+                        "success" "$structured" "$output" \
+                        "$(_extract_denials "$output")" \
+                        "$result_model" "null" \
+                        "$(( $(_epoch_ms) - result_start_ms ))")
+                    _apply_stage_action "$_sr" "accept"
+                    return $?
+                fi
+
+                # Try .result fallback from escalated run
+                local struct_err_esc_fallback_result
+                struct_err_esc_fallback_result=$(printf '%s' "$output" | jq -c '
+                    select(.is_error == false and .result != null) |
+                    {status: "success", summary: .result}
+                ' 2>/dev/null)
+                if [[ -n "$struct_err_esc_fallback_result" ]]; then
+                    log "WARNING: Escalated run for $stage_name produced .result (no .structured_output) — using fallback"
+                    _CONSECUTIVE_TIMEOUTS=0
+                    _TIMED_OUT_STAGE_NAMES=""
+                    local _sr
+                    _sr=$(_emit_stage_result \
+                        "success" "$struct_err_esc_fallback_result" "$output" \
+                        "$(_extract_denials "$output")" \
+                        "$result_model" "null" \
+                        "$(( $(_epoch_ms) - result_start_ms ))")
+                    _apply_stage_action "$_sr" "accept"
+                    return $?
+                fi
+            fi
+        fi
     fi
 
     _CONSECUTIVE_TIMEOUTS=0
     _TIMED_OUT_STAGE_NAMES=""
-    printf '%s\n' "$structured"
+    local _sr
+    _sr=$(_emit_stage_result \
+        "success" "$structured" "$output" \
+        "$(_extract_denials "$output")" \
+        "$result_model" "null" \
+        "$(( $(_epoch_ms) - result_start_ms ))")
+    _apply_stage_action "$_sr" "accept"
+    return $?
+}
+
+# =============================================================================
+# TRIAGE STAGE
+# =============================================================================
+#
+# Classify the issue into "fast-path" (surgical, test-only, well-specified) or
+# "full" (default verification pipeline). Conservative — biases hard toward
+# "full" whenever uncertain. See .claude/skills/handle-issues/SKILL.md for the
+# six criteria and .claude/scripts/triage-validate.sh for prompt-quality tests.
+#
+# Arguments:
+#   $1 - optional path to issue body markdown (defaults to context/issue-body.md)
+#
+# Side effects:
+#   - Writes $LOG_BASE/triage.json artifact
+#   - Updates status.json: stages.triage.* and top-level .route
+#   - Sets current_stage to "triage"
+#
+# Output (stdout):
+#   - The final route string ("fast-path" or "full")
+
+# build_triage_prompt is a thin wrapper around build_prompt() sourced from
+# prompts/triage-prompt.sh. The sourced build_prompt() is the single source
+# of truth for the triage classifier prompt and is shared with
+# triage-validate.sh's golden tests.
+build_triage_prompt() {
+    build_prompt "$@"
+}
+
+run_triage_stage() {
+    local issue_body_file="${1:-$LOG_BASE/context/issue-body.md}"
+
+    set_stage_started "triage"
+
+    if [[ ! -f "$issue_body_file" ]]; then
+        log_error "Triage: issue body file not found: $issue_body_file"
+        # Fail safe: write a minimal triage.json marking full route, return full.
+        printf '{"route":"full","disqualifying_criterion":"issue_body_missing","kill_switch_engaged":false}\n' \
+            > "$LOG_BASE/triage.json"
+        update_stage triage completed route full
+        printf 'full\n'
+        return 0
+    fi
+
+    local issue_body prompt
+    issue_body=$(cat "$issue_body_file")
+    prompt=$(build_triage_prompt "$issue_body")
+
+    # Resolve model. TRIAGE_MODEL env var allows operator override; default
+    # falls through to model-config.sh (triage stage maps to "haiku" tier).
+    local triage_model="${TRIAGE_MODEL:-}"
+
+    local raw
+    raw=$(run_stage "triage" "$prompt" "implement-issue-triage.json" "" "" "" "$triage_model") || true
+
+    # Extract Claude's classification from the stage_result envelope's .output.
+    # If parse fails, default to full.
+    local route confidence dq pattern criteria
+    route=$(printf '%s' "$raw" | jq -r '.output.route // "full"')
+    confidence=$(printf '%s' "$raw" | jq -r '.output.confidence // "low"')
+    dq=$(printf '%s' "$raw" | jq -r '.output.disqualifying_criterion // empty')
+    pattern=$(printf '%s' "$raw" | jq -r '.output.established_pattern_grep // empty')
+    criteria=$(printf '%s' "$raw" | jq -c '.output.criteria // {}')
+
+    # Post-processing: defense in depth on top of the prompt.
+    local kill_switch_engaged=false
+    local pattern_grep_count=0
+
+    # 1. Kill switch: forces full regardless of Claude's decision.
+    if [[ "${DISABLE_SURGICAL_FAST_PATH:-0}" == "1" ]]; then
+        if [[ "$route" == "fast-path" ]]; then
+            dq="kill_switch"
+        fi
+        route="full"
+        kill_switch_engaged=true
+    fi
+
+    # 2. Confidence demotion: medium/low forces full.
+    if [[ "$kill_switch_engaged" == "false" && "$route" == "fast-path" ]]; then
+        if [[ "$confidence" != "high" ]]; then
+            route="full"
+            dq="confidence_low"
+        fi
+    fi
+
+    # 3. Pattern grep verification: requires >= 3 matching files.
+    if [[ "$kill_switch_engaged" == "false" && "$route" == "fast-path" ]]; then
+        if [[ -z "$pattern" || "$pattern" == "null" ]]; then
+            route="full"
+            dq="established_pattern"
+        elif [[ "$pattern" == *$'\n'* ]]; then
+            # Reject multi-line patterns. POSIX/BSD/GNU grep treats embedded
+            # newlines as alternation, so a malformed pattern like
+            # "storageState\n." would falsely match arbitrary files.
+            route="full"
+            dq="established_pattern"
+        else
+            # Run from BASE_BRANCH worktree if available; otherwise current dir.
+            pattern_grep_count=$(git grep -lE -- "$pattern" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+            if (( pattern_grep_count < 3 )); then
+                route="full"
+                dq="established_pattern"
+            fi
+        fi
+    fi
+
+    # Write triage.json artifact (always, for both routes — auditable record).
+    local artifact="$LOG_BASE/triage.json"
+    jq -n \
+        --arg route "$route" \
+        --arg confidence "$confidence" \
+        --arg dq "${dq:-}" \
+        --arg pattern "${pattern:-}" \
+        --argjson criteria "${criteria:-\{\}}" \
+        --argjson grep_count "$pattern_grep_count" \
+        --argjson kill_switch "$kill_switch_engaged" \
+        --arg summary "$(printf '%s' "$raw" | jq -r '.output.summary // ""')" \
+        '{
+            route: $route,
+            confidence: $confidence,
+            disqualifying_criterion: (if $dq == "" then null else $dq end),
+            established_pattern_grep: (if $pattern == "" or $pattern == "null" then null else $pattern end),
+            pattern_grep_count: $grep_count,
+            kill_switch_engaged: $kill_switch,
+            criteria: $criteria,
+            summary: $summary,
+            timestamp: (now | todate)
+        }' > "$artifact"
+
+    # Update status.json: triage stage details + top-level route field.
+    jq --arg route "$route" \
+       --arg confidence "$confidence" \
+       --arg dq "${dq:-}" \
+       '.stages.triage.route = $route |
+        .stages.triage.confidence = $confidence |
+        .stages.triage.disqualifying_criterion = (if $dq == "" then null else $dq end) |
+        .route = $route |
+        .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+    set_stage_completed "triage"
+    log "Triage complete. Route: $route (confidence: $confidence, dq: ${dq:-none}, kill_switch: $kill_switch_engaged)"
+
+    printf '%s\n' "$route"
 }
 
 # =============================================================================
@@ -1457,7 +2242,7 @@ Output a summary of changes made."
             local simplify_result
             simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
 
-            simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.summary // "No changes"')
+            simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.output.summary // "No changes"')
 
             # If simplify reported no changes, skip it on the next iteration until a
             # fix stage runs (which may introduce new simplification opportunities).
@@ -1487,7 +2272,7 @@ Output a summary of changes made."
         review_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
         review_changed_files=$(printf '%s\n' "$review_changed_files_raw" | grep -v -E '^$' || true)
 
-        local review_prompt="Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
+        local review_prompt="${PLATFORM_PATTERNS_PREFIX}Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT: This is a task-level quality check within the implementation workflow, NOT a full PR review.
 Your job is to verify code quality for the changes made in this task only.
@@ -1497,6 +2282,14 @@ Check:
 - Consistency with codebase conventions
 - Potential bugs or issues
 - Security concerns
+- If any \$queryRaw or raw SQL strings are present, cross-reference them against existing similar queries in the codebase to verify table names and query patterns are consistent
+
+Checklist (verify each item explicitly):
+1. Response schemas declared for all routes
+2. Auth middleware applied to all protected routes
+3. No unbounded queries without \`take\` (pagination limit)
+4. No N+1 patterns (all related data fetched in a single query or batched)
+5. No hollow test assertions (every assertion checks a meaningful value)
 
 FILES CHANGED:
 $review_changed_files
@@ -1522,13 +2315,13 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         fi
 
         local review_verdict review_summary verdict_source
-        review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
+        review_summary=$(printf '%s' "$review_result" | jq -r '.output.summary // "Review completed"')
         local has_result_field
-        has_result_field=$(printf '%s' "$review_result" | jq 'has("result")' 2>/dev/null)
+        has_result_field=$(printf '%s' "$review_result" | jq '.output | has("result")' 2>/dev/null)
 
         if [[ "$has_result_field" == "true" ]]; then
-            # Structured output available: extract verdict from .result field
-            review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+            # Structured output available: extract verdict from .output.result field
+            review_verdict=$(printf '%s' "$review_result" | jq -r '.output.result')
             verdict_source="structured output"
             log "Verdict extracted from structured output: $review_verdict"
         else
@@ -1554,7 +2347,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
 
         # Append current iteration findings to review history
         local current_issues
-        current_issues=$(printf '%s' "$review_result" | jq -c "{iteration: $loop_iteration, issues: (.issues // []), result: (.result // .status // \"unknown\")}" 2>/dev/null)
+        current_issues=$(printf '%s' "$review_result" | jq -c "{iteration: $loop_iteration, issues: (.output.issues // []), result: (.output.result // .output.status // \"unknown\")}" 2>/dev/null)
         if [[ -n "$current_issues" ]]; then
             if [[ -f "$review_history_file" ]]; then
                 local existing
@@ -1570,10 +2363,10 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             local repeat_ratio repeat_issues
             repeat_ratio=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
                 . as $root |
-                ($root.issues // []) | length as $current_count |
+                ($root.output.issues // []) | length as $current_count |
                 if $current_count == 0 then 0
                 else
-                    [$root.issues[] | .description] as $current |
+                    [$root.output.issues[] | .description] as $current |
                     [$history[0][] | .issues[]? | .description] as $prior |
                     [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
                     ($repeats | length * 100 / $current_count)
@@ -1581,10 +2374,10 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             ' 2>/dev/null || echo 0)
             repeat_issues=$(printf '%s' "$review_result" | jq -r --slurpfile history "$review_history_file" '
                 . as $root |
-                ($root.issues // []) | length as $current_count |
+                ($root.output.issues // []) | length as $current_count |
                 if $current_count == 0 then ""
                 else
-                    [$root.issues[] | .description] as $current |
+                    [$root.output.issues[] | .description] as $current |
                     [$history[0][] | .issues[]? | .description] as $prior |
                     [$current[] | select(. as $c | $prior | any(. == $c))] as $repeats |
                     ($repeats | join("\n- "))
@@ -1633,7 +2426,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         local major_issue_override=false
         if [[ "$review_verdict" == "approved" ]]; then
             local major_issue_count
-            major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
+            major_issue_count=$(printf '%s' "$review_result" | jq '[.output.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
             if (( major_issue_count > 0 )); then
                 log_warn "Quality review for $stage_prefix approved but $major_issue_count major issue(s) found — overriding to changes_requested"
                 review_verdict="changes_requested"
@@ -1648,9 +2441,9 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
             local review_comments
             if $major_issue_override; then
                 # Filter to include only major-severity issues
-                review_comments=$(printf '%s' "$review_result" | jq -r '[.issues // [] | .[] | select(.severity == "major") | .description] | join("\n- ")')
+                review_comments=$(printf '%s' "$review_result" | jq -r '[.output.issues // [] | .[] | select(.severity == "major") | .description] | join("\n- ")')
             else
-                review_comments=$(printf '%s' "$review_result" | jq -r '.comments // "No comments"')
+                review_comments=$(printf '%s' "$review_result" | jq -r '.output.comments // "No comments"')
             fi
             printf '%s\n' "$review_comments" >> "$LOG_BASE/context/review-comments.json"
 
@@ -1668,7 +2461,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
                 fi
             fi
 
-            local fix_prompt="Address code review feedback in working directory $loop_dir on branch $loop_branch.
+            local fix_prompt="${PLATFORM_PATTERNS_PREFIX}Address code review feedback in working directory $loop_dir on branch $loop_branch.
 
 Current iteration findings:
 $review_comments
@@ -1688,7 +2481,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
 
             # Fix stage introduced new changes — simplify should run next iteration.
             skip_simplify=false
@@ -1819,23 +2612,26 @@ all_tasks_s_complexity() {
 
 # Get PR review configuration based on diff size.
 # Returns JSON: { "model": "...", "timeout": N, "max_iterations": N }
-# Four tiers by diff line count:
-#   <20  lines  → haiku,  300s timeout, 1 iteration  (tiny)
-#   <50  lines  → haiku,  600s timeout, 1 iteration  (small)
-#   <200 lines  → sonnet, 900s timeout, MAX_PR_REVIEW_ITERATIONS (medium)
-#   200+ lines  → sonnet, 1800s timeout, MAX_PR_REVIEW_ITERATIONS (large)
+#
+# All tiers use sonnet. Haiku was tried for tiny/small diffs but in practice
+# it burns through max turns exploring the codebase (4.7M tokens for an
+# 11-line diff) then escalates to sonnet anyway — wasting ~$0.85 and ~5 min.
+# Sonnet with the diff included in the prompt finishes in 2-3 turns.
+#
+# Three tiers by diff line count:
+#   <50  lines  → sonnet, 180s timeout, 1 iteration  (small)
+#   <200 lines  → sonnet, 600s timeout, MAX_PR_REVIEW_ITERATIONS (medium)
+#   200+ lines  → sonnet, 1200s timeout, MAX_PR_REVIEW_ITERATIONS (large)
 get_pr_review_config() {
     local diff_lines
     diff_lines=$(get_diff_line_count "$BASE_BRANCH")
 
-    if (( diff_lines < 20 )); then
-        printf '{"model":"haiku","timeout":300,"max_iterations":1}'
-    elif (( diff_lines < 50 )); then
-        printf '{"model":"haiku","timeout":600,"max_iterations":1}'
+    if (( diff_lines < 50 )); then
+        printf '{"model":"sonnet","timeout":360,"max_iterations":1}'
     elif (( diff_lines < 200 )); then
-        printf '{"model":"sonnet","timeout":900,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
+        printf '{"model":"sonnet","timeout":600,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
     else
-        printf '{"model":"sonnet","timeout":1800,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
+        printf '{"model":"sonnet","timeout":1200,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
     fi
 }
 
@@ -2150,12 +2946,37 @@ _parse_task_lines() {
 		fi
 
 		task_id=$((task_id + 1))
+		# Store task for now; affected_files will be attached in the second pass.
 		tasks_json=$(printf '%s' "$tasks_json" | jq \
 			--argjson id "$task_id" \
 			--arg desc "$desc" \
 			--arg agent "$agent" \
-			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0}]')
+			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0, affected_files: []}]')
 
+	done <<< "$tasks_section"
+
+	# Second pass: extract "Affected files:" lines and attach to preceding task.
+	local current_task_idx=-1
+	while IFS= read -r line; do
+		# Detect task lines (same patterns as above) to track which task we're under.
+		if [[ "$line" =~ ^[-\*][[:space:]]+(\[.?\][[:space:]]*)?\`?\[? ]]; then
+			current_task_idx=$((current_task_idx + 1))
+		fi
+		# Match "Affected files:" line (case-insensitive, optional leading whitespace).
+		if [[ "$line" =~ ^[[:space:]]*[Aa]ffected[[:space:]][Ff]iles:[[:space:]]*(.+)$ ]] && (( current_task_idx >= 0 )); then
+			local files_str="${BASH_REMATCH[1]}"
+			# Split comma-separated file paths, trim whitespace, remove "(new)" annotations.
+			local files_arr
+			files_arr=$(printf '%s' "$files_str" \
+				| tr ',' '\n' \
+				| sed 's/(new)//g; s/^[[:space:]]*//; s/[[:space:]]*$//' \
+				| grep -v '^$' \
+				| jq -R '.' | jq -s '.')
+			tasks_json=$(printf '%s' "$tasks_json" | jq \
+				--argjson idx "$current_task_idx" \
+				--argjson files "$files_arr" \
+				'.[$idx].affected_files = $files')
+		fi
 	done <<< "$tasks_section"
 
 	printf '%s\n' "$tasks_json"
@@ -2245,9 +3066,17 @@ compute_task_batches() {
 		local desc
 		desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
 
-		# Primary: extract path-like tokens from the task description
+		# Primary: use explicit affected_files from task JSON if available
+		local af_json
+		af_json=$(printf '%s' "$tasks_json" | jq -r ".[$i].affected_files // [] | .[]" 2>/dev/null)
+
 		local desc_files
-		desc_files=$(_extract_task_files_from_desc "$desc")
+		if [[ -n "$af_json" ]]; then
+			desc_files="$af_json"
+		else
+			# Fallback: extract path-like tokens from the task description
+			desc_files=$(_extract_task_files_from_desc "$desc")
+		fi
 
 		# Secondary: add diff files that share a path component with any
 		# desc_files token (augments detection when the branch already has commits)
@@ -2274,6 +3103,11 @@ compute_task_batches() {
 		combined=$(printf '%s\n%s' "$desc_files" "$aug_files" \
 			| sort -u | grep -v '^[[:space:]]*$')
 		task_files[$i]="$combined"
+		if [[ -n "$combined" ]]; then
+			log "  Task $((i+1)) files: $(echo "$combined" | tr '\n' ', ')"
+		else
+			log "  Task $((i+1)) files: (none detected)"
+		fi
 	done
 
 	# Greedy batch assignment
@@ -2529,7 +3363,7 @@ run_task_in_worktree() {
 
 	local base_timeout
 	base_timeout=$(get_stage_timeout \
-		"implement-task-$task_id")
+		"implement-task-$task_id" "$task_size")
 	local base_model
 	base_model=$(resolve_model \
 		"implement-task-$task_id" "$task_size")
@@ -2560,10 +3394,12 @@ run_task_in_worktree() {
 	while (( review_attempts < max_attempts )); do
 		review_attempts=$((review_attempts + 1))
 
+		local line_range_hint
+		line_range_hint=$(build_line_range_hint "$task_desc")
 		local impl_prompt
-		impl_prompt="Implement task $task_id on branch $wt_branch in the current working directory:
+		impl_prompt="${PLATFORM_PATTERNS_PREFIX}Implement task $task_id on branch $wt_branch in the current working directory:
 
-$task_desc${files_block}
+$task_desc${line_range_hint}${files_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
@@ -2604,7 +3440,7 @@ Commit your changes with a descriptive message."
 
 		local impl_status
 		impl_status=$(printf '%s' "$impl_result" \
-			| jq -r '.status')
+			| jq -r '.output.status')
 
 		if [[ "$impl_status" == "success" ]]; then
 			task_succeeded=true
@@ -2634,15 +3470,19 @@ Commit your changes with a descriptive message."
 
 		local commit_sha
 		commit_sha=$(printf '%s' "$impl_result" \
-			| jq -r '.commit')
+			| jq -r '.output.commit')
 		local impl_summary
 		impl_summary=$(printf '%s' "$impl_result" \
-			| jq -r '.summary // "Implementation completed"')
+			| jq -r '.output.summary // "Implementation completed"')
 
+		local files_changed_wt_json
+		files_changed_wt_json=$(git -C "$wt_path" diff --name-only HEAD~1 HEAD \
+			2>/dev/null | jq -R -s 'split("\n") | map(select(length>0))')
 		printf '%s' "{
 \"status\":\"success\",
 \"review_attempts\":$review_attempts,
 \"commit\":\"$commit_sha\",
+\"files_changed\":${files_changed_wt_json:-[]},
 \"summary\":$(printf '%s' "$impl_summary" | jq -Rs .)
 }" > "$result_file"
 		return 0
@@ -2851,24 +3691,27 @@ execute_batch_parallel() {
 
 		# Launch in background subshell with wall-time guard
 		(
+			# Enable job control so the child gets its own process group
+			# (PGID == _task_pid), letting the watchdog kill the whole tree.
+			set -m
 			run_task_in_worktree \
 				"$tid" "$tdesc" "$tagent" \
 				"$tsize" "$wt_path" \
 				"$wt_branch" "$feature_branch" \
 				"$result_file" "$base_branch" &
 			_task_pid=$!
+			set +m
 			( sleep "${MAX_TASK_WALL_TIME_SECS}" && \
-				kill "$_task_pid" 2>/dev/null ) &
+				kill -- -"$_task_pid" 2>/dev/null ) &
 			_watchdog_pid=$!
 			wait "$_task_pid" 2>/dev/null
 			_task_exit=$?
 			kill "$_watchdog_pid" 2>/dev/null
 			wait "$_watchdog_pid" 2>/dev/null || true
-			# exit 143 = SIGTERM from watchdog; exit 124 = timeout
-			# command (defensive). Only treat as timeout when no
-			# result file was written by the task.
-			if [[ $_task_exit -eq 124 ]] || \
-				[[ $_task_exit -eq 143 && \
+			# exit 143 = SIGTERM from watchdog; only treat as timeout
+			# when no result file was written (guards against race
+			# where task completes as watchdog fires).
+			if [[ $_task_exit -eq 143 && \
 				! -f "$result_file" ]]; then
 				log_error "Task $tid TIMED OUT" \
 					"after ${MAX_TASK_WALL_TIME_SECS}s"
@@ -2886,7 +3729,7 @@ execute_batch_parallel() {
 
 	# Wait for all background tasks
 	local p
-	for p in "${pids[@]}"; do
+	for p in "${pids[@]+"${pids[@]}"}"; do
 		wait "$p" 2>/dev/null || true
 	done
 
@@ -2957,6 +3800,100 @@ execute_batch_parallel() {
 	printf '%s' "{\"completed\":${comp_json},\"failed\":${fail_json},\"conflicted\":${conf_json}}"
 }
 
+# =============================================================================
+# E2E TDD CLASSIFICATION
+# =============================================================================
+#
+# Classify the E2E strategy for a single task before it runs.
+#
+# Classification rules (in priority order):
+#   1. TEST_E2E_CMD not configured → none (can't run E2E)
+#   2. Agent is NOT playwright-test-developer AND desc has no UI keywords → none
+#   3. Agent IS playwright-test-developer AND size L AND UI keywords → tdd*
+#   4. Agent IS playwright-test-developer AND change_scope is frontend/ts-frontend → tdd*
+#   5. Agent IS playwright-test-developer → smoke
+#   6. UI keywords AND change_scope is frontend/ts-frontend → smoke
+#   7. Default → none
+#
+#   *tdd is downgraded to smoke when E2E_TDD_ENABLED=false
+#
+# Arguments:
+#   $1 - task_desc
+#   $2 - task_agent
+#   $3 - task_size  (S/M/L)
+# Outputs (stdout):
+#   none | smoke | tdd
+#
+classify_e2e_strategy() {
+	local task_desc="$1"
+	local task_agent="$2"
+	local task_size="$3"
+
+	# Rule 1: no E2E command → none regardless
+	if [[ -z "${TEST_E2E_CMD:-}" ]]; then
+		printf 'none'
+		return
+	fi
+
+	# Detect UI keywords in description
+	local has_ui_keywords=false
+	if printf '%s' "$task_desc" \
+		| grep -qiE \
+		'button|tab|form|click|navigate|modal|dialog|dropdown|checkbox|input|component|page|view|screen'; then
+		has_ui_keywords=true
+	fi
+
+	# Rule 2: not playwright agent AND no UI keywords → none
+	if [[ "$task_agent" != "playwright-test-developer" ]] \
+		&& [[ "$has_ui_keywords" == "false" ]]; then
+		printf 'none'
+		return
+	fi
+
+	# Detect change scope from current working directory
+	local change_scope
+	change_scope=$(detect_change_scope "." "${BASE_BRANCH:-main}" 2>/dev/null \
+		|| echo "backend")
+	local is_frontend=false
+	if [[ "$change_scope" == "frontend" \
+		|| "$change_scope" == "ts-frontend" ]]; then
+		is_frontend=true
+	fi
+
+	local _tdd_result="tdd"
+	# Honour E2E_TDD_ENABLED flag — downgrade tdd → smoke when disabled
+	if [[ "${E2E_TDD_ENABLED:-true}" == "false" ]]; then
+		_tdd_result="smoke"
+	fi
+
+	if [[ "$task_agent" == "playwright-test-developer" ]]; then
+		# Rule 3: playwright + L size + UI keywords → tdd
+		if [[ "$task_size" == "L" ]] \
+			&& [[ "$has_ui_keywords" == "true" ]]; then
+			printf '%s' "$_tdd_result"
+			return
+		fi
+		# Rule 4: playwright + frontend scope → tdd
+		if [[ "$is_frontend" == "true" ]]; then
+			printf '%s' "$_tdd_result"
+			return
+		fi
+		# Rule 5: playwright (other) → smoke
+		printf 'smoke'
+		return
+	fi
+
+	# Rule 6: UI keywords + frontend scope → smoke
+	if [[ "$has_ui_keywords" == "true" ]] \
+		&& [[ "$is_frontend" == "true" ]]; then
+		printf 'smoke'
+		return
+	fi
+
+	# Rule 7: default
+	printf 'none'
+}
+
 # Execute tasks serially (fallback / single-task batches).
 #
 # This extracts the existing sequential logic into a
@@ -2980,6 +3917,8 @@ execute_batch_serial() {
 
 	local -a completed=()
 	local -a failed=()
+	# Track playwright tasks already run in TDD pre-run mode
+	local -a tdd_prerun_tids=()
 
 	local i
 	for ((i = 0; i < count; i++)); do
@@ -2994,6 +3933,160 @@ execute_batch_serial() {
 			| jq -r '.agent')
 		tsize=$(extract_task_size "$tdesc")
 
+		# Skip playwright tasks already run in TDD pre-run mode
+		local _already_prerun=false
+		local _prid
+		for _prid in "${tdd_prerun_tids[@]+"${tdd_prerun_tids[@]}"}"; do
+			if [[ "$_prid" == "$tid" ]]; then
+				_already_prerun=true
+				break
+			fi
+		done
+		if [[ "$_already_prerun" == "true" ]]; then
+			log "Task $tid already executed in TDD" \
+				"pre-run phase — skipping"
+			completed+=("$tid")
+			continue
+		fi
+
+		# Classify E2E strategy before running this task
+		local e2e_strategy
+		e2e_strategy=$(classify_e2e_strategy \
+			"$tdesc" "$tagent" "$tsize")
+		log "Task $tid E2E strategy: $e2e_strategy"
+
+		# TDD: if this is an implementation task and the adjacent next task
+		# is a playwright-test-developer task classified as tdd, run the
+		# playwright task FIRST (RED phase) before the implementation task.
+		if [[ "$tagent" != "playwright-test-developer" ]] \
+			&& (( i + 1 < count )); then
+			local _next_task _next_tid _next_tdesc _next_tagent _next_tsize
+			_next_task=$(printf '%s' "$serial_tasks" \
+				| jq ".[$((i + 1))]")
+			_next_tagent=$(printf '%s' "$_next_task" \
+				| jq -r '.agent')
+			if [[ "$_next_tagent" == "playwright-test-developer" ]]; then
+				_next_tid=$(printf '%s' "$_next_task" \
+					| jq -r '.id')
+				_next_tdesc=$(printf '%s' "$_next_task" \
+					| jq -r '.description')
+				_next_tsize=$(extract_task_size "$_next_tdesc")
+				local _next_strategy
+				_next_strategy=$(classify_e2e_strategy \
+					"$_next_tdesc" "$_next_tagent" \
+					"$_next_tsize")
+				if [[ "$_next_strategy" == "tdd" ]]; then
+					log "TDD pre-run: running playwright" \
+						"task $_next_tid before" \
+						"implementation task $tid"
+
+					# Build prompt for the playwright task
+					local _pw_files_block
+					_pw_files_block=$(build_files_block)
+					local _pw_prompt
+					_pw_prompt="Implement task $_next_tid on branch $feature_branch in the current working directory:
+
+$_next_tdesc${_pw_files_block}
+SELF-REVIEW BEFORE COMMITTING:
+After implementing, verify your changes against the task description above:
+1. Does your implementation fully achieve the task's goal?
+2. Are there any obvious issues, missing edge cases, or incomplete parts?
+3. If you find problems, fix them before committing.
+
+MANDATORY UI INTERACTION CONSTRAINTS:
+- Use data-testid selectors on actual buttons, forms, and navigation elements.
+- Do NOT call backend APIs directly from test code as a substitute for UI interactions.
+- Do NOT use waitForLoadState('networkidle') — use domcontentloaded + waitFor on specific elements.
+
+Only commit when you are confident the task goal is achieved.
+Commit your changes with a descriptive message."
+
+					local _pre_pw_sha
+					_pre_pw_sha=$(git rev-parse HEAD)
+
+					local _pw_timeout _pw_model
+					_pw_timeout=$(get_stage_timeout \
+						"implement-task-$_next_tid" \
+						"$_next_tsize")
+					_pw_model=$(resolve_model \
+						"implement-task-$_next_tid" \
+						"$_next_tsize")
+
+					local _pw_result
+					_pw_result=$(run_stage \
+						"implement-task-${_next_tid}-tdd-red" \
+						"$_pw_prompt" \
+						"implement-issue-implement.json" \
+						"$_next_tagent" "$_next_tsize" \
+						"$_pw_timeout" "$_pw_model")
+
+					local _pw_status
+					_pw_status=$(printf '%s' "$_pw_result" \
+						| jq -r '.output.status')
+
+					if [[ "$_pw_status" == "success" ]]; then
+						# Find new spec files added by the playwright task
+						local _new_specs
+						_new_specs=$(git diff "$_pre_pw_sha"..HEAD \
+							--name-only --diff-filter=A \
+							2>/dev/null \
+							| grep -E '\.(spec|test)\.(ts|js)$' \
+							|| true)
+
+						if [[ -n "$_new_specs" ]]; then
+							log "TDD RED phase: asserting" \
+								"new spec(s) fail" \
+								"before implementation:"
+							log "$_new_specs"
+							local _red_confirmed=false
+							local _spec_file
+							while IFS= read -r _spec_file; do
+								[[ -z "$_spec_file" ]] && continue
+								log "RED check:" \
+									"$TEST_E2E_CMD --" \
+									"$_spec_file"
+								if bash -c \
+									"$TEST_E2E_CMD -- $(printf '%q' "$_spec_file")" \
+									>/dev/null 2>&1; then
+									log_warn "TDD RED:" \
+										"$_spec_file passed" \
+										"(expected failure)"
+								else
+									log "TDD RED confirmed:" \
+										"$_spec_file fails" \
+										"as expected"
+									_red_confirmed=true
+								fi
+							done <<< "$_new_specs"
+							if [[ "$_red_confirmed" == "true" ]]; then
+								log "TDD RED phase confirmed" \
+									"— proceeding with" \
+									"implementation task $tid"
+							else
+								log_warn "TDD RED: not confirmed" \
+									"— all specs passed" \
+									"unexpectedly"
+							fi
+						else
+							log_warn "TDD pre-run: no new" \
+								"spec files found after" \
+								"playwright task $_next_tid" \
+								"— proceeding anyway"
+						fi
+						# Register regardless of whether new spec files were
+						# found — prevents double-execution when the playwright
+						# task only modifies page objects or fixtures.
+						tdd_prerun_tids+=("$_next_tid")
+					else
+						log_warn "TDD pre-run: playwright" \
+							"task $_next_tid failed" \
+							"— running implementation" \
+							"task $tid anyway"
+					fi
+				fi
+			fi
+		fi
+
 		log "Implementing task $tid" \
 			"(serial): $tdesc"
 
@@ -3004,7 +4097,7 @@ execute_batch_serial() {
 
 		local base_timeout
 		base_timeout=$(get_stage_timeout \
-			"implement-task-$tid")
+			"implement-task-$tid" "$tsize")
 		local base_model
 		base_model=$(resolve_model \
 			"implement-task-$tid" "$tsize")
@@ -3035,15 +4128,22 @@ execute_batch_serial() {
 		while (( review_attempts < max_attempts )); do
 			review_attempts=$((review_attempts + 1))
 
+			local line_range_hint
+			line_range_hint=$(build_line_range_hint "$tdesc")
 			local impl_prompt
 			impl_prompt="Implement task $tid on branch $feature_branch in the current working directory:
 
-$tdesc${files_block}
+$tdesc${line_range_hint}${files_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
 3. If you find problems, fix them before committing.
+
+MANDATORY UI INTERACTION CONSTRAINTS:
+- Use data-testid selectors on actual buttons, forms, and navigation elements.
+- Do NOT call backend APIs directly from test code as a substitute for UI interactions.
+- Do NOT use waitForLoadState('networkidle') — use domcontentloaded + waitFor on specific elements.
 
 Only commit when you are confident the task goal is achieved.
 Commit your changes with a descriptive message."
@@ -3078,7 +4178,7 @@ Commit your changes with a descriptive message."
 
 			local impl_status
 			impl_status=$(printf '%s' "$impl_result" \
-				| jq -r '.status')
+				| jq -r '.output.status')
 
 			if [[ "$impl_status" == "success" ]]; then
 				task_succeeded=true
@@ -3107,18 +4207,23 @@ Commit your changes with a descriptive message."
 			# Write result file for main loop
 			local commit_sha
 			commit_sha=$(printf '%s' "$impl_result" \
-				| jq -r '.commit')
+				| jq -r '.output.commit')
 			local impl_summary
 			impl_summary=$(printf '%s' "$impl_result" \
 				| jq -r \
-				'.summary // "Implementation completed"')
+				'.output.summary // "Implementation completed"')
+			local files_changed_json
+			files_changed_json=$(git diff --name-only HEAD~1 HEAD \
+				2>/dev/null | jq -R -s \
+				'split("\n") | map(select(length>0))')
 			local rf
 			rf="${LOG_BASE}/stages/task-${tid}-serial.log"
 			printf '%s' "{
 \"status\":\"success\",
 \"review_attempts\":$review_attempts,
 \"commit\":\"$commit_sha\",
-\"summary\":$(printf '%s' "$impl_summary" | jq -Rs .)
+\"summary\":$(printf '%s' "$impl_summary" | jq -Rs .),
+\"files_changed\":${files_changed_json:-[]}
 }" > "$rf"
 
 			completed+=("$tid")
@@ -3157,6 +4262,30 @@ Commit your changes with a descriptive message."
 #   separator in prompt).  A "LIKELY AFFECTED FILES:" section listing
 #   deduplicated, sorted file paths when one or more are provided.
 #
+# Build a targeted read hint from a task description.
+#
+# Parses "(lines N[–-]M)" from the task description and emits a
+# "TARGETED READ:" line instructing the subagent to jump to that offset.
+# No hard read limit is imposed — subagents should read additional context
+# (adjacent functions, callers, etc.) as needed.
+#
+# Arguments:
+#   $1 - task description string
+# Outputs:
+#   A "TARGETED READ:" line when a line range is found, or empty string.
+#
+build_line_range_hint() {
+    local task_desc="$1"
+    local start_line end_line
+    if [[ "$task_desc" =~ \(lines?[[:space:]]+([0-9]+)[[:space:]]*[-–][[:space:]]*([0-9]+)\) ]]; then
+        start_line="${BASH_REMATCH[1]}"
+        end_line="${BASH_REMATCH[2]}"
+        local offset=$(( start_line - 1 ))
+        printf '\nTARGETED READ: The primary change target is around lines %s–%s — use offset=%s to jump there, then read additional context (adjacent functions, callers) as needed.\n' \
+            "$start_line" "$end_line" "$offset"
+    fi
+}
+
 build_files_block() {
     local block=$'\n'
     if [[ $# -gt 0 ]]; then
@@ -3626,9 +4755,18 @@ Files: $(echo "$playwright_test_files" | tr '\n' ', ')
 "
         fi
 
-        local test_prompt="Run the test suite and validate test comprehensiveness in working directory $safe_dir.
+        local test_validation_skill
+        test_validation_skill=$(load_skill "test-validation")
 
-STEP 1 — TEST EXECUTION (Jest unit tests)
+        local test_prompt="${test_validation_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$test_validation_skill
+
+## End Skill Instructions
+
+}Run the test suite and validate test quality in working directory $safe_dir.
+
+STEP 1 — TEST EXECUTION
 Run the following command:
 $test_command
 
@@ -3660,12 +4798,12 @@ Output both test results and validation findings in one structured response.
         fi
 
         local test_status test_summary
-        test_status=$(printf '%s' "$test_result" | jq -r '.result')
-        test_summary=$(printf '%s' "$test_result" | jq -r '.summary // "Tests completed"')
+        test_status=$(printf '%s' "$test_result" | jq -r '.output.result')
+        test_summary=$(printf '%s' "$test_result" | jq -r '.output.summary // "Tests completed"')
 
         local validate_status validate_summary
-        validate_status=$(printf '%s' "$test_result" | jq -r '.validation_result // "skipped"')
-        validate_summary=$(printf '%s' "$test_result" | jq -r '.validation_summary // ""')
+        validate_status=$(printf '%s' "$test_result" | jq -r '.output.validation_result // "skipped"')
+        validate_summary=$(printf '%s' "$test_result" | jq -r '.output.validation_summary // ""')
 
         # -----------------------------------------------------------------
         # HANDLE TEST FAILURES
@@ -3676,7 +4814,7 @@ Output both test results and validation findings in one structured response.
 $test_summary" "default"
             log "Tests failed. Getting failures and fixing..."
             local failures
-            failures=$(printf '%s' "$test_result" | jq -c '.failures')
+            failures=$(printf '%s' "$test_result" | jq -c '.output.failures')
 
             # Filter failures: only include failures from PR-changed test files.
             # Explicit mode (changed_test_files non-empty): all failures are from
@@ -3774,7 +4912,7 @@ $test_summary" "default"
                 fi
             fi
 
-            local fix_prompt="ENVIRONMENT NOTE: If failures mention Redis/database connection errors, HTTP 500 from route handlers, or similar infrastructure issues, these are environment issues not code bugs. Do NOT attempt to fix these — note them as environment-dependent and focus only on code-level failures.
+            local fix_prompt="${PLATFORM_PATTERNS_PREFIX}ENVIRONMENT NOTE: If failures mention Redis/database connection errors, HTTP 500 from route handlers, or similar infrastructure issues, these are environment issues not code bugs. Do NOT attempt to fix these — note them as environment-dependent and focus only on code-level failures.
 
 Fix ONLY the specific test failures listed below. Do NOT rewrite test files, introduce new dependencies, or modify pre-existing test code. Only fix the failing assertions.
 
@@ -3792,7 +4930,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
 
             # Comment: Fix results
             comment_issue "Test Loop: Test Fix ($test_iteration/$max_test_iter)" "$fix_summary" "$loop_agent"
@@ -3832,13 +4970,13 @@ $validate_summary" "default"
             log "Test validation found issues. Fixing... (validation fix iteration $validation_fix_iteration/$MAX_VALIDATION_FIX_ITERATIONS)"
             local validate_issues
             validate_issues=$(printf '%s' "$test_result" | jq -r '
-                if .validation_issues then (.validation_issues | tostring)
-                elif .validation_summary then .validation_summary
+                if .output.validation_issues then (.output.validation_issues | tostring)
+                elif .output.validation_summary then .output.validation_summary
                 else "Fix test quality issues"
                 end
             ')
 
-            local fix_prompt="Address test quality issues in working directory $safe_dir on branch $loop_branch:
+            local fix_prompt="${PLATFORM_PATTERNS_PREFIX}Address test quality issues in working directory $safe_dir on branch $loop_branch:
 
 $validate_issues
 
@@ -3855,7 +4993,7 @@ Output a summary of fixes applied."
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
 
             local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
 
             # Comment: Fix results
             comment_issue "Test Loop: Validation Fix ($test_iteration/$max_test_iter)" "$fix_summary" "$loop_agent"
@@ -4084,9 +5222,9 @@ Report result as 'passed' or 'failed' with a detailed summary."
 
 			local e2e_verify_status e2e_verify_summary
 			e2e_verify_status=$(printf '%s' "$e2e_verify_result" \
-				| jq -r '.result')
+				| jq -r '.output.result')
 			e2e_verify_summary=$(printf '%s' "$e2e_verify_result" \
-				| jq -r '.summary // "E2E verification completed"')
+				| jq -r '.output.summary // "E2E verification completed"')
 
 			local e2e_icon="✅"
 			[[ "$e2e_verify_status" == "failed" ]] \
@@ -4171,10 +5309,10 @@ Output result as 'passed' or 'failed' with a detailed summary."
 
 				local acceptance_status acceptance_summary
 				acceptance_status=$(printf '%s' "$acceptance_result" \
-					| jq -r '.result')
+					| jq -r '.output.result')
 				acceptance_summary=$(printf '%s' "$acceptance_result" \
 					| jq -r \
-					'.summary // "Acceptance test completed"')
+					'.output.summary // "Acceptance test completed"')
 
 				local acceptance_icon="✅"
 				[[ "$acceptance_status" == "failed" ]] \
@@ -4271,7 +5409,7 @@ Commit your changes."
 
 			local e2e_fix_summary
 			e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
-				| jq -r '.summary // "Fix applied"')
+				| jq -r '.output.summary // "Fix applied"')
 			comment_issue "E2E Fix (iteration $e2e_fix_iter)" \
 				"🔧 $e2e_fix_summary" "$AGENT"
 
@@ -4313,9 +5451,9 @@ Report result as 'passed' or 'failed' with a detailed summary."
 
 			local rerun_status rerun_summary
 			rerun_status=$(printf '%s' "$rerun_result" \
-				| jq -r '.result')
+				| jq -r '.output.result')
 			rerun_summary=$(printf '%s' "$rerun_result" \
-				| jq -r '.summary // "E2E rerun completed"')
+				| jq -r '.output.summary // "E2E rerun completed"')
 
 			local rerun_icon="✅"
 			[[ "$rerun_status" == "failed" ]] && rerun_icon="❌"
@@ -4381,7 +5519,7 @@ Investigate the root cause and fix the issue. Commit your changes."
 		local acceptance_fix_summary
 		acceptance_fix_summary=$(printf '%s' \
 			"$acceptance_fix_result" \
-			| jq -r '.summary // "Fix applied"')
+			| jq -r '.output.summary // "Fix applied"')
 		comment_issue "Acceptance Test Fix" \
 			"$acceptance_fix_summary" "$AGENT"
 	fi
@@ -4558,12 +5696,55 @@ $excerpt
     fi
 
     # -------------------------------------------------------------------------
+    # STAGE: TRIAGE (classify route — fast-path or full)
+    # -------------------------------------------------------------------------
+    local triage_route
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "triage"; then
+        triage_route=$(jq -r '.route // "full"' "$STATUS_FILE")
+        log "Skipping triage stage (already completed). Route: $triage_route"
+    else
+        triage_route=$(run_triage_stage)
+    fi
+
+    if [[ "$triage_route" == "fast-path" ]]; then
+        log "Triage routes to surgical fast-path. Handing off to surgical-fast-path.sh"
+        export STATUS_FILE LOG_BASE ISSUE_NUMBER BASE_BRANCH SCHEMA_DIR CLAUDE_CLI
+        export BRANCH="${branch:-$(jq -r '.branch // ""' "$STATUS_FILE")}"
+        exec "$SCRIPT_DIR/surgical-fast-path.sh"
+    fi
+    log "Triage routes to full pipeline."
+
+    # -------------------------------------------------------------------------
     # PIPELINE PROFILE: classify complexity now that task sizes are known
     # -------------------------------------------------------------------------
     pipeline_profile=$(compute_pipeline_profile "$tasks_json")
     log "Pipeline profile: $pipeline_profile"
     # TODO(issue-XX): wire pipeline_profile to stage-selection logic so that
     # 'minimal' skips optional quality/simplify stages and 'full' enforces them.
+
+    # -------------------------------------------------------------------------
+    # COMPLEXITY-ADJUSTED WALL-CLOCK BUDGET
+    # Add 1800s per L-sized task, capped at 4x the base value.
+    # -------------------------------------------------------------------------
+    local l_task_count base_wall_time max_wall_time wall_time_bump
+    l_task_count=$(printf '%s' "$tasks_json" | jq -r '.[].description' \
+        | while IFS= read -r d; do
+            s=$(extract_task_size "$d")
+            [[ -n "$s" ]] && printf '%s\n' "$s"
+          done \
+        | grep -c '^L$' || true)
+    base_wall_time="$MAX_ORCHESTRATOR_WALL_TIME"
+    max_wall_time=$(( base_wall_time * 4 ))
+    wall_time_bump=$(( l_task_count * 1800 ))
+    MAX_ORCHESTRATOR_WALL_TIME=$(( base_wall_time + wall_time_bump ))
+    if (( MAX_ORCHESTRATOR_WALL_TIME > max_wall_time )); then
+        MAX_ORCHESTRATOR_WALL_TIME=$max_wall_time
+    fi
+    if (( wall_time_bump > 0 )); then
+        log "Complexity-adjusted wall-clock budget: ${base_wall_time}s + ${wall_time_bump}s (${l_task_count} L-task(s)) = ${MAX_ORCHESTRATOR_WALL_TIME}s (cap: ${max_wall_time}s)"
+    else
+        log "Wall-clock budget: ${MAX_ORCHESTRATOR_WALL_TIME}s (no L-tasks, no adjustment)"
+    fi
 
     # -------------------------------------------------------------------------
     # EARLY SCOPE CHECK: config-only bypass
@@ -4979,6 +6160,26 @@ $impl_summary" "$tagent"
         log "Implementation complete." \
             "$completed_tasks/$task_count tasks" \
             "completed (with per-task quality loops)."
+
+        # Guardrail: abort if no tasks completed but tasks were expected.
+        # Guard: if the branch has commits ahead of base (from a prior run or
+        # partial work), continue to PR creation instead of aborting.
+        if (( completed_tasks == 0 && task_count > 0 )); then
+            local commits_ahead
+            commits_ahead=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+            if (( commits_ahead > 0 )); then
+                log_warn "0/$task_count tasks completed this run, but branch has $commits_ahead commit(s) ahead of $BASE_BRANCH — continuing to PR creation."
+            else
+                log_error "ABORT: 0/$task_count tasks completed — implementation produced no changes." \
+                    "This usually indicates a bug in the orchestrator (e.g. undefined variable, worktree failure)." \
+                    "Check stage logs for errors."
+                comment_issue "Implementation Failed" \
+                    "❌ 0/$task_count tasks completed. No changes were produced. Aborting pipeline." \
+                    "error"
+                set_final_state "error"
+                exit 1
+            fi
+        fi
     fi
 
     # -------------------------------------------------------------------------
@@ -4987,6 +6188,64 @@ $impl_summary" "$tagent"
     local branch_scope
     branch_scope=$(detect_change_scope "." "$BASE_BRANCH")
     log "Branch change scope: $branch_scope"
+
+    # Already-done check: if all tasks reported already_done or files_changed:[],
+    # the issue was previously implemented — exit cleanly without PR or tests.
+    # Guard: only skip PR creation if the branch also has no commits (prevents false-positive
+    # exits when agents set already_done:true after genuinely committing changes).
+    if is_stage_completed "implement"; then
+        local all_already_done=true
+        local _rf _already_done _files_changed
+        # files_changed is now reliably written by execute_batch_serial (added in feat/issue-152),
+        # so a missing or empty array is a genuine signal that no files were changed, not a gap.
+        # The commits_ahead guard below remains as defence-in-depth against false-positive exits.
+        for _rf in "${LOG_BASE}/stages"/task-*-worktree.log \
+                   "${LOG_BASE}/stages"/task-*-serial.log; do
+            [[ -f "$_rf" ]] || continue
+            _already_done=$(jq -r '.already_done // false' "$_rf" 2>/dev/null || echo "false")
+            _files_changed=$(jq -r '(.files_changed // []) | length' "$_rf" 2>/dev/null || echo "1")
+            if [[ "$_already_done" != "true" && "$_files_changed" != "0" ]]; then
+                all_already_done=false
+                break
+            fi
+        done
+
+        if [[ "$all_already_done" == "true" && "$completed_tasks" -gt 0 ]]; then
+            # Guard: serial conflict-retry logs report already_done=true even when new commits
+            # landed. Check for actual commits before concluding the issue was pre-implemented.
+            local _commits_check
+            _commits_check=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+            if (( _commits_check > 0 )); then
+                log "All $completed_tasks task(s) reported already_done but branch has $_commits_check commit(s) ahead of $BASE_BRANCH — continuing to PR creation."
+            else
+                log "All $completed_tasks task(s) reported already_done — issue was previously implemented."
+                comment_issue "Already Implemented" \
+                    "✅ All tasks for this issue were already completed in a prior run. No new changes are needed. Closing as done." \
+                    "default"
+                set_final_state "already_implemented"
+                jq '.task_summary.sp_completed = 0 | .task_summary.sp_total = 0' status.json > status.json.tmp && mv status.json.tmp status.json
+                exit 0
+            fi
+        fi
+    fi
+
+    # Guardrail: if we just ran implementation but have no changes, something went wrong.
+    if is_stage_completed "implement" && [[ "$branch_scope" == "config" ]]; then
+        local commits_ahead
+        commits_ahead=$(git rev-list --count "${BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+        if (( commits_ahead > 0 )); then
+            log "Branch has $commits_ahead commit(s) ahead of" \
+                "$BASE_BRANCH — continuing."
+        else
+            log_error "ABORT: Implementation stage completed but branch has 0 commits ahead of $BASE_BRANCH." \
+                "Worktree merge-back likely failed. Check orchestrator log for merge errors."
+            comment_issue "Implementation Failed" \
+                "❌ Implementation completed but no commits landed on the feature branch. Aborting." \
+                "error"
+            set_final_state "error"
+            exit 1
+        fi
+    fi
 
     # -------------------------------------------------------------------------
     # STAGE: TEST LOOP (after all tasks complete)
@@ -5149,9 +6408,9 @@ STEPS:
                     deploy_verify_result=$(run_stage "deploy-verify" "$deploy_verify_prompt" "implement-issue-deploy-verify.json" "default")
 
                     local dv_status dv_health dv_summary
-                    dv_status=$(printf '%s' "$deploy_verify_result" | jq -r '.status // "unknown"')
-                    dv_health=$(printf '%s' "$deploy_verify_result" | jq -r '.health_status // "unknown"')
-                    dv_summary=$(printf '%s' "$deploy_verify_result" | jq -r '.summary // "Deploy verification completed"')
+                    dv_status=$(printf '%s' "$deploy_verify_result" | jq -r '.output.status // "unknown"')
+                    dv_health=$(printf '%s' "$deploy_verify_result" | jq -r '.output.health_status // "unknown"')
+                    dv_summary=$(printf '%s' "$deploy_verify_result" | jq -r '.output.summary // "Deploy verification completed"')
 
                     local dv_icon="✅"
                     [[ "$dv_status" == "error" ]] && dv_icon="❌"
@@ -5212,13 +6471,19 @@ $dv_summary" "default"
         else
             set_stage_started "docs"
 
-            local docs_prompt="Write JSDoc/TSDoc comments for all modified TypeScript files on branch $branch in the current working directory.
+            local file_idx=0
+            while IFS= read -r ts_file; do
+                [[ -z "$ts_file" ]] && continue
+                (( file_idx++ )) || true
+                local docs_file_prompt="Write JSDoc/TSDoc comments for the TypeScript file \`$ts_file\` on branch $branch in the current working directory.
 
-Modified TypeScript files:
-$files_for_prompt
+File: $ts_file
 
-Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSUE_NUMBER): add JSDoc comments"
-            run_stage "docs" "$docs_prompt" "implement-issue-implement.json" "default"
+Add comprehensive JSDoc/TSDoc comments to this file only. Stage the changes with \`git add $ts_file\` but do NOT commit."
+                run_stage "docs-file-$file_idx" "$docs_file_prompt" "implement-issue-implement.json" "default"
+            done <<< "$modified_ts_files"
+
+            run_stage "docs-commit" "Commit all staged docblock changes with message: docs(issue-$ISSUE_NUMBER): add JSDoc comments" "implement-issue-implement.json" "default"
 
             set_stage_completed "docs"
         fi
@@ -5242,20 +6507,27 @@ Add comprehensive JSDoc/TSDoc comments and commit with message: docs(issue-$ISSU
     else
         set_stage_started "pr"
 
+        local pr_creation_skill
+        pr_creation_skill=$(load_skill "pr-creation")
+
         local pr_prompt="Create a merge request for issue #$ISSUE_NUMBER.
 
 Run this exact command (substitute a short description for <description>):
 
 git push -u origin $branch 2>/dev/null; $PLATFORM_DIR/create-mr.sh --source '$branch' --target '$BASE_BRANCH' --title 'feat(issue-$ISSUE_NUMBER): <description>' --body 'Closes #$ISSUE_NUMBER'
 
-The command will output the MR number. Use that as pr_number in your response."
+The command will output the MR number. Use that as pr_number in your response.
+
+${pr_creation_skill:+## Skill Instructions
+
+$pr_creation_skill}"
 
         local pr_result
-        pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "sonnet")
+        pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "opus")
 
         local pr_status
-        pr_status=$(printf '%s' "$pr_result" | jq -r '.status')
-        pr_number=$(printf '%s' "$pr_result" | jq -r '.pr_number')
+        pr_status=$(printf '%s' "$pr_result" | jq -r '.output.status')
+        pr_number=$(printf '%s' "$pr_result" | jq -r '.output.pr_number')
 
         if [[ "$pr_status" != "success" ]]; then
             log_error "PR creation failed"
@@ -5315,6 +6587,8 @@ The command will output the MR number. Use that as pr_number in your response."
         diff_lines=$(get_diff_line_count "$BASE_BRANCH")
         log "PR review config: model=$pr_review_model, timeout=${pr_review_timeout}s, max_iter=$pr_review_max_iter (diff: ${diff_lines} lines, profile: $pipeline_profile)"
 
+        local review_history_file="$LOG_BASE/context/pr-review-history.json"
+
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
         local pr_iteration
@@ -5341,11 +6615,75 @@ The command will output the MR number. Use that as pr_number in your response."
         # -------------------------------------------------------------------------
         # COMBINED SPEC + CODE REVIEW → PR comment #11 (single pass)
         # -------------------------------------------------------------------------
+        # Include the diff inline so the reviewer doesn't waste turns running git diff
+        # and exploring the entire codebase. For small diffs this dramatically reduces
+        # token usage (4.7M → ~50K observed on an 11-line diff).
+        local pr_diff
+        pr_diff=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null | head -500)
+
+        # Sibling-file scan: for each directory containing a changed file,
+        # collect other .ts/.tsx files (excluding tests and already-diffed files),
+        # deduplicate, cap at 5. Uses newline-delimited strings for bash 3 compat.
+        local repo_root
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+
+        # Collect changed files (newline-delimited for lookup)
+        local changed_files_nl
+        changed_files_nl=$(git diff --name-only "$BASE_BRANCH"...HEAD -- 2>/dev/null)
+
+        local -a sibling_files_list=()
+        local seen_nl="" sib_f sib_dir
+        while IFS= read -r sib_f; do
+            [[ -z "$sib_f" ]] && continue
+            sib_dir="${sib_f%/*}"
+            [[ "$sib_dir" == "$sib_f" ]] && sib_dir="."
+            for f in "$repo_root/$sib_dir"/*.ts "$repo_root/$sib_dir"/*.tsx; do
+                [[ -f "$f" ]] || continue
+                [[ "$f" == *".test."* || "$f" == *".spec."* ]] && continue
+                # Normalize back to repo-relative path
+                local rel="${f#"$repo_root"/}"
+                # Skip files already in the diff
+                printf '%s\n' "$changed_files_nl" | grep -qxF "$rel" && continue
+                # Deduplicate
+                printf '%s\n' "$seen_nl" | grep -qxF "$rel" && continue
+                seen_nl="${seen_nl}${rel}
+"
+                sibling_files_list+=("$rel")
+                ((${#sibling_files_list[@]} >= 5)) && break 2
+            done
+        done <<< "$changed_files_nl"
+
+        local sibling_files_prompt=""
+        if ((${#sibling_files_list[@]} > 0)); then
+            local sibling_list
+            sibling_list=$(printf '%s, ' "${sibling_files_list[@]}")
+            sibling_list="${sibling_list%, }"
+            sibling_files_prompt="
+
+Also check these sibling files for the same auth, schema, and N+1 patterns: ${sibling_list}
+For sibling files, only report major-severity findings (omit minor findings)."
+        fi
+
+        local pr_review_skill
+        pr_review_skill=$(load_skill "pr-review")
+
         local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
-Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
+${pr_review_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$pr_review_skill
+
+## End Skill Instructions
+
+}Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
 
+Here is the diff to review (do NOT run git diff yourself — use this):
+
+\`\`\`diff
+$pr_diff
+\`\`\`
+${sibling_files_prompt}
 Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
@@ -5359,13 +6697,13 @@ Approve or request changes. Output a summary suitable for an issue comment."
         fi
 
         local review_verdict review_summary verdict_source
-        review_summary=$(printf '%s' "$review_result" | jq -r '.summary // "Review completed"')
+        review_summary=$(printf '%s' "$review_result" | jq -r '.output.summary // "Review completed"')
         local has_result_field
-        has_result_field=$(printf '%s' "$review_result" | jq 'has("result")' 2>/dev/null)
+        has_result_field=$(printf '%s' "$review_result" | jq '.output | has("result")' 2>/dev/null)
 
         if [[ "$has_result_field" == "true" ]]; then
-            # Structured output available: extract verdict from .result field
-            review_verdict=$(printf '%s' "$review_result" | jq -r '.result')
+            # Structured output available: extract verdict from .output.result field
+            review_verdict=$(printf '%s' "$review_result" | jq -r '.output.result')
             verdict_source="structured output"
             log "Verdict extracted from structured output: $review_verdict"
         else
@@ -5396,12 +6734,12 @@ Approve or request changes. Output a summary suitable for an issue comment."
         # -------------------------------------------------------------------------
         if [[ "$review_verdict" == "approved" ]]; then
             local major_issue_count
-            major_issue_count=$(printf '%s' "$review_result" | jq '[.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
+            major_issue_count=$(printf '%s' "$review_result" | jq '[.output.issues // [] | .[] | select(.severity == "major")] | length' 2>/dev/null || echo "0")
             if (( major_issue_count > 0 )); then
                 log_warn "Review verdict was 'approved' but $major_issue_count major issue(s) found — overriding to changes_requested"
                 review_verdict="changes_requested"
                 local major_descriptions
-                major_descriptions=$(printf '%s' "$review_result" | jq -r '[.issues[] | select(.severity == "major") | .description] | join("; ")' 2>/dev/null || echo "")
+                major_descriptions=$(printf '%s' "$review_result" | jq -r '[.output.issues[] | select(.severity == "major") | .description] | join("; ")' 2>/dev/null || echo "")
                 review_summary="${review_summary}
 
 ⚠️ **Override:** Reviewer approved but $major_issue_count major issue(s) must be resolved first:
@@ -5412,9 +6750,48 @@ ${major_descriptions}"
         # Comment #11: PR Combined Review Result
         local review_icon="✅"
         [[ "$review_verdict" == "changes_requested" ]] && review_icon="🔄"
+
+        # Create follow-up GH issues for adjacent_issues with major severity
+        local followup_comment=""
+        if [[ "$review_verdict" == "approved" ]]; then
+            local adjacent_json adj_count
+            adjacent_json=$(printf '%s' "$review_result" | \
+                jq -c '[.adjacent_issues // [] | .[] | select(.severity == "major")]' \
+                2>/dev/null || echo "[]")
+            adj_count=$(printf '%s' "$adjacent_json" | jq 'length' 2>/dev/null || echo "0")
+            if (( adj_count > 0 )); then
+                local created_nums=()
+                while IFS= read -r adj_item; do
+                    local adj_title adj_body
+                    adj_title=$(printf '%s' "$adj_item" | jq -r '.title // ""')
+                    adj_body=$(printf '%s' "$adj_item" | jq -r '.body // ""')
+                    [[ -z "$adj_title" ]] && continue
+                    local new_num
+                    new_num=$("$PLATFORM_DIR/create-issue.sh" \
+                        --title "$adj_title" --body "$adj_body" \
+                        --labels "pipeline-followup" 2>/dev/null || true)
+                    if [[ -n "$new_num" ]]; then
+                        created_nums+=("#$new_num")
+                        log "Created follow-up issue #$new_num: $adj_title"
+                    else
+                        log "WARN: failed to create follow-up issue for: $adj_title"
+                    fi
+                done < <(printf '%s' "$adjacent_json" | jq -c '.[]'  2>/dev/null)
+                if (( ${#created_nums[@]} > 0 )); then
+                    local nums_joined
+                    nums_joined=$(printf '%s, ' "${created_nums[@]}")
+                    nums_joined="${nums_joined%, }"
+                    followup_comment="
+
+---
+📋 **Follow-up issues created:** $nums_joined"
+                fi
+            fi
+        fi
+
         comment_pr "$pr_number" "PR Review (Iteration $pr_iteration)" "$review_icon **Result:** $review_verdict
 
-$review_summary" "code-reviewer"
+$review_summary$followup_comment" "code-reviewer"
 
         if [[ "$review_verdict" == "approved" ]]; then
             pr_approved=true
@@ -5424,12 +6801,45 @@ $review_summary" "code-reviewer"
 
             # Collect feedback
             local review_comments
-            review_comments=$(printf '%s' "$review_result" | jq -r '.comments // ""')
+            review_comments=$(printf '%s' "$review_result" | jq -r '[.output.issues // [] | .[] | "\(.file // ""):\(.line // "") → \(.description // "")"] | join("\n- ")')
 
-            local fix_prompt="Address PR review feedback on branch $branch in the current working directory:
+            # Append current iteration issues to history file
+            local current_issues
+            current_issues=$(printf '%s' "$review_result" | jq -c '.output.issues // []')
+            if [[ -f "$review_history_file" ]]; then
+                local existing
+                existing=$(< "$review_history_file")
+                printf '%s' "$existing" | jq --argjson new "$current_issues" '. + [$new]' > "$review_history_file"
+            else
+                printf '[%s]' "$current_issues" > "$review_history_file"
+            fi
 
-Review feedback:
+            # Build cumulative findings from prior iterations
+            local cumulative_findings=""
+            if [[ -f "$review_history_file" ]]; then
+                cumulative_findings=$(jq -r '
+                    [.[-2:] | .[] | .[]? | .description] | unique | join("\n- ")
+                ' "$review_history_file" 2>/dev/null || printf '')
+            fi
+
+            local fix_from_review_skill
+            fix_from_review_skill=$(load_skill "fix-from-review")
+
+            local fix_prompt="${fix_from_review_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$fix_from_review_skill
+
+## End Skill Instructions
+
+}Address PR review feedback on branch $branch in the current working directory:
+
+Current iteration findings:
 $review_comments
+
+$(if [[ -n "$cumulative_findings" ]]; then
+    printf 'Cumulative findings across all iterations (ensure ALL are addressed):\n'
+    printf -- '- %s\n' "$cumulative_findings"
+fi)
 
 Fix the issues and commit. Output a summary of fixes applied."
 
@@ -5439,7 +6849,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
 
             local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.summary // "Fixes applied"')
+            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
 
             # Comment #12: PR Fix Result
             comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" "$fix_summary" "$AGENT"
@@ -5461,21 +6871,24 @@ Fix the issues and commit. Output a summary of fixes applied."
     else
         set_stage_started "complete"
 
-        local complete_prompt="Generate a completion summary for PR #$pr_number implementing issue #$ISSUE_NUMBER.
+        local complete_skill
+        complete_skill=$(load_skill "complete-summary")
 
-Include:
-- Issue and branch info
-- Decisions made during implementation
-- Reviews passed
-- Final status
+        local complete_prompt="Generate a completion summary for PR #$pr_number implementing issue #$ISSUE_NUMBER on branch $branch.
 
-Output a summary suitable for a PR/MR comment."
+${complete_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$complete_skill
+
+## End Skill Instructions
+
+}Output a summary suitable for a PR/MR comment."
 
         local complete_result
         complete_result=$(run_stage "complete" "$complete_prompt" "implement-issue-complete.json")
 
         local complete_summary
-        complete_summary=$(printf '%s' "$complete_result" | jq -r '.summary // "Implementation completed successfully"')
+        complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
 
         # Add degradation warning to completion comment if any stages soft-failed
         local degraded_warning=""
@@ -5505,7 +6918,43 @@ $complete_summary
 *This PR is ready for human review and merge.*"
 
         set_stage_completed "complete"
+    fi
+
+    # -------------------------------------------------------------------------
+    # STAGE: MERGE
+    # Merges the PR/MR into the base branch after successful review.
+    # Uses merge-mr.sh which respects MERGE_STYLE (squash/merge/rebase) from
+    # platform.sh. After merge, checks out and pulls the base branch.
+    # -------------------------------------------------------------------------
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "merge_pr"; then
+        log "Skipping merge_pr stage (already completed)"
         set_final_state "completed"
+    else
+        set_stage_started "merge_pr"
+        log "Merging PR #$pr_number into $BASE_BRANCH..."
+        comment_issue "Merge: Merging" \
+            "🔀 Merging PR #$pr_number into \`$BASE_BRANCH\`..." \
+            "default"
+
+        if "$PLATFORM_DIR/merge-mr.sh" "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1; then
+            log "PR #$pr_number merged successfully. Switching to $BASE_BRANCH..."
+            git fetch origin >>"${LOG_FILE:-/dev/null}" 2>&1 \
+                && git checkout "$BASE_BRANCH" >>"${LOG_FILE:-/dev/null}" 2>&1 \
+                && git pull >>"${LOG_FILE:-/dev/null}" 2>&1
+            log "Now on $BASE_BRANCH (up to date)"
+            comment_issue "Merge: Complete" \
+                "✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully." \
+                "default"
+            set_stage_completed "merge_pr"
+            set_final_state "completed"
+        else
+            log_error "Failed to merge PR #$pr_number"
+            comment_issue "Merge: Failed" \
+                "❌ Failed to merge PR #$pr_number. Manual intervention required." \
+                "default"
+            set_final_state "error"
+            exit 1
+        fi
     fi
 
     # Record degraded stages in status.json

@@ -42,6 +42,7 @@ _stage_to_tier() {
 	case "$1" in
 		parse-issue)    printf '%s' "light" ;;
 		validate-plan)  printf '%s' "light" ;;
+		triage)         printf '%s' "light" ;;
 		implement)      printf '%s' "standard" ;;
 		task-review)    printf '%s' "standard" ;;
 		fix)            printf '%s' "standard" ;;
@@ -101,6 +102,7 @@ if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
 		fix-acceptance-test acceptance-test validate-plan
 		fix-deploy-verify deploy-verify spec-review code-review task-review parse-issue e2e-verify
 		pr-review implement simplify research complete pr-fix fix-e2e review test-iter test docs fix pr
+		triage
 	)
 fi
 
@@ -157,8 +159,8 @@ resolve_model() {
 	fi
 
 	# Apply complexity hint — overrides stage default when provided.
-	# Light-tier stages (test, parse-issue, validate-plan, research, complete,
-	# docs, simplify, acceptance-test) are mechanical and always use haiku;
+	# Light-tier stages (test, parse-issue, validate-plan, complete, docs,
+	# simplify, acceptance-test) are mechanical and always use haiku;
 	# complexity hints are ignored for them.
 	# The quality loop forwards task-level complexity to implement, review,
 	# and fix stages so model selection scales with task size.
@@ -194,4 +196,62 @@ _next_model_up() {
 		opus)   printf '%s' "opus" ;;
 		*)      printf '%s' "opus" ;;
 	esac
+}
+
+# =============================================================================
+# USAGE-AWARE MODEL SELECTION (effective_model / effective_fallback)
+# =============================================================================
+#
+# Wraps resolve_model with a check against claude-usage.sh's
+# is_model_exhausted. When the picked model is exhausted (per-model bucket
+# full and overage isn't absorbing), escalate via _next_model_up until we
+# find one that isn't exhausted or hit the opus ceiling.
+#
+# When claude-usage.sh isn't loaded OR no sessionKey is configured,
+# is_model_exhausted returns false for everything and these wrappers
+# behave identically to resolve_model / _next_model_up — zero regression
+# for users who haven't opted into usage polling.
+#
+
+_usage_aware_escalate() {
+	local model="$1" original="$1" next
+	# is_model_exhausted comes from claude-usage.sh. When it isn't sourced
+	# (or polling is unconfigured), treat all models as not exhausted.
+	if ! declare -F is_model_exhausted >/dev/null 2>&1; then
+		printf '%s\n' "$model"
+		return 0
+	fi
+
+	# _next_model_up returns the same model at the opus ceiling, which
+	# terminates the loop unconditionally — no infinite spin if every
+	# tier is exhausted.
+	while is_model_exhausted "$model"; do
+		next=$(_next_model_up "$model")
+		if [[ "$next" == "$model" ]]; then
+			break
+		fi
+		model="$next"
+	done
+
+	# Surface the escalation so operators can correlate cost spikes with
+	# bucket exhaustion. Logged via the orchestrator's `log` if available,
+	# else stderr — see _usage_log in claude-usage.sh.
+	if [[ "$model" != "$original" ]] && declare -F model_reset_at >/dev/null 2>&1; then
+		local _reset
+		_reset=$(model_reset_at "$original")
+		_usage_log "Usage gate: $original exhausted (resets ${_reset}) — escalating to $model"
+	fi
+
+	printf '%s\n' "$model"
+}
+
+# effective_model(stage, complexity) — resolve_model with usage gating.
+effective_model() {
+	_usage_aware_escalate "$(resolve_model "$@")"
+}
+
+# effective_fallback(model) — _next_model_up with usage gating.
+# Used to compute the --fallback-model arg for the Claude CLI.
+effective_fallback() {
+	_usage_aware_escalate "$(_next_model_up "$1")"
 }

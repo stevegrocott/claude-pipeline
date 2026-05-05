@@ -1,0 +1,254 @@
+{
+  "description": "Append-only JSONL event envelope for the pipeline event stream. Each line is one event.",
+  "type": "object",
+  "required": ["ts", "run_id", "event"],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the event was emitted"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Unique run identifier, e.g. issue-158-20260409-183459"
+    },
+    "stage": {
+      "type": "string",
+      "description": "Pipeline stage name, e.g. triage, implement, test, review"
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "escalation",
+        "retry",
+        "model_call",
+        "rate_limit_hit",
+        "schema_validation_fail",
+        "status_change",
+        "stage_start",
+        "stage_end",
+        "batch_start",
+        "batch_end",
+        "issue_start",
+        "issue_end",
+        "batch_paused"
+      ],
+      "description": "Event type discriminator"
+    },
+    "task": {
+      "type": "integer",
+      "description": "Task number within the stage, when applicable (omitted for stage-level events)"
+    }
+  },
+  "oneOf": [
+    {
+      "description": "Model escalation — a lower-tier model was replaced by a higher-tier model mid-stage",
+      "properties": {
+        "event": { "const": "escalation" },
+        "reason": {
+          "type": "string",
+          "enum": ["timeout", "empty_output", "max_turns_exhausted", "structured_error", "double_timeout"],
+          "description": "Why escalation was triggered"
+        },
+        "from_model": {
+          "type": "string",
+          "description": "Model being replaced, e.g. haiku"
+        },
+        "to_model": {
+          "type": "string",
+          "description": "Replacement model, e.g. sonnet"
+        },
+        "consecutive_timeouts": {
+          "type": "integer",
+          "description": "Number of consecutive timeouts that led to this escalation"
+        }
+      },
+      "required": ["event", "reason", "from_model", "to_model"]
+    },
+    {
+      "description": "Retry attempt after a transient failure",
+      "properties": {
+        "event": { "const": "retry" },
+        "reason": {
+          "type": "string",
+          "enum": ["timeout", "empty_output", "rate_limit", "schema_validation_fail"],
+          "description": "Why the retry was triggered"
+        },
+        "attempt": {
+          "type": "integer",
+          "description": "Current attempt number (1-based)"
+        },
+        "max_attempts": {
+          "type": "integer",
+          "description": "Maximum allowed attempts before escalation or failure"
+        }
+      },
+      "required": ["event", "reason", "attempt", "max_attempts"]
+    },
+    {
+      "description": "An individual Claude API call was made",
+      "properties": {
+        "event": { "const": "model_call" },
+        "model": {
+          "type": "string",
+          "description": "Model ID used for this call, e.g. claude-haiku-4-5"
+        },
+        "stage_attempt": {
+          "type": "integer",
+          "description": "Which attempt within the stage this call belongs to (1-based)"
+        },
+        "turns_used": {
+          "type": "integer",
+          "description": "Number of agentic turns consumed"
+        },
+        "exit_reason": {
+          "type": "string",
+          "enum": ["success", "timeout", "max_turns", "error"],
+          "description": "How the call terminated"
+        }
+      },
+      "required": ["event", "model", "stage_attempt"]
+    },
+    {
+      "description": "A rate limit (HTTP 429 or quota exhaustion) was encountered",
+      "properties": {
+        "event": { "const": "rate_limit_hit" },
+        "model": {
+          "type": ["string", "null"],
+          "description": "Model that triggered the rate limit, if known"
+        },
+        "retry_after_seconds": {
+          "type": "integer",
+          "description": "Seconds to wait before retrying, from Retry-After header"
+        }
+      },
+      "required": ["event"]
+    },
+    {
+      "description": "Structured output from a Claude call failed JSON Schema validation",
+      "properties": {
+        "event": { "const": "schema_validation_fail" },
+        "schema": {
+          "type": "string",
+          "description": "Schema filename against which validation was attempted, e.g. implement-issue-triage.json"
+        },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Validation error messages"
+        }
+      },
+      "required": ["event", "schema", "errors"]
+    },
+    {
+      "description": "The orchestrator run state transitioned (e.g. initializing → running → completed)",
+      "properties": {
+        "event": { "const": "status_change" },
+        "from_state": {
+          "type": "string",
+          "enum": ["initializing", "running", "completed", "failed"],
+          "description": "Previous orchestrator state"
+        },
+        "to_state": {
+          "type": "string",
+          "enum": ["initializing", "running", "completed", "failed"],
+          "description": "New orchestrator state"
+        }
+      },
+      "required": ["event", "from_state", "to_state"]
+    },
+    {
+      "description": "A pipeline stage began execution",
+      "properties": {
+        "event": { "const": "stage_start" },
+        "model": {
+          "type": "string",
+          "description": "Model selected for this stage"
+        },
+        "route": {
+          "type": ["string", "null"],
+          "enum": ["fast-path", "full", null],
+          "description": "Pipeline route in effect at stage start, if known"
+        }
+      },
+      "required": ["event", "model"]
+    },
+    {
+      "description": "A pipeline stage finished execution",
+      "properties": {
+        "event": { "const": "stage_end" },
+        "status": {
+          "type": "string",
+          "enum": ["success", "error", "rate_limit"],
+          "description": "Outcome of the stage"
+        },
+        "duration_seconds": {
+          "type": "number",
+          "description": "Wall-clock seconds from stage_start to stage_end"
+        }
+      },
+      "required": ["event", "status"]
+    },
+    {
+      "description": "A batch run began processing its issue list",
+      "properties": {
+        "event": { "const": "batch_start" }
+      },
+      "required": ["event"]
+    },
+    {
+      "description": "A batch run finished processing all issues",
+      "properties": {
+        "event": { "const": "batch_end" },
+        "outcome": {
+          "type": "string",
+          "enum": ["completed", "circuit_breaker", "failed"],
+          "description": "How the batch terminated"
+        }
+      },
+      "required": ["event", "outcome"]
+    },
+    {
+      "description": "Processing began for a single issue within a batch",
+      "properties": {
+        "event": { "const": "issue_start" },
+        "issue_num": {
+          "type": "string",
+          "description": "Issue number being processed, e.g. 158"
+        }
+      },
+      "required": ["event", "issue_num"]
+    },
+    {
+      "description": "Processing finished for a single issue within a batch",
+      "properties": {
+        "event": { "const": "issue_end" },
+        "issue_num": {
+          "type": "string",
+          "description": "Issue number that finished processing"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["success", "failed"],
+          "description": "Whether the issue was processed successfully"
+        }
+      },
+      "required": ["event", "issue_num", "outcome"]
+    },
+    {
+      "description": "The batch was paused by the circuit breaker due to consecutive failures",
+      "properties": {
+        "event": { "const": "batch_paused" },
+        "consecutive_failures": {
+          "type": "integer",
+          "description": "Number of consecutive issue failures that triggered the circuit breaker"
+        },
+        "max_failures": {
+          "type": "integer",
+          "description": "Configured threshold that was exceeded"
+        }
+      },
+      "required": ["event", "consecutive_failures", "max_failures"]
+    }
+  ]
+}

@@ -51,6 +51,10 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 source "$SCRIPT_DIR/../config/platform.sh"
+# claude-usage.sh provides is_model_exhausted / model_reset_at for the
+# pre-flight log line. Sourcing is no-op when CLAUDE_USAGE_SESSION_KEY is
+# unset (graceful fallback — see claude-usage.sh).
+source "$SCRIPT_DIR/claude-usage.sh"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 LOG_BASE="logs/batch-$(date +%Y%m%d-%H%M%S)"
 STATUS_FILE="status.json"
@@ -205,6 +209,94 @@ log_error() {
     printf '%s\n' "$msg" >&2
 }
 
+log_warn() {
+    local msg="[$(date -Iseconds)] WARN: $*"
+    printf '%s\n' "$msg" >> "$LOG_FILE"
+    printf '%s\n' "$msg" >&2
+}
+
+# =============================================================================
+# STRUCTURED EVENT EMISSION
+# =============================================================================
+#
+# emit_event <event_type> [key=value ...]
+#
+# Builds a JSON envelope with ts/run_id/event/stage and forwards it to
+# event-emit.sh, which validates against schemas/pipeline-event.json and
+# appends one JSONL line to $LOG_BASE/events.jsonl under flock.
+#
+# Design notes:
+#   - Parallel to existing text logs: every text-log call site that maps to one
+#     of the 8 event types (stage_start, stage_end, escalation, retry,
+#     model_call, rate_limit_hit, schema_validation_fail, status_change) gets
+#     a parallel emit_event call.  Text logs are retained verbatim for human
+#     debugging — see issue #180.
+#   - Safe-by-default: silently no-ops when event-emit.sh is missing or
+#     LOG_BASE is unset (e.g. during early init or when the helper has not yet
+#     landed in this branch).  A schema-invalid emit exits non-zero from
+#     event-emit.sh but never crashes the orchestrator (stderr-redirected,
+#     `|| true`).
+#   - run_id is derived from the LOG_BASE basename which already encodes
+#     issue+timestamp (e.g. "issue-180-20260502-183541").
+emit_event() {
+    local event_type="$1"
+    shift
+
+    # Parallel-task safety: if the helper hasn't been added yet (sub-issue
+    # tasks land out of order), skip silently rather than break the pipeline.
+    local emit_script="$SCRIPT_DIR/event-emit.sh"
+    if [[ ! -x "$emit_script" ]]; then
+        return 0
+    fi
+
+    # Skip if LOG_BASE isn't established yet (very early init paths).
+    if [[ -z "${LOG_BASE:-}" ]]; then
+        return 0
+    fi
+
+    local run_id="${LOG_BASE##*/}"
+
+    local -a jq_args=(
+        --arg ts "$(date -Iseconds)"
+        --arg run_id "$run_id"
+        --arg event "$event_type"
+    )
+    local filter='{ts: $ts, run_id: $run_id, event: $event}'
+
+    local kv key value safe_key json_value
+    for kv in "$@"; do
+        # Support `key:=value` for JSON-typed values (numbers, booleans, null)
+        # in addition to `key=value` for strings. Required because the schema
+        # types fields like attempt/max_attempts/stage_attempt as integer.
+        if [[ "$kv" == *":="* ]]; then
+            key="${kv%%:=*}"
+            value="${kv#*:=}"
+            json_value=true
+        else
+            key="${kv%%=*}"
+            value="${kv#*=}"
+            json_value=false
+        fi
+        # Defensive: only allow alphanumeric/underscore in keys to keep the
+        # generated jq filter safe.
+        safe_key="${key//[^A-Za-z0-9_]/}"
+        if [[ -z "$safe_key" ]]; then
+            continue
+        fi
+        if $json_value; then
+            jq_args+=(--argjson "$safe_key" "$value")
+        else
+            jq_args+=(--arg "$safe_key" "$value")
+        fi
+        filter+=" | .${safe_key} = \$${safe_key}"
+    done
+
+    local event_json
+    event_json=$(jq -nc "${jq_args[@]}" "$filter" 2>/dev/null) || return 0
+
+    LOG_DIR="$LOG_BASE" "$emit_script" "$event_json" >/dev/null 2>&1 || true
+}
+
 # =============================================================================
 # STATUS FILE MANAGEMENT
 # =============================================================================
@@ -221,6 +313,7 @@ init_status() {
             "error": null,
             "follow_ups": [],
             "started_at": null,
+            "stage_started_at": null,
             "completed_at": null
         }]')
     done
@@ -279,7 +372,7 @@ update_issue_field() {
 }
 
 update_progress() {
-    jq '.progress.completed = ([.issues[] | select(.status == "completed")] | length) |
+    jq '.progress.completed = ([.issues[] | select(.status == "completed" or .status == "already_done")] | length) |
         .progress.failed = ([.issues[] | select(.status == "failed" or .status == "skipped")] | length) |
         .progress.in_progress = ([.issues[] | select(.status == "in_progress")] | length) |
         .progress.pending = ([.issues[] | select(.status == "pending")] | length) |
@@ -401,6 +494,121 @@ extract_wait_time() {
 }
 
 # =============================================================================
+# COMPOSITION ROUTING
+# =============================================================================
+#
+# dispatch_composition routes a claude invocation to one of two subprocess
+# paths:
+#
+#   1. isolated  (isolated=true)  — worktree-isolated subprocess with
+#      --dangerously-skip-permissions.  Used for implementation tasks that
+#      need to modify files in a fresh git worktree.
+#
+#   2. standard  (isolated=false) — plain subprocess WITHOUT
+#      --dangerously-skip-permissions.  Used for decision/review tasks like
+#      process-pr that orchestrate via interactive tools.
+#
+# ARCHITECTURAL CONSTRAINT: bash cannot invoke the Skill tool.
+# The Skill tool is a Claude Code API feature available only inside a Claude
+# session; it cannot be called from a bash subprocess.  Both paths therefore
+# call `claude -p` as a child process — the distinction is only in which
+# permission flags are forwarded.  Any "skill-tool path" naming in prior
+# versions of this file was aspirational and has been removed to avoid
+# confusion.
+#
+# Usage:
+#   dispatch_composition "<prompt>" [isolated] [extra claude args...]
+#
+# Arguments:
+#   prompt   — slash-command prompt (e.g. "/process-pr 1 2 main")
+#   isolated — "true" for isolated subprocess, "false"/omitted for standard
+#   ...      — additional flags forwarded to the claude invocation
+#
+# Kill-switch: COMPOSITION_BACKEND env var overrides auto-routing.
+#   subprocess — always use isolated subprocess path
+#   skill      — always use standard (non-sandboxed) subprocess path
+#                NOTE: "skill" is a legacy name; it does NOT invoke the Skill
+#                tool.  It selects the standard subprocess without
+#                --dangerously-skip-permissions.
+#   (unset)    — auto-route based on the isolated argument
+
+dispatch_composition() {
+	local prompt="$1"
+	local isolated="${2:-false}"
+	local -a extra_args=()
+	if (( $# > 2 )); then
+		shift 2
+		extra_args=("$@")
+	fi
+
+	local backend
+	if [[ -n "${COMPOSITION_BACKEND:-}" ]]; then
+		case "$COMPOSITION_BACKEND" in
+			subprocess|skill)
+				backend="$COMPOSITION_BACKEND"
+				;;
+			*)
+				printf 'ERROR: unknown COMPOSITION_BACKEND value: %s\n' \
+					"$COMPOSITION_BACKEND" >&2
+				return 1
+				;;
+		esac
+	elif [[ "$isolated" == "true" ]]; then
+		backend="subprocess"
+	else
+		backend="skill"
+	fi
+
+	case "$backend" in
+		subprocess)
+			run_composition_subprocess "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+			;;
+		# "skill" is the legacy kill-switch value; routes to the standard
+		# (non-sandboxed) subprocess path.  See ARCHITECTURAL CONSTRAINT note
+		# above.
+		skill)
+			run_composition_standard "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+			;;
+	esac
+}
+
+# run_composition_subprocess — invoke a skill as a worktree-isolated subprocess.
+# Used for skills that require git worktree isolation (e.g. implement-issue).
+run_composition_subprocess() {
+	local prompt="$1"
+	shift
+	log "Composition dispatch → subprocess: $prompt"
+	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+		--dangerously-skip-permissions \
+		--output-format json \
+		"$@" \
+		2>&1
+}
+
+# run_composition_standard — invoke claude as a standard (non-sandboxed) subprocess.
+# Used for decision/review skills that do not require worktree isolation
+# (e.g. process-pr, plan, review).
+#
+# ARCHITECTURAL CONSTRAINT: bash cannot invoke the Skill tool.
+# This function is the successor to the former run_composition_skill(); it was
+# renamed because the old name implied a Skill-tool invocation, which bash
+# subprocesses cannot perform.  The implementation is a plain `claude -p`
+# call — identical to run_composition_subprocess() except that it omits
+# --dangerously-skip-permissions, allowing the spawned session to use
+# interactive tools and AskUserQuestion.
+#
+# Output format is not forced here — callers that need structured JSON must
+# pass --output-format json (and --json-schema) explicitly.
+run_composition_standard() {
+	local prompt="$1"
+	shift
+	log "Composition dispatch → standard: $prompt"
+	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+		"$@" \
+		2>&1
+}
+
+# =============================================================================
 # ISSUE PROCESSING
 # =============================================================================
 
@@ -411,11 +619,13 @@ process_issue() {
     log "=========================================="
     log "Starting issue #$issue_num"
     log "=========================================="
+    emit_event "issue_start" "issue_num=$issue_num"
 
     set_current_issue "$issue_num"
     update_issue_field "$issue_num" "status" "in_progress"
     update_issue_field "$issue_num" "started_at" "$(date -Iseconds)"
     update_issue_field "$issue_num" "stage" "implement-issue"
+    update_issue_field "$issue_num" "stage_started_at" "$(date -Iseconds)"
     update_progress
 
     # Set up feature branch for this issue
@@ -441,19 +651,17 @@ process_issue() {
 
     log "Running: implement-issue-orchestrator.sh --issue $issue_num --branch $BRANCH ${agent_args[@]+"${agent_args[@]}"}"
 
-    local impl_output
     local impl_exit=0
 
-    impl_output=$("$SCRIPT_DIR/implement-issue-orchestrator.sh" \
+    printf '%s\n' "=== implement-issue output ===" >> "$issue_log"
+    "$SCRIPT_DIR/implement-issue-orchestrator.sh" \
         --issue "$issue_num" \
         --branch "$BRANCH" \
         ${agent_args[@]+"${agent_args[@]}"} \
         --status-file "$issue_status_file" \
-        2>&1) || impl_exit=$?
-
-    echo "=== implement-issue output ===" >> "$issue_log"
-    echo "$impl_output" >> "$issue_log"
-    echo "=== exit code: $impl_exit ===" >> "$issue_log"
+        2>&1 | tee -a "$issue_log"
+    impl_exit=${PIPESTATUS[0]}
+    printf '%s\n' "=== exit code: $impl_exit ===" >> "$issue_log"
 
     # Parse result from status file
     local impl_status="error"
@@ -470,10 +678,9 @@ process_issue() {
                 impl_status="success"
                 # Extract PR number from stages.pr or from the status file
                 pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
-                if [[ -z "$pr_number" ]]; then
-                    # Fallback: try to parse from log output
-                    pr_number=$(echo "$impl_output" | grep -oE 'PR: #[0-9]+' | grep -oE '[0-9]+' | head -1)
-                fi
+                ;;
+            already_implemented)
+                impl_status="already_implemented"
                 ;;
             error|max_iterations_quality|max_iterations_pr_review)
                 impl_status="error"
@@ -484,6 +691,21 @@ process_issue() {
                 impl_error="Unknown state: $state"
                 ;;
         esac
+
+        # Recovery: if the orchestrator exited with a non-completed state but
+        # stages.pr.pr_number was already written (PR created before crash),
+        # treat it as recoverable success. Handles the case where the script is
+        # killed or crashes after PR creation but before set_final_state("completed").
+        if [[ "$impl_status" == "error" ]]; then
+            local recovered_pr
+            recovered_pr=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
+            if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
+                log_warn "Orchestrator exited with state='$state' but PR #$recovered_pr exists — recovering as success"
+                impl_status="success"
+                pr_number="$recovered_pr"
+                impl_error=""
+            fi
+        fi
     else
         impl_error="Status file not created"
     fi
@@ -497,6 +719,14 @@ process_issue() {
         if [[ -n "$issue_log_dir" && -f "$issue_log_dir/metrics.json" ]]; then
             log "Metrics available: $issue_log_dir/metrics.json"
         fi
+    fi
+
+    if [[ "$impl_status" == "already_implemented" ]]; then
+        log "Issue #$issue_num was already implemented in a prior run — skipping PR creation."
+        update_issue_field "$issue_num" "status" "already_done"
+        update_progress
+        git checkout "$BRANCH" 2>/dev/null || true
+        return 0
     fi
 
     if [[ "$impl_status" != "success" ]]; then
@@ -525,61 +755,53 @@ process_issue() {
     # -------------------------------------------------------------------------
     log "Running: claude -p \"/process-pr $pr_number $issue_num $BRANCH\" --agent code-reviewer --json-schema ..."
 
-    local proc_output
     local proc_exit=0
 
-    proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+    printf '%s\n' "=== process-pr output ===" >> "$issue_log"
+    dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
         --agent code-reviewer \
-        --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$PROCESS_SCHEMA" \
-        2>&1) || proc_exit=$?
+        | tee -a "$issue_log"
+    proc_exit=${PIPESTATUS[0]}
+    printf '%s\n' "=== exit code: $proc_exit ===" >> "$issue_log"
 
-    echo "=== process-pr output ===" >> "$issue_log"
-    echo "$proc_output" >> "$issue_log"
-    echo "=== exit code: $proc_exit ===" >> "$issue_log"
-
-    # Update session ID
-    session_id=$(printf '%s' "$proc_output" | jq -r '.session_id // empty' 2>/dev/null)
+    # Update session ID from last JSON line in log
+    local session_id
+    session_id=$(grep -E '^\{' "$issue_log" | tail -1 | jq -r '.session_id // empty' 2>/dev/null)
     if [[ -n "$session_id" ]]; then
         update_issue_field "$issue_num" "session_id" "$session_id"
     fi
 
     # Check for rate limit
-    if detect_rate_limit "$proc_output" "$proc_exit"; then
+    local proc_last_json
+    proc_last_json=$(grep -E '^\{' "$issue_log" | tail -1)
+    if detect_rate_limit "$proc_last_json" "$proc_exit"; then
         local wait_time
-        wait_time=$(extract_wait_time "$proc_output")
+        wait_time=$(extract_wait_time "$proc_last_json")
         wait_time=$((wait_time + RATE_LIMIT_BUFFER))
         local resume_at
         resume_at=$(date -Iseconds -d "+${wait_time} seconds" 2>/dev/null || date -v+${wait_time}S -Iseconds 2>/dev/null)
 
         log "Rate limit hit during process-pr. Waiting ${wait_time}s"
+        emit_event "rate_limit_hit" "stage=process-pr" "retry_after_seconds:=$wait_time"
         set_rate_limit "true" "$resume_at" "$session_id"
 
         sleep "$wait_time"
 
         set_rate_limit "false" "" ""
 
-        # Resume
-        if [[ -n "$session_id" ]]; then
-            proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "please continue" \
-                --resume "$session_id" \
-                --agent code-reviewer \
-                --dangerously-skip-permissions \
-                --output-format json \
-                --json-schema "$PROCESS_SCHEMA" \
-                2>&1) || proc_exit=$?
-        else
-            proc_output=$(timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
-                --agent code-reviewer \
-                --dangerously-skip-permissions \
-                --output-format json \
-                --json-schema "$PROCESS_SCHEMA" \
-                2>&1) || proc_exit=$?
-        fi
-
-        echo "=== process-pr resume output ===" >> "$issue_log"
-        echo "$proc_output" >> "$issue_log"
+        # Resume — retry-with-backoff: parent already slept for the rate-limit
+        # window; restart fresh rather than resuming with "please continue"
+        # (the --resume subprocess is replaced by a clean retry here).
+        printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
+        dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
+            --agent code-reviewer \
+            --output-format json \
+            --json-schema "$PROCESS_SCHEMA" \
+            | tee -a "$issue_log"
+        proc_exit=${PIPESTATUS[0]}
+        proc_last_json=$(grep -E '^\{' "$issue_log" | tail -1)
     fi
 
     # Check for timeout
@@ -597,9 +819,9 @@ process_issue() {
     local follow_ups
     local proc_error
 
-    proc_status=$(printf '%s' "$proc_output" | jq -r '.structured_output.status // "error"' 2>/dev/null)
-    follow_ups=$(printf '%s' "$proc_output" | jq -c '.structured_output.follow_up_issues // []' 2>/dev/null)
-    proc_error=$(printf '%s' "$proc_output" | jq -r '.structured_output.error // empty' 2>/dev/null)
+    proc_status=$(printf '%s' "$proc_last_json" | jq -r '.structured_output.status // "error"' 2>/dev/null)
+    follow_ups=$(printf '%s' "$proc_last_json" | jq -c '.structured_output.follow_up_issues // []' 2>/dev/null)
+    proc_error=$(printf '%s' "$proc_last_json" | jq -r '.structured_output.error // empty' 2>/dev/null)
 
     log "process-pr status: $proc_status"
 
@@ -648,8 +870,27 @@ log "Process-PR agent: code-reviewer"
 log "Log dir: $LOG_BASE"
 log "Timeout per issue: ${ISSUE_TIMEOUT}s"
 log "Max consecutive failures: $MAX_CONSECUTIVE_FAILURES"
+emit_event "batch_start" "total_issues:=${#ISSUE_ARRAY[@]}" "branch=$BRANCH"
 
 init_status
+
+# Pre-flight usage check. When the user has configured CLAUDE_USAGE_SESSION_KEY,
+# log current per-model utilization + reset times so operators can see at a
+# glance whether the batch will hit a wall. Per-stage escalation in the
+# subprocess (implement-issue-orchestrator.sh) handles actual routing — this
+# is an observability gate, not a control point.
+if [[ -n "${CLAUDE_USAGE_SESSION_KEY:-}${CLAUDE_USAGE_SESSION_KEY_FILE:-}" ]] \
+        && declare -F is_model_exhausted >/dev/null 2>&1; then
+    for _m in sonnet opus; do
+        _pct=$(usage_for_model "$_m" 2>/dev/null || echo "0")
+        _reset=$(model_reset_at "$_m" 2>/dev/null || echo "unknown")
+        if is_model_exhausted "$_m" 2>/dev/null; then
+            log "Pre-flight: $_m exhausted (utilization ${_pct}%, resets $_reset) — subprocess will escalate"
+        else
+            log "Pre-flight: $_m available (utilization ${_pct}%, resets $_reset)"
+        fi
+    done
+fi
 
 consecutive_failures=0
 exit_code=0
@@ -666,14 +907,17 @@ for issue in "${ISSUE_ARRAY[@]}"; do
     if process_issue "$issue"; then
         consecutive_failures=0
         log "Issue #$issue processed successfully"
+        emit_event "issue_end" "issue_num=$issue" "outcome=success"
     else
         consecutive_failures=$((consecutive_failures + 1))
         exit_code=1
         log "Issue #$issue failed. Consecutive failures: $consecutive_failures / $MAX_CONSECUTIVE_FAILURES"
+        emit_event "issue_end" "issue_num=$issue" "outcome=failed"
 
         if (( consecutive_failures >= MAX_CONSECUTIVE_FAILURES )); then
             log_error "CIRCUIT BREAKER: $MAX_CONSECUTIVE_FAILURES consecutive failures. Stopping batch."
             set_state "circuit_breaker"
+            emit_event "batch_paused" "consecutive_failures:=$consecutive_failures" "max_failures:=$MAX_CONSECUTIVE_FAILURES"
             exit_code=2
             break
         fi
@@ -696,6 +940,9 @@ log "Batch Complete"
 log "=========================================="
 log "Final state: $(jq -r '.state' "$STATUS_FILE")"
 log "Progress: $(jq -c '.progress' "$STATUS_FILE")"
+_batch_outcome=$(jq -r '.state' "$STATUS_FILE" 2>/dev/null)
+[[ -z "$_batch_outcome" || "$_batch_outcome" == "null" ]] && _batch_outcome="failed"
+emit_event "batch_end" "outcome=$_batch_outcome"
 
 # Write summary
 jq '{

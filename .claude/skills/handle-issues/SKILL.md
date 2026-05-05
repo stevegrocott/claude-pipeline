@@ -2,6 +2,35 @@
 name: handle-issues
 description: Batch process issues via batch-orchestrator.sh with rate limit handling and session resumption
 argument-hint: "[context query]"
+inputs:
+  - name: context_query
+    type: string
+    required: true
+    description: Natural language query describing which issues to process and how (e.g. "issues assigned to @me ordered by priority")
+outputs:
+  - name: status_json
+    type: file
+    description: Batch status with per-issue results written to status.json
+  - name: per_issue_prs
+    type: url[]
+    description: One pull request URL per successfully processed issue
+side_effects:
+  - spawns_background_process: batch-orchestrator.sh
+  - creates_git_branches
+  - creates_pull_requests
+  - merges_pull_requests
+  - writes_manifest: logs/handle-issues/manifest-<ts>.json
+  - writes_logs: logs/batch-*/
+composes:
+  - implement-issue
+  - process-pr
+failure_modes:
+  - id: circuit_breaker
+    mitigation: fix the failing issues then run /handle-issues "resume" to continue the batch
+  - id: rate_limit
+    mitigation: orchestrator handles automatically — waits for reset then resumes; no operator action needed
+  - id: incomplete_batch
+    mitigation: on next run operator is offered resume or fresh start; choose resume to skip completed issues
 ---
 
 # Handle Issues
@@ -73,6 +102,216 @@ Claude CLI invocations:
     --output-format json \
     --json-schema process-pr.json
 ```
+
+## Per-Issue Triage & Surgical Fast-Path
+
+Inside `implement-issue-orchestrator.sh`, every issue passes through a
+**triage** stage immediately after `parse-issue`. The triage classifier
+(Haiku, ~$0.001/issue) decides one of two routes:
+
+```
+parse-issue ──► triage ──┬──► fast-path: branch → implement → commit → PR → squash-merge
+                          │                  (skips: test loop, code review, deploy verify, docs)
+                          │
+                          └──► full:      branch → implement → quality loop → review → PR → ...
+                                                  (the standard pipeline)
+```
+
+The fast-path lives in `.claude/scripts/surgical-fast-path.sh`. It is
+deliberately the bare minimum — no test iterations, no review, no docs.
+The triage classifier must be confident that a fast-path issue is safe to
+ship without those gates.
+
+### Six criteria — ALL must pass for fast-path
+
+| # | Criterion | Disqualifies on |
+|---|-----------|-----------------|
+| 1 | `test_only_scope` | any reference to `apps/`, `packages/`, `src/`, migrations |
+| 2 | `surgical_size` | > 30 lines net diff or > 3 files |
+| 3 | `established_pattern` | no grep-able regex with ≥ 3 matching files in repo |
+| 4 | `precise_specification` | missing `## Implementation Tasks` or vague file/line refs |
+| 5 | `benign_failure_mode` | wrong change could break prod, not just fail a test |
+| 6 | `no_security_concerns` | auth, RBAC, encryption, secrets, validation, CORS, sessions |
+
+Confidence must be `high`. Anything less forces `full`. The shell wrapper
+also re-runs `git grep -lE` on the classifier-supplied regex and downgrades
+to `full` when fewer than 3 files match — defense in depth on top of the
+prompt.
+
+### Example fixtures (also used by triage-validate.sh)
+
+| Fixture | Route | Why |
+|---------|-------|-----|
+| `issue-2836` quickLogin → storageState in 2 specs | fast-path | test-only, established pattern (5 prior migrations), precise |
+| `issue-2837` fix stale E2E selectors | fast-path | test-only, well-specified |
+| `issue-2838` retry/timeout tweak in E2E | fast-path | test-only, surgical |
+| `issue-2839` remove premature toBeVisible() | fast-path | test-only, single file |
+| `issue-2752` `hasBaseline` filter on `/api/farms` | full | backend code, not test-only |
+| `issue-2754` zone overlap validator fix | full | production validator code |
+| `issue-2776` `window.location.href` → `router.push()` | full | production component code |
+| `issue-auth-test` add MFA assertion to auth-flow E2E | full | security concern, even though test-only |
+| `issue-vague` "fix the timeout issue" | full | precise_specification fails |
+| `issue-novel-pattern` first use of new `withRetry` helper | full | no established pattern (< 3 grep matches) |
+
+### Operator controls
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `DISABLE_SURGICAL_FAST_PATH` | `0` | `1` forces every issue to the full pipeline regardless of classifier output. Use during incidents. |
+| `TRIAGE_MODEL` | `haiku` (tier) | Override the model. Pass a tier name (`haiku`/`sonnet`/`opus`), not a pinned model ID — the tier-to-model mapping lives in `.claude/scripts/model-config.sh`. |
+| `FAST_PATH_IMPLEMENT_MODEL` | `sonnet` | Model used by the fast-path implement step. |
+
+### Pre-commit hook failure on fast-path
+
+The fast-path commit runs hooks with no `--no-verify` bypass. If a hook
+fails, the fast-path **bails cleanly** — it does NOT fall back to the full
+pipeline. The script:
+
+1. Captures the hook's stderr (capped at 4 KB) into `triage.json.hook_failure_output`.
+2. Sets `state="failed"` and `error="pre_commit_hook_failed"` in `status.json`.
+3. Exits 1 — counted by `batch-orchestrator.sh`'s circuit breaker as a real failure.
+
+This is intentional. Falling back to `full` after a hook failure would mask
+a triage misclassification (the issue was not really fast-path-safe). A
+counted failure surface lets operators tune the criteria.
+
+### Test contract
+
+Two test layers protect the triage system. Both must stay green:
+
+- `.claude/scripts/implement-issue-test/test-surgical-fast-path.bats` —
+  18 mock-based tests covering the shell logic (kill switch, confidence
+  demotion, grep verification, status-file bookkeeping, fast-path step
+  ordering, hook-failure handling). Run via `bats`.
+- `.claude/scripts/triage-validate.sh` — real-Claude golden tests
+  (~$0.10/run, ~100s) that exercise the actual prompt against all 10
+  fixtures. **Run before merging changes to the prompt, schema, or
+  triage tier model. Run monthly to catch model drift.** Do NOT
+  auto-update the manifest when fixtures flip — investigate first.
+
+## Proactive Usage Polling (skip exhausted models)
+
+When `seven_day_sonnet` hits 100% but the all-models weekly cap still has
+headroom, opus/haiku are still usable. Without this feature the orchestrator
+would sleep ~1h waiting for sonnet to reset. With it, the orchestrator polls
+the same private endpoint that menu-bar apps like Sneaky Penguin use, and
+escalates sonnet → opus on the fly.
+
+### How to enable
+
+1. **Get your sessionKey.** Open `https://claude.ai` in any browser logged
+   in to your account. Open DevTools (F12) → Console tab and paste:
+
+   ```js
+   document.cookie  // search the output for "sessionKey="
+   ```
+
+   If `sessionKey` isn't visible there (HttpOnly), use the Application tab →
+   Cookies → `https://claude.ai` → row named `sessionKey`. Copy the long
+   value starting `sk-ant-sid01-...`.
+
+2. **Get your org UUID.** In DevTools Console, paste:
+
+   ```js
+   fetch('/api/organizations', {credentials: 'include'}).then(r => r.json()).then(o => console.log(o[0]?.uuid))
+   ```
+
+3. **Configure the env vars** (e.g. in `~/.zshrc`):
+
+   ```bash
+   export CLAUDE_USAGE_SESSION_KEY="sk-ant-sid01-..."
+   export CLAUDE_USAGE_ORG_ID="your-org-uuid"
+   ```
+
+   For CI / shared boxes, prefer a 0600 file:
+
+   ```bash
+   echo "sk-ant-sid01-..." > ~/.claude-session-key && chmod 600 ~/.claude-session-key
+   export CLAUDE_USAGE_SESSION_KEY_FILE=~/.claude-session-key
+   ```
+
+### Configuration env vars
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `CLAUDE_USAGE_SESSION_KEY` | (required to enable) | sessionKey cookie from claude.ai |
+| `CLAUDE_USAGE_SESSION_KEY_FILE` | (alternative) | Path to 0600 file containing the key |
+| `CLAUDE_USAGE_ORG_ID` | (required) | Organization UUID |
+| `CLAUDE_USAGE_DISABLE` | `0` | `1` opts out — script behaves exactly as today |
+| `CLAUDE_USAGE_SESSION_THRESHOLD` | `95` | `five_hour` cap (5-hour rate window — overage cannot absorb) |
+| `CLAUDE_USAGE_MODEL_THRESHOLD` | `95` | `seven_day_sonnet` / `seven_day_opus` cap (per-model weekly) |
+| `CLAUDE_USAGE_WEEKLY_THRESHOLD` | `98` | `seven_day` all-models weekly cap (last-resort circuit-breaker) |
+| `CLAUDE_USAGE_EXTRA_THRESHOLD` | `90` | When `extra_usage.utilization` exceeds this, stop letting overage absorb |
+| `CLAUDE_USAGE_CACHE_TTL` | `30` | Seconds — cache one response per 30s ≈ one API call per ~30 stages |
+
+### Bucket-to-model mapping (verified against captured fixture)
+
+| Model | Per-model bucket | Falls back to | Session gate |
+|-------|------------------|---------------|--------------|
+| sonnet | `seven_day_sonnet` | `seven_day` if null | `five_hour` |
+| opus | `seven_day_opus` (often null) | `seven_day` if null | `five_hour` |
+| haiku | _none_ | `seven_day` | `five_hour` |
+| unknown | (not gated; returns 0) | — | — |
+
+### Behavior
+
+- **Hybrid fallback**: if `CLAUDE_USAGE_SESSION_KEY` is unset OR a fetch
+  fails, `is_model_exhausted` returns false for everything. The reactive
+  rate-limit handler (`handle_rate_limit`, sleeps for parsed wait time)
+  remains as the safety net — no regression for users without a key.
+- **Overage absorption**: paid plans with `extra_usage.is_enabled: true`
+  have per-model exhaustion absorbed by overage billing. The script does
+  NOT escalate when overage is below `EXTRA_THRESHOLD` — escalating
+  prematurely would burn opus when sonnet calls would still have succeeded
+  (just billed against overage).
+- **Mid-run model oscillation**: each stage is a fresh Claude CLI
+  invocation with no shared conversation context. If sonnet at 96%
+  triggers escalation in stage 1, then resets mid-run and stage 3 sees
+  it at 5%, stage 3 will use sonnet. This is expected and benign.
+- **Cache location**: `${XDG_CACHE_HOME:-$HOME/.cache}/claude-pipeline/usage.json`.
+  User-scoped, single source of truth across all worktrees and projects.
+  Never accidentally committed.
+- **`model_override` callsites bypass the gate**: stages with hard-coded
+  models (e.g. PR creation pinned to opus) honor the explicit caller
+  intent. If opus is exhausted in that case, the call surfaces an error
+  rather than silently demoting.
+
+### Security
+
+- sessionKey is a long-lived bearer-equivalent for your claude.ai account.
+- Read once into a local variable; passed to curl via `-H Cookie:` (header,
+  not visible in `ps`); never echoed; never logged; never written to
+  status.json or any artifact.
+- The `test-claude-usage.bats` suite includes an explicit grep-the-key-out
+  check on every code path's output.
+- Known limitation: child process environment may show the value in
+  `/proc/PID/environ` on some Linux configurations during the curl call.
+  Acceptable on a single-user box; use the file-based alternative on shared
+  hosts.
+
+### Known limitations
+
+- The endpoint at `https://claude.ai/api/organizations/{org}/usage` is
+  undocumented. If it changes shape, parse failure → graceful fallback to
+  reactive behavior + WARN log (ERROR if previous cache was valid, so the
+  regression is visible).
+- The double-timeout escalation path in `run_stage` (lines ~1188–1198)
+  bypasses `effective_model`. Rare edge case; addressed in a follow-up.
+- Empirical verification of whether `extra_usage` absorbs `five_hour` or
+  `seven_day` exhaustion is pending — current code treats both as hard
+  caps (conservative). Can be relaxed later if observed.
+
+### Re-capturing the API fixture
+
+If the response shape changes:
+
+```bash
+.claude/scripts/capture-usage-fixture.sh
+```
+
+(prompts for sessionKey + org UUID, writes to
+`.claude/scripts/implement-issue-test/fixtures/usage-response.json`,
+prints the discovered field names so the bucket mapping can be updated).
 
 ## Process
 
@@ -246,16 +485,32 @@ The orchestrator will:
 
 ### Step 6: Monitor Progress
 
-Check status.json every 5 minutes until complete. Also report lines changed vs base branch:
+Check status.json every minute until complete, then display the completion summary. Both the monitoring loop and summary are in a single bash block so they execute atomically:
 
 ```bash
 echo ""
-echo "Monitoring progress (checking every 5 minutes)..."
+echo "Monitoring progress (checking every minute)..."
 echo ""
 
 BASE_BRANCH=$(jq -r '.base_branch' status.json)
+DEADLINE=$((SECONDS + 10800))  # 3-hour wall-clock guard
+
+# Expected timeouts per stage (seconds) — used for stuck detection
+_stage_timeout() {
+    case "$1" in
+        implement-issue) echo 3600 ;;  # 60 min
+        process-pr)      echo 1800 ;;  # 30 min
+        *)               echo 3600 ;;  # default 60 min
+    esac
+}
 
 while true; do
+    # Wall-clock deadline guard
+    if (( SECONDS > DEADLINE )); then
+        echo "⚠️ Monitor timeout — check status.json manually"
+        break
+    fi
+
     # Check if orchestrator is still running
     if [[ -f logs/handle-issues/.orchestrator.pid ]]; then
         ORCHESTRATOR_PID=$(cat logs/handle-issues/.orchestrator.pid)
@@ -275,16 +530,45 @@ while true; do
         FAILED=$(jq -r '.progress.failed' status.json)
         TOTAL=$(jq -r '.progress.total' status.json)
         CURRENT=$(jq -r '.current_issue // "none"' status.json)
+        CURRENT_STAGE=$(jq -r '.current_stage // ""' status.json)
+        STAGE_STARTED_AT=$(jq -r '.stage_started_at // ""' status.json)
         RATE_LIMITED=$(jq -r '.rate_limit.waiting' status.json)
+
+        # Compute stage elapsed time
+        ELAPSED_STR=""
+        STUCK_WARNING=""
+        if [[ -n "$STAGE_STARTED_AT" && "$STAGE_STARTED_AT" != "null" ]]; then
+            NOW=$(date +%s)
+            # Parse ISO 8601 — try GNU date first, fall back to BSD date (macOS)
+            STAGE_START=$(date -d "$STAGE_STARTED_AT" +%s 2>/dev/null \
+                || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$STAGE_STARTED_AT" +%s 2>/dev/null \
+                || echo "")
+            if [[ -n "$STAGE_START" && "$STAGE_START" =~ ^[0-9]+$ ]]; then
+                ELAPSED=$(( NOW - STAGE_START ))
+                ELAPSED_MIN=$(( ELAPSED / 60 ))
+                ELAPSED_SEC=$(( ELAPSED % 60 ))
+                ELAPSED_STR=" (${ELAPSED_MIN}m ${ELAPSED_SEC}s running)"
+
+                STAGE_TIMEOUT=$(_stage_timeout "$CURRENT_STAGE")
+                THRESHOLD=$(( STAGE_TIMEOUT * 80 / 100 ))
+                if (( ELAPSED > THRESHOLD )); then
+                    STUCK_WARNING="⚠️ Stage running longer than expected — may need attention"
+                fi
+            fi
+        fi
 
         # Calculate lines changed since start (vs base branch)
         LINES_CHANGED=$(git diff "$BASE_BRANCH"...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ insertion|[0-9]+ deletion' | grep -oE '[0-9]+' | paste -sd+ | bc 2>/dev/null || echo "0")
 
         if [[ "$RATE_LIMITED" == "true" ]]; then
             RESUME_AT=$(jq -r '.rate_limit.resume_at' status.json)
-            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL complete, $FAILED failed | Current: #$CURRENT | Lines changed: $LINES_CHANGED | Rate limited until $RESUME_AT"
+            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL | #$CURRENT $CURRENT_STAGE$ELAPSED_STR | Lines changed: $LINES_CHANGED | Rate limited until $RESUME_AT"
         else
-            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL complete, $FAILED failed | Current: #$CURRENT | Lines changed: $LINES_CHANGED"
+            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL | #$CURRENT $CURRENT_STAGE$ELAPSED_STR | Lines changed: $LINES_CHANGED"
+        fi
+
+        if [[ -n "$STUCK_WARNING" ]]; then
+            echo "$STUCK_WARNING"
         fi
 
         # Exit conditions
@@ -295,13 +579,8 @@ while true; do
 
     sleep 300  # 5 minutes
 done
-```
 
-### Step 7: Output Summary
-
-Read final results from status.json and output summary:
-
-```bash
+# Output completion summary (same bash block — always executes after loop)
 STATE=$(jq -r '.state' status.json)
 COMPLETED=$(jq -r '.progress.completed' status.json)
 FAILED=$(jq -r '.progress.failed' status.json)

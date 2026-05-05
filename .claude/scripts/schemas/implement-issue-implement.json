@@ -2,6 +2,7 @@
   "type": "object",
   "properties": {
     "status": {"enum": ["success", "error"]},
+    "already_done": {"type": "boolean"},
     "commit": {"type": "string"},
     "files_changed": {
       "type": "array",

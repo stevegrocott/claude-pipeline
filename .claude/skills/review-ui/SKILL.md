@@ -1,8 +1,28 @@
-<!-- STACK-SPECIFIC: Keep if web project; delete during /adapting-claude-pipeline otherwise. -->
 ---
 name: review-ui
 description: Comprehensive UI/CSS review using parallel agents. Each agent reviews against a specific UI design fundamentals section. Use when reviewing frontend code, CSS, Blade templates, or components.
+inputs:
+  - name: scope
+    type: string
+    required: true
+    description: File path, component directory, glob pattern, or plain-language description of what to review
+outputs:
+  - name: review_report
+    type: string
+    description: Unified report with executive summary, critical issues, and per-domain findings from all parallel agents
+side_effects:
+  - spawns_parallel_agents
+composes:
+  - bulletproof-frontend
+  - ui-design-fundamentals
+failure_modes:
+  - id: no_applicable_domains
+    mitigation: Report which domains were skipped and why; proceed with the domains that do apply
+  - id: agent_dispatch_failure
+    mitigation: Collect results from agents that completed; note missing domains in the executive summary
 ---
+
+<!-- STACK-SPECIFIC: Keep if web project; delete during /adapting-claude-pipeline otherwise. -->
 
 # UI Review Skill
 

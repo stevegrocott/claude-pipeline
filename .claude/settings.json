@@ -8,6 +8,11 @@
             "type": "command",
             "command": "jq -r '.tool_input.file_path // empty' | { read f; if [ -n \"$f\" ]; then source \"$CLAUDE_PROJECT_DIR/.claude/config/platform.sh\" 2>/dev/null; if [ -n \"${FORMAT_CMD:-}\" ]; then cd \"$CLAUDE_PROJECT_DIR\" && eval \"$FORMAT_CMD\" \"$f\" 2>/dev/null; fi; fi; }",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/sync-reminder.sh\"",
+            "timeout": 10
           }
         ]
       },
@@ -30,6 +35,11 @@
             "type": "command",
             "command": "python3 -c \"import json,sys; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path',''); sys.exit(2 if any(x in p for x in ['.env','.git/','credentials','package-lock.json']) else 0)\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-commit-skill-validate.sh\"",
+            "timeout": 15
           }
         ]
       },
@@ -40,6 +50,11 @@
             "type": "command",
             "command": "python3 -c \"import json,sys,shlex; d=json.load(sys.stdin); c=d.get('tool_input',{}).get('command',''); parts=c.strip().split(); sys.exit(2 if any('deploy_to_production' in p for p in parts) else 0)\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/block-destructive-db-commands.sh\"",
+            "timeout": 10
           }
         ]
       }
@@ -54,6 +69,27 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/pipeline-status-inject.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Edit(.claude/**)",
+      "Write(.claude/**)",
+      "Edit(logs/**)",
+      "Write(logs/**)",
+      "Bash(gh *)"
     ]
   }
 }
