@@ -1332,7 +1332,8 @@ run_stage() {
         emit_event "schema_validation_fail" \
             "stage=$stage_name" \
             "reason=schema_not_found" \
-            "schema_file=$schema_file"
+            "schema=$schema_file" \
+            "errors:=[]"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
         local _sr
@@ -1798,7 +1799,8 @@ for m in re.finditer(r'\[\s*\{', t):
             "stage=$stage_name" \
             "reason=no_structured_output" \
             "model=$model" \
-            "schema=$schema_file"
+            "schema=$schema_file" \
+            "errors:=[]"
 
         if [[ "$empty_escalated_model" != "$model" ]]; then
             log "WARN: No structured output from $stage_name with $model — escalating to $empty_escalated_model"
@@ -1881,7 +1883,8 @@ for m in re.finditer(r'\[\s*\{', t):
             "stage=$stage_name" \
             "reason=no_structured_output_after_escalation" \
             "model=$model" \
-            "schema=$schema_file"
+            "schema=$schema_file" \
+            "errors:=[]"
         _CONSECUTIVE_TIMEOUTS=0
         _TIMED_OUT_STAGE_NAMES=""
         local _sr
