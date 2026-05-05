@@ -32,6 +32,11 @@
 #     # Caller inspects .error_kind / .output.status to decide the action:
 #     _apply_stage_action "$result" "accept"   # or "bail" / "escalate" / "retry_same"
 #
+# Triage Routing:
+#   Issue classification (fast-path vs. full pipeline) is performed by invoking
+#   the triage-classify skill via _run_triage_composition(), following the
+#   dispatch_composition(isolated=false) pattern — no filesystem writes required.
+#
 
 set -uo pipefail  # Note: not -e, we handle errors explicitly
 
