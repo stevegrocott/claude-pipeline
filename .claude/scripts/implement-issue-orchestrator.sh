@@ -1560,6 +1560,10 @@ run_stage() {
     output_subtype=$(printf '%s' "$output" | jq -r '.subtype // empty' 2>/dev/null)
 
     # Detect permission denials early (needed for structured-error classification)
+    # NOTE: This extracts a comma-joined string for use in human-readable log_warn
+    # messages below.  The _extract_denials() calls inside _emit_stage_result
+    # return a JSON array for the stage_result envelope — two different formats
+    # for two different consumers; both are intentional.
     local _permission_denials
     _permission_denials=$(printf '%s' "$output" \
         | jq -r '[.permission_denials[]?.tool_name // empty] | select(length > 0) | join(", ")' \
@@ -1780,6 +1784,9 @@ for m in re.finditer(r'\[\s*\{', t):
                 _esc_turns_args=("${turns_args[@]+"${turns_args[@]}"}")
             fi
 
+            # _esc_exit_code is captured to preserve the raw CLI exit code for
+            # the stage log.  Flow control is handled via structured output
+            # extraction below, not via this value.
             local _esc_exit_code=0
             output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
                 -p "$prompt" \
