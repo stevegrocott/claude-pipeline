@@ -1,0 +1,12 @@
+{
+  "status": "error",
+  "output": null,
+  "raw": "",
+  "denials": [],
+  "model": "haiku",
+  "error_kind": "rate_limit",
+  "elapsed_ms": 200,
+  "_fixture_meta": {
+    "description": "Rate limit on first attempt (retry_count=0, empty history) — expect retry with backoff_ms"
+  }
+}

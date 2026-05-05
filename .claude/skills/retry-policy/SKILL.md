@@ -10,11 +10,16 @@ outputs:
   reason: "Human-readable rationale for the decision"
   backoff_ms: "Milliseconds to wait before retrying (only present when action == \"retry\" and error_kind == \"rate_limit\")"
 failure_modes:
-  - "Retrying max_turns errors at the same model — more turns cannot be given to an already-exhausted run; escalate instead"
-  - "Retrying permission_denied or schema_not_found — these are configuration errors that a retry cannot fix; bail immediately"
-  - "Not applying back-off on rate_limit retries — always include backoff_ms and wait before retrying"
-  - "Escalating when already at opus ceiling — check model before escalating; bail if at opus"
-  - "Using retry when error_history shows the same error_kind already retried at same model — cross the threshold into escalate"
+  - id: retrying_max_turns_exhausted
+    mitigation: "Escalate instead — more turns cannot be given to an already-exhausted run at the same model"
+  - id: retrying_unrecoverable_error
+    mitigation: "Bail immediately; permission_denied and schema_not_found are configuration errors no retry can fix"
+  - id: missing_backoff_on_rate_limit
+    mitigation: "Always include backoff_ms and wait the computed delay before retrying on rate_limit errors"
+  - id: escalating_at_opus_ceiling
+    mitigation: "Check model tier before escalating; bail if already at opus ceiling"
+  - id: retry_when_at_threshold
+    mitigation: "Escalate when retry_count meets max_retries or error_history shows the same error_kind at the same model"
 ---
 
 # retry-policy
@@ -85,6 +90,10 @@ Filter to records where `model == stage_result.model` before reasoning.
 | `schema_not_found`              | 0                     | bail immediately |
 
 **`max_turns` at non-ceiling model:** 0 retries — escalate immediately (same model cannot run more turns).
+
+> **`no_structured_output` is the canonical `error_kind`** for "empty output" — this is the value
+> emitted by `run_stage` (`implement-issue-orchestrator.sh`) when the stage produces no structured
+> output. Issue #212 refers to this error class informally as "empty output".
 
 ---
 

@@ -1,0 +1,12 @@
+{
+  "status": "error",
+  "output": null,
+  "raw": "",
+  "denials": [],
+  "model": "haiku",
+  "error_kind": "permission_denied",
+  "elapsed_ms": 100,
+  "_fixture_meta": {
+    "description": "Permission denied — unretryable configuration error, expect bail"
+  }
+}

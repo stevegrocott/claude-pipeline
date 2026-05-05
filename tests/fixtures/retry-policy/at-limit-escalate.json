@@ -1,0 +1,12 @@
+{
+  "status": "error",
+  "output": null,
+  "raw": "",
+  "denials": [],
+  "model": "haiku",
+  "error_kind": "timeout",
+  "elapsed_ms": 60000,
+  "_fixture_meta": {
+    "description": "Timeout with retry_count=1 (at max limit of 1) — expect escalate to sonnet"
+  }
+}
