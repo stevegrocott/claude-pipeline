@@ -1,0 +1,12 @@
+{
+  "status": "error",
+  "output": null,
+  "raw": "",
+  "denials": [],
+  "model": "haiku",
+  "error_kind": "disk_full",
+  "elapsed_ms": 100,
+  "_fixture_meta": {
+    "description": "Unrecognised error_kind on haiku — conservative no-upgrade"
+  }
+}

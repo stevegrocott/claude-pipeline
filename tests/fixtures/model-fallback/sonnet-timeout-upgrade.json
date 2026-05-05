@@ -1,0 +1,12 @@
+{
+  "status": "error",
+  "output": null,
+  "raw": "",
+  "denials": [],
+  "model": "sonnet",
+  "error_kind": "timeout",
+  "elapsed_ms": 120000,
+  "_fixture_meta": {
+    "description": "Timeout on sonnet — expect upgrade to opus"
+  }
+}
