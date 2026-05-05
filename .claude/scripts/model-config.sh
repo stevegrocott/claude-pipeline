@@ -2,122 +2,183 @@
 #
 # model-config.sh - Tier-to-model mapping for orchestrator pipeline
 #
-# Provides semantic tier abstraction (light/standard/advanced) decoupled
-# from specific model names. Update this single file when models change.
+# Data-only: tier-to-model table, stage-to-tier tables,
+# complexity-to-tier table, model-escalation table, and the ordered
+# stage-prefix list.  Decision logic for retry and model-fallback
+# lives in the companion skills:
+#   .claude/skills/retry-policy/SKILL.md
+#   .claude/skills/model-fallback/SKILL.md
 #
 # Usage: source this file, then call resolve_model <stage> [complexity]
 #
 
+# Idempotent sourcing guard — skip re-definition on repeated source.
+[[ -z "${_MODEL_CONFIG_LOADED+set}" ]] || return 0
+readonly _MODEL_CONFIG_LOADED=1
+
 # =============================================================================
-# TIER-TO-MODEL MAPPING (TIER_MODEL)
+# TIER-TO-MODEL TABLE
 # =============================================================================
 #
 # Semantic tiers mapped to concrete model names.
 # Change models here — propagates to all stages automatically.
 #
-# Uses case-based lookup for bash 3.2 compatibility (macOS default).
+# light    → haiku   (mechanical: parse, template, simplify)
+# standard → sonnet  (judgment: review, fix, match)
+# advanced → opus    (deep reasoning: complex implementation)
 #
+# Lookup: _tier_to_model <tier>
+# Decision logic: .claude/skills/model-fallback/SKILL.md
 
-_tier_to_model() {
-	case "$1" in
-		light)    printf '%s' "haiku" ;;
-		standard) printf '%s' "sonnet" ;;
-		advanced) printf '%s' "opus" ;;
-		*)        printf '%s' "opus" ;;
-	esac
-}
+readonly _MODEL_light="haiku"
+readonly _MODEL_standard="sonnet"
+readonly _MODEL_advanced="opus"
+readonly _MODEL_default="opus"    # fallback for unknown tiers
 
 # =============================================================================
-# STAGE-TO-TIER DEFAULTS (STAGE_TIER)
+# COMPLEXITY-TO-TIER TABLE
+# =============================================================================
+#
+# Task complexity hints (S/M/L) from issue parsing override stage defaults.
+#
+# S, M → standard  (judgment tier)
+# L    → advanced  (deep-reasoning tier)
+#
+# Lookup: _complexity_to_tier <hint>
+# Decision logic: .claude/skills/model-fallback/SKILL.md
+
+readonly _COMPLEXITY_S="standard"
+readonly _COMPLEXITY_M="standard"
+readonly _COMPLEXITY_L="advanced"
+
+# =============================================================================
+# MODEL ESCALATION TABLE
+# =============================================================================
+#
+# Next model up in the haiku → sonnet → opus escalation chain.
+# opus → opus signals the ceiling (no further escalation).
+#
+# Lookup: _next_model_up <model>
+# Retry decisions:    .claude/skills/retry-policy/SKILL.md
+# Fallback decisions: .claude/skills/model-fallback/SKILL.md
+
+readonly _NEXT_MODEL_haiku="sonnet"
+readonly _NEXT_MODEL_sonnet="opus"
+readonly _NEXT_MODEL_opus="opus"
+readonly _NEXT_MODEL_default="opus"   # fallback for unknown models
+
+# =============================================================================
+# STAGE-TO-TIER TABLES
 # =============================================================================
 #
 # Each orchestrator stage maps to a tier based on its cognitive demands.
 #
-# light    — mechanical: parse markdown, run commands, fill templates, simplify
+# light    — mechanical: parse markdown, run commands, fill templates
 # standard — judgment: reviews, fixes, pattern matching
-# advanced — deep reasoning: complex implementation, root cause analysis
 #
+# (No stage defaults to advanced; complexity hint upgrades to advanced.)
+#
+# Lookup: _stage_to_tier <stage>
+# Decision logic: .claude/skills/model-fallback/SKILL.md
 
-_stage_to_tier() {
-	case "$1" in
-		parse-issue)    printf '%s' "light" ;;
-		validate-plan)  printf '%s' "light" ;;
-		triage)         printf '%s' "light" ;;
-		implement)      printf '%s' "standard" ;;
-		task-review)    printf '%s' "standard" ;;
-		fix)            printf '%s' "standard" ;;
-		test-iter)      printf '%s' "standard" ;;
-		test)           printf '%s' "light" ;;
-		review)         printf '%s' "standard" ;;
-		research)       printf '%s' "light" ;;
-		simplify)       printf '%s' "light" ;;
-		pr)             printf '%s' "standard" ;;
-		pr-review)      printf '%s' "standard" ;;
-		pr-fix)         printf '%s' "standard" ;;
-		spec-review)    printf '%s' "standard" ;;
-		code-review)    printf '%s' "standard" ;;
-		e2e-verify)     printf '%s' "light" ;;
-		fix-e2e)        printf '%s' "standard" ;;
-		fix-acceptance-test) printf '%s' "standard" ;;
-		fix-deploy-verify) printf '%s' "standard" ;;
-		deploy-verify)  printf '%s' "light" ;;
-		complete)       printf '%s' "light" ;;
-		docs)           printf '%s' "light" ;;
-		acceptance-test) printf '%s' "light" ;;
-		*)              printf '%s' "" ;;
-	esac
-}
+readonly -a _LIGHT_STAGES=(
+	parse-issue validate-plan triage
+	test research simplify
+	e2e-verify deploy-verify
+	complete docs acceptance-test
+)
+
+readonly -a _STANDARD_STAGES=(
+	implement task-review fix test-iter review
+	pr pr-review pr-fix
+	spec-review code-review
+	fix-e2e fix-acceptance-test fix-deploy-verify
+)
 
 # =============================================================================
-# COMPLEXITY-TO-TIER MAPPING (COMPLEXITY_TIER)
-# =============================================================================
-#
-# Task complexity hints (S/M/L) from issue parsing override stage defaults.
-# The quality loop forwards these to implement, review, and fix stages.
-#
-
-_complexity_to_tier() {
-	case "$1" in
-		S) printf '%s' "standard" ;;
-		M) printf '%s' "standard" ;;
-		L) printf '%s' "advanced" ;;
-		*) printf '%s' "" ;;
-	esac
-}
-
-# =============================================================================
-# STAGE PREFIX MATCHING
+# STAGE PREFIX MATCHING TABLE
 # =============================================================================
 #
 # Orchestrator stage names follow the pattern: <base>-<suffix>
 # e.g. "implement-task-1", "review-task-1-iter-2", "fix-tests-iter-1"
 #
-# We match the longest known prefix for specificity:
-# "spec-review-iter-1" matches "spec-review" (11 chars) over "review" (6)
+# Listed longest-first so _match_stage_prefix finds the most specific
+# match: "spec-review-iter-1" matches "spec-review" (11 chars) over
+# "review" (6 chars).
 #
+# Lookup: _match_stage_prefix <stage_name>
 
-# All known stage prefixes, ordered longest-first for greedy matching
-if [[ -z "${_STAGE_PREFIXES+set}" ]]; then
-	readonly -a _STAGE_PREFIXES=(
-		fix-acceptance-test acceptance-test validate-plan
-		fix-deploy-verify deploy-verify spec-review code-review task-review parse-issue e2e-verify
-		pr-review implement simplify research complete pr-fix fix-e2e review test-iter test docs fix pr
-		triage
-	)
-fi
+readonly -a _STAGE_PREFIXES=(
+	fix-acceptance-test acceptance-test validate-plan
+	fix-deploy-verify deploy-verify spec-review code-review
+	task-review parse-issue e2e-verify
+	pr-review implement simplify research complete
+	pr-fix fix-e2e review test-iter test docs fix pr
+	triage
+)
 
-_match_stage_prefix() {
-	local stage_name="$1"
+# =============================================================================
+# LOOKUP FUNCTIONS
+# =============================================================================
+#
+# Thin wrappers over the data tables above.  All retry / escalation
+# decision logic lives in the skills; these functions only look up data.
 
-	for prefix in "${_STAGE_PREFIXES[@]}"; do
-		if [[ "$stage_name" == "$prefix" || \
-			"$stage_name" == "$prefix-"* ]]; then
-			printf '%s' "$prefix"
-			return 0
-		fi
+# _tier_to_model <tier>
+# Prints the model name for the given semantic tier.
+# Unknown tiers fall back to _MODEL_default (opus).
+_tier_to_model() {
+	local _var="_MODEL_${1//[^a-zA-Z]/}"
+	printf '%s' "${!_var:-$_MODEL_default}"
+}
+
+# _stage_to_tier <stage>
+# Prints the tier for an exact stage name.
+# Returns empty string for unknown stages.
+_stage_to_tier() {
+	local _s
+	for _s in "${_LIGHT_STAGES[@]}"; do
+		[[ "$_s" == "${1:-}" ]] || continue
+		printf '%s' "light"
+		return 0
 	done
+	for _s in "${_STANDARD_STAGES[@]}"; do
+		[[ "$_s" == "${1:-}" ]] || continue
+		printf '%s' "standard"
+		return 0
+	done
+	printf '%s' ""
+}
 
+# _complexity_to_tier <hint>
+# Prints the tier for S/M/L complexity hint.
+# Returns empty string for unknown hints.
+_complexity_to_tier() {
+	local _var="_COMPLEXITY_${1//[^a-zA-Z]/}"
+	printf '%s' "${!_var:-}"
+}
+
+# _match_stage_prefix <stage_name>
+# Prints the longest known prefix that matches the stage name.
+# Returns 1 and prints nothing for unknown stage names.
+_match_stage_prefix() {
+	local _stage_name="$1" _prefix
+	for _prefix in "${_STAGE_PREFIXES[@]}"; do
+		[[ "$_stage_name" == "$_prefix" || \
+			"$_stage_name" == "$_prefix-"* ]] || continue
+		printf '%s' "$_prefix"
+		return 0
+	done
 	return 1
+}
+
+# _next_model_up <model>
+# Prints the next model up in the escalation chain.
+# opus stays at opus (ceiling); unknown models fall back to opus.
+# Full decision logic: .claude/skills/model-fallback/SKILL.md
+_next_model_up() {
+	local _var="_NEXT_MODEL_${1//[^a-zA-Z]/}"
+	printf '%s' "${!_var:-$_NEXT_MODEL_default}"
 }
 
 # =============================================================================
@@ -134,68 +195,33 @@ _match_stage_prefix() {
 # Logic:
 #   1. Match stage name against known prefixes (longest match wins)
 #   2. Look up default tier for that stage
-#   3. If complexity hint provided and valid, override with its tier
+#   3. If complexity hint provided and tier is not light, override
 #   4. Fall back to advanced (opus) for unknown stages
 #
 
 resolve_model() {
 	local stage_name="${1:-}"
 	local complexity="${2:-}"
-	local tier=""
-	local matched_prefix=""
+	local tier="" matched_prefix="" complexity_tier=""
 
 	# Match stage name against known prefixes
-	if [[ -n "$stage_name" ]]; then
+	[[ -n "$stage_name" ]] && \
 		matched_prefix=$(_match_stage_prefix "$stage_name") || true
-
-		if [[ -n "$matched_prefix" ]]; then
-			tier=$(_stage_to_tier "$matched_prefix")
-		fi
-	fi
+	[[ -n "$matched_prefix" ]] && \
+		tier=$(_stage_to_tier "$matched_prefix") || true
 
 	# Fall back to advanced for unknown stages
-	if [[ -z "$tier" ]]; then
-		tier="advanced"
-	fi
+	tier="${tier:-advanced}"
 
-	# Apply complexity hint — overrides stage default when provided.
-	# Light-tier stages (test, parse-issue, validate-plan, complete, docs,
-	# simplify, acceptance-test) are mechanical and always use haiku;
-	# complexity hints are ignored for them.
-	# The quality loop forwards task-level complexity to implement, review,
-	# and fix stages so model selection scales with task size.
-	if [[ -n "$complexity" && "$tier" != "light" ]]; then
-		local complexity_tier
-		complexity_tier=$(_complexity_to_tier "$complexity")
-
-		if [[ -n "$complexity_tier" ]]; then
-			tier="$complexity_tier"
-		fi
-	fi
+	# Apply complexity hint — light-tier stages are always haiku;
+	# complexity hints are ignored for them.  The quality loop forwards
+	# task-level complexity to implement, review, and fix stages so
+	# model selection scales with task size.
+	[[ -n "$complexity" && "$tier" != "light" ]] && \
+		complexity_tier=$(_complexity_to_tier "$complexity") || true
+	[[ -n "$complexity_tier" ]] && tier="$complexity_tier" || true
 
 	printf '%s\n' "$(_tier_to_model "$tier")"
-}
-
-# =============================================================================
-# MODEL ESCALATION (_next_model_up)
-# =============================================================================
-#
-# Given a model name, returns the next model up in the tier hierarchy.
-# Used for --fallback-model to provide resilience when the primary model
-# is unavailable or rate-limited.
-#
-# haiku  -> sonnet
-# sonnet -> opus
-# opus   -> opus (ceiling)
-#
-
-_next_model_up() {
-	case "$1" in
-		haiku)  printf '%s' "sonnet" ;;
-		sonnet) printf '%s' "opus" ;;
-		opus)   printf '%s' "opus" ;;
-		*)      printf '%s' "opus" ;;
-	esac
 }
 
 # =============================================================================
@@ -203,9 +229,9 @@ _next_model_up() {
 # =============================================================================
 #
 # Wraps resolve_model with a check against claude-usage.sh's
-# is_model_exhausted. When the picked model is exhausted (per-model bucket
-# full and overage isn't absorbing), escalate via _next_model_up until we
-# find one that isn't exhausted or hit the opus ceiling.
+# is_model_exhausted.  When the picked model is exhausted (per-model
+# bucket full and overage isn't absorbing), escalates via _next_model_up
+# until a non-exhausted model is found or the opus ceiling is reached.
 #
 # When claude-usage.sh isn't loaded OR no sessionKey is configured,
 # is_model_exhausted returns false for everything and these wrappers
@@ -214,33 +240,31 @@ _next_model_up() {
 #
 
 _usage_aware_escalate() {
-	local model="$1" original="$1" next
-	# is_model_exhausted comes from claude-usage.sh. When it isn't sourced
-	# (or polling is unconfigured), treat all models as not exhausted.
-	if ! declare -F is_model_exhausted >/dev/null 2>&1; then
+	local model="$1" original="$1" next _reset _msg
+	declare -F is_model_exhausted >/dev/null 2>&1 || {
 		printf '%s\n' "$model"
 		return 0
-	fi
+	}
 
 	# _next_model_up returns the same model at the opus ceiling, which
 	# terminates the loop unconditionally — no infinite spin if every
 	# tier is exhausted.
 	while is_model_exhausted "$model"; do
 		next=$(_next_model_up "$model")
-		if [[ "$next" == "$model" ]]; then
-			break
-		fi
+		[[ "$next" == "$model" ]] && break
 		model="$next"
 	done
 
 	# Surface the escalation so operators can correlate cost spikes with
-	# bucket exhaustion. Logged via the orchestrator's `log` if available,
+	# bucket exhaustion.  Logged via the orchestrator's log if available,
 	# else stderr — see _usage_log in claude-usage.sh.
-	if [[ "$model" != "$original" ]] && declare -F model_reset_at >/dev/null 2>&1; then
-		local _reset
-		_reset=$(model_reset_at "$original")
-		_usage_log "Usage gate: $original exhausted (resets ${_reset}) — escalating to $model"
-	fi
+	[[ "$model" != "$original" ]] && \
+		declare -F model_reset_at >/dev/null 2>&1 && {
+			_reset=$(model_reset_at "$original")
+			_msg="Usage gate: $original exhausted"
+			_msg+=" (resets ${_reset}) — escalating to $model"
+			_usage_log "$_msg"
+		} || true
 
 	printf '%s\n' "$model"
 }
