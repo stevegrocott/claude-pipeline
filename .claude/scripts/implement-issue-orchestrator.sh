@@ -1942,6 +1942,25 @@ build_triage_prompt() {
     build_prompt "$@"
 }
 
+# _run_triage_composition — invoke the triage-classify skill as a standard
+# (non-isolated) subprocess, following the dispatch_composition(isolated=false)
+# pattern from batch-orchestrator.sh.  Triage is a pure classification task;
+# it requires no file-system writes so --dangerously-skip-permissions is
+# omitted.
+#
+# Usage: _run_triage_composition <prompt> [extra claude args...]
+_run_triage_composition() {
+    local prompt="$1"
+    shift
+    local triage_timeout
+    triage_timeout=$(get_stage_timeout "triage" "")
+    log "Composition dispatch → standard (triage-classify)"
+    timeout "$triage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+        -p "$prompt" \
+        "$@" \
+        2>&1
+}
+
 run_triage_stage() {
     local issue_body_file="${1:-$LOG_BASE/context/issue-body.md}"
 
@@ -1949,96 +1968,70 @@ run_triage_stage() {
 
     if [[ ! -f "$issue_body_file" ]]; then
         log_error "Triage: issue body file not found: $issue_body_file"
-        # Fail safe: write a minimal triage.json marking full route, return full.
-        printf '{"route":"full","disqualifying_criterion":"issue_body_missing","kill_switch_engaged":false}\n' \
-            > "$LOG_BASE/triage.json"
+        # Fail safe: write minimal triage.json marking full route.
+        jq -n '{
+            route: "full",
+            confidence: "low",
+            disqualifying_criterion: "issue_body_missing",
+            timestamp: (now | todate)
+        }' > "$LOG_BASE/triage.json"
         update_stage triage completed route full
         printf 'full\n'
         return 0
     fi
 
     local issue_body prompt
-    issue_body=$(cat "$issue_body_file")
+    issue_body=$(< "$issue_body_file")
     prompt=$(build_triage_prompt "$issue_body")
 
     # Resolve model. TRIAGE_MODEL env var allows operator override; default
     # falls through to model-config.sh (triage stage maps to "haiku" tier).
     local triage_model="${TRIAGE_MODEL:-}"
-
-    local raw
-    raw=$(run_stage "triage" "$prompt" "implement-issue-triage.json" "" "" "" "$triage_model") || true
-
-    # Extract Claude's classification from the stage_result envelope's .output.
-    # If parse fails, default to full.
-    local route confidence dq pattern criteria
-    route=$(printf '%s' "$raw" | jq -r '.output.route // "full"')
-    confidence=$(printf '%s' "$raw" | jq -r '.output.confidence // "low"')
-    dq=$(printf '%s' "$raw" | jq -r '.output.disqualifying_criterion // empty')
-    pattern=$(printf '%s' "$raw" | jq -r '.output.established_pattern_grep // empty')
-    criteria=$(printf '%s' "$raw" | jq -c '.output.criteria // {}')
-
-    # Post-processing: defense in depth on top of the prompt.
-    local kill_switch_engaged=false
-    local pattern_grep_count=0
-
-    # 1. Kill switch: forces full regardless of Claude's decision.
-    if [[ "${DISABLE_SURGICAL_FAST_PATH:-0}" == "1" ]]; then
-        if [[ "$route" == "fast-path" ]]; then
-            dq="kill_switch"
-        fi
-        route="full"
-        kill_switch_engaged=true
+    local -a model_args=()
+    if [[ -n "$triage_model" ]]; then
+        model_args=(--model "$triage_model")
     fi
 
-    # 2. Confidence demotion: medium/low forces full.
-    if [[ "$kill_switch_engaged" == "false" && "$route" == "fast-path" ]]; then
-        if [[ "$confidence" != "high" ]]; then
-            route="full"
-            dq="confidence_low"
-        fi
-    fi
+    local schema
+    schema=$(jq -c . "$SCHEMA_DIR/implement-issue-triage.json")
 
-    # 3. Pattern grep verification: requires >= 3 matching files.
-    if [[ "$kill_switch_engaged" == "false" && "$route" == "fast-path" ]]; then
-        if [[ -z "$pattern" || "$pattern" == "null" ]]; then
-            route="full"
-            dq="established_pattern"
-        elif [[ "$pattern" == *$'\n'* ]]; then
-            # Reject multi-line patterns. POSIX/BSD/GNU grep treats embedded
-            # newlines as alternation, so a malformed pattern like
-            # "storageState\n." would falsely match arbitrary files.
-            route="full"
-            dq="established_pattern"
-        else
-            # Run from BASE_BRANCH worktree if available; otherwise current dir.
-            pattern_grep_count=$(git grep -lE -- "$pattern" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
-            if (( pattern_grep_count < 3 )); then
-                route="full"
-                dq="established_pattern"
-            fi
-        fi
-    fi
+    local triage_log="$LOG_BASE/stages/$(next_stage_log "triage")"
 
-    # Write triage.json artifact (always, for both routes — auditable record).
+    # Invoke the triage-classify skill via a standard (non-isolated)
+    # subprocess — the dispatch_composition(isolated=false) pattern from
+    # batch-orchestrator.sh.  No --dangerously-skip-permissions needed.
+    local raw exit_code=0
+    raw=$(_run_triage_composition "$prompt" \
+        ${model_args[@]+"${model_args[@]}"} \
+        --output-format json \
+        --json-schema "$schema") || exit_code=$?
+
+    printf '%s\n' "=== triage output ===" >> "$triage_log"
+    printf '%s\n' "$raw" >> "$triage_log"
+    printf '%s\n' "=== exit code: $exit_code ===" >> "$triage_log"
+
+    # Parse {route, confidence, disqualifying_criterion} from skill output.
+    # Default to full/low on any parse failure.
+    local route confidence dq
+    route=$(printf '%s' "$raw" \
+        | jq -r '.structured_output.route // "full"' 2>/dev/null)
+    confidence=$(printf '%s' "$raw" \
+        | jq -r '.structured_output.confidence // "low"' 2>/dev/null)
+    dq=$(printf '%s' "$raw" \
+        | jq -r \
+            '.structured_output.disqualifying_criterion // empty' \
+            2>/dev/null)
+
+    # Write triage.json artifact (auditable record for both routes).
     local artifact="$LOG_BASE/triage.json"
     jq -n \
         --arg route "$route" \
         --arg confidence "$confidence" \
         --arg dq "${dq:-}" \
-        --arg pattern "${pattern:-}" \
-        --argjson criteria "${criteria:-\{\}}" \
-        --argjson grep_count "$pattern_grep_count" \
-        --argjson kill_switch "$kill_switch_engaged" \
-        --arg summary "$(printf '%s' "$raw" | jq -r '.output.summary // ""')" \
         '{
             route: $route,
             confidence: $confidence,
             disqualifying_criterion: (if $dq == "" then null else $dq end),
-            established_pattern_grep: (if $pattern == "" or $pattern == "null" then null else $pattern end),
-            pattern_grep_count: $grep_count,
-            kill_switch_engaged: $kill_switch,
-            criteria: $criteria,
-            summary: $summary,
             timestamp: (now | todate)
         }' > "$artifact"
 
@@ -2048,13 +2041,16 @@ run_triage_stage() {
        --arg dq "${dq:-}" \
        '.stages.triage.route = $route |
         .stages.triage.confidence = $confidence |
-        .stages.triage.disqualifying_criterion = (if $dq == "" then null else $dq end) |
+        .stages.triage.disqualifying_criterion =
+            (if $dq == "" then null else $dq end) |
         .route = $route |
         .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+       && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 
     set_stage_completed "triage"
-    log "Triage complete. Route: $route (confidence: $confidence, dq: ${dq:-none}, kill_switch: $kill_switch_engaged)"
+    log "Triage complete. Route: $route" \
+        "(confidence: $confidence, dq: ${dq:-none})"
 
     printf '%s\n' "$route"
 }
