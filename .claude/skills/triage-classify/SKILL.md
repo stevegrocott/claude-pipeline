@@ -7,6 +7,9 @@ inputs:
     required: true
     description: Full text of the GitHub issue body (title + description + implementation tasks)
 outputs:
+  - name: status
+    type: string
+    description: "Schema-required signal: success, error, or rate_limit"
   - name: route
     type: string
     description: "Classification result: fast-path or full"
@@ -16,6 +19,15 @@ outputs:
   - name: disqualifying_criterion
     type: string
     description: Snake_case name of the first criterion that failed; null when route is fast-path
+  - name: established_pattern_grep
+    type: string
+    description: "Grep-able regex (for git grep -lE) identifying the pattern this change applies; null when no pattern identified (established_pattern criterion fails). Orchestrator verifies >= 3 matching files."
+  - name: criteria
+    type: object
+    description: "Per-criterion pass/fail breakdown: six keys (test_only_scope, surgical_size, established_pattern, precise_specification, benign_failure_mode, no_security_concerns), each with passed (bool) and reason (string)"
+  - name: summary
+    type: string
+    description: One-sentence explanation of the routing decision written to triage.json
   - name: triage_json
     type: file
     description: Auditable classification record written to logs/implement-issue/<run>/triage.json
