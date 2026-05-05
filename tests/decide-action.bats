@@ -134,7 +134,7 @@ _assert_valid_action_envelope() {
 
 @test "(1) ESCALATION_POLICY_BACKEND=bash returns a valid action via inline bash" {
 	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
-		|| skip "decide-action.sh not present yet"
+		|| fail "decide-action.sh not present or not executable"
 
 	# Tripwire: if the bash backend incorrectly invokes the skill,
 	# the mock prints this sentinel and exits 1.  A correctly-routed
@@ -168,7 +168,7 @@ _assert_valid_action_envelope() {
 
 @test "(2) schema-invalid skill output triggers bash fallback (no crash)" {
 	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
-		|| skip "decide-action.sh not present yet"
+		|| fail "decide-action.sh not present or not executable"
 
 	# Skill returns JSON that lacks the required `action` field —
 	# must fail jq schema validation and force the fallback path.
@@ -194,7 +194,7 @@ _assert_valid_action_envelope() {
 
 @test "(3) valid skill output is echoed through to stdout" {
 	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
-		|| skip "decide-action.sh not present yet"
+		|| fail "decide-action.sh not present or not executable"
 
 	local skill_output
 	skill_output='{"action":"escalate","model":"sonnet",'
