@@ -89,11 +89,10 @@ MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
 
-# Kill-switch for emergency bash fallback after PR-B introduces the
-# escalation-policy skill.  Defined here for discoverability; PR-B will
-# honour it when deciding whether to delegate to the skill or stay with the
-# inline bash decision tree.
-#   Unset / empty  → use escalation-policy skill when available (PR-B+)
+# Kill-switch for emergency bash fallback.  The escalation-policy skill is
+# now the default routing backend.  Set ESCALATION_POLICY_BACKEND=bash to
+# force the inline bash decision tree instead.
+#   Unset / empty  → use escalation-policy skill (skill-native default)
 #   "bash"         → always use inline bash escalation branches
 ESCALATION_POLICY_BACKEND="${ESCALATION_POLICY_BACKEND:-}"
 ORCHESTRATOR_START_EPOCH=$(date +%s)
@@ -1252,10 +1251,10 @@ _emit_stage_result() {
 # Apply a stage outcome action to a stage_result envelope.
 #
 # This is the single bash entry point for stage outcome handling. Callers
-# determine which action to take (via the existing bash decision tree), then
-# delegate execution to this function. PR-B will replace the bash decision
-# tree with an escalation-policy skill invocation; this shim keeps the code
-# path uniform so tests can target the action interface independently.
+# determine which action to take (via the escalation-policy skill or the
+# inline bash decision tree), then delegate execution to this function.
+# Keeping action execution here keeps the interface uniform so tests can
+# target the action logic independently of the routing backend.
 #
 # Arguments:
 #   $1 - stage_result: JSON envelope (see schemas/stage-result.json)
@@ -1263,9 +1262,8 @@ _emit_stage_result() {
 #   $3 - reason:       (optional) human-readable reason for logging / diagnostics
 #
 # Stdout:
-#   Emits the stage_result JSON envelope unchanged (PR-A pass-through).
-#   PR-B will replace the escalate/retry_same branches with skill invocations
-#   that may produce a new envelope.
+#   Emits the stage_result JSON envelope unchanged; re-run and retry
+#   logic lives in run_stage, driven by the escalation-policy skill.
 #
 # Returns:
 #   0 for accept / escalate / retry_same
@@ -1286,15 +1284,14 @@ _apply_stage_action() {
 			return 1
 			;;
 		escalate)
-			# PR-A shim: emit stage_result as-is; the re-run logic lives in
-			# run_stage. PR-B will replace this branch with a skill invocation
-			# that returns the next action + target model.
+			# Emit stage_result as-is; run_stage reads the action and drives
+			# model escalation via the escalation-policy skill.
 			printf '%s\n' "$stage_result"
 			return 0
 			;;
 		retry_same)
-			# PR-A shim: emit stage_result as-is; the retry logic lives in
-			# run_stage. PR-B will replace this branch with explicit retry.
+			# Emit stage_result as-is; run_stage reads the action and drives
+			# the retry loop (same model) via the escalation-policy skill.
 			printf '%s\n' "$stage_result"
 			return 0
 			;;
