@@ -1809,6 +1809,8 @@ for m in re.finditer(r'\[\s*\{', t):
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' \
                 "=== escalation exit code: $_esc_exit_code ===" >> "$stage_log"
+            (( _esc_exit_code != 0 )) && \
+                log_warn "escalation CLI exited $_esc_exit_code"
 
             # Extract output from the escalated run
             local _esc_structured
