@@ -54,7 +54,7 @@ _is_upgrade_trigger() {
 	# exhausting per-tier retries before calling this script.
 	case "$1" in
 		timeout|max_turns_exhausted|no_structured_output|\
-		structured_error|rate_limit|context_length_exceeded)
+		structured_error|rate_limit)
 			return 0
 			;;
 		*)
