@@ -426,6 +426,20 @@ After resolving a bug or observing a recurring problem:
 > /improvement-loop
 ```
 
+### Skill Frontmatter
+
+All 38 skills carry structured YAML frontmatter that makes their contracts machine-readable:
+
+```yaml
+inputs: [issue_number, base_branch]
+outputs: [pr_url, branch_name]
+side_effects: [github_comments, git_push]
+composes: [brainstorming, test-driven-development]
+failure_modes: [api_timeout, merge_conflict]
+```
+
+A pre-commit hook (`skill-validate.sh`) validates every skill file against this schema before it can be committed, preventing undocumented inputs, outputs, or side effects from entering the pipeline.
+
 ## Hooks
 
 - **Session Start** (`hooks/session-start.sh`): Injects `using-skills` into every conversation
