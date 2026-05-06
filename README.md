@@ -81,13 +81,14 @@ git diff HEAD~1 -- .claude/agents/ .claude/skills/ .claude/config/
 
 ## What's Inside
 
-- **26 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
+- **38 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
 - **8 specialized agents** (backend/frontend developers, reviewers, validators, Playwright test developer, orchestration writer)
 - **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including format converters)
 - **2 hooks** for session initialization and post-PR simplification
 - **2 orchestration scripts** for batch issue processing and end-to-end implementation
 - **13 JSON schemas** for structured output at each pipeline stage
-- **30 BATS test files** across orchestrator and platform wrapper test suites
+- **42 BATS test files** across orchestrator and platform wrapper test suites
+- **6 decision and validation scripts** (`decide-action.sh`, `decide-retry.sh`, `decide-model-fallback.sh`, `skill-validate.sh`, `skill-golden-lib.sh`, `skill-golden.sh`) bridging bash orchestration and skill-native policy evaluation
 - **Quality gates** at every stage: spec compliance, code quality, test validation, acceptance testing
 
 ## Architecture
