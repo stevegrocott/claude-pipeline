@@ -250,6 +250,8 @@ _compose_decide() {
 			fi
 			return 0
 			;;
+		*) printf '%s: error: unexpected retry_action: %s\n' \
+			"$SCRIPT_NAME" "$retry_action" >&2; return 1 ;;
 	esac
 }
 
