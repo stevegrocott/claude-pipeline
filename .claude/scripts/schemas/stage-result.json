@@ -32,6 +32,7 @@
       "type": ["string", "null"],
       "enum": [
         "timeout",
+        "double_timeout",
         "schema_not_found",
         "no_structured_output",
         "max_turns_exhausted_at_ceiling",
