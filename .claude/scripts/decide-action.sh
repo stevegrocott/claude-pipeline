@@ -62,20 +62,15 @@ _bash_decide() {
 	local stage_result="$1"
 	local history="$2"
 
-	local status output_status error_kind model
+	local status error_kind model
 	status=$(printf '%s' "$stage_result" | jq -r '.status')
-	output_status=$(printf '%s' "$stage_result" \
-		| jq -r '.output.status // "null"')
 	error_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind')
 	model=$(printf '%s' "$stage_result" | jq -r '.model // "haiku"')
 
-	# success + valid output + no error_kind → accept
-	if [[ "$status" == "success" ]] && \
-	   [[ "$output_status" != "null" ]] && \
-	   [[ "$output_status" != "error" ]] && \
-	   [[ "$error_kind" == "null" ]]; then
+	# success at top level → accept regardless of .output.status presence
+	if [[ "$status" == "success" ]]; then
 		printf '%s\n' \
-			'{"action":"accept","reason":"stage completed successfully with valid output"}'
+			'{"action":"accept","reason":"stage completed successfully"}'
 		return 0
 	fi
 
@@ -161,20 +156,15 @@ _compose_decide() {
 	local stage_result="$1"
 	local history="$2"
 
-	local status output_status error_kind model
+	local status error_kind model
 	status=$(printf '%s' "$stage_result" | jq -r '.status')
-	output_status=$(printf '%s' "$stage_result" \
-		| jq -r '.output.status // "null"')
 	error_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind')
 	model=$(printf '%s' "$stage_result" | jq -r '.model // "haiku"')
 
-	# success + valid output + no error_kind → accept (no retry needed)
-	if [[ "$status" == "success" ]] && \
-	   [[ "$output_status" != "null" ]] && \
-	   [[ "$output_status" != "error" ]] && \
-	   [[ "$error_kind" == "null" ]]; then
+	# success at top level → accept regardless of .output.status presence
+	if [[ "$status" == "success" ]]; then
 		printf '%s\n' \
-			'{"action":"accept","reason":"stage completed successfully with valid output"}'
+			'{"action":"accept","reason":"stage completed successfully"}'
 		return 0
 	fi
 

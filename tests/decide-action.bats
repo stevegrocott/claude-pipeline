@@ -128,6 +128,16 @@ _assert_valid_action_envelope() {
 	fi
 }
 
+# A minimal stage_result with status=success but NO .output.status field.
+# Under the old buggy guard, output_status resolved to "null" which caused
+# the compound condition to fail, falling through to error handling instead
+# of accepting.  The new guard checks status first, so this must → accept.
+_stage_result_success_no_output_status() {
+	printf '%s' \
+		'{"status":"success","raw":"","denials":[],"model":"haiku",' \
+		'"error_kind":null,"elapsed_ms":100}'
+}
+
 # ===========================================================================
 # (1) ESCALATION_POLICY_BACKEND=bash bypasses the skill entirely
 # ===========================================================================
@@ -191,6 +201,56 @@ _assert_valid_action_envelope() {
 # ===========================================================================
 # (3) Valid skill output is echoed through to stdout
 # ===========================================================================
+
+# ===========================================================================
+# (issue-252) success gate fires on status=success even without .output.status
+# ===========================================================================
+
+@test "(4) status=success without .output.status → accept (bash backend)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	local stage_result history
+	stage_result=$(_stage_result_success_no_output_status)
+	history=$(_history_empty)
+
+	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$stage_result" "$history"
+
+	[ "$status" -eq 0 ]
+
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	if [[ "$action" != "accept" ]]; then
+		printf 'FAIL: expected accept, got: %s\n' "$action" >&2
+		printf 'Stdout: %s\n' "$output" >&2
+		return 1
+	fi
+}
+
+@test "(5) status=success without .output.status → accept (compose backend)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	local stage_result history
+	stage_result=$(_stage_result_success_no_output_status)
+	history=$(_history_empty)
+
+	# Use compose backend (default); the success gate must fire before any
+	# sub-script delegation, so no mock for decide-retry.sh is needed.
+	run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$stage_result" "$history"
+
+	[ "$status" -eq 0 ]
+
+	local action
+	action=$(printf '%s' "$output" | jq -r '.action')
+	if [[ "$action" != "accept" ]]; then
+		printf 'FAIL: expected accept, got: %s\n' "$action" >&2
+		printf 'Stdout: %s\n' "$output" >&2
+		return 1
+	fi
+}
 
 @test "(3) valid skill output is echoed through to stdout" {
 	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
