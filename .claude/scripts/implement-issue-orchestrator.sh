@@ -1649,8 +1649,10 @@ for m in re.finditer(r'\[\s*\{', t):
     local _error_kind="null"
 
     if (( exit_code == 124 )); then
-        # Timed out even after same-model retry
-        _error_kind="timeout"
+        # Timed out even after same-model retry — classify as double_timeout
+        # so downstream (decide-action.sh) can distinguish a single first-pass
+        # timeout (which never reaches here) from a repeated timeout.
+        _error_kind="double_timeout"
     elif [[ "$output_subtype" == "error_max_turns" ]]; then
         if [[ "$(effective_fallback "$model")" == "$model" ]]; then
             log_error "Stage $stage_name hit max turns with $model (ceiling) — cannot escalate"
