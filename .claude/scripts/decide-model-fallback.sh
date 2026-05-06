@@ -84,9 +84,10 @@ _bash_model_fallback() {
 		max_turns_exhausted_at_ceiling)
 			local reason
 			reason="${error_kind}: non-escalatable, no model can fix this"
-			printf \
-				'{"next_model":null,"at_ceiling":true,"reason":"%s"}\n' \
-				"$reason"
+			jq -nc --argjson next_model null \
+				--arg reason "$reason" \
+				--argjson at_ceiling true \
+				'{next_model: $next_model, at_ceiling: $at_ceiling, reason: $reason}'
 			return 0
 			;;
 	esac
@@ -95,8 +96,10 @@ _bash_model_fallback() {
 	if [[ "$model" == "opus" ]]; then
 		local reason
 		reason="at opus ceiling: no higher tier available"
-		printf '{"next_model":null,"at_ceiling":true,"reason":"%s"}\n' \
-			"$reason"
+		jq -nc --argjson next_model null \
+			--arg reason "$reason" \
+			--argjson at_ceiling true \
+			'{next_model: $next_model, at_ceiling: $at_ceiling, reason: $reason}'
 		return 0
 	fi
 
@@ -105,17 +108,20 @@ _bash_model_fallback() {
 		local next reason
 		next=$(_next_model_up "$model")
 		reason="${error_kind}: upgrading ${model} → ${next}"
-		printf \
-			'{"next_model":"%s","at_ceiling":false,"reason":"%s"}\n' \
-			"$next" "$reason"
+		jq -nc --arg next_model "$next" \
+			--arg reason "$reason" \
+			--argjson at_ceiling false \
+			'{next_model: $next_model, at_ceiling: $at_ceiling, reason: $reason}'
 		return 0
 	fi
 
 	# Unrecognised error_kind: conservative no-upgrade.
 	local reason
 	reason="${error_kind}: not a recognised upgrade trigger, no-upgrade"
-	printf '{"next_model":null,"at_ceiling":false,"reason":"%s"}\n' \
-		"$reason"
+	jq -nc --argjson next_model null \
+		--arg reason "$reason" \
+		--argjson at_ceiling false \
+		'{next_model: $next_model, at_ceiling: $at_ceiling, reason: $reason}'
 }
 
 # ---------------------------------------------------------------------------
