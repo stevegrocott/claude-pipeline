@@ -116,6 +116,7 @@ The `implement-issue-orchestrator.sh` (~5,000 lines) runs 11 stages per issue:
 |-------|-----------|-------------|
 | `parse_issue` | light (haiku) | Fetch issue body, extract tasks via fuzzy parser, compute batch assignments |
 | `validate_plan` | light (haiku) | Verify agent names exist, check file paths, warn on oversized tasks |
+| `triage` | light (haiku) | Classify issue as fast-path (surgical: no quality/test loops) or full (standard pipeline) via triage-classify skill |
 | `implement` | standard (sonnet) | Execute tasks in dependency-aware batches (serial or parallel via worktrees) |
 | `quality_loop` | mixed | Iterative simplify → review → fix cycle (up to 3 iterations) |
 | `test_loop` | mixed | Smart test targeting with convergence detection (stops on repeated failures) |
@@ -141,6 +142,7 @@ handle-issues (skill) → batch-orchestrator.sh
 
 ### Key Orchestrator Features
 
+- **Skill-native triage** — each issue is classified before implementation; fast-path skips quality and test loops for surgical single-file changes
 - **Fuzzy task parsing** — handles missing backticks, asterisk bullets, leading whitespace, and missing square brackets with warnings
 - **Task batching** — tasks with non-overlapping file sets are grouped into parallel batches; tasks sharing files run sequentially
 - **Worktree parallelism** — parallel batches execute in isolated git worktrees and merge back
