@@ -193,6 +193,13 @@ _compose_decide() {
 	# Escalation history lacks per-error-kind records; pass an empty
 	# error_history array so retry-policy uses retry_count for threshold
 	# checks.  Defaults to bash backend unless RETRY_POLICY_BACKEND is set.
+	#
+	# NOTE: the inline ${RETRY_POLICY_BACKEND:-bash} default means callers
+	# MUST use `export RETRY_POLICY_BACKEND=claude` (not a bare assignment)
+	# to reach the live Claude path in decide-retry.sh.  A bare assignment
+	# (e.g. RETRY_POLICY_BACKEND=claude; decide-action.sh) without export
+	# leaves the variable unexported, so $RETRY_POLICY_BACKEND is empty
+	# inside this script and the :-bash default forces the bash path.
 	local retry_out
 	retry_out=$(
 		RETRY_POLICY_BACKEND="${RETRY_POLICY_BACKEND:-bash}" \
