@@ -75,6 +75,8 @@ Filter to records where `model == stage_result.model` before reasoning.
 
 `backoff_ms` is **only present** when `action == "retry"` and `error_kind == "rate_limit"`. Omit it for all other cases.
 
+> **Machine-readable output:** When invoked as a live skill, output exactly one JSON object on stdout — no markdown fences, no prose before or after the object.
+
 ---
 
 ## Max Retries Per Error Class
@@ -174,7 +176,7 @@ error_kind == "rate_limit"? → include backoff_ms
 ```json
 {
   "action": "retry",
-  "reason": "no_structured_output: first retry at haiku, retry_count=1"
+  "reason": "no_structured_output: first retry at haiku, retry_count=0"
 }
 ```
 
