@@ -41,8 +41,8 @@ readonly _MODEL_default="opus"    # fallback for unknown tiers
 #
 # Task complexity hints (S/M/L) from issue parsing override stage defaults.
 #
-# S, M → standard  (judgment tier)
-# L    → advanced  (deep-reasoning tier)
+# S, M → standard → sonnet  (judgment tier)
+# L    → advanced → opus    (deep-reasoning tier)
 #
 # Lookup: _complexity_to_tier <hint>
 # Decision logic: .claude/skills/model-fallback/SKILL.md
