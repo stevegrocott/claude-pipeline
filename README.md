@@ -434,7 +434,7 @@ After resolving a bug or observing a recurring problem:
 ## Testing
 
 ```bash
-# Orchestrator tests (23 test files, ~930 tests)
+# Orchestrator tests (35 test files, ~930 tests)
 cd .claude/scripts/implement-issue-test
 ./run-tests.sh
 
@@ -442,6 +442,8 @@ cd .claude/scripts/implement-issue-test
 cd .claude/scripts/platform-test
 ./run-tests.sh
 ```
+
+Decision skill tests use a golden-fixture harness (`skill-golden-lib.sh`) with mock Claude to verify escalation-policy, retry-policy, model-fallback, and triage-classify outputs without live API calls.
 
 Test coverage includes: argument parsing, branch verification, comment helpers, constants, deploy verification, environment error detection, metrics export, fuzzy task parsing, helper functions, integration, JSON parsing, model config, pipeline profiles, PR review config, prompt file lists, quality loop, rate limiting, smart test targeting, stage runner, status functions, task batching, timeout escalation, and verdict parsing.
 
