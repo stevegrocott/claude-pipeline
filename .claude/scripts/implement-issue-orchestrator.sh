@@ -2402,9 +2402,15 @@ Fix the issues and commit. Output a summary of fixes applied."
                     '{status:"error", output:null, raw:"", denials:[], model:$model, error_kind:"quality_stall", elapsed_ms:0}')
 
                 local _stall_da_json _stall_action _stall_target_model _stall_reason
+                local exit_code
                 _stall_da_json=$(bash "$SCRIPT_DIR/decide-action.sh" \
-                    "$stall_sr" "$_stall_history" 2>/dev/null) \
-                    || _stall_da_json='{"action":"retry_same","reason":"decide-action.sh invocation failed"}'
+                    "$stall_sr" "$_stall_history" \
+                    2>>"${LOG_BASE:-/tmp}/orchestrator.log")
+                exit_code=$?
+                if ((exit_code != 0)); then
+                    log_warn "stall decide-action.sh exited non-zero ($exit_code) — falling back to retry_same"
+                    _stall_da_json='{"action":"retry_same","reason":"decide-action.sh invocation failed"}'
+                fi
                 _stall_action=$(printf '%s' "$_stall_da_json" | jq -r '.action // "retry_same"')
                 _stall_target_model=$(printf '%s' "$_stall_da_json" | jq -r '.model // empty' 2>/dev/null)
                 _stall_reason=$(printf '%s' "$_stall_da_json" | jq -r '.reason // ""')
