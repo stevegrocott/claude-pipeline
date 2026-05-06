@@ -686,6 +686,7 @@ write_task_summary_to_status() {
     jq --argjson summary "$summary" \
        '.task_summary = $summary' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    sync_status_to_log
 }
 
 # =============================================================================
