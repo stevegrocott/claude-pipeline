@@ -10,8 +10,8 @@
 # higher tier, or bail permanently.
 #
 # Environment:
-#   RETRY_POLICY_BACKEND — set to "bash" to bypass skill invocation and use
-#                          the inline decision tree directly (for testing)
+#   RETRY_POLICY_BACKEND — unset or "claude": invoke retry-policy skill via Claude (default)
+#                          "bash": bypass Claude and use the inline decision tree (for testing)
 #
 # Output (stdout):
 #   {"action":"<retry|escalate|bail>",
@@ -20,7 +20,7 @@
 #
 # Exit codes:
 #   0 — action decided (skill or bash fallback)
-#   1 — bad arguments
+#   1 — bad arguments or Claude invocation failure
 #
 
 set -o pipefail
@@ -182,7 +182,7 @@ _claude_retry_decide() {
 		"$stage_result" "$retry_count" "$error_history")
 
 	local output rc
-	output=$(env -u CLAUDECODE claude -p "$prompt" \
+	output=$(timeout "${CLAUDE_SKILL_TIMEOUT:-120}" env -u CLAUDECODE claude -p "$prompt" \
 		--dangerously-skip-permissions \
 		--output-format json \
 		--json-schema "$schema_compact" 2>&1)
