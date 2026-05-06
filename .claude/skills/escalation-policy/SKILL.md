@@ -33,7 +33,7 @@ Model escalation path: **haiku → sonnet → opus** (no tier above opus; opus i
   "raw":        "<string>         — raw stdout before extraction",
   "denials":    ["<tool_name>"]   ,
   "model":      "haiku | sonnet | opus",
-  "error_kind": "timeout | schema_not_found | no_structured_output | max_turns_exhausted_at_ceiling | rate_limit | permission_denied | null",
+  "error_kind": "timeout | schema_not_found | no_structured_output | quality_stall | max_turns_exhausted_at_ceiling | rate_limit | permission_denied | null",
   "elapsed_ms": 12345
 }
 ```
@@ -102,6 +102,7 @@ Re-run the stage with the next higher model tier.
 | `timeout` | `double_timeout` | Always escalate on timeout; `run_stage` handles internal first-retry before invoking the skill |
 | `max_turns_exhausted_at_ceiling` is NOT set AND turns exhausted | `max_turns_exhausted` | Only escalate if not already at opus |
 | `no_structured_output` | `empty_output` | Model produced no parseable result |
+| `quality_stall` | `quality_stall` | Fix stage added no new commits after ≥2 quality iterations — model is stuck; synthesised by `run_quality_loop()` |
 | `output.status == "error"` | `structured_error` | Claude returned a structured error block |
 
 **Required output fields:** `action`, `model` (target tier), `reason`
