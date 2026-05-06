@@ -2081,6 +2081,7 @@ run_quality_loop() {
     local loop_agent="${4:-$AGENT}"
     local max_iterations="${5:-$MAX_QUALITY_ITERATIONS}"
     local loop_complexity="${6:-}"
+    local loop_model_override=""
 
     local loop_approved=false
     local loop_iteration=0  # Per-loop counter (resets each call)
@@ -2370,13 +2371,55 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             verify_on_feature_branch "$loop_branch" || true
 
+            local pre_fix_commits
+            pre_fix_commits=$(git rev-list --count "${BASE_BRANCH}..${loop_branch}" 2>/dev/null || echo "0")
+
             # Pass loop_complexity so run_stage can route model selection by task
             # size: S→sonnet, M→sonnet, L→opus (via resolve_model in run_stage).
+            # Pass loop_model_override (arg 7) so an escalated model takes effect
+            # on subsequent iterations after stall detection.
             local fix_result
-            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
+            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity" "" "${loop_model_override:-}")
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
+
+            # Stall detection: if the fix stage did not produce any new commits
+            # and we are at least on iteration 2, escalate via decide-action.sh.
+            local current_fix_model post_fix_commits
+            current_fix_model=$(printf '%s' "$fix_result" | jq -r '.model // "sonnet"')
+            post_fix_commits=$(git rev-list --count "${BASE_BRANCH}..${loop_branch}" 2>/dev/null || echo "0")
+
+            if (( post_fix_commits <= pre_fix_commits )) && (( loop_iteration >= 2 )); then
+                log_warn "Quality loop stall detected on iteration $loop_iteration: fix produced no new commits (pre=$pre_fix_commits post=$post_fix_commits)"
+
+                local _stall_history="[]"
+                if [[ -f "$STATUS_FILE" ]]; then
+                    _stall_history=$(jq -c '.escalations // []' "$STATUS_FILE" 2>/dev/null || printf '[]')
+                fi
+
+                local stall_sr
+                stall_sr=$(jq -nc \
+                    --arg model "$current_fix_model" \
+                    '{status:"error", output:null, raw:"", denials:[], model:$model, error_kind:"quality_stall", elapsed_ms:0}')
+
+                local _stall_da_json _stall_action _stall_target_model _stall_reason
+                _stall_da_json=$(bash "$SCRIPT_DIR/decide-action.sh" \
+                    "$stall_sr" "$_stall_history" 2>/dev/null) \
+                    || _stall_da_json='{"action":"retry_same","reason":"decide-action.sh invocation failed"}'
+                _stall_action=$(printf '%s' "$_stall_da_json" | jq -r '.action // "retry_same"')
+                _stall_target_model=$(printf '%s' "$_stall_da_json" | jq -r '.model // empty' 2>/dev/null)
+                _stall_reason=$(printf '%s' "$_stall_da_json" | jq -r '.reason // ""')
+
+                log "Stall decide-action.sh → action=$_stall_action${_stall_target_model:+ model=$_stall_target_model}"
+
+                if [[ "$_stall_action" == "escalate" ]]; then
+                    local _esc_model="${_stall_target_model:-$(effective_fallback "$current_fix_model")}"
+                    loop_model_override="$_esc_model"
+                    record_escalation "fix-review-${stage_prefix}-stall-iter-$loop_iteration" "$current_fix_model" "$_esc_model" "${_stall_reason:-quality_stall}"
+                    log "Quality loop stall: escalating fix model $current_fix_model → $_esc_model for next iteration"
+                fi
+            fi
 
             # Fix stage introduced new changes — simplify should run next iteration.
             skip_simplify=false
