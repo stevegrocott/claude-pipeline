@@ -175,7 +175,7 @@ The orchestrator classifies each run into a profile based on task complexity, th
 
 ### Model Configuration
 
-The pipeline uses a three-tier model abstraction (`model-config.sh`) that decouples stages from specific model names:
+The pipeline uses a three-tier model abstraction (`model-config.sh`) — **pure data** — lookup arrays for tier/model/stage mappings only; no decision branches — that decouples stages from specific model names:
 
 | Tier | Model | Used For |
 |------|-------|----------|
@@ -184,6 +184,16 @@ The pipeline uses a three-tier model abstraction (`model-config.sh`) that decoup
 | **advanced** | opus | Deep reasoning: complex implementation (L-complexity tasks), unknown stages |
 
 Task complexity hints (`S`/`M`/`L`) from issue parsing override stage defaults — S and M use sonnet, L uses opus. Light-tier stages always use haiku regardless of complexity.
+
+#### Decision layer
+
+The three decision scripts read from `model-config.sh` and apply policy logic:
+
+| Script | Companion skill |
+|--------|----------------|
+| `decide-action.sh` | `escalation-policy` |
+| `decide-retry.sh` | `retry-policy` |
+| `decide-model-fallback.sh` | `model-fallback` |
 
 ## Orchestrator Features
 
