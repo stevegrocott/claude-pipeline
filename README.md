@@ -168,11 +168,12 @@ The orchestrator classifies each run into a profile based on task complexity, th
 | Category | Skills | Purpose |
 |----------|--------|---------|
 | **Discovery** | explore, investigating-codebase-for-user-stories | Turn ideas into fully-planned issues |
-| **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents | Enforce discipline and methodology |
-| **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans | Automate multi-step development workflows |
+| **Process** | brainstorming, TDD, systematic-debugging, writing-plans, dispatching-parallel-agents, test-validation | Enforce discipline and methodology |
+| **Workflow** | handle-issues, implement-issue, process-pr, subagent-driven-development, executing-plans, fix-from-review, pr-review, pr-creation, complete-summary | Automate multi-step development workflows |
 | **Domain** | bulletproof-frontend, ui-design-fundamentals, write-docblocks, review-ui, playwright-testing | Tech-stack-specific guidance |
 | **Reference** | mcp-tools, using-skills | Tool selection and skill discovery |
-| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, resume-session | Maintain and extend the pipeline itself |
+| **Pipeline Policy** | escalation-policy, retry-policy, model-fallback, triage-classify | Document when to escalate/retry/bail and which model to use next — evaluated by decide-*.sh scripts |
+| **Meta** | writing-skills, writing-agents, adapting-claude-pipeline, improvement-loop, create-session-summary, resume-session, pipeline-feedback, pipeline-recovery, pipeline-sync | Maintain and extend the pipeline itself |
 | **Utility** | using-git-worktrees | Workspace isolation for feature work |
 
 ### Model Configuration
