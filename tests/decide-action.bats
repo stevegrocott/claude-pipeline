@@ -296,3 +296,69 @@ _stage_result_success_no_output_status() {
 		return 1
 	fi
 }
+
+# ===========================================================================
+# (6) _compose_decide: unexpected retry_action value returns non-zero
+# ===========================================================================
+
+@test "(6) _compose_decide returns non-zero for unexpected retry_action value" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	# Create a temp scripts directory holding a mock decide-retry.sh that
+	# returns an unexpected action ("unknown").  This simulates what would
+	# happen if RETRY_POLICY_BACKEND=bash emitted an action not yet handled
+	# by _compose_decide's case block — e.g. a future policy extension.
+	local mock_dir
+	mock_dir="$TEST_TMP/scripts"
+	mkdir -p "$mock_dir"
+	cat > "$mock_dir/decide-retry.sh" <<'MOCK'
+#!/usr/bin/env bash
+# Mock: returns a schema-looking envelope with an unrecognised action.
+printf '{"action":"unknown","reason":"injected unexpected action for test"}\n'
+MOCK
+	chmod +x "$mock_dir/decide-retry.sh"
+
+	# Source _compose_decide and its dependencies in-process so the function
+	# can be called directly.  Skip 'readonly' and 'set -o' header lines so
+	# that SCRIPT_DIR / SCRIPT_NAME can be supplied by the test.
+	local func_file
+	func_file="$TEST_TMP/compose_decide.bash"
+	awk '
+		/^readonly /  { next }
+		/^set -o /    { next }
+		/^_compose_decide\(\) \{$/,/^\}$/        { print; next }
+		/^_valid_retry_schema\(\) \{$/,/^\}$/    { print; next }
+		/^_valid_fallback_schema\(\) \{$/,/^\}$/ { print; next }
+		/^_bash_decide\(\) \{$/,/^\}$/           { print; next }
+		/^_next_model\(\) \{$/,/^\}$/            { print; next }
+		/^die\(\) \{$/,/^\}$/                    { print; next }
+	' "$DECIDE_ACTION_SCRIPT" > "$func_file"
+
+	# Point SCRIPT_DIR at the mock directory so _compose_decide invokes
+	# mock/decide-retry.sh when it delegates the retry decision.
+	SCRIPT_DIR="$mock_dir"
+	SCRIPT_NAME="decide-action.sh"
+	# shellcheck disable=SC1090
+	source "$func_file"
+
+	# Override _valid_retry_schema to return 0 for any JSON that carries a
+	# non-empty reason field.  This lets the "unknown" action pass schema
+	# validation so it reaches the wildcard arm of _compose_decide's case
+	# block — the new code added to reject unexpected retry_action values.
+	_valid_retry_schema() {
+		local json="$1"
+		local reason
+		reason=$(jq -r '.reason // empty' 2>/dev/null <<< "$json")
+		[[ -n "$reason" ]]
+	}
+
+	local stage_result history
+	stage_result='{"status":"failure","error_kind":"timeout","model":"haiku",'
+	stage_result+='"raw":"","denials":[],"elapsed_ms":100}'
+	history='[]'
+
+	run --separate-stderr _compose_decide "$stage_result" "$history"
+
+	[ "$status" -ne 0 ]
+}
