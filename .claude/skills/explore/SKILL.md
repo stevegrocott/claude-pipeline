@@ -215,7 +215,7 @@ The `## Implementation Tasks` section must use this parseable convention:
 
 Task sizing directly controls model cost via `model-config.sh`:
 
-- **Prefer S-complexity tasks** — they use haiku (cheapest model). Only use M/L when the work genuinely requires it.
+- **Prefer S-complexity tasks** — S and M tasks use sonnet; only L tasks use opus. Prefer S over M/L for smaller scope, not model savings.
 - **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps.
 - **Point tasks to specific files and line numbers** — vague descriptions cause subagents to explore broadly, triggering 19x more tool calls.
 - **Each task's affected file list reduces subagent exploration cost** — include file paths in the task description.
