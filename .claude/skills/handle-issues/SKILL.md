@@ -621,6 +621,13 @@ fi
 
 echo ""
 echo "**Logs:** $LOG_DIR"
+
+# Extract and report follow-up issues
+FOLLOWUPS=$(jq -r '[.issues[].follow_ups // [] | .[]] | unique | join(" ")' status.json)
+if [[ -n "$FOLLOWUPS" ]]; then
+    echo ""
+    echo "Follow-up issues found: ${FOLLOWUPS}. Run: /handle-issues ${FOLLOWUPS} on branch main"
+fi
 ```
 
 ## Files
