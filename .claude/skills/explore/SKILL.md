@@ -219,7 +219,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 
 - **Prefer S-complexity tasks** — S and M tasks use sonnet; only L tasks use opus. Prefer S over M/L for smaller scope, not model savings.
 - **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps.
-- **Point tasks to specific files and line numbers** — vague descriptions cause subagents to explore broadly, triggering 19x more tool calls.
+- **Every task MUST include at least one file path. Tasks without file paths will cause subagents to scan broadly — this is the #1 token waste in the pipeline.**
 - **Each task's affected file list reduces subagent exploration cost** — include file paths in the task description.
 
 ## Integration
@@ -238,3 +238,4 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Combine multiple concerns in one issue | One issue = one problem = one PR |
 | Ask too many clarifying questions | 0-2 questions max; research answers most questions |
 | Single task modifies 5+ files | Split into focused subtasks |
+| Task has no file paths | Subagent reads 13+ files to orient; include at least 1 file path per task |
