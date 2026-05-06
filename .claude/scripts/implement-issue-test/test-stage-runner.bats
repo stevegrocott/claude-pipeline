@@ -1290,3 +1290,35 @@ EOF
 	[ "$agent_status" = "error" ] || \
 		fail "Expected output.status=error in emitted envelope, got: $agent_status"
 }
+
+@test "_apply_stage_action: retry_same exits 0 and emits stage_result envelope unchanged" {
+	# retry_same behavior: run_stage calls _apply_stage_action with retry_same
+	# for rate-limit scenarios. The shim must emit the envelope and return 0 so
+	# the caller can re-issue the stage; the envelope must survive intact.
+	local stage_result
+	stage_result=$(jq -nc '{
+		status: "error",
+		output: null,
+		raw: "{\"result\":\"rate limited\",\"is_error\":true}",
+		denials: [],
+		model: "sonnet",
+		error_kind: "rate_limit",
+		elapsed_ms: 2000
+	}')
+
+	run _apply_stage_action "$stage_result" "retry_same" "rate_limit"
+	[ "$status" -eq 0 ]
+
+	# Envelope must be emitted on stdout so callers can inspect stage_result.
+	local emitted_envelope
+	emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+	[ -n "$emitted_envelope" ] || \
+		fail "_apply_stage_action retry_same must emit stage_result on stdout"
+
+	# The error_kind must survive unchanged so the caller knows why retry was
+	# requested (PR-B will use this to drive the retry decision).
+	local error_kind
+	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+	[ "$error_kind" = "rate_limit" ] || \
+		fail "Expected error_kind=rate_limit in emitted envelope, got: $error_kind"
+}
