@@ -192,8 +192,10 @@ Ready for implementation: /implement-issue NNN main
 The `## Implementation Tasks` section must use this parseable convention:
 
 ```markdown
-- [ ] `[agent-name]` **(M)** Task description
+- [ ] `[agent-name]` **(M)** Task description — `src/path/file.ts:L10-40`
 ```
+
+**Files suffix:** Append ` — \`path/to/file.ts:L10-40\`` (em dash, space, backtick-quoted path with optional line range) to every task description. Multiple files: ` — \`file1.ts:L5\`, \`file2.ts:L20-35\``. This tells subagents exactly where to look, eliminating broad codebase scans.
 
 **Agent values** (adapt to your project's agents):
 - Use whatever agent names are configured in `.claude/agents/`
