@@ -95,6 +95,7 @@ bail() {
         '.state = "failed" |
          .error = $err |
          .last_update = (now | todate)'
+    write_task_summary
     exit 1
 }
 
@@ -123,6 +124,41 @@ is_stage_completed() {
 
 read_pr_number_from_status() {
     jq -r '.stages.fast_path_pr.pr_number // empty' "$STATUS_FILE" 2>/dev/null
+}
+
+write_task_summary() {
+    [[ -f "$STATUS_FILE" ]] || return 0
+    local summary
+    summary=$(jq '
+        def size_points:
+            if . == "M" then 3
+            elif . == "L" then 5
+            else 1
+            end;
+        def extract_size:
+            if .description | test("\\*\\*\\(L\\)\\*\\*") then "L"
+            elif .description | test("\\*\\*\\(M\\)\\*\\*") then "M"
+            else "S"
+            end;
+        [.tasks[] | . + {size: extract_size}] as $tasks |
+        {
+            completed: {
+                S: [$tasks[] | select(.status == "completed" and .size == "S")] | length,
+                M: [$tasks[] | select(.status == "completed" and .size == "M")] | length,
+                L: [$tasks[] | select(.status == "completed" and .size == "L")] | length
+            },
+            failed: {
+                S: [$tasks[] | select(.status == "failed" and .size == "S")] | length,
+                M: [$tasks[] | select(.status == "failed" and .size == "M")] | length,
+                L: [$tasks[] | select(.status == "failed" and .size == "L")] | length
+            },
+            sp_completed: ([$tasks[] | select(.status == "completed") | .size | size_points] | add // 0),
+            sp_total: ([$tasks[] | .size | size_points] | add // 0)
+        }
+    ' "$STATUS_FILE" 2>/dev/null) || true
+    [[ -n "$summary" ]] || return 0
+    _jq_inplace "$STATUS_FILE" --argjson s "$summary" '.task_summary = $s' || true
+    cp "$STATUS_FILE" "$LOG_BASE/status.json" || true
 }
 
 # --- kill switch -----------------------------------------------------------
@@ -313,4 +349,5 @@ _jq_inplace "$STATUS_FILE" \
      .last_update = (now | todate)'
 
 log "Surgical fast-path complete. PR #$pr_number merged and branch deleted."
+write_task_summary
 exit 0
