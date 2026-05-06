@@ -361,4 +361,11 @@ MOCK
 	run --separate-stderr _compose_decide "$stage_result" "$history"
 
 	[ "$status" -ne 0 ]
+
+	# Wildcard arm must emit the diagnostic to stderr.
+	[[ "$stderr" == *"unexpected retry_action"* ]] || {
+		printf 'FAIL: expected "unexpected retry_action" in stderr, got: %s\n' \
+			"$stderr" >&2
+		return 1
+	}
 }
