@@ -90,6 +90,20 @@ _bash_decide() {
 		return 0
 	fi
 
+	# quality_stall → escalate, or bail if already at opus ceiling
+	if [[ "$error_kind" == "quality_stall" ]]; then
+		if [[ "$model" == "opus" ]]; then
+			printf '%s\n' \
+				'{"action":"bail","reason":"quality_stall: already at opus ceiling"}'
+		else
+			local next_model
+			next_model=$(_next_model "$model")
+			printf '{"action":"escalate","model":"%s","reason":"quality_stall: escalating from %s to %s"}\n' \
+				"$next_model" "$model" "$next_model"
+		fi
+		return 0
+	fi
+
 	# already at opus → bail (cannot escalate further)
 	if [[ "$model" == "opus" ]]; then
 		printf '%s\n' \

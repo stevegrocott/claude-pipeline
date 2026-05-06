@@ -181,6 +181,13 @@ error_kind == "permission_denied" OR "schema_not_found"?
   no  ↓
         │
         ▼
+error_kind == "quality_stall"?
+  yes → model == "opus"?
+          yes → bail  (quality_stall: already at opus ceiling)
+          no  → escalate (quality_stall: escalating from <model> to <next>)
+  no  ↓
+        │
+        ▼
 model == "opus" (ceiling)?
   yes → bail  (cannot escalate further)
   no  ↓
@@ -191,7 +198,7 @@ error_kind == "rate_limit" AND no prior retry at same model?
   no  ↓
         │
         ▼
-escalate  (double_timeout | max_turns_exhausted | empty_output | structured_error)
+escalate  (double_timeout | max_turns_exhausted | empty_output | structured_error | quality_stall)
 ```
 
 ## Common Mistakes
