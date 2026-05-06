@@ -87,7 +87,7 @@ git diff HEAD~1 -- .claude/agents/ .claude/skills/ .claude/config/
 - **2 hooks** for session initialization and post-PR simplification
 - **2 orchestration scripts** for batch issue processing and end-to-end implementation
 - **13 JSON schemas** for structured output at each pipeline stage
-- **42 BATS test files** across orchestrator and platform wrapper test suites
+- **42 BATS test files, 1,265 tests** across orchestrator and platform wrapper test suites
 - **6 decision and validation scripts** (`decide-action.sh`, `decide-retry.sh`, `decide-model-fallback.sh`, `skill-validate.sh`, `skill-golden-lib.sh`, `skill-golden.sh`) bridging bash orchestration and skill-native policy evaluation
 - **Quality gates** at every stage: spec compliance, code quality, test validation, acceptance testing
 
@@ -448,7 +448,7 @@ A pre-commit hook (`skill-validate.sh`) validates every skill file against this 
 ## Testing
 
 ```bash
-# Orchestrator tests (35 test files, ~930 tests)
+# Orchestrator tests (35 test files)
 cd .claude/scripts/implement-issue-test
 ./run-tests.sh
 
