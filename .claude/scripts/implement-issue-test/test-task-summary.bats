@@ -292,3 +292,27 @@ _set_tasks_json() {
     [ "$status" -eq 0 ]
     [ ! -f "$missing" ]
 }
+
+@test "write_task_summary_to_status syncs task_summary to LOG_BASE/status.json" {
+    _set_tasks_json '[
+        {"id":1,"description":"**(S)** Task one","status":"completed"},
+        {"id":2,"description":"**(M)** Task two","status":"pending"}
+    ]'
+    write_task_summary_to_status
+    local expected actual
+    expected=$(jq -r '.task_summary.sp_completed' "$STATUS_FILE")
+    actual=$(jq -r '.task_summary.sp_completed' "$LOG_BASE/status.json")
+    [ "$actual" = "$expected" ]
+}
+
+@test "write_task_summary_to_status LOG_BASE copy has same sp_total as STATUS_FILE" {
+    _set_tasks_json '[
+        {"id":1,"description":"**(S)** Task one","status":"completed"},
+        {"id":2,"description":"**(L)** Task two","status":"pending"}
+    ]'
+    write_task_summary_to_status
+    local status_sp_total log_sp_total
+    status_sp_total=$(jq -r '.task_summary.sp_total' "$STATUS_FILE")
+    log_sp_total=$(jq -r '.task_summary.sp_total' "$LOG_BASE/status.json")
+    [ "$log_sp_total" = "$status_sp_total" ]
+}
