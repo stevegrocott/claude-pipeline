@@ -53,7 +53,7 @@ _is_upgrade_trigger() {
 	# are met — see retry-policy.  The orchestrator is responsible for
 	# exhausting per-tier retries before calling this script.
 	case "$1" in
-		timeout|max_turns_exhausted|no_structured_output|\
+		timeout|double_timeout|max_turns_exhausted|no_structured_output|\
 		structured_error|rate_limit)
 			return 0
 			;;
