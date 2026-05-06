@@ -37,6 +37,9 @@
         "max_turns_exhausted_at_ceiling",
         "rate_limit",
         "permission_denied",
+        "quality_stall",
+        "max_turns_exhausted",
+        "structured_error",
         null
       ],
       "description": "Machine-readable error classification; null when status is success"
