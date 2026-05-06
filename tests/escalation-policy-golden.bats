@@ -115,7 +115,7 @@ _assert_reason_present() {
 		|| fail "decide-action.sh not present or not executable"
 
 	local stage_result history
-	stage_result=$(_load_fixture "escalate-timeout")
+	stage_result=$(_load_fixture "timeout-first-attempt")
 	history=$(_history_empty)
 
 	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
