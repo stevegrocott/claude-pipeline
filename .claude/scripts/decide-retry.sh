@@ -26,6 +26,7 @@
 set -o pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
+readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 die() {
 	printf '%s: error: %s\n' "$SCRIPT_NAME" "$*" >&2
@@ -147,6 +148,72 @@ _bash_retry_decide() {
 }
 
 # ---------------------------------------------------------------------------
+# _claude_retry_decide <stage_result_json> <retry_count> <error_history_json>
+# Live Claude skill invocation via /retry-policy.
+# Prints action JSON to stdout; exits non-zero on invocation failure.
+# ---------------------------------------------------------------------------
+_claude_retry_decide() {
+	local stage_result="$1"
+	local retry_count="$2"
+	local error_history="$3"
+
+	local schema_file="$SCRIPT_DIR/schemas/retry-policy.json"
+	local skill_file="$SCRIPT_DIR/../skills/retry-policy/SKILL.md"
+
+	if [[ ! -f "$skill_file" ]]; then
+		printf '%s: retry-policy SKILL.md not found: %s\n' \
+			"$SCRIPT_NAME" "$skill_file" >&2
+		return 1
+	fi
+	if [[ ! -f "$schema_file" ]]; then
+		printf '%s: retry-policy schema not found: %s\n' \
+			"$SCRIPT_NAME" "$schema_file" >&2
+		return 1
+	fi
+
+	local schema_compact
+	schema_compact=$(jq -c . "$schema_file" 2>&1) || {
+		printf '%s: failed to compact schema: %s\n' "$SCRIPT_NAME" "$schema_compact" >&2
+		return 1
+	}
+
+	local prompt
+	prompt=$(printf '/retry-policy\n\nINPUTS:\nstage_result: %s\nretry_count: %s\nerror_history: %s\n' \
+		"$stage_result" "$retry_count" "$error_history")
+
+	local output rc
+	output=$(env -u CLAUDECODE claude -p "$prompt" \
+		--dangerously-skip-permissions \
+		--output-format json \
+		--json-schema "$schema_compact" 2>&1)
+	rc=$?
+
+	if (( rc != 0 )); then
+		printf '%s: claude invocation failed (exit %d): %s\n' \
+			"$SCRIPT_NAME" "$rc" "$output" >&2
+		return 1
+	fi
+
+	# Extract the structured payload from the claude output envelope.
+	# Mirrors sg_extract_payload() in skill-golden-lib.sh and run_stage() in
+	# implement-issue-orchestrator.sh — keep these in sync.
+	local payload
+	payload=$(printf '%s' "$output" | jq -c '
+		.structured_output
+		// (.result | if type == "string" then fromjson? else . end)
+		// .
+	' 2>/dev/null)
+
+	if [[ -z "$payload" ]] || ! printf '%s' "$payload" \
+		| jq -e '.action' >/dev/null 2>&1; then
+		printf '%s: no valid action in claude output\n' "$SCRIPT_NAME" >&2
+		return 1
+	fi
+
+	printf '%s\n' "$payload"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 main() {
@@ -162,11 +229,7 @@ main() {
 		return 0
 	fi
 
-	# TODO: implement live Claude skill invocation so the retry policy can be
-	# driven by the full SKILL.md prompt without requiring RETRY_POLICY_BACKEND=bash.
-	# Tracked in the follow-up issue for issue #212 (live skill invocation path).
-	die "live retry-policy skill invocation not yet implemented;" \
-		"use RETRY_POLICY_BACKEND=bash"
+	_claude_retry_decide "$stage_result" "$retry_count" "$error_history"
 }
 
 main "$@"
