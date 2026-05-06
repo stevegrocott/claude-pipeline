@@ -2419,6 +2419,7 @@ Fix the issues and commit. Output a summary of fixes applied."
                     loop_model_override="$_esc_model"
                     record_escalation "fix-review-${stage_prefix}-stall-iter-$loop_iteration" "$current_fix_model" "$_esc_model" "${_stall_reason:-quality_stall}"
                     log "Quality loop stall: escalating fix model $current_fix_model → $_esc_model for next iteration"
+                elif [[ "$_stall_action" == "bail" ]]; then break
                 fi
             fi
 
