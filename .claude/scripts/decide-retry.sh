@@ -102,6 +102,18 @@ _bash_retry_decide() {
 		return 0
 	fi
 
+	# quality_stall at non-ceiling model → escalate immediately
+	if [[ "$error_kind" == "quality_stall" ]]; then
+		if [[ "$model" == "opus" ]]; then
+			printf '%s\n' \
+				'{"action":"bail","reason":"quality_stall: at opus ceiling, cannot escalate"}'
+		else
+			printf '%s\n' \
+				'{"action":"escalate","reason":"quality_stall: fix made no commits"}'
+		fi
+		return 0
+	fi
+
 	local max
 	max=$(_max_retries "$error_kind")
 
