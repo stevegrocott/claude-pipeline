@@ -55,10 +55,11 @@ _max_retries() {
 		rate_limit)           printf '3' ;;
 		no_structured_output) printf '1' ;;
 		timeout)              printf '1' ;;
+		structured_error)     printf '1' ;;
 		# Known non-retriable errors: escalate or bail immediately.
 		# Listed explicitly so new error_kinds don't silently inherit 0-retry
 		# behaviour — add an entry here when extending the error_kind enum.
-		max_turns_exhausted|structured_error|quality_stall) printf '0' ;;
+		max_turns_exhausted|quality_stall) printf '0' ;;
 		# Unknown error_kind: fail closed — 0 retries causes immediate bail.
 		# This prevents silent retries when the policy table has no entry for
 		# an unrecognised class.
@@ -89,6 +90,33 @@ _bash_retry_decide() {
 			return 0
 			;;
 	esac
+
+	# max_turns_exhausted at non-ceiling model → escalate immediately
+	if [[ "$error_kind" == "max_turns_exhausted" ]]; then
+		if [[ "$model" == "opus" ]]; then
+			printf '%s\n' \
+				'{"action":"bail","reason":"max_turns_exhausted: at opus ceiling, cannot escalate"}'
+		else
+			local next_model
+			next_model=$(_next_model "$model")
+			printf \
+				'{"action":"escalate","reason":"max_turns_exhausted: escalating %s → %s"}\n' \
+				"$model" "$next_model"
+		fi
+		return 0
+	fi
+
+	# quality_stall at non-ceiling model → escalate immediately
+	if [[ "$error_kind" == "quality_stall" ]]; then
+		if [[ "$model" == "opus" ]]; then
+			printf '%s\n' \
+				'{"action":"bail","reason":"quality_stall: at opus ceiling, cannot escalate"}'
+		else
+			printf '%s\n' \
+				'{"action":"escalate","reason":"quality_stall: fix made no commits"}'
+		fi
+		return 0
+	fi
 
 	local max
 	max=$(_max_retries "$error_kind")
