@@ -141,10 +141,7 @@ main() {
 		return 0
 	fi
 
-	# TODO: implement live Claude skill invocation; model-fallback SKILL.md
-	# now exists but the invocation glue is not yet wired up.  Fall through
-	# to the bash backend so the orchestrator gets a deterministic decision.
-	_bash_model_fallback "$stage_result"
+	die "Unknown MODEL_FALLBACK_BACKEND: ${MODEL_FALLBACK_BACKEND} (only 'bash' is supported)"
 }
 
 main "$@"
