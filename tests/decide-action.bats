@@ -256,18 +256,31 @@ _stage_result_success_no_output_status() {
 	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
 		|| fail "decide-action.sh not present or not executable"
 
+	# decide-action.sh uses the composition pattern: it delegates to
+	# decide-retry.sh, which (when RETRY_POLICY_BACKEND=claude) calls
+	# the mock claude.  Install a mock claude that returns a valid
+	# escalate action so we can verify the reason string from the skill
+	# propagates through to stdout.
+	#
+	# A failure stage_result is required so the success gate in
+	# _compose_decide does not short-circuit to accept before reaching
+	# the retry-policy delegation.
 	local skill_output
-	skill_output='{"action":"escalate","model":"sonnet",'
+	skill_output='{"action":"escalate",'
 	skill_output+='"reason":"double_timeout: passthrough"}'
 
 	install_mock_claude
 	set_mock_claude_output "$skill_output"
 
+	# failure with double_timeout forces an escalate via the retry path
 	local stage_result history
-	stage_result=$(_stage_result_success)
+	stage_result='{"status":"failure","error_kind":"double_timeout",'
+	stage_result+='"model":"haiku","raw":"","denials":[],"elapsed_ms":100}'
 	history=$(_history_empty)
 
-	run --separate-stderr \
+	# Export RETRY_POLICY_BACKEND=claude so _compose_decide forwards it
+	# to decide-retry.sh, causing the mock claude to be invoked.
+	RETRY_POLICY_BACKEND=claude run --separate-stderr \
 		bash "$DECIDE_ACTION_SCRIPT" "$stage_result" "$history"
 
 	[ "$status" -eq 0 ]
@@ -290,8 +303,11 @@ _stage_result_success_no_output_status() {
 			"$model" >&2
 		return 1
 	fi
-	if [[ "$reason" != "double_timeout: passthrough" ]]; then
-		printf 'FAIL: reason did not round-trip, got: %s\n' \
+	# The skill reason is combined with the model-fallback reason in the
+	# composition path.  Verify the passthrough string from the mock
+	# skill is present rather than requiring an exact match.
+	if [[ "$reason" != *"passthrough"* ]]; then
+		printf 'FAIL: skill reason did not propagate, got: %s\n' \
 			"$reason" >&2
 		return 1
 	fi

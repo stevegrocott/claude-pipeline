@@ -34,6 +34,22 @@ die() {
 }
 
 # ---------------------------------------------------------------------------
+# _run_with_timeout <seconds> <command> [args...]
+# Run a command with a wall-clock timeout.  Uses GNU timeout when available;
+# falls back to direct execution on systems where timeout is not installed
+# (e.g. macOS without coreutils).
+# ---------------------------------------------------------------------------
+_run_with_timeout() {
+	local secs="$1"
+	shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$secs" "$@"
+	else
+		"$@"
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # _next_model <model>
 # Print the next escalation tier.  haiku→sonnet, sonnet/other→opus.
 # ---------------------------------------------------------------------------
@@ -198,7 +214,8 @@ _claude_retry_decide() {
 		"$stage_result" "$retry_count" "$error_history")
 
 	local output rc
-	output=$(timeout "${CLAUDE_SKILL_TIMEOUT:-120}" env -u CLAUDECODE claude -p "$prompt" \
+	output=$(_run_with_timeout "${CLAUDE_SKILL_TIMEOUT:-120}" \
+		env -u CLAUDECODE claude -p "$prompt" \
 		--dangerously-skip-permissions \
 		--output-format json \
 		--json-schema "$schema_compact" 2>&1)
