@@ -210,14 +210,15 @@ run_skill() {
 
 	# ------------------------------------------------------------------
 	# Source the skill's prompt builder.  Without it we cannot invoke
-	# Claude.  Return 0 (skip, not failure) so --all partial-wired suites
-	# do not block CI.
+	# Claude.  Return 2 (setup error) so direct invocations get a
+	# non-zero exit and --all mode counts the skill as skipped (not
+	# failed), keeping partial-wired suites from blocking CI.
 	# ------------------------------------------------------------------
 	local prompt_builder_file="$SKILLS_DIR/$skill_name/prompt-builder.sh"
 	if [[ ! -f "$prompt_builder_file" ]]; then
 		printf '%s: [SKIP] %s — no prompt-builder.sh\n' \
 			"$SCRIPT_NAME" "$skill_name" >&2
-		return 0
+		return 2
 	fi
 
 	# Clear any previous build_prompt from a prior skill in --all mode.
