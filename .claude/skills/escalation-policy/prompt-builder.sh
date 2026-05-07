@@ -43,7 +43,8 @@ build_prompt() {
 	# Read the full SKILL.md spec — decision logic, input/output contracts,
 	# flowchart, and common-mistakes table are all included.
 	local skill_content
-	skill_content=$(<"$_ESCALATION_POLICY_DIR/SKILL.md") || {
+	skill_content=$(awk 'NR==1&&/^---$/{f=1;next} f&&/^---$/{f=0;next} !f{print}' \
+		"$_ESCALATION_POLICY_DIR/SKILL.md") || {
 		printf 'prompt-builder: cannot read SKILL.md: %s/SKILL.md\n' \
 			"$_ESCALATION_POLICY_DIR" >&2
 		return 1
@@ -65,8 +66,6 @@ build_prompt() {
 
 	cat <<ESCALATION_PROMPT
 ${skill_content}
-
----
 
 Apply the decision logic above to the inputs below.
 
