@@ -7,6 +7,7 @@ on:
       - '.claude/scripts/schemas/**'
       - '.claude/scripts/skill-golden.sh'
       - '.claude/scripts/skill-golden-lib.sh'
+      - '.claude/scripts/decide-*.sh'
   workflow_dispatch: {}
   schedule:
     - cron: '0 6 1 * *'  # 1st of each month, 06:00 UTC
@@ -79,3 +80,59 @@ jobs:
       - name: No touched decision skills
         if: steps.scope.outputs.mode == 'none'
         run: echo "No decision skills touched — golden tests skipped."
+
+  decision-scripts:
+    name: Decision Script BATS Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine test scope
+        id: scope
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+            if printf '%s\n' "$changed" | grep -qE \
+              '^\.claude/(scripts/decide-[^/]+\.sh|scripts/schemas/|skills/[^/]+/SKILL\.md)'; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+            echo "has_api_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_api_key=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install bats and jq
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bats jq
+
+      - name: Run bats tests (API key present — all tests including live)
+        if: steps.scope.outputs.run == 'true' && steps.scope.outputs.has_api_key == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bats tests/
+
+      - name: Run bats tests (no API key — live tests skipped)
+        if: steps.scope.outputs.run == 'true' && steps.scope.outputs.has_api_key == 'false'
+        run: |
+          printf 'ANTHROPIC_API_KEY absent — live-API tests skipped\n'
+          mapfile -t bats_files < <(find tests -maxdepth 1 -name '*.bats' ! -name '*-live.bats' | sort)
+          bats "${bats_files[@]}"
+
+      - name: No decision scripts touched — bats tests skipped
+        if: steps.scope.outputs.run == 'false'
+        run: echo "No decide-*.sh, schemas/, or SKILL.md changes — bats tests skipped."
