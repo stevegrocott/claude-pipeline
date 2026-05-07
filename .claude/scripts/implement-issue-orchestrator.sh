@@ -1292,6 +1292,9 @@ _apply_stage_action() {
 			;;
 		bail)
 			log_error "Stage bailed: ${reason:-action=bail}"
+			set_stage_failed \
+				"$(jq -r '.stage // ""' <<< "$stage_result")" \
+				"$(jq -r '.error_kind // "bail"' <<< "$stage_result")"
 			printf '%s\n' "$stage_result"
 			return 1
 			;;
@@ -1309,6 +1312,9 @@ _apply_stage_action() {
 			;;
 		*)
 			log_error "_apply_stage_action: unknown action '$action'"
+			set_stage_failed \
+				"$(jq -r '.stage // ""' <<< "$stage_result")" \
+				"unknown_action"
 			printf '%s\n' "$stage_result"
 			return 1
 			;;
