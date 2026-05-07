@@ -269,6 +269,17 @@ set_mock_claude_exit() {
 	_assert_next_model "opus"
 	_assert_at_ceiling "false"
 	_assert_reason_present
+
+	# Tripwire: confirm the mock's unique reason string is present in the
+	# output, proving the claude path was taken rather than the bash fallback
+	# (which would produce a different reason string).
+	local reason
+	reason=$(printf '%s' "$output" | jq -r '.reason' 2>/dev/null)
+	if [[ "$reason" != "sonnet-timeout: upgrading sonnet to opus" ]]; then
+		printf 'TRIPWIRE FAIL: expected mock reason from claude path, got: %s\n' \
+			"$reason" >&2
+		return 1
+	fi
 }
 
 # ===========================================================================

@@ -145,7 +145,7 @@ _run_with_timeout() {
 _claude_model_fallback() {
 	local stage_result="$1"
 
-	local schema_file="$SCRIPT_DIR/schemas/model-fallback.json"
+	local schema_file="$SCRIPT_DIR/schemas/model-fallback-output.json"
 	local skill_file="$SCRIPT_DIR/../skills/model-fallback/SKILL.md"
 
 	if [[ ! -f "$skill_file" ]]; then
