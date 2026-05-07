@@ -532,6 +532,18 @@ set_stage_completed() {
     emit_event "stage_end" "stage=$stage" "status=success"
 }
 
+set_stage_failed() {
+    local stage="$1"
+    local error_kind="$2"
+    jq --arg stage "$stage" \
+       '.stages[$stage].completed_at = (now | todate) |
+        .stages[$stage].status = "error" |
+        .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    sync_status_to_log
+    emit_event "stage_end" "stage=$stage" "status=error" "error_kind=$error_kind"
+}
+
 record_escalation() {
     local stage="$1"
     local from_model="$2"
