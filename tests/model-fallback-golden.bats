@@ -32,9 +32,13 @@ FIXTURES_DIR="$REPO_ROOT/tests/fixtures/model-fallback"
 setup() {
 	TEST_TMP=$(mktemp -d)
 	export TEST_TMP
+
+	# Snapshot PATH so mock-claude bin doesn't leak between tests.
+	_ORIGINAL_PATH="$PATH"
 }
 
 teardown() {
+	export PATH="${_ORIGINAL_PATH:-$PATH}"
 	if [[ -n "$TEST_TMP" && -d "$TEST_TMP" ]]; then
 		rm -rf "$TEST_TMP"
 	fi
@@ -92,6 +96,40 @@ _assert_reason_present() {
 			"$reason" >&2
 		return 1
 	fi
+}
+
+# Install a mock `claude` CLI in TEST_TMP/bin and prepend it to PATH.
+# The mock ignores all arguments and prints the contents of
+# TEST_TMP/claude_stdout, exiting with the integer in
+# TEST_TMP/claude_exit (default 0).
+install_mock_claude() {
+	local bin_dir="$TEST_TMP/bin"
+	mkdir -p "$bin_dir"
+
+	cat > "$bin_dir/claude" <<'MOCK_EOF'
+#!/usr/bin/env bash
+# Mock `claude` for model-fallback tests.  All args are ignored;
+# stdout and exit code are driven by files in $TEST_TMP.
+if [[ -f "$TEST_TMP/claude_stdout" ]]; then
+	cat "$TEST_TMP/claude_stdout"
+fi
+if [[ -f "$TEST_TMP/claude_exit" ]]; then
+	exit "$(<"$TEST_TMP/claude_exit")"
+fi
+exit 0
+MOCK_EOF
+	chmod +x "$bin_dir/claude"
+	export PATH="$bin_dir:$PATH"
+}
+
+# Configure what the next mock-claude invocation prints to stdout.
+set_mock_claude_output() {
+	printf '%s' "$1" > "$TEST_TMP/claude_stdout"
+}
+
+# Configure the exit code for the next mock-claude invocation.
+set_mock_claude_exit() {
+	printf '%s' "$1" > "$TEST_TMP/claude_exit"
 }
 
 # ===========================================================================
@@ -170,6 +208,92 @@ _assert_reason_present() {
 
 	[ "$status" -eq 0 ]
 	_assert_next_model "null"
+	_assert_at_ceiling "false"
+	_assert_reason_present
+}
+
+# ===========================================================================
+# bash-backend tripwire — MODEL_FALLBACK_BACKEND=bash must not invoke claude
+# ===========================================================================
+
+@test "bash-backend: MODEL_FALLBACK_BACKEND=bash does not invoke claude" {
+	[[ -x "$DECIDE_FALLBACK_SCRIPT" ]] \
+		|| fail "decide-model-fallback.sh not present or not executable"
+
+	# Tripwire: if the bash backend incorrectly invokes the skill,
+	# the mock prints this sentinel and exits 1.  A correctly-routed
+	# bash backend never reaches the mock.
+	install_mock_claude
+	set_mock_claude_output 'TRIPWIRE-SKILL-WAS-INVOKED'
+	set_mock_claude_exit 1
+
+	local stage_result
+	stage_result=$(_load_fixture "haiku-timeout-upgrade")
+
+	MODEL_FALLBACK_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_FALLBACK_SCRIPT" "$stage_result"
+
+	[ "$status" -eq 0 ]
+	_assert_next_model "sonnet"
+
+	# The tripwire string must not appear on stdout.
+	if [[ "$output" == *"TRIPWIRE-SKILL-WAS-INVOKED"* ]]; then
+		printf 'FAIL: claude invoked despite bash kill-switch\n' >&2
+		printf 'Output: %s\n' "$output" >&2
+		return 1
+	fi
+}
+
+# ===========================================================================
+# claude-backend — valid skill output is passed through to stdout
+# ===========================================================================
+
+@test "claude-backend: valid skill output is passed through" {
+	[[ -x "$DECIDE_FALLBACK_SCRIPT" ]] \
+		|| fail "decide-model-fallback.sh not present or not executable"
+
+	# Mock claude to return a schema-valid model-fallback decision.
+	local skill_output
+	skill_output='{"next_model":"opus","at_ceiling":false,"reason":"sonnet-timeout: upgrading sonnet to opus"}'
+
+	install_mock_claude
+	set_mock_claude_output "$skill_output"
+
+	local stage_result
+	stage_result=$(_load_fixture "sonnet-timeout-upgrade")
+
+	MODEL_FALLBACK_BACKEND=claude run --separate-stderr \
+		bash "$DECIDE_FALLBACK_SCRIPT" "$stage_result"
+
+	[ "$status" -eq 0 ]
+	_assert_next_model "opus"
+	_assert_at_ceiling "false"
+	_assert_reason_present
+}
+
+# ===========================================================================
+# claude-backend — schema-invalid skill output falls back to bash (no crash)
+# ===========================================================================
+
+@test "claude-backend: schema-invalid skill output triggers bash fallback" {
+	[[ -x "$DECIDE_FALLBACK_SCRIPT" ]] \
+		|| fail "decide-model-fallback.sh not present or not executable"
+
+	# Mock claude to return JSON that lacks the required at_ceiling field —
+	# must fail schema validation and force the bash fallback path.
+	install_mock_claude
+	set_mock_claude_output '{"foo":"bar","not_a_valid_field":"oops"}'
+
+	local stage_result
+	stage_result=$(_load_fixture "haiku-timeout-upgrade")
+
+	MODEL_FALLBACK_BACKEND=claude run --separate-stderr \
+		bash "$DECIDE_FALLBACK_SCRIPT" "$stage_result"
+
+	# Bash fallback must succeed — the orchestrator never sees a crash
+	# from a malformed skill response.
+	[ "$status" -eq 0 ]
+	_assert_next_model "sonnet"
 	_assert_at_ceiling "false"
 	_assert_reason_present
 }
