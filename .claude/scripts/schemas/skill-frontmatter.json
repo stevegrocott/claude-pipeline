@@ -1,7 +1,7 @@
 {
   "description": "JSON schema for SKILL.md YAML frontmatter — validates the existing required fields and the five optional metadata fields added in issue #177.",
   "type": "object",
-  "required": ["name", "description"],
+  "required": ["name", "description", "inputs", "outputs", "side_effects", "composes", "failure_modes"],
   "additionalProperties": false,
   "properties": {
     "name": {
