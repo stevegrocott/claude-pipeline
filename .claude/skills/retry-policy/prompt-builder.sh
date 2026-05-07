@@ -45,7 +45,8 @@ build_prompt() {
 	# max-retries table, back-off strategy, flowchart, and common-mistakes
 	# table are all included so Claude has everything it needs.
 	local skill_content
-	skill_content=$(<"$_RETRY_POLICY_DIR/SKILL.md") || {
+	skill_content=$(awk 'NR==1&&/^---$/{f=1;next} f&&/^---$/{f=0;next} !f{print}' \
+		"$_RETRY_POLICY_DIR/SKILL.md") || {
 		printf 'prompt-builder: cannot read SKILL.md: %s/SKILL.md\n' \
 			"$_RETRY_POLICY_DIR" >&2
 		return 1
