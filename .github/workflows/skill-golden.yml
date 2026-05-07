@@ -1,6 +1,11 @@
 name: Skill Golden Tests
 
 on:
+  push:
+    paths:
+      - '.claude/scripts/decide-*.sh'
+      - '.claude/scripts/schemas/**'
+      - '.claude/skills/*/SKILL.md'
   pull_request:
     paths:
       - '.claude/skills/**'
