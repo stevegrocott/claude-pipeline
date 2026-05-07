@@ -87,16 +87,19 @@ _source_orchestrator_functions() {
 
 # Minimal stage_result JSON with status=error and error_kind=double_timeout.
 # This is the envelope produced by run_stage() when a bail decision is reached.
-# The stage field is included so set_stage_failed can extract it via
-# `jq -r '.stage // ""'` if the implementation uses that approach.
+# The stage field is included for completeness; _apply_stage_action now reads
+# the stage name from ${_RUN_STAGE_NAME:-} (set in setup) rather than from
+# this JSON field.
 _bail_stage_result() {
 	printf '%s' \
 		'{"status":"error","output":null,"raw":"","denials":[],' \
-		'"model":"haiku","error_kind":"double_timeout","elapsed_ms":500}'
+		'"model":"haiku","error_kind":"double_timeout","elapsed_ms":500,' \
+		'"stage":"bail_test_stage"}'
 }
 
 # Assert that events.jsonl contains at least one stage_end event with
-# status=error.  Prints diagnostics to stderr on failure.
+# status=error and a non-empty stage name.
+# Prints diagnostics to stderr on failure.
 _assert_stage_end_error_in_events() {
 	local events_file="$LOG_BASE/events.jsonl"
 
@@ -105,13 +108,25 @@ _assert_stage_end_error_in_events() {
 		return 1
 	fi
 
-	local found
-	found=$(jq -r \
+	local found_status
+	found_status=$(jq -r \
 		'select(.event == "stage_end" and .status == "error") | .status' \
 		"$events_file" 2>/dev/null)
 
-	if [[ "$found" != "error" ]]; then
+	if [[ "$found_status" != "error" ]]; then
 		printf 'FAIL: stage_end status=error not found in events.jsonl\n' >&2
+		printf 'events.jsonl contents:\n' >&2
+		cat "$events_file" >&2 || printf '(empty or unreadable)\n' >&2
+		return 1
+	fi
+
+	local found_stage
+	found_stage=$(jq -r \
+		'select(.event == "stage_end" and .status == "error") | .stage // ""' \
+		"$events_file" 2>/dev/null)
+
+	if [[ -z "$found_stage" ]]; then
+		printf 'FAIL: stage_end status=error has empty .stage field in events.jsonl\n' >&2
 		printf 'events.jsonl contents:\n' >&2
 		cat "$events_file" >&2 || printf '(empty or unreadable)\n' >&2
 		return 1

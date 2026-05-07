@@ -538,6 +538,7 @@ set_stage_failed() {
     jq --arg stage "$stage" \
        '.stages[$stage].completed_at = (now | todate) |
         .stages[$stage].status = "error" |
+        .state = "failed" |
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
@@ -1293,7 +1294,7 @@ _apply_stage_action() {
 		bail)
 			log_error "Stage bailed: ${reason:-action=bail}"
 			set_stage_failed \
-				"$(jq -r '.stage // ""' <<< "$stage_result")" \
+				"${_RUN_STAGE_NAME:-}" \
 				"$(jq -r '.error_kind // "bail"' <<< "$stage_result")"
 			printf '%s\n' "$stage_result"
 			return 1
@@ -1313,7 +1314,7 @@ _apply_stage_action() {
 		*)
 			log_error "_apply_stage_action: unknown action '$action'"
 			set_stage_failed \
-				"$(jq -r '.stage // ""' <<< "$stage_result")" \
+				"${_RUN_STAGE_NAME:-}" \
 				"unknown_action"
 			printf '%s\n' "$stage_result"
 			return 1
@@ -2159,10 +2160,7 @@ Output a summary of changes made."
             simplify_result=$(run_stage "$simplify_stage_name" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
             local simplify_status
             simplify_status=$(printf '%s' "$simplify_result" | jq -r '.status // "success"')
-            if [[ "$simplify_status" == "error" ]]; then
-                set_stage_failed "$simplify_stage_name" \
-                    "$(printf '%s' "$simplify_result" | jq -r '.error_kind // "error"')"
-            else
+            if [[ "$simplify_status" != "error" ]]; then
                 set_stage_completed "$simplify_stage_name"
             fi
 
@@ -2235,10 +2233,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         review_result=$(run_stage "$review_stage_name" "$review_prompt" "implement-issue-review.json" "code-reviewer" "$loop_complexity")
         local review_run_status
         review_run_status=$(printf '%s' "$review_result" | jq -r '.status // "success"')
-        if [[ "$review_run_status" == "error" ]]; then
-            set_stage_failed "$review_stage_name" \
-                "$(printf '%s' "$review_result" | jq -r '.error_kind // "error"')"
-        else
+        if [[ "$review_run_status" != "error" ]]; then
             set_stage_completed "$review_stage_name"
         fi
 
@@ -2422,10 +2417,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             fix_result=$(run_stage "$fix_stage_name" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity" "" "${loop_model_override:-}")
             local fix_status
             fix_status=$(printf '%s' "$fix_result" | jq -r '.status // "success"')
-            if [[ "$fix_status" == "error" ]]; then
-                set_stage_failed "$fix_stage_name" \
-                    "$(printf '%s' "$fix_result" | jq -r '.error_kind // "error"')"
-            else
+            if [[ "$fix_status" != "error" ]]; then
                 set_stage_completed "$fix_stage_name"
             fi
 
