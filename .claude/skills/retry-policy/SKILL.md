@@ -87,6 +87,7 @@ Filter to records where `model == stage_result.model` before reasoning.
 | `no_structured_output`          | 1                     | escalate |
 | `timeout`                       | 1                     | escalate |
 | `structured_error` (output.status == "error") | 1        | escalate |
+| `max_turns_exhausted`           | 0                     | escalate immediately (or bail if at opus) |
 | `max_turns_exhausted_at_ceiling`| 0                     | bail immediately |
 | `permission_denied`             | 0                     | bail immediately |
 | `schema_not_found`              | 0                     | bail immediately |
@@ -96,7 +97,11 @@ Filter to records where `model == stage_result.model` before reasoning.
 > `max_retries = 0`, causing the script to bail immediately rather than silently
 > retrying with an unknown policy.
 
-**`max_turns` at non-ceiling model:** 0 retries — escalate immediately (same model cannot run more turns).
+> **`max_turns_exhausted` vs `max_turns_exhausted_at_ceiling`:** Use
+> `max_turns_exhausted` when the model is not at the opus ceiling — the same
+> model cannot run more turns, so escalate to the next tier.  Use
+> `max_turns_exhausted_at_ceiling` (or rely on the general opus-ceiling rule)
+> when already at opus — no higher tier exists, so bail.
 
 > **`no_structured_output` is the canonical `error_kind`** for "empty output" — this is the value
 > emitted by `run_stage` (`implement-issue-orchestrator.sh`) when the stage produces no structured

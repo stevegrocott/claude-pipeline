@@ -1,0 +1,17 @@
+# golden.manifest.txt — retry-policy skill
+#
+# Format: fixture_basename|expected_action|expected_criterion_or_*
+#   fixture_basename  — filename in fixtures/retry-policy/ (without extension)
+#   expected_action   — retry | escalate | bail
+#   expected_criterion — not used by retry-policy; always "*"
+#
+# The criterion field is only checked when it is not "*"; retry-policy does
+# not emit a disqualifying_criterion field, so "*" is the correct value here.
+#
+# DO NOT AUTO-UPDATE THIS MANIFEST. A fixture flip means the prompt or the
+# underlying model changed in a way that altered a routing decision. Investigate
+# before updating the expected value.
+#
+retry-on-rate-limit|retry|*
+bail-at-max-retries|bail|*
+immediate-escalate-max-turns|escalate|*
