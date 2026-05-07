@@ -87,18 +87,22 @@ _source_orchestrator_functions() {
 
 # Minimal stage_result JSON with status=error and error_kind=double_timeout.
 # This is the envelope produced by run_stage() when a bail decision is reached.
-# The stage field is included for completeness; _apply_stage_action now reads
-# the stage name from ${_RUN_STAGE_NAME:-} (set in setup) rather than from
-# this JSON field.
+# The .stage field is intentionally set to a DECOY value distinct from
+# $_RUN_STAGE_NAME so the assertion can verify _apply_stage_action reads the
+# stage name from the global (correct) rather than from this envelope (the
+# bug pattern that emitted an empty/wrong stage_end before issue #280).
 _bail_stage_result() {
 	printf '%s' \
 		'{"status":"error","output":null,"raw":"","denials":[],' \
 		'"model":"haiku","error_kind":"double_timeout","elapsed_ms":500,' \
-		'"stage":"bail_test_stage"}'
+		'"stage":"DECOY_STAGE_FROM_ENVELOPE"}'
 }
 
 # Assert that events.jsonl contains at least one stage_end event with
-# status=error and a non-empty stage name.
+# status=error and a .stage field that exactly matches $_RUN_STAGE_NAME.
+# Matching the global (not the envelope's decoy) is the meaningful check:
+# it proves _apply_stage_action used the run_stage-tracked stage name, not
+# the stage_result JSON.
 # Prints diagnostics to stderr on failure.
 _assert_stage_end_error_in_events() {
 	local events_file="$LOG_BASE/events.jsonl"
@@ -127,6 +131,16 @@ _assert_stage_end_error_in_events() {
 
 	if [[ -z "$found_stage" ]]; then
 		printf 'FAIL: stage_end status=error has empty .stage field in events.jsonl\n' >&2
+		printf 'events.jsonl contents:\n' >&2
+		cat "$events_file" >&2 || printf '(empty or unreadable)\n' >&2
+		return 1
+	fi
+
+	if [[ "$found_stage" != "$_RUN_STAGE_NAME" ]]; then
+		printf 'FAIL: stage_end .stage=%s does not match _RUN_STAGE_NAME=%s\n' \
+			"$found_stage" "$_RUN_STAGE_NAME" >&2
+		printf '(implementation likely read .stage from stage_result envelope ' >&2
+		printf 'instead of the run_stage-tracked global)\n' >&2
 		printf 'events.jsonl contents:\n' >&2
 		cat "$events_file" >&2 || printf '(empty or unreadable)\n' >&2
 		return 1
