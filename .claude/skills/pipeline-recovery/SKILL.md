@@ -1,11 +1,24 @@
 ---
 name: pipeline-recovery
 description: Use when the pipeline is experiencing repeated rate-limit errors, when batch execution is stalling with 429 responses, or when you want to check whether the current run has hit a rate-limit cluster before continuing work.
-inputs: []
-outputs: []
+inputs:
+  - name: events_file
+    type: file_path
+    required: true
+    description: "Path to the run's events.jsonl JSONL event stream (one file per run under logs/implement-issue/<run_id>/)"
+outputs:
+  - name: pause_recommended
+    type: boolean
+    description: "true when >=3 rate_limit_hit events fall within any 60-second window in the current run; false otherwise"
 side_effects: []
 composes: []
-failure_modes: []
+failure_modes:
+  - id: wrong_log_source
+    mitigation: "Read events.jsonl, not orchestrator.log — orchestrator.log format is not stable; events.jsonl is the contract"
+  - id: missing_run_id_filter
+    mitigation: "Always scope jq queries to the current run_id; the events file accumulates events across restarts and mixing runs produces false positives"
+  - id: wall_clock_instead_of_event_ts
+    mitigation: "Use the ts field from each rate_limit_hit event for sliding-window arithmetic, not the current wall-clock time"
 ---
 
 # Pipeline Recovery

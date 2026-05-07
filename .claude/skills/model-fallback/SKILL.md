@@ -10,7 +10,13 @@ outputs:
   reason: "Human-readable rationale for the decision"
 side_effects: []
 composes: []
-failure_modes: []
+failure_modes:
+  - id: non_escalatable_error_escalated
+    mitigation: "Check error_kind against permission_denied, schema_not_found, and max_turns_exhausted_at_ceiling before any escalation; return at_ceiling=true, next_model=null for these classes"
+  - id: ceiling_not_detected
+    mitigation: "Check current_model == 'opus' before computing next_model; opus is the ceiling — return at_ceiling=true, next_model=null"
+  - id: premature_escalation_on_rate_limit
+    mitigation: "Consult retry-policy before escalating on rate_limit; escalate only when the per-tier retry limit is met, not on the first rate_limit hit"
 ---
 
 # model-fallback
