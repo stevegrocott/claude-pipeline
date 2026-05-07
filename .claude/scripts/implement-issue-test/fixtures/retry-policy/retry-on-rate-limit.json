@@ -1,0 +1,18 @@
+{
+  "stage_result": {
+    "status": "error",
+    "output": null,
+    "raw": "API rate limit exceeded",
+    "denials": [],
+    "model": "haiku",
+    "error_kind": "rate_limit",
+    "elapsed_ms": 2100
+  },
+  "retry_count": 0,
+  "error_history": [],
+  "_fixture_meta": {
+    "description": "Rate limit on first attempt with empty history — expect retry with 30s backoff",
+    "expected_action": "retry",
+    "expected_backoff_ms": 30000
+  }
+}

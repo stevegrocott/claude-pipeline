@@ -1,0 +1,17 @@
+{
+  "stage_result": {
+    "status": "error",
+    "output": null,
+    "raw": "",
+    "denials": [],
+    "model": "opus",
+    "error_kind": "no_structured_output",
+    "elapsed_ms": 45000
+  },
+  "retry_count": 1,
+  "error_history": [],
+  "_fixture_meta": {
+    "description": "no_structured_output at retry_count=1 on opus (ceiling) — retry threshold met and cannot escalate; expect bail",
+    "expected_action": "bail"
+  }
+}
