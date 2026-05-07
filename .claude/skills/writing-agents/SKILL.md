@@ -1,6 +1,7 @@
 ---
 name: writing-agents
 description: Use when creating new agents, editing existing agents, or defining specialized subagent roles for the Task tool
+inputs: []
 outputs:
   - name: agent_file
     type: file_path

@@ -8,6 +8,9 @@ outputs:
   next_model: "The model to use next (haiku | sonnet | opus), or null when no fallback is possible"
   at_ceiling: "true when current_model is opus or the error_kind makes escalation impossible"
   reason: "Human-readable rationale for the decision"
+side_effects: []
+composes: []
+failure_modes: []
 ---
 
 # model-fallback

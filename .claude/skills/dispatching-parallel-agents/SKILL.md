@@ -14,6 +14,7 @@ side_effects:
   - spawns_parallel_subagents
   - modifies_repository_files
   - creates_git_commits
+composes: []
 failure_modes:
   - id: agent_conflict
     mitigation: Check summaries for overlapping file edits before integrating; resolve conflicts manually

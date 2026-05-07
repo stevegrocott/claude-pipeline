@@ -20,6 +20,7 @@ side_effects:
   - writes_test_files
   - writes_implementation_files
   - runs_test_suite
+composes: []
 failure_modes:
   - id: test_passes_immediately
     mitigation: Test is testing existing behaviour, not the new feature. Rewrite the test to target the missing behaviour.
