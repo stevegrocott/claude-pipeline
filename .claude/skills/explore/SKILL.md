@@ -124,11 +124,11 @@ PLATFORM_DIR=".claude/scripts/platform"
 - [alternative 2] — rejected because [reason]
 
 ## Implementation Tasks
-- [ ] `[agent-name]` **(S)** Description of task 1
-- [ ] `[agent-name]` **(M)** Description of task 2
-- [ ] `[agent-name]` **(L)** Description of task 3
-- [ ] `[default]` **(S)** Description of general task (e.g., tests, config)
-- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured)
+- [ ] `[agent-name]` **(S)** Description of task 1 — `src/services/auth.ts:L45-80`
+- [ ] `[agent-name]` **(M)** Description of task 2 — `src/components/Dashboard.tsx:L120-155`
+- [ ] `[agent-name]` **(L)** Description of task 3 — `src/api/users.ts:L30-65`
+- [ ] `[default]` **(S)** Description of general task (e.g., tests, config) — `tests/unit/auth.test.ts:L10-40`
+- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured) — `tests/e2e/dashboard.spec.ts:L22-55`
 
 ## Deploy Verification
 [Include if this issue involves bugs in specific environments or requires deployment testing]
