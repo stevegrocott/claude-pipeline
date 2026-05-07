@@ -12,10 +12,8 @@
 # Environment:
 #   MODEL_FALLBACK_BACKEND — set to "bash" to bypass skill invocation and
 #                            use the inline decision tree directly (for
-#                            testing).  The model-fallback SKILL.md now
-#                            exists; live skill invocation is not yet
-#                            wired up, so bash is the only supported
-#                            backend.
+#                            testing).  Default: invoke model-fallback
+#                            skill via Claude.
 #
 # Output (stdout):
 #   {"next_model": "<tier>"|null,
@@ -125,6 +123,93 @@ _bash_model_fallback() {
 }
 
 # ---------------------------------------------------------------------------
+# _run_with_timeout <seconds> <command> [args...]
+# Run a command with a wall-clock timeout.  Uses GNU timeout when available;
+# falls back to direct execution on systems where timeout is not installed
+# (e.g. macOS without coreutils).
+# ---------------------------------------------------------------------------
+_run_with_timeout() {
+	local secs="$1"
+	shift
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$secs" "$@"
+	else
+		"$@"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# _claude_model_fallback <stage_result_json>
+# Live Claude skill invocation via /model-fallback.
+# Prints decision JSON to stdout; exits non-zero on invocation failure.
+# ---------------------------------------------------------------------------
+_claude_model_fallback() {
+	local stage_result="$1"
+
+	local schema_file="$SCRIPT_DIR/schemas/model-fallback.json"
+	local skill_file="$SCRIPT_DIR/../skills/model-fallback/SKILL.md"
+
+	if [[ ! -f "$skill_file" ]]; then
+		printf '%s: model-fallback SKILL.md not found: %s\n' \
+			"$SCRIPT_NAME" "$skill_file" >&2
+		return 1
+	fi
+	if [[ ! -f "$schema_file" ]]; then
+		printf '%s: model-fallback schema not found: %s\n' \
+			"$SCRIPT_NAME" "$schema_file" >&2
+		return 1
+	fi
+
+	local schema_compact
+	schema_compact=$(jq -c . "$schema_file" 2>&1) || {
+		printf '%s: failed to compact schema: %s\n' \
+			"$SCRIPT_NAME" "$schema_compact" >&2
+		return 1
+	}
+
+	local current_model error_kind
+	current_model=$(printf '%s' "$stage_result" | jq -r '.model // "haiku"')
+	error_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind // "null"')
+
+	local prompt
+	prompt=$(printf '/model-fallback\n\nINPUTS:\ncurrent_model: %s\nerror_kind: %s\n' \
+		"$current_model" "$error_kind")
+
+	local output rc
+	output=$(_run_with_timeout "${CLAUDE_SKILL_TIMEOUT:-120}" \
+		env -u CLAUDECODE claude -p "$prompt" \
+		--dangerously-skip-permissions \
+		--output-format json \
+		--json-schema "$schema_compact" 2>&1)
+	rc=$?
+
+	if (( rc != 0 )); then
+		printf '%s: claude invocation failed (exit %d): %s\n' \
+			"$SCRIPT_NAME" "$rc" "$output" >&2
+		return 1
+	fi
+
+	# Extract the structured payload from the claude output envelope.
+	# Mirrors sg_extract_payload() in skill-golden-lib.sh and run_stage() in
+	# implement-issue-orchestrator.sh — keep these in sync.
+	local payload
+	payload=$(printf '%s' "$output" | jq -c '
+		.structured_output
+		// (.result | if type == "string" then fromjson? else . end)
+		// .
+	' 2>/dev/null)
+
+	if [[ -z "$payload" ]] || ! printf '%s' "$payload" \
+		| jq -e 'has("next_model")' >/dev/null 2>&1; then
+		printf '%s: no valid next_model in claude output\n' \
+			"$SCRIPT_NAME" >&2
+		return 1
+	fi
+
+	printf '%s\n' "$payload"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 main() {
@@ -133,15 +218,13 @@ main() {
 
 	local stage_result="$1"
 
-	# Kill-switch: bypass skill and use inline bash directly.  The live
-	# skill invocation path is not yet implemented; the bash backend is
-	# the only supported route until the invocation glue is wired up.
-	if [[ "${MODEL_FALLBACK_BACKEND:-bash}" == "bash" ]]; then
+	# Kill-switch: bypass skill and use inline bash directly (for testing).
+	if [[ "${MODEL_FALLBACK_BACKEND:-}" == "bash" ]]; then
 		_bash_model_fallback "$stage_result"
 		return 0
 	fi
 
-	die "Unknown MODEL_FALLBACK_BACKEND: ${MODEL_FALLBACK_BACKEND} (only 'bash' is supported)"
+	_claude_model_fallback "$stage_result"
 }
 
 main "$@"
