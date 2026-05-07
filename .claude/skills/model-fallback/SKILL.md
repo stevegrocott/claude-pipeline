@@ -55,7 +55,7 @@ Source: `.claude/scripts/model-config.sh` — `_tier_to_model()` and `_next_mode
 ```json
 {
   "next_model": "haiku | sonnet | opus | null",
-  "at_ceiling": true,
+  "at_ceiling": "true | false",
   "reason":     "<human-readable string>"
 }
 ```
