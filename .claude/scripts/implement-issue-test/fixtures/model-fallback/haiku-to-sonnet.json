@@ -1,11 +1,6 @@
 {
-  "status": "error",
-  "output": null,
-  "raw": "",
-  "denials": [],
-  "model": "haiku",
+  "current_model": "haiku",
   "error_kind": "timeout",
-  "elapsed_ms": 1800000,
   "_fixture_meta": {
     "description": "Timeout on haiku — expected escalation to sonnet."
   }

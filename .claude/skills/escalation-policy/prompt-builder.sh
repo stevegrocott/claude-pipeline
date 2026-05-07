@@ -15,15 +15,22 @@
 #   present; otherwise an empty array is used (correct for first-attempt
 #   fixtures where no prior escalation has occurred).
 #
-#   Output field: the prompt asks Claude to return its decision as "route"
-#   (values: accept | escalate | bail | retry_same) for compatibility with
-#   the skill-golden framework (SG_ROUTE_FIELD defaults to "route").
+#   Output field: the prompt asks Claude to return its decision as "action"
+#   (values: accept | escalate | bail | retry_same) matching the SKILL.md
+#   output contract. SG_ROUTE_FIELD is exported as "action" so skill-golden.sh
+#   extracts the correct field for manifest comparison.
 #
 
 # Resolve the skill directory at source time so it remains correct even
 # when build_prompt is called after the working directory has changed.
 # BASH_SOURCE[0] may be relative when sourced with a relative path, so
 # we pin it to an absolute path now while the caller's cwd is stable.
+# Override the default SG_ROUTE_FIELD ("route") — escalation-policy returns
+# its primary decision under .action per SKILL.md output contract. Because
+# this file is *sourced* by skill-golden.sh (not exec'd), the export persists
+# into the caller.
+export SG_ROUTE_FIELD=action
+
 _ESCALATION_POLICY_DIR="$(
 	cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 )" || {
@@ -64,8 +71,8 @@ ${skill_content}
 Apply the decision logic above to the inputs below.
 
 Output schema-enforced JSON with:
-  route   — "accept" | "escalate" | "bail" | "retry_same"
-  model   — target model tier when route == "escalate"; omit otherwise
+  action  — "accept" | "escalate" | "bail" | "retry_same"
+  model   — target model tier when action == "escalate"; omit otherwise
   reason  — human-readable routing rationale
 
 STAGE_RESULT:
