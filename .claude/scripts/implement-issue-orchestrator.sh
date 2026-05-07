@@ -1294,7 +1294,7 @@ _apply_stage_action() {
 		bail)
 			log_error "Stage bailed: ${reason:-action=bail}"
 			set_stage_failed \
-				"${_RUN_STAGE_NAME:-}" \
+				"${_RUN_STAGE_NAME:-unknown}" \
 				"$(jq -r '.error_kind // "bail"' <<< "$stage_result")"
 			printf '%s\n' "$stage_result"
 			return 1
@@ -1314,7 +1314,7 @@ _apply_stage_action() {
 		*)
 			log_error "_apply_stage_action: unknown action '$action'"
 			set_stage_failed \
-				"${_RUN_STAGE_NAME:-}" \
+				"${_RUN_STAGE_NAME:-unknown}" \
 				"unknown_action"
 			printf '%s\n' "$stage_result"
 			return 1
