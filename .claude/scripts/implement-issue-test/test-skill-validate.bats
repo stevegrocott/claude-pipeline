@@ -202,6 +202,19 @@ description: Second valid skill"
 	[[ "$output" == *"description"* ]]
 }
 
+@test "(b) frontmatter missing 'side_effects' is rejected with non-zero exit" {
+	make_skill "no-side-effects" \
+		"name: no-side-effects
+description: A skill missing the required side_effects field
+inputs: []
+outputs: []
+composes: []
+failure_modes: []"
+
+	run bash "$SKILL_VALIDATE_SCRIPT" --skill no-side-effects 2>&1
+	[ "$status" -ne 0 ]
+}
+
 @test "(b) empty frontmatter block is rejected" {
 	mkdir -p "$TEST_SKILLS_DIR/empty-fm"
 	printf -- '---\n---\n\n# Empty\n' > "$TEST_SKILLS_DIR/empty-fm/SKILL.md"
