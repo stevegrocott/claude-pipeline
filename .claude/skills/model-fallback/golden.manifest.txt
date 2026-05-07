@@ -1,0 +1,20 @@
+# golden.manifest.txt — model-fallback skill
+#
+# Format: fixture_basename|expected_next_model|expected_criterion_or_*
+#   fixture_basename     — filename in fixtures/model-fallback/ (without extension)
+#   expected_next_model  — sonnet | opus | MISSING (when next_model is JSON null)
+#   expected_criterion   — not used by model-fallback; always "*"
+#
+# The prompt-builder for this skill exports SG_ROUTE_FIELD=next_model so the
+# golden harness compares against `.next_model` in the skill output. When the
+# skill returns `next_model: null` (the at-ceiling case), sg_get_field maps
+# JSON null to its default sentinel "MISSING" — that string is the contract
+# value the framework surfaces and is therefore the correct manifest entry.
+#
+# DO NOT AUTO-UPDATE THIS MANIFEST. A fixture flip means the prompt or the
+# underlying model changed in a way that altered an escalation decision.
+# Investigate before updating the expected value.
+#
+haiku-to-sonnet|sonnet|*
+sonnet-to-opus|opus|*
+at-ceiling|MISSING|*

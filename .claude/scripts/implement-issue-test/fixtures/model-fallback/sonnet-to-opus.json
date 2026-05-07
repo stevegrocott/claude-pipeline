@@ -1,0 +1,12 @@
+{
+  "status": "error",
+  "output": null,
+  "raw": "Output was not valid JSON.",
+  "denials": [],
+  "model": "sonnet",
+  "error_kind": "no_structured_output",
+  "elapsed_ms": 45000,
+  "_fixture_meta": {
+    "description": "no_structured_output on sonnet — expected escalation to opus."
+  }
+}

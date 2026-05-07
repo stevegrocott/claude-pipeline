@@ -1,0 +1,12 @@
+{
+  "status": "error",
+  "output": null,
+  "raw": "",
+  "denials": ["bash"],
+  "model": "sonnet",
+  "error_kind": "permission_denied",
+  "elapsed_ms": 5000,
+  "_fixture_meta": {
+    "description": "permission_denied — non-escalatable error; no model can bypass permission hooks. Expected next_model=null, at_ceiling=true."
+  }
+}
