@@ -108,7 +108,7 @@ _bash_decide() {
 	if [[ "$error_kind" == "double_timeout" ]]; then
 		if [[ "$model" == "opus" ]]; then
 			printf '%s\n' \
-				'{"action":"bail","reason":"double_timeout: already at opus ceiling"}'
+				'{"action":"bail","reason":"double_timeout"}'
 		else
 			local next_model
 			next_model=$(_next_model "$model")
