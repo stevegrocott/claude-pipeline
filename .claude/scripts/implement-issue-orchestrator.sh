@@ -2153,8 +2153,18 @@ If no TypeScript/React files were modified as part of this issue's implementatio
 Simplify code for clarity and consistency without changing functionality.
 Output a summary of changes made."
 
+            local simplify_stage_name="simplify-${stage_prefix}-iter-$loop_iteration"
+            set_stage_started "$simplify_stage_name"
             local simplify_result
-            simplify_result=$(run_stage "simplify-${stage_prefix}-iter-$loop_iteration" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
+            simplify_result=$(run_stage "$simplify_stage_name" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
+            local simplify_status
+            simplify_status=$(printf '%s' "$simplify_result" | jq -r '.status // "success"')
+            if [[ "$simplify_status" == "error" ]]; then
+                set_stage_failed "$simplify_stage_name" \
+                    "$(printf '%s' "$simplify_result" | jq -r '.error_kind // "error"')"
+            else
+                set_stage_completed "$simplify_stage_name"
+            fi
 
             simplify_summary=$(printf '%s' "$simplify_result" | jq -r '.output.summary // "No changes"')
 
@@ -2219,8 +2229,18 @@ fi)
 DO NOT recommend 'approve and merge' - this is not a PR review.
 Simply output 'approved' if code quality is acceptable, or 'changes_requested' with specific issues to fix."
 
+        local review_stage_name="review-${stage_prefix}-iter-$loop_iteration"
+        set_stage_started "$review_stage_name"
         local review_result
-        review_result=$(run_stage "review-${stage_prefix}-iter-$loop_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer" "$loop_complexity")
+        review_result=$(run_stage "$review_stage_name" "$review_prompt" "implement-issue-review.json" "code-reviewer" "$loop_complexity")
+        local review_run_status
+        review_run_status=$(printf '%s' "$review_result" | jq -r '.status // "success"')
+        if [[ "$review_run_status" == "error" ]]; then
+            set_stage_failed "$review_stage_name" \
+                "$(printf '%s' "$review_result" | jq -r '.error_kind // "error"')"
+        else
+            set_stage_completed "$review_stage_name"
+        fi
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$review_result"; then
@@ -2396,8 +2416,18 @@ Fix the issues and commit. Output a summary of fixes applied."
             # size: S→sonnet, M→sonnet, L→opus (via resolve_model in run_stage).
             # Pass loop_model_override (arg 7) so an escalated model takes effect
             # on subsequent iterations after stall detection.
+            local fix_stage_name="fix-review-${stage_prefix}-iter-$loop_iteration"
+            set_stage_started "$fix_stage_name"
             local fix_result
-            fix_result=$(run_stage "fix-review-${stage_prefix}-iter-$loop_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity" "" "${loop_model_override:-}")
+            fix_result=$(run_stage "$fix_stage_name" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity" "" "${loop_model_override:-}")
+            local fix_status
+            fix_status=$(printf '%s' "$fix_result" | jq -r '.status // "success"')
+            if [[ "$fix_status" == "error" ]]; then
+                set_stage_failed "$fix_stage_name" \
+                    "$(printf '%s' "$fix_result" | jq -r '.error_kind // "error"')"
+            else
+                set_stage_completed "$fix_stage_name"
+            fi
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
