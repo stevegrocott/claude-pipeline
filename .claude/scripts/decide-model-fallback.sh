@@ -10,10 +10,9 @@
 # decision and whether the model ceiling has been reached.
 #
 # Environment:
-#   MODEL_FALLBACK_BACKEND — set to "bash" to bypass skill invocation and
-#                            use the inline decision tree directly (for
-#                            testing).  Default: invoke model-fallback
-#                            skill via Claude.
+#   MODEL_FALLBACK_BACKEND — controls backend selection.
+#     "bash"   — bypass skill invocation; use inline decision tree (testing).
+#     "claude" — invoke model-fallback skill via Claude (default when unset).
 #
 # Output (stdout):
 #   {"next_model": "<tier>"|null,
@@ -218,13 +217,19 @@ main() {
 
 	local stage_result="$1"
 
-	# Kill-switch: bypass skill and use inline bash directly (for testing).
-	if [[ "${MODEL_FALLBACK_BACKEND:-}" == "bash" ]]; then
-		_bash_model_fallback "$stage_result"
-		return 0
-	fi
-
-	_claude_model_fallback "$stage_result"
+	case "${MODEL_FALLBACK_BACKEND:-claude}" in
+		bash)
+			_bash_model_fallback "$stage_result"
+			;;
+		claude)
+			_claude_model_fallback "$stage_result" \
+				|| _bash_model_fallback "$stage_result"
+			;;
+		*)
+			die "unknown MODEL_FALLBACK_BACKEND" \
+				"'${MODEL_FALLBACK_BACKEND}'; valid values: bash, claude"
+			;;
+	esac
 }
 
 main "$@"
