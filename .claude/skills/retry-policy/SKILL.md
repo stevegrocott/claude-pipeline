@@ -9,6 +9,8 @@ outputs:
   action: '"retry" | "escalate" | "bail"'
   reason: "Human-readable rationale for the decision"
   backoff_ms: "Milliseconds to wait before retrying (only present when action == \"retry\" and error_kind == \"rate_limit\")"
+side_effects: []
+composes: []
 failure_modes:
   - id: retrying_max_turns_exhausted
     mitigation: "Escalate instead — more turns cannot be given to an already-exhausted run at the same model"
