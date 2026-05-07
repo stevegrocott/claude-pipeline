@@ -1,6 +1,11 @@
 ---
 name: pipeline-recovery
 description: Use when the pipeline is experiencing repeated rate-limit errors, when batch execution is stalling with 429 responses, or when you want to check whether the current run has hit a rate-limit cluster before continuing work.
+inputs: []
+outputs: []
+side_effects: []
+composes: []
+failure_modes: []
 ---
 
 # Pipeline Recovery

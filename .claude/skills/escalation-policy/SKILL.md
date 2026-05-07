@@ -8,6 +8,8 @@ outputs:
   action: '"accept" | "escalate" | "bail" | "retry_same"'
   model: "Target model for escalate action (haiku|sonnet|opus); omitted for other actions"
   reason: "Human-readable routing rationale for logging/diagnostics"
+side_effects: []
+composes: []
 failure_modes:
   - "Escalating when already at opus ceiling — use bail instead"
   - "retry_same on a repeated failure at the same model — check escalation_history first"

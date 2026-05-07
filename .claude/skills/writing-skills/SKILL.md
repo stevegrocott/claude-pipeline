@@ -1,6 +1,7 @@
 ---
 name: writing-skills
 description: Use when creating new skills, editing existing skills, or verifying skills work before deployment
+inputs: []
 outputs:
   - name: skill_file
     type: file_path

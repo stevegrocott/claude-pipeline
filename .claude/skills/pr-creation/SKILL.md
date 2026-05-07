@@ -13,6 +13,7 @@ outputs:
 side_effects:
   - pushes_git_branch
   - creates_pr_mr
+composes: []
 failure_modes:
   - id: push_failed
     mitigation: Check for remote conflicts or permission issues; do not retry blindly

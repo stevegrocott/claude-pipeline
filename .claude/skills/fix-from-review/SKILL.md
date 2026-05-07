@@ -17,6 +17,7 @@ side_effects:
   - modifies_source_files
   - runs_lint_on_changed_files
   - creates_git_commit
+composes: []
 failure_modes:
   - id: fix_requires_broad_context
     mitigation: For minor issues defer and note in the summary. For major issues read the minimum additional context needed.

@@ -19,6 +19,7 @@ side_effects:
 composes:
   - subagent-driven-development
   - executing-plans
+failure_modes: []
 ---
 
 # Writing Plans

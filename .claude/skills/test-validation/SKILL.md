@@ -18,6 +18,7 @@ outputs:
     description: Array of hollow assertion, empty body, or commented-out test findings with file and line
 side_effects:
   - runs_test_suite
+composes: []
 failure_modes:
   - id: test_command_fails
     mitigation: Report failure details (count, messages) and stop. Do not proceed to validation checks.

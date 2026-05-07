@@ -17,6 +17,8 @@ outputs:
   - name: issues
     type: array
     description: List of findings with severity (major or minor) and supporting evidence from the diff
+side_effects: []
+composes: []
 failure_modes:
   - id: review_timeout
     mitigation: Stop exploring the codebase — review only the provided diff; complete in 3-5 turns maximum

@@ -17,6 +17,7 @@ side_effects:
   - modifies_php_source_files
   - runs_pint_on_changed_files
   - dispatches_subagents
+composes: []
 failure_modes:
   - id: subagent_fails_on_file
     mitigation: Note the failure and continue processing remaining files in the batch. Retry the failed file individually after the batch completes.
