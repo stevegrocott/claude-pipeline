@@ -104,7 +104,7 @@ Re-run the stage with the next higher model tier.
 | `timeout` | `double_timeout` | Always escalate on timeout; `run_stage` handles internal first-retry before invoking the skill |
 | `max_turns_exhausted_at_ceiling` is NOT set AND turns exhausted | `max_turns_exhausted` | Only escalate if not already at opus |
 | `no_structured_output` | `empty_output` | Model produced no parseable result |
-| `quality_stall` | `quality_stall` | Fix stage added no new commits after ≥2 quality iterations — model is stuck; synthesised by `run_quality_loop()` |
+| `quality_stall` | `quality_stall` | Fix stage made no new commits in the current iteration AND quality loop is on iteration ≥2 (`loop_iteration >= 2`) — model is stuck; synthesised by `run_quality_loop()` |
 | `output.status == "error"` | `structured_error` | Claude returned a structured error block |
 
 **Required output fields:** `action`, `model` (target tier), `reason`
