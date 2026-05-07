@@ -65,7 +65,12 @@ jobs:
         if: steps.scope.outputs.mode == 'all'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: .claude/scripts/skill-golden.sh --all
+        run: |
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            printf 'skill-golden: ANTHROPIC_API_KEY not set — live tests skipped\n'
+            exit 0
+          fi
+          .claude/scripts/skill-golden.sh --all
 
       - name: Run golden tests — touched skills
         if: steps.scope.outputs.mode == 'touched'
@@ -73,6 +78,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TOUCHED_SKILLS: ${{ steps.scope.outputs.skills }}
         run: |
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            printf 'skill-golden: ANTHROPIC_API_KEY not set — live tests skipped\n'
+            exit 0
+          fi
           overall=0
           for skill in $TOUCHED_SKILLS; do
             printf '==> Testing skill: %s\n' "$skill"
