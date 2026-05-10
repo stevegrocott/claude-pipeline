@@ -14,14 +14,14 @@ wait_for_mergeable() {
 
   while [ "$elapsed" -lt "$max" ]; do
     local state
-    state=$(gh pr view "$pr" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "UNKNOWN")
+    state=$(gh pr view "$pr" --json mergeable --jq '.mergeable' 2>/dev/null || echo "UNKNOWN")
 
     case "$state" in
       MERGEABLE)
         return 0
         ;;
       CONFLICTING)
-        echo "ERROR: PR #$pr has merge conflicts and cannot be merged." >&2
+        echo "PR has unresolvable merge conflicts" >&2
         return 1
         ;;
       *)
@@ -32,7 +32,7 @@ wait_for_mergeable() {
     esac
   done
 
-  echo "ERROR: PR #$pr did not become mergeable within ${max}s." >&2
+  echo "Timed out waiting for GitHub to compute mergeability" >&2
   return 1
 }
 
