@@ -3010,7 +3010,7 @@ _build_adj_body() {
 		| awk '/^## Implementation Tasks/{exit} {print}' \
 		| sed 's/[[:space:]]*$//')
 
-	printf '%s\n\n## Implementation Tasks\n\n- [ ] `[fullstack-engineer]` **(M)** %s\n' \
+	printf '%s\n\n## Implementation Tasks\n\n- [ ] `[default]` **(M)** %s\n' \
 		"$body_prefix" "$adj_title"
 }
 
@@ -6802,8 +6802,9 @@ ${major_descriptions}"
 
                     # Deduplication: skip if an open issue with the same title already exists
                     local dup_count
-                    dup_count=$(gh issue list --search "${adj_title} in:title" \
-                        --state open --json number --jq 'length' 2>/dev/null || echo "0")
+                    dup_count=$(gh issue list --state open --json title \
+                        --jq --arg t "$adj_title" '[.[] | select(.title == $t)] | length' \
+                        2>/dev/null || echo "0")
                     if (( dup_count > 0 )); then
                         log "Skipping duplicate follow-up issue (title already open): $adj_title"
                         continue
