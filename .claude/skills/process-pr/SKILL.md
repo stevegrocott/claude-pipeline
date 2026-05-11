@@ -248,6 +248,29 @@ Scan all review comments for indicators of follow-up work:
 - "nice to have:"
 - "consider adding:"
 
+**Follow-up classification — determine type before extracting:**
+
+| Classification | Criteria | Action |
+|---|---|---|
+| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — enough context to implement |
+| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Skip or flag for human triage — insufficient context to act |
+
+Open-ended trigger phrases that signal a **vague** follow-up (do not auto-create):
+`"consider adding:"`, `"nice to have:"`, `"future improvement:"`, `"we could also..."`
+
+Examples:
+
+```
+# PRECISE — create issue
+"follow-up needed: extract retry logic in scripts/merge-mr.sh:handle_merge() into a shared helper"
+"technical debt: auth/token.sh:validate_token doesn't handle clock skew — add leeway param"
+
+# VAGUE — skip, do not auto-create
+"consider adding more tests"
+"future improvement: better error handling throughout"
+"nice to have: improve logging"
+```
+
 **Extract for each:**
 - Title (short description)
 - Body (full context from comment)
