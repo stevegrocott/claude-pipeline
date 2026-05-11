@@ -2967,6 +2967,54 @@ _parse_task_lines() {
 	printf '%s\n' "$tasks_json"
 }
 
+# Builds a well-formed issue body for an adjacent follow-up issue.
+# If the raw body already contains a valid ## Implementation Tasks section
+# with at least one canonical task line, it is returned unchanged.
+# Otherwise a canonical task line is appended in a new ## Implementation Tasks section.
+#
+# Arguments:
+#   $1 - raw body text from the adjacent_issue JSON
+#   $2 - issue title (used to synthesise the task description when body lacks one)
+# Outputs:
+#   validated body on stdout
+_build_adj_body() {
+	local raw_body="$1"
+	local adj_title="$2"
+
+	# Extract any existing Implementation Tasks section
+	local tasks_section
+	tasks_section=$(printf '%s' "$raw_body" \
+		| awk '/^## Implementation Tasks/{found=1; next} found && /^## /{exit} found{print}')
+
+	# Check for at least one canonical task line: - [ ] `[agent]` **(S|M|L)** description
+	local has_valid_task=false
+	if [[ -n "$tasks_section" ]]; then
+		while IFS= read -r line; do
+			[[ -z "$line" ]] && continue
+			if [[ "$line" =~ ^-\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ \*\*\([SML]\)\*\*\ .+$ ]]; then
+				has_valid_task=true
+				break
+			fi
+		done <<< "$tasks_section"
+	fi
+
+	if [[ "$has_valid_task" == true ]]; then
+		printf '%s' "$raw_body"
+		return
+	fi
+
+	# Body lacks a valid Implementation Tasks section — synthesise one.
+	# Strip any existing (malformed) Implementation Tasks section, then append a canonical one.
+	local body_prefix
+	body_prefix=$(printf '%s' "$raw_body" \
+		| awk '/^## Implementation Tasks/{exit} {print}' \
+		| sed 's/[[:space:]]*$//')
+
+	printf '%s\n\n## Implementation Tasks\n\n- [ ] `[default]` **(M)** %s\n' \
+		"$body_prefix" "$adj_title"
+}
+
+
 # Known file extensions to avoid false positives when extracting bare filenames
 # (version strings v1.0, domains, etc. are excluded)
 readonly KNOWN_FILE_EXTENSIONS='sh|bats|bash|ts|tsx|js|jsx|mjs|cjs|py|go|rb|rs|java|kt|swift|json|yaml|yml|toml|sql|md|css|html|tf'
@@ -6751,9 +6799,24 @@ ${major_descriptions}"
                     adj_title=$(printf '%s' "$adj_item" | jq -r '.title // ""')
                     adj_body=$(printf '%s' "$adj_item" | jq -r '.body // ""')
                     [[ -z "$adj_title" ]] && continue
+
+                    # Deduplication: skip if an open issue with the same title already exists
+                    local dup_count
+                    dup_count=$(gh issue list --state open --json title \
+                        --jq --arg t "$adj_title" '[.[] | select(.title == $t)] | length' \
+                        2>/dev/null || echo "0")
+                    if (( dup_count > 0 )); then
+                        log "Skipping duplicate follow-up issue (title already open): $adj_title"
+                        continue
+                    fi
+
+                    # Validate/build body to enforce canonical task format
+                    local validated_body
+                    validated_body=$(_build_adj_body "$adj_body" "$adj_title")
+
                     local new_num
                     new_num=$("$PLATFORM_DIR/create-issue.sh" \
-                        --title "$adj_title" --body "$adj_body" \
+                        --title "$adj_title" --body "$validated_body" \
                         --labels "pipeline-followup" 2>/dev/null || true)
                     if [[ -n "$new_num" ]]; then
                         created_nums+=("#$new_num")
