@@ -78,6 +78,7 @@ Break the chosen approach into implementable tasks:
 - Each task should target 5-30 minutes of subagent execution time
 - If a task requires reading more than 3 files or modifying more than 2 files, split it
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
+- **Parseable format required:** Every task line in `## Implementation Tasks` MUST begin with `- [ ] \`[agent-name]\``. Prose lines such as "Task 1: Do something" are **silently skipped** by the orchestrator — no error is raised and no warning is emitted; the task simply never executes.
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
 - **E2E tests (REQUIRED for UI changes):** If `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E task for ANY issue touching user-visible UI — CSS, components, layouts, forms, navigation, visual regressions. This is NOT optional for UI work.
   `- [ ] \`[playwright-test-developer]\` **(S)** Write Playwright E2E test for [flow description]`
