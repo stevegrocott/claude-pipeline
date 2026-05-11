@@ -273,14 +273,15 @@ Only proceed to create the issue when no duplicate is found.
 
 **Implementation Tasks format — REQUIRED format:**
 
-Every task line in the `## Implementation Tasks` block MUST include an agent prefix in backticks. The task parser silently skips lines that lack this prefix.
+Every task line in the `## Implementation Tasks` block MUST use the checkbox + agent-prefix format. The task parser silently skips prose-style `Task N:` lines — this is the failure mode that caused production incidents.
 
 ```
 # CORRECT — task parser picks this up:
 - [ ] `[default]` **(S)** $INFERRED_TASK_DESCRIPTION
 
-# ANTI-PATTERN — task parser silently skips this:
-- [ ] $INFERRED_TASK_DESCRIPTION
+# ANTI-PATTERN — task parser silently skips these:
+Task 1: $INFERRED_TASK_DESCRIPTION
+Task 2: $INFERRED_TASK_DESCRIPTION
 ```
 
 For each extracted issue (after deduplication check passes):

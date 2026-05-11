@@ -6803,7 +6803,7 @@ ${major_descriptions}"
                     # Deduplication: skip if an open issue with the same title already exists
                     local dup_count
                     dup_count=$(gh issue list --state open --json title \
-                        --jq --arg t "$adj_title" '[.[] | select(.title == $t)] | length' \
+                        2>/dev/null | jq --arg t "$adj_title" '[.[] | select(.title == $t)] | length' \
                         2>/dev/null || echo "0")
                     if (( dup_count > 0 )); then
                         log "Skipping duplicate follow-up issue (title already open): $adj_title"
