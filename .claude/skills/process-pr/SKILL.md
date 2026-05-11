@@ -255,7 +255,34 @@ Scan all review comments for indicators of follow-up work:
 
 ### Step 4f: Create Follow-up Issues
 
-For each extracted issue:
+**Before creating each issue, run a deduplication check:**
+
+```bash
+EXISTING=$(gh issue list --search "$ISSUE_TITLE" --state open \
+  --json number,title \
+  --jq '.[] | select(.title | ascii_downcase | test("'"$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]')"'")) | .number' \
+  | head -1)
+if [ -n "$EXISTING" ]; then
+  echo "Skipping duplicate: similar open issue already exists (#$EXISTING for \"$ISSUE_TITLE\")"
+  # continue to next extracted issue
+fi
+```
+
+Only proceed to create the issue when no duplicate is found.
+
+**Implementation Tasks format — REQUIRED format:**
+
+Every task line in the `## Implementation Tasks` block MUST include an agent prefix in backticks. The task parser silently skips lines that lack this prefix.
+
+```
+# CORRECT — task parser picks this up:
+- [ ] `[default]` **(S)** $INFERRED_TASK_DESCRIPTION
+
+# ANTI-PATTERN — task parser silently skips this:
+- [ ] $INFERRED_TASK_DESCRIPTION
+```
+
+For each extracted issue (after deduplication check passes):
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
