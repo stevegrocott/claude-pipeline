@@ -258,9 +258,10 @@ Scan all review comments for indicators of follow-up work:
 **Before creating each issue, run a deduplication check:**
 
 ```bash
+TITLE_LOWER=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]')
 EXISTING=$(gh issue list --search "$ISSUE_TITLE" --state open \
   --json number,title \
-  --jq '.[] | select(.title | ascii_downcase | test("'"$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]')"'")) | .number' \
+  | jq -r --arg t "$TITLE_LOWER" '.[] | select(.title | ascii_downcase | contains($t)) | .number' \
   | head -1)
 if [ -n "$EXISTING" ]; then
   echo "Skipping duplicate: similar open issue already exists (#$EXISTING for \"$ISSUE_TITLE\")"
