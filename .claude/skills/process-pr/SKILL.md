@@ -253,7 +253,7 @@ Scan all review comments for indicators of follow-up work:
 | Classification | Criteria | Action |
 |---|---|---|
 | **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — enough context to implement |
-| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Skip or flag for human triage — insufficient context to act |
+| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Attempt to expand via /explore; fall back to direct create with needs-explore label if /explore fails |
 
 Open-ended trigger phrases that signal a **vague** follow-up (do not auto-create):
 `"consider adding:"`, `"nice to have:"`, `"future improvement:"`, `"we could also..."`
@@ -339,7 +339,7 @@ Log each: `Created follow-up issue #XXX: "$TITLE"`
 PLATFORM_DIR=".claude/scripts/platform"
 
 # Attempt to expand the vague item via /explore
-EXPLORE_OUTPUT=$(claude --dangerously-skip-permissions --print "/explore $EXTRACTED_DESCRIPTION" 2>&1)
+EXPLORE_OUTPUT=$(claude --dangerously-skip-permissions --print "/explore $(printf '%s' "$EXTRACTED_DESCRIPTION")" 2>&1)
 EXPLORE_EXIT=$?
 
 if [ $EXPLORE_EXIT -eq 0 ]; then
