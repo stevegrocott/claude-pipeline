@@ -3734,12 +3734,14 @@ execute_batch_parallel() {
 				"$result_file" "$base_branch" &
 			_task_pid=$!
 			set +m
+			set -m
 			( sleep "${MAX_TASK_WALL_TIME_SECS}" && \
-				kill -- -"$_task_pid" 2>/dev/null ) &
+				kill -- -"$_task_pid" 2>/dev/null ) > /dev/null 2>&1 &
 			_watchdog_pid=$!
+			set +m
 			wait "$_task_pid" 2>/dev/null
 			_task_exit=$?
-			kill "$_watchdog_pid" 2>/dev/null
+			kill -- -"$_watchdog_pid" 2>/dev/null
 			wait "$_watchdog_pid" 2>/dev/null || true
 			# exit 143 = SIGTERM from watchdog; only treat as timeout
 			# when no result file was written (guards against race
