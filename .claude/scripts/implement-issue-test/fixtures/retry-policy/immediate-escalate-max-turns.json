@@ -1,0 +1,17 @@
+{
+  "stage_result": {
+    "status": "error",
+    "output": null,
+    "raw": "Max turns exhausted",
+    "denials": [],
+    "model": "haiku",
+    "error_kind": "max_turns_exhausted",
+    "elapsed_ms": 60000
+  },
+  "retry_count": 0,
+  "error_history": [],
+  "_fixture_meta": {
+    "description": "max_turns_exhausted at non-ceiling model haiku — same model cannot run more turns; expect immediate escalate to sonnet",
+    "expected_action": "escalate"
+  }
+}

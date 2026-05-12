@@ -2,6 +2,44 @@
 name: process-pr
 description: Process PR/MR based on code review - if approved, create follow-up issues, merge, close; if changes requested, re-run implement-issue
 argument-hint: "<pr_number> <issue_number> <base_branch>"
+inputs:
+  - name: pr_number
+    type: integer
+    required: true
+    description: PR/MR number to process
+  - name: issue_number
+    type: integer
+    required: true
+    description: Issue number that the PR/MR addresses
+  - name: base_branch
+    type: string
+    required: true
+    description: Base branch for re-implementation if changes are requested
+outputs:
+  - name: status
+    type: string
+    description: Outcome — one of merged, changes_requested, error, or rate_limit
+  - name: follow_up_issues
+    type: array
+    description: Issue numbers created from follow-up items found in review comments
+side_effects:
+  - merges_pr
+  - closes_github_issue
+  - deletes_branch
+  - creates_github_issues
+  - comments_on_issue
+  - spawns_claude_subprocess
+composes:
+  - implement-issue
+failure_modes:
+  - id: validation_failed
+    mitigation: Stop and report error — verify PR/MR and issue numbers are correct and open
+  - id: no_review_status
+    mitigation: Stop and report — a code review comment with Status line is required before processing
+  - id: merge_failed
+    mitigation: Stop and return failure; do NOT close the issue
+  - id: rerun_failed
+    mitigation: Log error and include in output; do not retry automatically
 ---
 
 # Process PR/MR
@@ -210,6 +248,29 @@ Scan all review comments for indicators of follow-up work:
 - "nice to have:"
 - "consider adding:"
 
+**Follow-up classification — determine type before extracting:**
+
+| Classification | Criteria | Action |
+|---|---|---|
+| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — enough context to implement |
+| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Attempt to expand via /explore; fall back to direct create with needs-explore label if /explore fails |
+
+Open-ended trigger phrases that signal a **vague** follow-up (do not auto-create):
+`"consider adding:"`, `"nice to have:"`, `"future improvement:"`, `"we could also..."`
+
+Examples:
+
+```
+# PRECISE — create issue
+"follow-up needed: extract retry logic in scripts/merge-mr.sh:handle_merge() into a shared helper"
+"technical debt: auth/token.sh:validate_token doesn't handle clock skew — add leeway param"
+
+# VAGUE — skip, do not auto-create
+"consider adding more tests"
+"future improvement: better error handling throughout"
+"nice to have: improve logging"
+```
+
 **Extract for each:**
 - Title (short description)
 - Body (full context from comment)
@@ -217,7 +278,38 @@ Scan all review comments for indicators of follow-up work:
 
 ### Step 4f: Create Follow-up Issues
 
-For each extracted issue:
+**Before creating each issue, run a deduplication check:**
+
+```bash
+TITLE_LOWER=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]')
+EXISTING=$(gh issue list --search "$ISSUE_TITLE" --state open \
+  --json number,title \
+  | jq -r --arg t "$TITLE_LOWER" '.[] | select(.title | ascii_downcase | contains($t)) | .number' \
+  | head -1)
+if [ -n "$EXISTING" ]; then
+  echo "Skipping duplicate: similar open issue already exists (#$EXISTING for \"$ISSUE_TITLE\")"
+  # continue to next extracted issue
+fi
+```
+
+Only proceed to create the issue when no duplicate is found.
+
+**Implementation Tasks format — REQUIRED format:**
+
+Every task line in the `## Implementation Tasks` block MUST use the checkbox + agent-prefix format. The task parser silently skips prose-style `Task N:` lines — this is the failure mode that caused production incidents.
+
+```
+# CORRECT — task parser picks this up:
+- [ ] `[default]` **(S)** $INFERRED_TASK_DESCRIPTION
+
+# ANTI-PATTERN — task parser silently skips these:
+Task 1: $INFERRED_TASK_DESCRIPTION
+Task 2: $INFERRED_TASK_DESCRIPTION
+```
+
+For each extracted issue (after deduplication check passes), route by classification:
+
+**Precise follow-up** — create issue immediately:
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
@@ -228,6 +320,9 @@ Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
 ## Description
 $EXTRACTED_DESCRIPTION
 
+## Implementation Tasks
+- [ ] `[default]` **(S)** $INFERRED_TASK_DESCRIPTION
+
 ## References
 - Parent Issue: #$ISSUE_NUMBER
 - PR/MR: #$PR_NUMBER
@@ -237,6 +332,40 @@ EOF
 ```
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`
+
+**Vague follow-up** — invoke `/explore` to flesh out context before creating the issue:
+
+```bash
+PLATFORM_DIR=".claude/scripts/platform"
+
+# Attempt to expand the vague item via /explore
+EXPLORE_OUTPUT=$(claude --dangerously-skip-permissions --print "/explore $(printf '%s' "$EXTRACTED_DESCRIPTION")" 2>&1)
+EXPLORE_EXIT=$?
+
+if [ $EXPLORE_EXIT -eq 0 ]; then
+  # /explore succeeded — it creates a fully-formed issue internally; log and continue
+  echo "Explored and created issue from vague item: \"$ISSUE_TITLE\""
+else
+  # /explore failed — fall back to direct creation with needs-explore label
+  echo "Warning: /explore failed (exit $EXPLORE_EXIT) for \"$ISSUE_TITLE\"; falling back to direct create with needs-explore label"
+  "$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
+## Context
+Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
+
+## Description
+$EXTRACTED_DESCRIPTION
+
+> **Note:** This item was classified as vague. The /explore subprocess failed to expand it.
+> A human should research and flesh out the implementation tasks before acting on this issue.
+
+## References
+- Parent Issue: #$ISSUE_NUMBER
+- PR/MR: #$PR_NUMBER
+- Reviewer: @$REVIEWER
+EOF
+)" --labels "${LABELS:+$LABELS,}needs-explore"
+fi
+```
 
 ---
 

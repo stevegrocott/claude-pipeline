@@ -232,16 +232,16 @@ teardown() {
 	git checkout -q -b feature/test-wt2 main
 
 	local wt_base="$TEST_TMP/worktrees"
-	create_task_worktree "$wt_base" "feature/test-wt2" "7" \
+	create_task_worktree "$wt_base" "feature/test-wt2" "7" "42" \
 		>/dev/null
 
-	# Branch should exist
-	git rev-parse --verify "wt-task-7" >/dev/null 2>&1
+	# Branch should exist with new naming format wt-i<issue>-t<task>
+	git rev-parse --verify "wt-i42-t7" >/dev/null 2>&1
 	[ $? -eq 0 ]
 
 	# Clean up
 	git worktree remove --force "${wt_base}/task-7" 2>/dev/null || true
-	git branch -D "wt-task-7" 2>/dev/null || true
+	git branch -D "wt-i42-t7" 2>/dev/null || true
 	git checkout -q main
 }
 
@@ -540,6 +540,10 @@ _setup_parallel_stage_mocks() {
 	log_warn()  { true; }
 	comment_issue() { true; }
 	verify_on_feature_branch() { return 0; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export TEST_E2E_CMD="echo run-e2e"
 	export RESUME_MODE=""
@@ -727,6 +731,7 @@ _setup_parallel_stage_mocks() {
 	resolve_model() { printf '%s' "sonnet"; }
 	build_files_block() { printf '\n'; }
 	extract_task_size() { printf '%s' "S"; }
+	classify_e2e_strategy() { printf '%s' "none"; }
 
 	local tasks
 	tasks='[{"id":3,"description":"Do thing","agent":"default"}]'
@@ -1342,9 +1347,14 @@ _setup_parallel_stage_mocks() {
 	}
 	log()                { :; }
 	log_warn()           { :; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 	export status_calls_file
 
 	# Call the real function with conditions that allow both stages to run
@@ -1404,9 +1414,14 @@ _setup_parallel_stage_mocks() {
 		fi
 	}
 	log_warn() { :; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 
 	run_parallel_post_task_stages \
 		"main" "frontend" "" "S" 2>/dev/null
@@ -1456,9 +1471,14 @@ _setup_parallel_stage_mocks() {
 	log_warn() {
 		printf 'warned: %s\n' "$1" >> "$status_log"
 	}
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 
 	run_parallel_post_task_stages \
 		"main" "frontend" "" "S" 2>/dev/null
@@ -1508,9 +1528,14 @@ _setup_parallel_stage_mocks() {
 		true
 	}
 	log_warn() { :; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 	export e2e_pid_file acc_pid_file
 
 	run_parallel_post_task_stages \
@@ -1582,6 +1607,15 @@ _setup_parallel_stage_mocks() {
 @test "run_parallel_post_task_stages: e2e and acceptance truly run in parallel (timing)" {
 	cd "$TEST_TMP/repo" || exit 1
 
+	# Add a route file on a new branch so acceptance stage calls run_stage too.
+	# Without this, acceptance short-circuits (no route files) and only e2e sleeps,
+	# making serial vs parallel indistinguishable.
+	git checkout -q -b feature/parallel-timing-test main
+	mkdir -p routes
+	printf 'export const handler = () => {}\n' > routes/api.ts
+	git add routes/api.ts
+	git commit -q -m "add route"
+
 	export TEST_E2E_CMD="true"
 	export BASE_BRANCH=main
 	unset RESUME_MODE
@@ -1598,31 +1632,33 @@ _setup_parallel_stage_mocks() {
 		local stage="$1"
 		local start_ns=$(date +%s%N)
 		printf "stage=%s,start=%s\n" "$stage" "$start_ns" >> "$timing_file"
-		# Simulate 0.1 second work
-		sleep 0.1
+		# Simulate 0.15 second work per stage
+		sleep 0.15
 		printf '{"status":"success","result":"passed","summary":"ok"}'
 	}
 	log()     { :; }
 	log_warn() { :; }
+	rebuild_and_health_check() {
+		printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+	}
+	_build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
 
 	export -f is_stage_completed set_stage_started set_stage_completed
-	export -f comment_issue run_stage log log_warn
+	export -f comment_issue run_stage log log_warn rebuild_and_health_check
+	export -f _build_targeted_e2e_cmd
 	export timing_file
 
 	local global_start_ns=$(date +%s%N)
 	run_parallel_post_task_stages \
-		"main" "frontend" "" "S" 2>/dev/null
+		"feature/parallel-timing-test" "frontend" "" "S" 2>/dev/null
 	local global_end_ns=$(date +%s%N)
 	local global_elapsed_ns=$(( global_end_ns - global_start_ns ))
 	local global_elapsed_ms=$(( global_elapsed_ns / 1000000 ))
 
-	[ $? -eq 0 ]
-
-	# If stages ran serially (one after another), total time would be ~200ms
-	# If stages ran in parallel, total time would be ~100ms
-	# Add some buffer for system overhead
-	# Parallel should be much less than serial
-	[[ "$global_elapsed_ms" -lt 180 ]] || {
+	# With both stages sleeping 0.15s in parallel, total time ≈ 150ms + overhead.
+	# If they ran serially, total would be ≈ 300ms + overhead.
+	# Threshold of 400ms: passes parallel (~270ms), fails serial (~500ms).
+	[[ "$global_elapsed_ms" -lt 400 ]] || {
 		echo "Stages appear to have run serially (took ${global_elapsed_ms}ms)"
 		cat "$timing_file"
 		exit 1

@@ -1,0 +1,7 @@
+{
+  "current_model": "haiku",
+  "error_kind": "timeout",
+  "_fixture_meta": {
+    "description": "Timeout on haiku — expected escalation to sonnet."
+  }
+}

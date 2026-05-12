@@ -1,6 +1,20 @@
 ---
 name: create-session-summary
 description: Create Session Summary
+inputs: []
+outputs:
+  - name: session_file
+    type: file_path
+    description: Written session file at .claude/sessions/session-YYYY-MM-DD-HHMM.md
+side_effects:
+  - writes_file: .claude/sessions/session-<timestamp>.md
+  - creates_directory: .claude/sessions/ (if absent)
+composes: []
+failure_modes:
+  - id: git_unavailable
+    mitigation: skip the git state section and note "no git repo" in the session file; still write the summary
+  - id: sessions_dir_unwritable
+    mitigation: surface the mkdir or write error to the user; ask them to create .claude/sessions/ manually
 ---
 
 # Create Session Summary

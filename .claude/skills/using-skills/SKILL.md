@@ -1,6 +1,14 @@
 ---
 name: using-skills
 description: Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions
+inputs: []
+outputs: []
+side_effects:
+  - creates_todowrite_todos
+composes: []
+failure_modes:
+  - id: rationalization_bypass
+    mitigation: Stop, restart the response, and invoke the Skill tool before taking any action or asking any question
 ---
 
 <EXTREMELY-IMPORTANT>

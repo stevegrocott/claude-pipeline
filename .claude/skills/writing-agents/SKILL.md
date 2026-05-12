@@ -1,6 +1,19 @@
 ---
 name: writing-agents
 description: Use when creating new agents, editing existing agents, or defining specialized subagent roles for the Task tool
+inputs: []
+outputs:
+  - name: agent_file
+    type: file_path
+    description: Agent definition created at .claude/agents/<agent-name>.md
+side_effects:
+  - writes_agent_file
+composes:
+  - test-driven-development
+  - writing-skills
+failure_modes:
+  - id: missing_session_restart
+    mitigation: Always prompt user to restart Claude Code session after creating or modifying an agent — agents are loaded at session start and won't be available until restart
 ---
 
 # Writing Agents

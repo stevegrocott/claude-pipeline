@@ -1,6 +1,25 @@
 ---
 name: writing-plans
 description: Use when you have a spec or requirements for a multi-step task, before touching code
+inputs:
+  - name: github_mode
+    type: boolean
+    required: false
+    description: When true, outputs plan as a structured GitHub Issue body instead of saving to a local file
+outputs:
+  - name: plan_file
+    type: file_path
+    description: Implementation plan saved to docs/plans/YYYY-MM-DD-<feature-name>.md (local mode only)
+  - name: github_issue_body
+    type: string
+    description: Structured GitHub Issue body with parseable task list (--github mode only)
+side_effects:
+  - writes_file: "docs/plans/YYYY-MM-DD-<feature-name>.md"
+  - commits_to_git
+composes:
+  - subagent-driven-development
+  - executing-plans
+failure_modes: []
 ---
 
 # Writing Plans

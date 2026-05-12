@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "escalation-policy skill output: route a completed stage_result to accept, escalate, bail, or retry_same",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["accept", "escalate", "bail", "retry_same"],
+      "description": "Routing decision for the pipeline"
+    },
+    "model": {
+      "type": "string",
+      "enum": ["haiku", "sonnet", "opus"],
+      "description": "Target model when action==escalate; omitted otherwise"
+    },
+    "reason": {
+      "type": "string",
+      "description": "Human-readable routing rationale for logging and diagnostics"
+    }
+  },
+  "required": ["action", "reason"]
+}

@@ -1,0 +1,7 @@
+{
+  "current_model": "sonnet",
+  "error_kind": "no_structured_output",
+  "_fixture_meta": {
+    "description": "no_structured_output on sonnet — expected escalation to opus."
+  }
+}

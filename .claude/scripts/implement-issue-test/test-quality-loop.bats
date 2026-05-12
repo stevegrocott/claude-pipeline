@@ -1695,3 +1695,77 @@ HIST_EOF
     was_fix_called=$(cat "$fix_called")
     [ "$was_fix_called" = "false" ] || fail "Fix should not be called when only minor issues exist in an approved review"
 }
+
+# =============================================================================
+# STALL BAIL EARLY EXIT
+# =============================================================================
+
+@test "run_quality_loop stall handling has bail branch that breaks the loop" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    # Must have a bail branch in the stall action handling
+    [[ "$func_def" == *'"bail"'* ]] || fail "run_quality_loop must handle bail action from stall detection"
+
+    # The bail branch must break the loop (not just log and continue)
+    # Verify bail and break appear together in the stall section
+    local stall_section
+    stall_section=$(printf '%s' "$func_def" | awk '/quality_stall/,/skip_simplify=false/')
+    [[ "$stall_section" == *"bail"* ]] || fail "bail action must be handled in the stall detection section"
+    [[ "$stall_section" == *"break"* ]] || fail "bail action must break the loop in the stall detection section"
+}
+
+@test "bail stall action exits quality loop before max iterations" {
+    # Create a fake decide-action.sh that returns bail (simulating opus ceiling)
+    local fake_script_dir="$TEST_TMP/fake-scripts"
+    mkdir -p "$fake_script_dir"
+    cat > "$fake_script_dir/decide-action.sh" << 'FAKE_EOF'
+#!/usr/bin/env bash
+printf '{"action":"bail","reason":"quality_stall: at opus ceiling, cannot escalate"}\n'
+FAKE_EOF
+    chmod +x "$fake_script_dir/decide-action.sh"
+
+    # Override SCRIPT_DIR so the orchestrator uses our fake decide-action.sh
+    SCRIPT_DIR="$fake_script_dir"
+
+    local review_count_file="$TEST_TMP/bail_review_count"
+    echo "0" > "$review_count_file"
+    export review_count_file
+
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            simplify-*)
+                printf '{"status":"success","summary":"No changes"}\n'
+                ;;
+            review-*)
+                local count
+                count=$(cat "$review_count_file")
+                count=$((count + 1))
+                echo "$count" > "$review_count_file"
+                # Always request changes so fix runs and stall can be detected
+                printf '{"status":"success","result":"changes_requested","comments":"Fix this","summary":"1 issue"}\n'
+                ;;
+            fix-review-*)
+                # Return without committing — keeps pre/post commit counts equal,
+                # satisfying the stall condition on iteration >= 2
+                printf '{"status":"success","output":{"summary":"Applied fixes"},"summary":"Applied fixes","model":"opus"}\n'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    # Run with max 5 iterations; bail should cause early exit after iter 2
+    ( run_quality_loop "$TEST_TMP" "test-branch" "test" "" 5 ) || true
+
+    local review_count
+    review_count=$(cat "$review_count_file")
+
+    # Without the bail branch the loop runs all 5 iterations (5 review calls).
+    # With the bail branch the loop exits after iteration 2 (2 review calls).
+    [ "$review_count" -le 2 ] || fail "Expected loop to exit after bail on iter 2, but review ran $review_count times"
+}
+

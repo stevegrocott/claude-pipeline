@@ -494,6 +494,121 @@ extract_wait_time() {
 }
 
 # =============================================================================
+# COMPOSITION ROUTING
+# =============================================================================
+#
+# dispatch_composition routes a claude invocation to one of two subprocess
+# paths:
+#
+#   1. isolated  (isolated=true)  — worktree-isolated subprocess with
+#      --dangerously-skip-permissions.  Used for implementation tasks that
+#      need to modify files in a fresh git worktree.
+#
+#   2. standard  (isolated=false) — plain subprocess WITHOUT
+#      --dangerously-skip-permissions.  Used for decision/review tasks like
+#      process-pr that orchestrate via interactive tools.
+#
+# ARCHITECTURAL CONSTRAINT: bash cannot invoke the Skill tool.
+# The Skill tool is a Claude Code API feature available only inside a Claude
+# session; it cannot be called from a bash subprocess.  Both paths therefore
+# call `claude -p` as a child process — the distinction is only in which
+# permission flags are forwarded.  Any "skill-tool path" naming in prior
+# versions of this file was aspirational and has been removed to avoid
+# confusion.
+#
+# Usage:
+#   dispatch_composition "<prompt>" [isolated] [extra claude args...]
+#
+# Arguments:
+#   prompt   — slash-command prompt (e.g. "/process-pr 1 2 main")
+#   isolated — "true" for isolated subprocess, "false"/omitted for standard
+#   ...      — additional flags forwarded to the claude invocation
+#
+# Kill-switch: COMPOSITION_BACKEND env var overrides auto-routing.
+#   subprocess — always use isolated subprocess path
+#   skill      — always use standard (non-sandboxed) subprocess path
+#                NOTE: "skill" is a legacy name; it does NOT invoke the Skill
+#                tool.  It selects the standard subprocess without
+#                --dangerously-skip-permissions.
+#   (unset)    — auto-route based on the isolated argument
+
+dispatch_composition() {
+	local prompt="$1"
+	local isolated="${2:-false}"
+	local -a extra_args=()
+	if (( $# > 2 )); then
+		shift 2
+		extra_args=("$@")
+	fi
+
+	local backend
+	if [[ -n "${COMPOSITION_BACKEND:-}" ]]; then
+		case "$COMPOSITION_BACKEND" in
+			subprocess|skill)
+				backend="$COMPOSITION_BACKEND"
+				;;
+			*)
+				printf 'ERROR: unknown COMPOSITION_BACKEND value: %s\n' \
+					"$COMPOSITION_BACKEND" >&2
+				return 1
+				;;
+		esac
+	elif [[ "$isolated" == "true" ]]; then
+		backend="subprocess"
+	else
+		backend="skill"
+	fi
+
+	case "$backend" in
+		subprocess)
+			run_composition_subprocess "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+			;;
+		# "skill" is the legacy kill-switch value; routes to the standard
+		# (non-sandboxed) subprocess path.  See ARCHITECTURAL CONSTRAINT note
+		# above.
+		skill)
+			run_composition_standard "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+			;;
+	esac
+}
+
+# run_composition_subprocess — invoke a skill as a worktree-isolated subprocess.
+# Used for skills that require git worktree isolation (e.g. implement-issue).
+run_composition_subprocess() {
+	local prompt="$1"
+	shift
+	log "Composition dispatch → subprocess: $prompt"
+	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+		--dangerously-skip-permissions \
+		--output-format json \
+		"$@" \
+		2>&1
+}
+
+# run_composition_standard — invoke claude as a standard (non-sandboxed) subprocess.
+# Used for decision/review skills that do not require worktree isolation
+# (e.g. process-pr, plan, review).
+#
+# ARCHITECTURAL CONSTRAINT: bash cannot invoke the Skill tool.
+# This function is the successor to the former run_composition_skill(); it was
+# renamed because the old name implied a Skill-tool invocation, which bash
+# subprocesses cannot perform.  The implementation is a plain `claude -p`
+# call — identical to run_composition_subprocess() except that it omits
+# --dangerously-skip-permissions, allowing the spawned session to use
+# interactive tools and AskUserQuestion.
+#
+# Output format is not forced here — callers that need structured JSON must
+# pass --output-format json (and --json-schema) explicitly.
+run_composition_standard() {
+	local prompt="$1"
+	shift
+	log "Composition dispatch → standard: $prompt"
+	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+		"$@" \
+		2>&1
+}
+
+# =============================================================================
 # ISSUE PROCESSING
 # =============================================================================
 
@@ -643,12 +758,11 @@ process_issue() {
     local proc_exit=0
 
     printf '%s\n' "=== process-pr output ===" >> "$issue_log"
-    timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
+    dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
         --agent code-reviewer \
-        --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$PROCESS_SCHEMA" \
-        2>&1 | tee -a "$issue_log"
+        | tee -a "$issue_log"
     proc_exit=${PIPESTATUS[0]}
     printf '%s\n' "=== exit code: $proc_exit ===" >> "$issue_log"
 
@@ -677,26 +791,16 @@ process_issue() {
 
         set_rate_limit "false" "" ""
 
-        # Resume
+        # Resume — retry-with-backoff: parent already slept for the rate-limit
+        # window; restart fresh rather than resuming with "please continue"
+        # (the --resume subprocess is replaced by a clean retry here).
         printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
-        if [[ -n "$session_id" ]]; then
-            timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "please continue" \
-                --resume "$session_id" \
-                --agent code-reviewer \
-                --dangerously-skip-permissions \
-                --output-format json \
-                --json-schema "$PROCESS_SCHEMA" \
-                2>&1 | tee -a "$issue_log"
-            proc_exit=${PIPESTATUS[0]}
-        else
-            timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "/process-pr $pr_number $issue_num $BRANCH" \
-                --agent code-reviewer \
-                --dangerously-skip-permissions \
-                --output-format json \
-                --json-schema "$PROCESS_SCHEMA" \
-                2>&1 | tee -a "$issue_log"
-            proc_exit=${PIPESTATUS[0]}
-        fi
+        dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
+            --agent code-reviewer \
+            --output-format json \
+            --json-schema "$PROCESS_SCHEMA" \
+            | tee -a "$issue_log"
+        proc_exit=${PIPESTATUS[0]}
         proc_last_json=$(grep -E '^\{' "$issue_log" | tail -1)
     fi
 

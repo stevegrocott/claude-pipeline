@@ -2,6 +2,34 @@
 name: implement-issue
 description: Use when given an issue number/key and base branch to implement end-to-end
 argument-hint: "[issue-number] [base-branch]"
+inputs:
+  - name: issue_number
+    type: string
+    required: true
+    description: Issue number or key (e.g. "123" or "KIN-123")
+  - name: base_branch
+    type: string
+    required: true
+    description: Base branch to branch from and target for the PR
+outputs:
+  - name: pr_url
+    type: url
+    description: Pull request created upon successful completion
+  - name: status_json
+    type: file
+    description: Final orchestrator status snapshot at logs/implement-issue/issue-N-timestamp/status.json
+side_effects:
+  - creates_git_branch
+  - creates_pull_request
+  - writes_logs: logs/implement-issue/issue-<N>-<ts>/
+composes: []
+failure_modes:
+  - id: orchestrator_exit_1
+    mitigation: check stage logs in logs/implement-issue/issue-N-timestamp/stages/ for the failing stage
+  - id: orchestrator_exit_2
+    mitigation: reduce task complexity or split the issue into smaller tasks
+  - id: orchestrator_exit_3
+    mitigation: verify --issue and --branch arguments are correct and the issue exists
 ---
 
 # Implement Issue

@@ -2,6 +2,29 @@
 name: executing-plans
 description: Use when you have a written implementation plan to execute in a separate session with review checkpoints
 argument-hint: "[plan-file-path or GH-issue-number]"
+inputs:
+  - name: plan_source
+    type: string
+    required: true
+    description: File path to a plan file or a GitHub issue number containing an Implementation Tasks section
+outputs:
+  - name: batch_report
+    type: string
+    description: Summary of implemented tasks and verification output, reported after each batch completes
+side_effects:
+  - modifies_repository_files
+  - creates_git_commits
+  - writes_session_summary
+composes:
+  - create-session-summary
+  - finishing-a-development-branch
+failure_modes:
+  - id: plan_load_failed
+    mitigation: Stop and report error — verify the file path exists or the issue number is valid
+  - id: blocker_mid_batch
+    mitigation: Stop executing immediately and ask for clarification; do not guess or skip steps
+  - id: verification_failed_repeatedly
+    mitigation: Stop and ask for help rather than forcing through the blocker
 ---
 
 # Executing Plans

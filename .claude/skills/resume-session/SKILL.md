@@ -2,6 +2,24 @@
 name: resume-session
 description: Resume Previous Session
 argument-hint: "[session-file-path]"
+inputs:
+  - name: session_file_path
+    type: file_path
+    required: false
+    description: Path to session summary file; defaults to the most recent file in .claude/sessions/ if omitted
+outputs: []
+side_effects:
+  - may_checkout_git_branch: switches to the branch recorded in the session file if it differs from the current branch
+composes: []
+failure_modes:
+  - id: session_file_not_found
+    mitigation: list available files in .claude/sessions/ and ask the user to pick one; if none exist, inform user and stop
+  - id: branch_mismatch
+    mitigation: inform the user of the discrepancy and offer to checkout the session branch or proceed on the current branch
+  - id: malformed_session_file
+    mitigation: show the raw file contents and ask the user for guidance; do not attempt to infer missing sections
+  - id: no_session_files
+    mitigation: inform the user that no session files exist in .claude/sessions/ and suggest running /create-session-summary first
 ---
 
 # Resume Session

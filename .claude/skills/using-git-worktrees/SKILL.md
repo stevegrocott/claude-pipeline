@@ -1,6 +1,37 @@
 ---
 name: using-git-worktrees
 description: Use when starting feature work that needs isolation from current workspace or before executing implementation plans - creates isolated git worktrees in .worktrees/
+inputs:
+  - name: branch_name
+    type: string
+    required: true
+    description: Name for the new feature branch and worktree directory
+  - name: base_branch
+    type: string
+    required: true
+    description: Existing branch to base the new worktree on (e.g. main, aw-next)
+outputs:
+  - name: worktree_path
+    type: string
+    description: Absolute path to the newly created worktree directory
+  - name: branch
+    type: string
+    description: Name of the branch checked out in the worktree
+  - name: test_summary
+    type: string
+    description: Baseline test results confirming the worktree is clean before work begins
+side_effects:
+  - creates_git_worktree
+  - modifies_gitignore
+  - installs_dependencies
+composes: []
+failure_modes:
+  - id: worktrees_not_ignored
+    mitigation: Add .worktrees/ to .gitignore and commit before creating the worktree
+  - id: missing_bootstrap_cache
+    mitigation: Run mkdir -p bootstrap/cache before composer install in Laravel projects
+  - id: baseline_tests_fail
+    mitigation: Verify vendor/, node_modules/, and Vite manifest all exist; compare failures with main branch to identify pre-existing issues
 ---
 
 > **Note:** This skill is not used by the automated pipeline (`implement-issue`, `handle-issues`). The pipeline uses feature branches instead. This skill remains available for manual use when workspace isolation is needed.

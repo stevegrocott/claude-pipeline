@@ -1,6 +1,38 @@
 ---
 name: playwright-testing
 description: Use when writing, reviewing, or debugging Playwright E2E tests. Use when converting manual test scripts to automated tests. Use when test failures involve browser interaction, page navigation, or UI assertions.
+inputs:
+  - name: test_target
+    type: string
+    required: true
+    description: The feature, page, or user interaction to cover with Playwright E2E tests
+  - name: base_url
+    type: url
+    description: Base URL of the application under test
+outputs:
+  - name: test_spec
+    type: file_path
+    description: E2E test spec file created under e2e/tests/
+  - name: page_object
+    type: file_path
+    description: Page Object Model class file created under e2e/pages/
+  - name: test_results
+    type: string
+    description: Playwright test runner output with pass/fail counts
+side_effects:
+  - writes_test_spec_files
+  - writes_page_object_files
+  - spawns_browser_process
+  - may_capture_screenshots
+composes:
+  - test-driven-development
+failure_modes:
+  - id: flaky_tests
+    mitigation: Replace waitForTimeout with condition-based waiting such as waitForResponse or expect().toBeVisible().
+  - id: selector_breaks_on_refactor
+    mitigation: Replace CSS selectors with data-testid attributes or role-based selectors.
+  - id: test_interdependence
+    mitigation: Ensure each test sets up its own state and does not share cookies, localStorage, or global state with other tests.
 ---
 
 # Playwright Testing

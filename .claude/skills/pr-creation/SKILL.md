@@ -1,3 +1,26 @@
+---
+name: pr-creation
+description: Create a pull request or merge request by executing the provided push-and-create command
+inputs:
+  - name: command
+    type: string
+    required: true
+    description: The exact git push and platform create-mr/create-pr command to run, with the <description> placeholder substituted from the issue context
+outputs:
+  - name: pr_number
+    type: string
+    description: The PR/MR number extracted from the command output
+side_effects:
+  - pushes_git_branch
+  - creates_pr_mr
+composes: []
+failure_modes:
+  - id: push_failed
+    mitigation: Check for remote conflicts or permission issues; do not retry blindly
+  - id: pr_creation_failed
+    mitigation: Check platform CLI authentication and connectivity; report error
+---
+
 # PR Creation
 
 Create a merge request / pull request by executing the provided command. Nothing else.

@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "Envelope returned by run_stage for every stage invocation",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error", "rate_limit"],
+      "description": "High-level outcome of the stage run"
+    },
+    "output": {
+      "description": "Parsed structured output from the Claude CLI response; null on error",
+      "oneOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
+    },
+    "raw": {
+      "type": "string",
+      "description": "Raw stdout from the Claude CLI call before structured output extraction"
+    },
+    "denials": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Tool names blocked by permission hooks during this stage run"
+    },
+    "model": {
+      "type": "string",
+      "description": "Model ID that produced the final output, e.g. haiku, sonnet, opus"
+    },
+    "error_kind": {
+      "type": ["string", "null"],
+      "enum": [
+        "timeout",
+        "double_timeout",
+        "schema_not_found",
+        "no_structured_output",
+        "max_turns_exhausted_at_ceiling",
+        "rate_limit",
+        "permission_denied",
+        "quality_stall",
+        "max_turns_exhausted",
+        "structured_error",
+        null
+      ],
+      "description": "Machine-readable error classification; null when status is success"
+    },
+    "elapsed_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock milliseconds from stage invocation to return"
+    }
+  },
+  "required": ["status"]
+}

@@ -2,6 +2,25 @@
 name: explore
 description: Turn a vague idea or bug observation into a fully-planned issue with research, evaluation, implementation tasks, and acceptance criteria
 argument-hint: "<description of idea or problem>"
+inputs:
+  - name: description
+    type: string
+    required: true
+    description: Vague idea, bug observation, or feature request to research and plan
+outputs:
+  - name: issue_url
+    type: url
+    description: GitHub issue URL created and ready for /implement-issue
+side_effects:
+  - creates_github_issue
+  - writes_log: logs/explore/explore-<issue>-<ts>/status.json
+composes:
+  - mcp-tools
+failure_modes:
+  - id: gh_api_unauthorized
+    mitigation: surface the gh auth error to the operator, do not retry
+  - id: vague_input_unanswered
+    mitigation: ask 1-2 AskUserQuestion clarifications then proceed; do not block indefinitely
 ---
 
 # Explore
@@ -59,6 +78,7 @@ Break the chosen approach into implementable tasks:
 - Each task should target 5-30 minutes of subagent execution time
 - If a task requires reading more than 3 files or modifying more than 2 files, split it
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
+- **Parseable format required:** Every task line in `## Implementation Tasks` MUST begin with `- [ ] \`[agent-name]\``. Prose lines such as "Task 1: Do something" are **silently skipped** by the orchestrator — no error is raised and no warning is emitted; the task simply never executes.
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
 - **E2E tests (REQUIRED for UI changes):** If `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E task for ANY issue touching user-visible UI — CSS, components, layouts, forms, navigation, visual regressions. This is NOT optional for UI work.
   `- [ ] \`[playwright-test-developer]\` **(S)** Write Playwright E2E test for [flow description]`
@@ -105,11 +125,11 @@ PLATFORM_DIR=".claude/scripts/platform"
 - [alternative 2] — rejected because [reason]
 
 ## Implementation Tasks
-- [ ] `[agent-name]` **(S)** Description of task 1
-- [ ] `[agent-name]` **(M)** Description of task 2
-- [ ] `[agent-name]` **(L)** Description of task 3
-- [ ] `[default]` **(S)** Description of general task (e.g., tests, config)
-- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured)
+- [ ] `[agent-name]` **(S)** Description of task 1 — `src/services/auth.ts:L45-80`
+- [ ] `[agent-name]` **(M)** Description of task 2 — `src/components/Dashboard.tsx:L120-155`
+- [ ] `[agent-name]` **(L)** Description of task 3 — `src/api/users.ts:L30-65`
+- [ ] `[default]` **(S)** Description of general task (e.g., tests, config) — `tests/unit/auth.test.ts:L10-40`
+- [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured) — `tests/e2e/dashboard.spec.ts:L22-55`
 
 ## Deploy Verification
 [Include if this issue involves bugs in specific environments or requires deployment testing]
@@ -173,8 +193,10 @@ Ready for implementation: /implement-issue NNN main
 The `## Implementation Tasks` section must use this parseable convention:
 
 ```markdown
-- [ ] `[agent-name]` **(M)** Task description
+- [ ] `[agent-name]` **(M)** Task description — `src/path/file.ts:L10-40`
 ```
+
+**Files suffix:** Append ` — \`path/to/file.ts:L10-40\`` (em dash, space, backtick-quoted path with optional line range) to every task description. Multiple files: ` — \`file1.ts:L5\`, \`file2.ts:L20-35\``. This tells subagents exactly where to look, eliminating broad codebase scans.
 
 **Agent values** (adapt to your project's agents):
 - Use whatever agent names are configured in `.claude/agents/`
@@ -196,9 +218,9 @@ The `## Implementation Tasks` section must use this parseable convention:
 
 Task sizing directly controls model cost via `model-config.sh`:
 
-- **Prefer S-complexity tasks** — they use haiku (cheapest model). Only use M/L when the work genuinely requires it.
+- **Prefer S-complexity tasks** — S and M tasks use sonnet; only L tasks use opus. Prefer S over M/L for smaller scope, not model savings.
 - **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps.
-- **Point tasks to specific files and line numbers** — vague descriptions cause subagents to explore broadly, triggering 19x more tool calls.
+- **Every task MUST include at least one file path. Tasks without file paths will cause subagents to scan broadly — this is the #1 token waste in the pipeline.**
 - **Each task's affected file list reduces subagent exploration cost** — include file paths in the task description.
 
 ## Integration
@@ -217,3 +239,4 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Combine multiple concerns in one issue | One issue = one problem = one PR |
 | Ask too many clarifying questions | 0-2 questions max; research answers most questions |
 | Single task modifies 5+ files | Split into focused subtasks |
+| Task has no file paths | Subagent reads 13+ files to orient; include at least 1 file path per task |

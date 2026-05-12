@@ -1,0 +1,7 @@
+{
+  "current_model": "sonnet",
+  "error_kind": "permission_denied",
+  "_fixture_meta": {
+    "description": "permission_denied — non-escalatable error; no model can bypass permission hooks. Expected next_model=null, at_ceiling=true."
+  }
+}
