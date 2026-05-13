@@ -117,9 +117,14 @@ teardown() {
 	local script_content
 	script_content=$(< "$ORCHESTRATOR_SCRIPT")
 
-	# Blocked merge must exit 0 (leave PR open, not fail the pipeline)
-	[[ "$script_content" == *'set_final_state "merge_blocked"'*$'\n'*'exit 0'* ]] || \
-	grep -q 'set_final_state "merge_blocked"' <<< "$script_content"
+	# Blocked merge must exit 0 (leave PR open, not fail the pipeline).
+	# Find the line number of set_final_state "merge_blocked", then check
+	# that the next exit statement in the same block is exit 0.
+	local block_pos next_exit
+	block_pos=$(grep -n 'set_final_state "merge_blocked"' <<< "$script_content" \
+		| tail -1 | cut -d: -f1)
+	next_exit=$(awk "NR>$block_pos && /exit [0-9]/{ print; exit }" <<< "$script_content")
+	[[ "$next_exit" == *'exit 0'* ]]
 }
 
 @test "merge stage block check precedes merge-mr.sh call" {
