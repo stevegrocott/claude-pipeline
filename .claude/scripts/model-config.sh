@@ -166,6 +166,48 @@ readonly -a _STAGE_PREFIXES=(
 # =============================================================================
 
 # =============================================================================
+# PER-LOOP WALL-CLOCK BUDGETS
+# =============================================================================
+#
+# Each major loop gets its own wall-clock budget so it cannot be starved by
+# earlier stages consuming the global MAX_ORCHESTRATOR_WALL_TIME budget.
+# Budgets are derived from the per-iteration timeouts already in the code,
+# so "at least one full iteration completes" is structurally guaranteed.
+#
+# PR-review loop budget:
+#   Formula:  pr_review_timeout × max(MAX_PR_REVIEW_ITERATIONS, 1)
+#               + PR_REVIEW_WALL_TIME_SLACK
+#   Default:  2520s  (1200 × 2 + 120; covers a 200+ line diff at full
+#                     iterations with the default 120s slack)
+#   Env vars:
+#     PR_REVIEW_WALL_BUDGET      — full override (seconds); when set,
+#                                  replaces the formula entirely
+#     PR_REVIEW_WALL_TIME_SLACK  — slack added on top of the per-iteration
+#                                  budget (default 120s)
+#
+#   pr_review_timeout is the per-iteration claude-run limit from
+#   get_pr_review_config() — it scales with diff size:
+#     <50 lines  → 360s  →  loop budget = 360  × max(iter,1) + slack
+#     <200 lines → 600s  →  loop budget = 600  × max(iter,1) + slack
+#     200+ lines → 1200s →  loop budget = 1200 × max(iter,1) + slack
+#   The default 2520s covers the worst case (200+ line diff, 2 iterations,
+#   120s slack).  On smaller diffs the computed budget is tighter;
+#   PR_REVIEW_WALL_BUDGET overrides the computed value entirely when set.
+#
+# Test loop budget:
+#   TODO: implemented in task 3 (issue #317).  This block will document
+#   MAX_TEST_LOOP_SECS and TEST_LOOP_PLANNED_ITERATIONS once the test
+#   loop's per-loop budget lands; do not search for those symbols yet.
+#
+# Both budgets are checked INSTEAD OF (or in addition to) the global clock
+# for their respective loops, so a loop that is within its own budget is
+# never killed by global-clock exhaustion from earlier stages.
+#
+# Decision logic / enforcement: implement-issue-orchestrator.sh
+# (search for PR_REVIEW_WALL_BUDGET)
+# =============================================================================
+
+# =============================================================================
 # LOOKUP FUNCTIONS
 # =============================================================================
 #
