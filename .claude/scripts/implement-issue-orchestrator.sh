@@ -2327,6 +2327,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
 
                 comment_issue "Quality Loop: Convergence Failure ($stage_prefix)" "$convergence_body" "code-reviewer"
                 DEGRADED_STAGES+=("quality:convergence_failure:$stage_prefix:iter=$loop_iteration")
+                set_final_state "convergence_failure_quality"
 
                 # Persist a merge-block reason so both the orchestrator merge
                 # stage and a standalone process-pr run will refuse to auto-merge
@@ -2340,8 +2341,11 @@ Repeating issues:
 - $repeat_issues"
                 fi
                 if [[ -f "$STATUS_FILE" ]]; then
+                    local degraded_json
+                    degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]}" | jq -R . | jq -s .)
                     jq --arg reason "$block_reason" \
-                       '.merge_blocked_reason = $reason | .last_update = (now | todate)' \
+                       --argjson stages "$degraded_json" \
+                       '.merge_blocked_reason = $reason | .degraded_stages = $stages | .last_update = (now | todate)' \
                        "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
                        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
                     sync_status_to_log

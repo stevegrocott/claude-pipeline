@@ -41,15 +41,15 @@ teardown() {
 	[[ "$script_content" == *'DEGRADED_STAGES+=("quality:convergence_failure:$stage_prefix:iter=$loop_iteration")'* ]]
 }
 
-@test "quality-loop convergence branch does not call set_final_state" {
-	# set_final_state is NOT called inside run_quality_loop at convergence
-	# failure — that would overwrite state mid-pipeline.  State is set later,
-	# in the merge stage, where set_final_state "merge_blocked" is called.
+@test "quality-loop convergence branch calls set_final_state convergence_failure_quality" {
+	# AC2: set_final_state "convergence_failure_quality" must be called in the
+	# >33%-repeats branch so status.json reflects the convergence failure.
+	# The merge stage overwrites it with "merge_blocked" if auto-merge is blocked.
 	local conv_block
 	conv_block=$(awk \
 		'/if \(\( repeat_ratio > 33 \)\); then/,/loop_approved=true/' \
 		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
-	[[ "$conv_block" != *'set_final_state'* ]]
+	[[ "$conv_block" == *'set_final_state "convergence_failure_quality"'* ]]
 }
 
 # =============================================================================
