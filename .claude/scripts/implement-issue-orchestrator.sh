@@ -94,6 +94,16 @@ PR_REVIEW_WALL_TIME_SLACK="${PR_REVIEW_WALL_TIME_SLACK:-120}"
 # Full override for the PR-review loop budget (seconds).  When set,
 # replaces the formula pr_review_timeout*max(max_iter,1)+slack entirely.
 PR_REVIEW_WALL_BUDGET="${PR_REVIEW_WALL_BUDGET:-}"
+# Sane planned-iteration count used when computing the test loop's
+# own wall-clock budget.  Intentionally smaller than MAX_TEST_ITERATIONS
+# (7) so the budget reflects realistic expected usage, not worst-case.
+# Override via env to tune without changing the hard iteration cap.
+TEST_LOOP_PLANNED_ITERATIONS="${TEST_LOOP_PLANNED_ITERATIONS:-3}"
+# Slack added on top of the per-iteration timeout for the test-loop budget.
+TEST_ITER_WALL_TIME_SLACK="${TEST_ITER_WALL_TIME_SLACK:-120}"
+# Full override for the test-loop wall-clock budget (seconds).  When set,
+# replaces test-iter-timeout×planned_iter+slack entirely.
+TEST_LOOP_WALL_BUDGET="${TEST_LOOP_WALL_BUDGET:-}"
 
 # Kill-switch for emergency bash fallback.  The escalation-policy skill is
 # now the default routing backend.  Set ESCALATION_POLICY_BACKEND=bash to
@@ -189,6 +199,50 @@ check_pr_review_wall_timeout() {
         return 1
     fi
     return 0
+}
+
+# Check the test loop's own wall-clock budget.
+# Returns 0 if within budget, 1 if the budget has been exceeded.
+#
+# Arguments:
+#   $1 - loop_start : epoch (seconds) when the test loop began
+#   $2 - budget     : total allowed seconds for the loop
+check_test_loop_wall_timeout() {
+    local loop_start="$1"
+    local budget="$2"
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$(( now - loop_start ))
+    if (( elapsed > budget )); then
+        log_warn "Test-loop wall-clock budget exceeded:" \
+            "${elapsed}s elapsed (limit: ${budget}s)." \
+            "Soft-exiting test loop."
+        return 1
+    fi
+    return 0
+}
+
+# Compute the test loop's own wall-clock budget (seconds).
+#
+# Formula: get_stage_timeout("test-iter") × max(planned_iter, 1)
+#            + TEST_ITER_WALL_TIME_SLACK
+#
+# When TEST_LOOP_WALL_BUDGET is set, it overrides the formula entirely.
+# TEST_LOOP_PLANNED_ITERATIONS and TEST_ITER_WALL_TIME_SLACK are both
+# env-overridable at the call site.
+#
+# Output: budget seconds to stdout
+calc_test_loop_budget() {
+    if [[ -n "${TEST_LOOP_WALL_BUDGET:-}" ]]; then
+        printf '%s' "$TEST_LOOP_WALL_BUDGET"
+        return 0
+    fi
+    local test_iter_timeout effective_iter
+    test_iter_timeout=$(get_stage_timeout "test-iter" "")
+    effective_iter=$(( TEST_LOOP_PLANNED_ITERATIONS > 1 \
+        ? TEST_LOOP_PLANNED_ITERATIONS : 1 ))
+    printf '%s' "$(( test_iter_timeout * effective_iter \
+        + TEST_ITER_WALL_TIME_SLACK ))"
 }
 
 # =============================================================================
@@ -4873,6 +4927,26 @@ run_test_loop() {
         log "WARNING: Playwright specs found but TEST_E2E_CMD not configured — Playwright specs will be skipped"
     fi
 
+    # Compute the test loop's own wall-clock budget.
+    # Formula: test-iter-timeout × max(planned_iter, 1) + slack
+    # Each factor is env-overridable; TEST_LOOP_WALL_BUDGET overrides all.
+    local test_loop_wall_budget
+    test_loop_wall_budget=$(calc_test_loop_budget)
+    if [[ -n "${TEST_LOOP_WALL_BUDGET:-}" ]]; then
+        log "Test loop wall-clock budget: ${test_loop_wall_budget}s" \
+            "(env override)"
+    else
+        local _tl_iter_timeout _tl_planned_eff
+        _tl_iter_timeout=$(get_stage_timeout "test-iter" "")
+        _tl_planned_eff=$(( TEST_LOOP_PLANNED_ITERATIONS > 1 \
+            ? TEST_LOOP_PLANNED_ITERATIONS : 1 ))
+        log "Test loop wall-clock budget: ${test_loop_wall_budget}s" \
+            "(${_tl_iter_timeout}s/iter × ${_tl_planned_eff}" \
+            "+ ${TEST_ITER_WALL_TIME_SLACK}s slack)"
+    fi
+    local test_loop_start
+    test_loop_start=$(date +%s)
+
     local prior_failure_sigs=""
     while [[ "$loop_complete" != "true" ]]; do
         test_iteration=$((test_iteration + 1))
@@ -4882,6 +4956,15 @@ run_test_loop() {
             log_warn "Wall-clock timeout in test loop at iteration $test_iteration"
             set_final_state "wall_timeout_test"
             DEGRADED_STAGES+=("test:wall_timeout:iter=$test_iteration")
+            loop_complete=true
+            break
+        fi
+
+        if ! check_test_loop_wall_timeout \
+                "$test_loop_start" "$test_loop_wall_budget"; then
+            log_warn "Test-loop budget timeout at iteration $test_iteration"
+            set_final_state "wall_timeout_test"
+            DEGRADED_STAGES+=("test:wall_timeout_budget:iter=$test_iteration")
             loop_complete=true
             break
         fi

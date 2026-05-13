@@ -200,12 +200,31 @@ readonly -a _STAGE_PREFIXES=(
 #   from global-clock exhaustion caused by earlier stages.
 #
 # Test loop budget:
-#   The test loop currently uses only the global wall clock (check_wall_timeout).
-#   A per-loop budget analogous to the PR-review one above is not yet
-#   implemented (issue #317, task 3 pending).
+#   Formula:  test_iter_timeout × max(TEST_LOOP_PLANNED_ITERATIONS, 1)
+#               + TEST_ITER_WALL_TIME_SLACK
+#   Default:  2820s  (900 × 3 + 120; covers 3 full test iterations with
+#                     the default 120s slack)
+#   Env vars:
+#     TEST_LOOP_WALL_BUDGET          — full override (seconds); when set,
+#                                      replaces the formula entirely
+#     TEST_LOOP_PLANNED_ITERATIONS   — sane planned iteration count used
+#                                      in the formula (default 3; intentionally
+#                                      smaller than MAX_TEST_ITERATIONS=7)
+#     TEST_ITER_WALL_TIME_SLACK      — slack added on top of the per-iteration
+#                                      budget (default 120s)
+#
+#   test_iter_timeout comes from get_stage_timeout("test-iter") = 900s.
+#   TEST_LOOP_PLANNED_ITERATIONS defaults to 3 — a sane expected iteration
+#   count that is structurally smaller than the hard cap MAX_TEST_ITERATIONS=7.
+#   Operators can raise it via env without changing the hard cap.
+#
+#   This budget is checked IN ADDITION TO the global clock — the loop exits
+#   when either guard fires.  Within its own budget, the loop is protected
+#   from global-clock exhaustion caused by earlier stages.
 #
 # Decision logic / enforcement: implement-issue-orchestrator.sh
-# (search for PR_REVIEW_WALL_BUDGET / check_pr_review_wall_timeout)
+# (search for PR_REVIEW_WALL_BUDGET / check_pr_review_wall_timeout and
+#  TEST_LOOP_WALL_BUDGET / check_test_loop_wall_timeout / calc_test_loop_budget)
 # =============================================================================
 
 # =============================================================================

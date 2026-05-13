@@ -71,18 +71,28 @@ teardown() {
 #   MAX_TASK_WALL_TIME_SECS
 _source_timeout_functions() {
 	local func_file="$TEST_TMP/timeout_funcs.bash"
+	# Stub log_warn so check_test_loop_wall_timeout can call it without
+	# the full orchestrator environment.
+	printf '%s\n' \
+		'log_warn() { printf "[WARN] %s\n" "$*" >&2; }' \
+		> "$func_file"
 	awk '
 		/^readonly / { next }
 		/^set -o /   { next }
-		/^MAX_TEST_ITERATIONS=/        { print; next }
-		/^MAX_PR_REVIEW_ITERATIONS=/   { print; next }
-		/^MAX_ORCHESTRATOR_WALL_TIME=/ { print; next }
-		/^MAX_TASK_WALL_TIME_SECS=/    { print; next }
-		/^get_stage_timeout\(\) \{$/,/^\}$/                    { print; next }
-		/^get_pr_review_config\(\) \{$/,/^\}$/                 { print; next }
-		/^apply_profile_to_pr_review_max_iter\(\) \{$/,/^\}$/ { print; next }
-		/^apply_profile_to_test_max_iter\(\) \{$/,/^\}$/      { print; next }
-	' "$ORCHESTRATOR" > "$func_file"
+		/^MAX_TEST_ITERATIONS=/           { print; next }
+		/^MAX_PR_REVIEW_ITERATIONS=/      { print; next }
+		/^MAX_ORCHESTRATOR_WALL_TIME=/    { print; next }
+		/^MAX_TASK_WALL_TIME_SECS=/       { print; next }
+		/^TEST_LOOP_PLANNED_ITERATIONS=/  { print; next }
+		/^TEST_ITER_WALL_TIME_SLACK=/     { print; next }
+		/^TEST_LOOP_WALL_BUDGET=/         { print; next }
+		/^get_stage_timeout\(\) \{$/,/^\}$/                      { print; next }
+		/^get_pr_review_config\(\) \{$/,/^\}$/                   { print; next }
+		/^apply_profile_to_pr_review_max_iter\(\) \{$/,/^\}$/   { print; next }
+		/^apply_profile_to_test_max_iter\(\) \{$/,/^\}$/         { print; next }
+		/^calc_test_loop_budget\(\) \{$/,/^\}$/                  { print; next }
+		/^check_test_loop_wall_timeout\(\) \{$/,/^\}$/           { print; next }
+	' "$ORCHESTRATOR" >> "$func_file"
 	# shellcheck disable=SC1090
 	source "$func_file"
 }
@@ -284,6 +294,199 @@ _mock_diff_count() {
 		printf \
 			'FAIL: expected default MAX_TEST_ITERATIONS=7 when unset, got %s\n' \
 			"$MAX_TEST_ITERATIONS" >&2
+		return 1
+	}
+}
+
+# =============================================================================
+# (4) Test loop wall-clock budget
+# =============================================================================
+#
+# Contract:
+#   calc_test_loop_budget() returns
+#     test-iter-timeout × max(TEST_LOOP_PLANNED_ITERATIONS, 1)
+#       + TEST_ITER_WALL_TIME_SLACK
+#   unless TEST_LOOP_WALL_BUDGET is set, in which case it returns that value.
+#
+#   check_test_loop_wall_timeout(start, budget) returns 0 when elapsed <=
+#   budget and 1 when elapsed > budget.
+#
+#   The computed default budget >= one test-iter stage timeout so the loop
+#   always gets at least one full iteration.
+# =============================================================================
+
+@test "(4a) TEST_LOOP_PLANNED_ITERATIONS default is 3 when unset" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	unset TEST_LOOP_PLANNED_ITERATIONS
+	_source_timeout_functions
+
+	[[ "$TEST_LOOP_PLANNED_ITERATIONS" -eq 3 ]] || {
+		printf \
+			'FAIL: expected default TEST_LOOP_PLANNED_ITERATIONS=3, got %s\n' \
+			"$TEST_LOOP_PLANNED_ITERATIONS" >&2
+		return 1
+	}
+}
+
+@test "(4b) TEST_LOOP_PLANNED_ITERATIONS env override survives orchestrator init" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	TEST_LOOP_PLANNED_ITERATIONS=2
+	_source_timeout_functions
+
+	[[ "$TEST_LOOP_PLANNED_ITERATIONS" -eq 2 ]] || {
+		printf \
+			'FAIL: expected TEST_LOOP_PLANNED_ITERATIONS=2 to survive init, got %s\n' \
+			"$TEST_LOOP_PLANNED_ITERATIONS" >&2
+		return 1
+	}
+}
+
+@test "(4c) TEST_ITER_WALL_TIME_SLACK default is 120 when unset" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	unset TEST_ITER_WALL_TIME_SLACK
+	_source_timeout_functions
+
+	[[ "$TEST_ITER_WALL_TIME_SLACK" -eq 120 ]] || {
+		printf \
+			'FAIL: expected default TEST_ITER_WALL_TIME_SLACK=120, got %s\n' \
+			"$TEST_ITER_WALL_TIME_SLACK" >&2
+		return 1
+	}
+}
+
+@test "(4d) TEST_ITER_WALL_TIME_SLACK env override survives orchestrator init" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	TEST_ITER_WALL_TIME_SLACK=60
+	_source_timeout_functions
+
+	[[ "$TEST_ITER_WALL_TIME_SLACK" -eq 60 ]] || {
+		printf \
+			'FAIL: expected TEST_ITER_WALL_TIME_SLACK=60 to survive init, got %s\n' \
+			"$TEST_ITER_WALL_TIME_SLACK" >&2
+		return 1
+	}
+}
+
+@test "(4e) calc_test_loop_budget uses formula: iter_timeout × planned_iter + slack" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	unset TEST_LOOP_WALL_BUDGET
+	TEST_LOOP_PLANNED_ITERATIONS=3
+	TEST_ITER_WALL_TIME_SLACK=120
+	_source_timeout_functions
+
+	local test_iter_timeout budget expected
+	test_iter_timeout=$(get_stage_timeout "test-iter-1" "")
+	expected=$(( test_iter_timeout * 3 + 120 ))
+
+	budget=$(calc_test_loop_budget)
+
+	[[ "$budget" -eq "$expected" ]] || {
+		printf \
+			'FAIL: expected budget=%d (%dx3+120), got %s\n' \
+			"$expected" "$test_iter_timeout" "$budget" >&2
+		return 1
+	}
+}
+
+@test "(4f) TEST_LOOP_WALL_BUDGET env override bypasses the formula" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	TEST_LOOP_WALL_BUDGET=9999
+	_source_timeout_functions
+
+	local budget
+	budget=$(calc_test_loop_budget)
+
+	[[ "$budget" -eq 9999 ]] || {
+		printf \
+			'FAIL: expected budget=9999 from env override, got %s\n' \
+			"$budget" >&2
+		return 1
+	}
+}
+
+@test "(4g) check_test_loop_wall_timeout returns 0 when within budget" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	_source_timeout_functions
+
+	local start budget
+	start=$(date +%s)
+	budget=3600
+
+	check_test_loop_wall_timeout "$start" "$budget" || {
+		printf 'FAIL: expected 0 (within budget), got 1\n' >&2
+		return 1
+	}
+}
+
+@test "(4h) check_test_loop_wall_timeout returns 1 when budget exceeded" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	_source_timeout_functions
+
+	# Start 100s in the past; budget is only 50s.
+	local start budget
+	start=$(( $(date +%s) - 100 ))
+	budget=50
+
+	! check_test_loop_wall_timeout "$start" "$budget" || {
+		printf 'FAIL: expected 1 (budget exceeded), got 0\n' >&2
+		return 1
+	}
+}
+
+@test "(4i) default test loop budget >= one test-iter stage timeout" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	unset TEST_LOOP_WALL_BUDGET
+	unset TEST_LOOP_PLANNED_ITERATIONS
+	unset TEST_ITER_WALL_TIME_SLACK
+	_source_timeout_functions
+
+	local budget test_iter_timeout
+	budget=$(calc_test_loop_budget)
+	test_iter_timeout=$(get_stage_timeout "test-iter-1" "")
+
+	(( budget >= test_iter_timeout )) || {
+		printf \
+			'FAIL: default budget %ds < test-iter timeout %ds\n' \
+			"$budget" "$test_iter_timeout" >&2
+		return 1
+	}
+}
+
+@test "(4j) TEST_LOOP_PLANNED_ITERATIONS=1 still yields at least one iter budget" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	unset TEST_LOOP_WALL_BUDGET
+	TEST_LOOP_PLANNED_ITERATIONS=1
+	TEST_ITER_WALL_TIME_SLACK=0
+	_source_timeout_functions
+
+	local budget test_iter_timeout
+	budget=$(calc_test_loop_budget)
+	test_iter_timeout=$(get_stage_timeout "test-iter-1" "")
+
+	(( budget >= test_iter_timeout )) || {
+		printf \
+			'FAIL: planned=1 budget %ds < test-iter timeout %ds\n' \
+			"$budget" "$test_iter_timeout" >&2
 		return 1
 	}
 }
