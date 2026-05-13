@@ -5,7 +5,7 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["merged", "changes_requested", "error", "rate_limit"],
+      "enum": ["merged", "changes_requested", "merge_blocked", "error", "rate_limit"],
       "description": "Final status of PR processing"
     },
     "follow_up_issues": {

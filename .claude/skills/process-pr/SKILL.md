@@ -18,7 +18,7 @@ inputs:
 outputs:
   - name: status
     type: string
-    description: Outcome — one of merged, changes_requested, error, or rate_limit
+    description: Outcome — one of merged, changes_requested, merge_blocked, error, or rate_limit
   - name: follow_up_issues
     type: array
     description: Issue numbers created from follow-up items found in review comments
@@ -71,23 +71,28 @@ digraph process_pr {
     approved [label="Approved path"];
     changes [label="Changes requested path"];
 
-    merge [label="4a. Merge PR/MR"];
-    comment [label="4b. Comment on issue"];
-    close [label="4c. Close issue"];
-    delete [label="4d. Delete branch"];
-    parse [label="4e. Parse comments for follow-ups"];
-    create_issues [label="4f. Create follow-up issues"];
+    check_block [label="4a. Check merge block\n(status.json)"];
+    merge [label="4b. Merge PR/MR"];
+    comment [label="4c. Comment on issue"];
+    close [label="4d. Close issue"];
+    delete [label="4e. Delete branch"];
+    parse [label="4f. Parse comments for follow-ups"];
+    create_issues [label="4g. Create follow-up issues"];
 
     rerun [label="5. Re-run /implement-issue"];
 
     output_success [label="Output: Success summary"];
+    output_blocked [label="Output: Merge blocked — PR left open"];
     output_rerun [label="Output: Re-implementation started"];
 
     validate -> fetch -> check;
     check -> approved [label="approved"];
     check -> changes [label="changes requested"];
 
-    approved -> merge -> comment -> close -> delete -> parse -> create_issues -> output_success;
+    approved -> check_block;
+    check_block -> merge [label="no block"];
+    check_block -> output_blocked [label="merge_blocked_reason set\nor quality:convergence_failure\nin degraded_stages"];
+    merge -> comment -> close -> delete -> parse -> create_issues -> output_success;
     changes -> rerun -> output_rerun;
 }
 ```
@@ -184,7 +189,60 @@ echo "Review status: $REVIEW_STATUS"
 
 ## If Approved: Merge Path
 
-### Step 4a: Merge PR/MR
+### Step 4a: Check for Merge Block
+
+Before calling `merge-mr.sh`, read `status.json` to check whether a convergence-failure block is in effect.
+
+```bash
+STATUS_JSON="${STATUS_JSON_PATH:-status.json}"
+MERGE_BLOCKED_REASON=""
+
+if [[ -f "$STATUS_JSON" ]]; then
+    # Prefer the explicit merge_blocked_reason field (written by the orchestrator)
+    MERGE_BLOCKED_REASON=$(jq -r '.merge_blocked_reason // empty' "$STATUS_JSON" 2>/dev/null)
+
+    # Fall back to scanning degraded_stages for a quality:convergence_failure entry
+    if [[ -z "$MERGE_BLOCKED_REASON" ]]; then
+        CONVERGENCE_ENTRY=$(jq -r '(.degraded_stages // [])[] | select(startswith("quality:convergence_failure"))' "$STATUS_JSON" 2>/dev/null | head -1)
+        if [[ -n "$CONVERGENCE_ENTRY" ]]; then
+            MERGE_BLOCKED_REASON="Quality loop convergence failure recorded in degraded_stages: $CONVERGENCE_ENTRY"
+        fi
+    fi
+fi
+
+if [[ -n "$MERGE_BLOCKED_REASON" ]]; then
+    echo "MERGE BLOCKED: $MERGE_BLOCKED_REASON"
+    # Post a comment on the PR explaining why it was not merged
+    PLATFORM_DIR=".claude/scripts/platform"
+    "$PLATFORM_DIR/comment-mr.sh" "$PR_NUMBER" "$(cat <<EOF
+## Merge Blocked — Unresolved Quality Feedback
+
+This PR was **not** merged automatically because the quality loop exited with a convergence failure, meaning the reviewer repeatedly flagged the same issues without resolution.
+
+**Block reason:** $MERGE_BLOCKED_REASON
+
+Human review is required before merging. Address the unresolved feedback, then re-run the pipeline or merge manually once the issues are resolved.
+EOF
+    )"
+    # Leave the PR open; do NOT close the issue or delete the branch
+    exit 0  # skill exits with merge_blocked status (see output section)
+fi
+```
+
+**`STATUS_JSON_PATH` override:** If `status.json` is not in the current directory (e.g. when invoked from a different working directory), set `STATUS_JSON_PATH` to the full path before calling this skill.
+
+**`BLOCK_MERGE_ON_CONVERGENCE_FAILURE` env var:** When this variable is explicitly set to `0`, skip the check above and proceed directly to merge (restores the pre-fix behaviour for emergency overrides).
+
+```bash
+if [[ "${BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1}" == "0" ]]; then
+    echo "WARN: BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 — skipping merge-block check"
+    MERGE_BLOCKED_REASON=""
+fi
+```
+
+**If a merge block is set:** Leave the PR open, post the explanatory comment, and output `merge_blocked` status (see Output section). Do not proceed to close the issue or delete the branch.
+
+### Step 4b: Merge PR/MR
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
@@ -196,7 +254,7 @@ PLATFORM_DIR=".claude/scripts/platform"
 - Stop - do not proceed to close issue or create follow-ups
 - Return failure status
 
-### Step 4b: Comment on Issue
+### Step 4c: Comment on Issue
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
@@ -214,14 +272,14 @@ EOF
 )"
 ```
 
-### Step 4c: Close Issue
+### Step 4d: Close Issue
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
 "$PLATFORM_DIR/transition-issue.sh" "$ISSUE_NUMBER"
 ```
 
-### Step 4d: Delete Branch
+### Step 4e: Delete Branch
 
 The merge script may handle branch deletion. Verify:
 
@@ -234,7 +292,7 @@ If still exists:
 git push origin --delete $BRANCH_NAME
 ```
 
-### Step 4e: Parse Comments for Follow-up Issues
+### Step 4f: Parse Comments for Follow-up Issues
 
 Scan all review comments for indicators of follow-up work:
 
@@ -276,7 +334,7 @@ Examples:
 - Body (full context from comment)
 - Labels (inferred: bug, enhancement, tech-debt)
 
-### Step 4f: Create Follow-up Issues
+### Step 4g: Create Follow-up Issues
 
 **Before creating each issue, run a deduplication check:**
 
@@ -410,6 +468,7 @@ Changes requested on PR/MR #$PR_NUMBER. Re-running implementation for issue #$IS
 
 ### Actions Taken
 - [x] Review status: APPROVED
+- [x] Merge block check: no block
 - [x] Created N follow-up issues
 - [x] PR/MR merged
 - [x] Issue #$ISSUE_NUMBER closed
@@ -419,6 +478,30 @@ Changes requested on PR/MR #$PR_NUMBER. Re-running implementation for issue #$IS
 | Issue | Title | Labels |
 |-------|-------|--------|
 | #XXX | Description | enhancement |
+```
+
+### Merge Blocked (Convergence Failure)
+
+```
+## Process PR/MR: Merge Blocked
+
+**PR/MR:** #$PR_NUMBER
+**Issue:** #$ISSUE_NUMBER
+**Status:** ⛔ Merge blocked — PR left open
+
+### Block Reason
+$MERGE_BLOCKED_REASON
+
+### Actions Taken
+- [x] Review status: APPROVED
+- [x] Merge block check: BLOCKED
+- [ ] PR/MR merge — SKIPPED (blocked)
+- [ ] Issue close — SKIPPED (blocked)
+- [ ] Branch delete — SKIPPED (blocked)
+
+### Next Steps
+Human review is required. Address the unresolved quality feedback listed above,
+then merge manually or re-run the pipeline once the issues are resolved.
 ```
 
 ### Re-implementation (Changes Requested)
@@ -443,6 +526,8 @@ Re-running /implement-issue $ISSUE_NUMBER $BASE_BRANCH to address requested chan
 |---------------|--------|
 | Validation fails | Stop, report error |
 | No review status in comments | Stop, report - need code review comment with Status line first |
+| `merge_blocked_reason` set in `status.json` | Leave PR open, post block comment, return `merge_blocked` — do NOT close issue or delete branch |
+| `quality:convergence_failure` in `degraded_stages` | Same as above (fallback when `merge_blocked_reason` absent) |
 | Issue creation fails | Log warning, continue |
 | Merge fails | Stop, return failure, do NOT close issue |
 | Issue close fails | Log warning (merge succeeded) |
@@ -530,6 +615,14 @@ Follow-up issues: none
 Status: changes_requested
 ```
 
+**On merge blocked (convergence failure):**
+```
+## Result
+
+Status: merge_blocked
+Error: Quality loop convergence failure recorded in degraded_stages: quality:convergence_failure:quality:iter=2
+```
+
 **On error:**
 ```
 ## Result
@@ -554,7 +647,7 @@ The `batch-orchestrator.sh` uses this JSON schema to extract results:
 {
   "type": "object",
   "properties": {
-    "status": {"enum": ["merged", "changes_requested", "error", "rate_limit"]},
+    "status": {"enum": ["merged", "changes_requested", "merge_blocked", "error", "rate_limit"]},
     "follow_up_issues": {"type": "array", "items": {"type": "string"}},
     "error": {"type": "string"}
   },
