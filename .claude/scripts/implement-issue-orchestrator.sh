@@ -2325,6 +2325,8 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
                 fi
 
                 comment_issue "Quality Loop: Convergence Failure ($stage_prefix)" "$convergence_body" "code-reviewer"
+                set_final_state "convergence_failure_quality"
+                DEGRADED_STAGES+=("quality:convergence_failure:$stage_prefix:iter=$loop_iteration")
                 loop_approved=true
                 break
             fi
