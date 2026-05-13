@@ -2866,6 +2866,36 @@ compute_pipeline_profile() {
 # =============================================================================
 
 #
+# Returns the canonical agent name, applying legacy→current mappings.
+# Falls back to "default" for names that have no local .md definition.
+#
+# Arguments:
+#   $1 - raw agent name extracted from a task line
+# Outputs:
+#   Normalized agent name on stdout
+#
+_normalize_agent_name() {
+	local name="$1"
+	local agents_dir="${SCRIPT_DIR}/../agents"
+
+	# Allowlist of legacy→current agent-name mappings.
+	# Add future renames here; never delete old entries so that
+	# historical issue bodies continue to parse cleanly.
+	case "$name" in
+		test-engineer) name="playwright-test-developer" ;;
+	esac
+
+	# If the (possibly remapped) name has a local definition, accept it.
+	if [[ -f "${agents_dir}/${name}.md" ]]; then
+		printf '%s' "$name"
+		return
+	fi
+
+	# Unknown name with no local definition — fall back to generic agent.
+	printf '%s' "default"
+}
+
+#
 # Parses task lines from a tasks section string into a JSON array.
 #
 # Handles the canonical format plus common malformations:
@@ -2876,7 +2906,8 @@ compute_pipeline_profile() {
 #   Fallback 4: - [ ] `agent` description        (missing square brackets)
 #
 # Fuzzy matches emit a warning on stderr so operators know the issue body
-# formatting is non-standard.
+# formatting is non-standard.  Fallback 4 (bracket-less backtick selectors)
+# is accepted silently — it is a common shorthand that requires no repair.
 #
 # Checked boxes [x] are considered already complete and skipped.
 #
@@ -2936,10 +2967,11 @@ _parse_task_lines() {
 			fuzzy="extra leading whitespace"
 
 		# Fallback 4: missing square brackets — - [ ] `agent` description
+		# Accepted silently: bracket-less backtick selectors are common
+		# shorthand and do not indicate a formatting problem.
 		elif [[ "$line" =~ $_re_bare_agent ]]; then
 			agent="${BASH_REMATCH[2]}"
 			desc="${BASH_REMATCH[3]}"
-			fuzzy="missing square brackets around agent name"
 
 		else
 			# Not a task line — skip silently
@@ -2949,6 +2981,10 @@ _parse_task_lines() {
 		if [[ -n "$fuzzy" ]]; then
 			log_warn "Fuzzy task parse (${fuzzy}): $line"
 		fi
+
+		# Normalize legacy agent names and fall back to "default" for
+		# names that have no local .md definition.
+		agent=$(_normalize_agent_name "$agent")
 
 		# AC2: default complexity to M when no hint present
 		if [[ ! "$desc" =~ \*\*\([SML]\)\*\* ]]; then
@@ -5869,12 +5905,17 @@ $excerpt
         fi
 
         # (a) Verify agent names have definitions in .claude/agents/
+        # Agent names are normalized by _parse_task_lines (legacy remapping +
+        # "default" fallback), so warn only when the post-normalization name
+        # is neither "default" nor a known local agent.
         local agents_dir="$SCRIPT_DIR/../agents"
         for ((i=0; i<task_count; i++)); do
             local check_agent
             check_agent=$(printf '%s' "$tasks_json" | jq -r ".[$i].agent")
-            if [[ ! -f "$agents_dir/${check_agent}.md" ]]; then
-                log "WARNING: Task $((i+1)) uses agent '$check_agent' which has no definition in .claude/agents/"
+            if [[ "$check_agent" != "default" \
+                && ! -f "$agents_dir/${check_agent}.md" ]]; then
+                log "WARNING: Task $((i+1)) uses agent '$check_agent'" \
+                    "which has no definition in .claude/agents/"
             fi
         done
 
