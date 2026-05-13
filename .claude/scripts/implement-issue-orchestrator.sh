@@ -3061,6 +3061,7 @@ _normalize_agent_name() {
 	fi
 
 	# Unknown name with no local definition — fall back to generic agent.
+	log_warn "_normalize_agent_name: unknown agent '${name}' — falling back to 'default'"
 	printf '%s' "default"
 }
 
