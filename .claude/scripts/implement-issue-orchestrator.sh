@@ -462,6 +462,7 @@ init_status() {
             stage_started_at: null,
             last_update: (now | todate),
             log_dir: $log_dir,
+            merge_blocked_reason: null,
             escalations: []
         }' > "$STATUS_FILE"
 
@@ -2327,6 +2328,26 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
                 comment_issue "Quality Loop: Convergence Failure ($stage_prefix)" "$convergence_body" "code-reviewer"
                 set_final_state "convergence_failure_quality"
                 DEGRADED_STAGES+=("quality:convergence_failure:$stage_prefix:iter=$loop_iteration")
+
+                # Persist a merge-block reason so both the orchestrator merge
+                # stage and a standalone process-pr run will refuse to auto-merge
+                # this PR — convergence failure means the reviewer kept flagging
+                # the same likely-real feedback, so a human should look first.
+                local block_reason
+                block_reason="Quality loop convergence failure: ${repeat_ratio}% of issues repeating at $stage_prefix (iter=$loop_iteration)"
+                if [[ -n "$repeat_issues" ]]; then
+                    block_reason+="
+Repeating issues:
+- $repeat_issues"
+                fi
+                if [[ -f "$STATUS_FILE" ]]; then
+                    jq --arg reason "$block_reason" \
+                       '.merge_blocked_reason = $reason | .last_update = (now | todate)' \
+                       "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+                       && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+                    sync_status_to_log
+                fi
+
                 loop_approved=true
                 break
             fi
@@ -6983,6 +7004,67 @@ $complete_summary
         set_final_state "completed"
     else
         set_stage_started "merge_pr"
+
+        # ---------------------------------------------------------------------
+        # MERGE GATE — refuse to auto-merge when the quality loop bailed via a
+        # convergence failure (the reviewer kept flagging the same, likely-real
+        # feedback that more iterations could not resolve).  The block reason is
+        # read from the persisted status.json field so a standalone process-pr
+        # run honours it too; if absent, fall back to scanning the in-memory
+        # DEGRADED_STAGES array.  Override with BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0.
+        # ---------------------------------------------------------------------
+        local merge_blocked_reason=""
+        if [[ "${BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1}" == "0" ]]; then
+            log "BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 — skipping merge-block check"
+        else
+            merge_blocked_reason=$(jq -r '.merge_blocked_reason // empty' \
+                "$STATUS_FILE" 2>/dev/null || printf '')
+            if [[ -z "$merge_blocked_reason" ]]; then
+                local _ds
+                for _ds in "${DEGRADED_STAGES[@]}"; do
+                    if [[ "$_ds" == quality:convergence_failure:* ]]; then
+                        merge_blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
+                        break
+                    fi
+                done
+            fi
+        fi
+
+        if [[ -n "$merge_blocked_reason" ]]; then
+            log_warn "Merge blocked for PR #$pr_number: unresolved quality feedback"
+            comment_pr "$pr_number" "Merge Blocked — Unresolved Quality Feedback" \
+                "🚫 Auto-merge was blocked because the internal quality loop could not resolve recurring review feedback. This PR has been left **open** for a human to review and merge (or push further fixes).
+
+$merge_blocked_reason
+
+To override this gate and merge anyway, re-run with \`BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0\`." \
+                "default"
+            comment_issue "Merge: Blocked" \
+                "🚫 Merge of PR #$pr_number blocked — unresolved quality feedback. PR left open for human review.${merge_blocked_reason:+
+
+$merge_blocked_reason}" \
+                "default"
+            set_final_state "merge_blocked"
+
+            # Persist degraded stages before exiting so downstream tooling sees them.
+            if (( ${#DEGRADED_STAGES[@]} > 0 )); then
+                local degraded_json
+                degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]}" | jq -R . | jq -s .)
+                jq --argjson degraded "$degraded_json" '.degraded_stages = $degraded' \
+                    "$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+            fi
+            cp "$STATUS_FILE" "$LOG_BASE/status.json"
+
+            log "=========================================="
+            log "Implement Issue Complete (merge blocked)"
+            log "=========================================="
+            log "Issue: #$ISSUE_NUMBER"
+            log "PR: #$pr_number"
+            log "Branch: $branch"
+            log "Status: merge_blocked"
+            exit 0
+        fi
+
         log "Merging PR #$pr_number into $BASE_BRANCH..."
         comment_issue "Merge: Merging" \
             "🔀 Merging PR #$pr_number into \`$BASE_BRANCH\`..." \
