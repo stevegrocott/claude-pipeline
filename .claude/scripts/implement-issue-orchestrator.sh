@@ -88,6 +88,12 @@ MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
+# Slack added on top of the per-iteration timeout when computing the
+# PR-review loop wall-clock budget.  Override via env to tune.
+PR_REVIEW_WALL_TIME_SLACK="${PR_REVIEW_WALL_TIME_SLACK:-120}"
+# Full override for the PR-review loop budget (seconds).  When set,
+# replaces the formula pr_review_timeout*max(max_iter,1)+slack entirely.
+PR_REVIEW_WALL_BUDGET="${PR_REVIEW_WALL_BUDGET:-}"
 
 # Kill-switch for emergency bash fallback.  The escalation-policy skill is
 # now the default routing backend.  Set ESCALATION_POLICY_BACKEND=bash to
@@ -161,6 +167,25 @@ check_wall_timeout() {
     elapsed=$(( now - ORCHESTRATOR_START_EPOCH ))
     if (( elapsed > MAX_ORCHESTRATOR_WALL_TIME )); then
         log_warn "Global wall-clock timeout: ${elapsed}s elapsed (limit: ${MAX_ORCHESTRATOR_WALL_TIME}s). Soft-exiting current loop."
+        return 1
+    fi
+    return 0
+}
+
+# Check the PR-review loop's own wall-clock budget.
+# Returns 0 if within budget, 1 if the budget has been exceeded.
+#
+# Arguments:
+#   $1 - loop_start : epoch (seconds) when the PR-review loop began
+#   $2 - budget     : total allowed seconds for the loop
+check_pr_review_wall_timeout() {
+    local loop_start="$1"
+    local budget="$2"
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$(( now - loop_start ))
+    if (( elapsed > budget )); then
+        log_warn "PR-review wall-clock budget exceeded: ${elapsed}s elapsed (limit: ${budget}s). Soft-exiting review loop."
         return 1
     fi
     return 0
@@ -6819,6 +6844,29 @@ $pr_creation_skill}"
 
         local review_history_file="$LOG_BASE/context/pr-review-history.json"
 
+        # Compute the PR-review loop's own wall-clock budget.
+        # Formula: pr_review_timeout * max(max_iter, 1) + slack
+        # Each factor is diff-size-scaled (timeout) and profile-adjusted
+        # (max_iter), so the budget reflects actual expected work.
+        # Override the entire budget with PR_REVIEW_WALL_BUDGET (env).
+        local pr_review_effective_iter
+        pr_review_effective_iter=$(( pr_review_max_iter > 1 \
+            ? pr_review_max_iter : 1 ))
+        local pr_review_wall_budget
+        if [[ -n "$PR_REVIEW_WALL_BUDGET" ]]; then
+            pr_review_wall_budget="$PR_REVIEW_WALL_BUDGET"
+            log "PR review wall-clock budget: ${pr_review_wall_budget}s (env override)"
+        else
+            pr_review_wall_budget=$(( pr_review_timeout \
+                * pr_review_effective_iter \
+                + PR_REVIEW_WALL_TIME_SLACK ))
+            log "PR review wall-clock budget: ${pr_review_wall_budget}s" \
+                "(${pr_review_timeout}s/iter × ${pr_review_effective_iter}" \
+                "+ ${PR_REVIEW_WALL_TIME_SLACK}s slack)"
+        fi
+        local pr_review_loop_start
+        pr_review_loop_start=$(date +%s)
+
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
         local pr_iteration
@@ -6826,6 +6874,15 @@ $pr_creation_skill}"
 
         if ! check_wall_timeout; then
             log_warn "Wall-clock timeout in PR review loop at iteration $pr_iteration"
+            set_final_state "wall_timeout_pr_review"
+            DEGRADED_STAGES+=("pr_review:wall_timeout")
+            pr_approved=true
+            break
+        fi
+
+        if ! check_pr_review_wall_timeout \
+                "$pr_review_loop_start" "$pr_review_wall_budget"; then
+            log_warn "PR-review budget timeout at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
             pr_approved=true
