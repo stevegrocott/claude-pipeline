@@ -118,6 +118,31 @@ readonly -a _STAGE_PREFIXES=(
 )
 
 # =============================================================================
+# TURN BUDGET OVERRIDES
+# =============================================================================
+#
+# Stage-type-aware turn limits cap the --max-turns flag passed to claude(1).
+# Operators can tune these via environment variables without modifying the
+# orchestrator source.
+#
+# simplify-* stages (haiku model, light-tier):
+#   Default: 12 turns   Env: MAX_TURNS_SIMPLIFY
+#   Targeted edits — more scope than parse, less than full implement.
+#
+# fix-* / fix-review-* stages (sonnet model, standard-tier):
+#   Default: 20 turns   Env: MAX_TURNS_FIX_REVIEW
+#   Targeted corrections — less scope than implement/review.
+#
+# pr / pr-review budgets are intentionally fixed and NOT affected by these
+# env vars:
+#   pr:        5 turns  (push + create MR)
+#   pr-review: 10 turns (focused diff analysis)
+#
+# Decision logic: implement-issue-orchestrator.sh
+# (search for MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW)
+# =============================================================================
+
+# =============================================================================
 # LOOKUP FUNCTIONS
 # =============================================================================
 #

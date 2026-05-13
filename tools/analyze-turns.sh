@@ -99,7 +99,7 @@ main() {
 	$json_out && json_flag="true"
 
 	python3 - "$logs_dir" "$verbose_flag" "$json_flag" <<'PYEOF'
-import os, re, json, sys, math
+import os, re, json, sys
 from collections import defaultdict
 
 logs_dir   = sys.argv[1]
@@ -117,7 +117,7 @@ files_seen = 0
 files_matched = 0
 
 for root, dirs, files in os.walk(logs_dir):
-    if not root.endswith("/stages"):
+    if os.path.basename(root) != "stages":
         continue
     for fname in sorted(files):
         if not fname.endswith(".log"):
