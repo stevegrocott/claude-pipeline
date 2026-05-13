@@ -125,10 +125,10 @@ PLATFORM_DIR=".claude/scripts/platform"
 - [alternative 2] — rejected because [reason]
 
 ## Implementation Tasks
-- [ ] `[agent-name]` **(S)** Description of task 1 — `src/services/auth.ts:L45-80`
-- [ ] `[agent-name]` **(M)** Description of task 2 — `src/components/Dashboard.tsx:L120-155`
-- [ ] `[agent-name]` **(L)** Description of task 3 — `src/api/users.ts:L30-65`
-- [ ] `[default]` **(S)** Description of general task (e.g., tests, config) — `tests/unit/auth.test.ts:L10-40`
+- [ ] `[fastify-backend-developer]` **(S)** Description of backend task — `src/services/auth.ts:L45-80`
+- [ ] `[react-frontend-developer]` **(M)** Description of frontend task — `src/components/Dashboard.tsx:L120-155`
+- [ ] `[bash-script-craftsman]` **(S)** Description of script task — `.claude/scripts/deploy.sh:L30-65`
+- [ ] `[default]` **(S)** Description of config/unit-test task — `tests/unit/auth.test.ts:L10-40`
 - [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured) — `tests/e2e/dashboard.spec.ts:L22-55`
 
 ## Deploy Verification
@@ -197,12 +197,28 @@ The `## Implementation Tasks` section must use this parseable convention:
 ```
 
 **Files suffix:** Append ` — \`path/to/file.ts:L10-40\`` (em dash, space, backtick-quoted path with optional line range) to every task description. Multiple files: ` — \`file1.ts:L5\`, \`file2.ts:L20-35\``. This tells subagents exactly where to look, eliminating broad codebase scans.
+- **Paths must be real repo paths** — verify each path exists in the repository before writing it. Never invent or guess file paths.
+- **Task descriptions must stay under ~200 characters** — keep the description concise; put details in the Research Findings section of the issue body instead.
 
-**Agent values** (adapt to your project's agents):
-- Use whatever agent names are configured in `.claude/agents/`
-- Common patterns: `[backend-developer]`, `[frontend-developer]`, `[playwright-test-developer]`, `[default]`
-- `[playwright-test-developer]` for E2E tests (when `TEST_E2E_CMD` is configured)
-- `[default]` for general tasks (config, tests, documentation, mixed)
+**Agent values** — use agents defined in `.claude/agents/`:
+
+| Agent | Use for |
+|-------|---------|
+| `[fastify-backend-developer]` | API routes, services, backend logic |
+| `[react-frontend-developer]` | React components, pages, CSS, hooks |
+| `[playwright-test-developer]` | **E2E tests only** (when `TEST_E2E_CMD` configured) |
+| `[bash-script-craftsman]` | Shell scripts, CI scripts, bash tooling |
+| `[cc-orchestration-writer]` | Claude Code orchestration scripts |
+| `[research-agent]` | Investigation, codebase exploration |
+| `[code-reviewer]` | Post-implementation review tasks |
+| `[project-manager-backlog]` | Backlog/issue management tasks |
+| `[spec-reviewer]` | Spec validation tasks |
+| `[default]` | General tasks: config, unit tests, documentation, mixed |
+
+**Agent name rules:**
+- Agent name MUST be wrapped in square brackets inside backticks: `` `[agent-name]` `` — the bracket-less form `` `agent-name` `` is tolerated by the parser but must not be written deliberately.
+- NEVER write `[test-engineer]` — it is a legacy alias that no longer maps to a real agent. Use `[playwright-test-developer]` for Playwright E2E tests, or `[default]` for general test/config tasks.
+- `[playwright-test-developer]` is ONLY for Playwright E2E test files. For unit tests, config changes, or documentation, use `[default]`.
 
 **Parsing rule:** Regex `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description. Task IDs assigned sequentially.
 
@@ -240,3 +256,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Ask too many clarifying questions | 0-2 questions max; research answers most questions |
 | Single task modifies 5+ files | Split into focused subtasks |
 | Task has no file paths | Subagent reads 13+ files to orient; include at least 1 file path per task |
+| File path doesn't exist in repo | Subagent wastes a full search cycle; verify paths before writing them |
+| Task description over ~200 chars | Truncated in UI and hard to scan; put details in the issue body instead |
+| Writing `[test-engineer]` as agent | Legacy alias — write `[playwright-test-developer]` for E2E or `[default]` for general tests |
+| Missing square brackets: `` `agent-name` `` instead of `` `[agent-name]` `` | Parser accepts it, but explicit brackets make intent clear — always use brackets |
