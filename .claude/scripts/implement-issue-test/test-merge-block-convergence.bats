@@ -370,3 +370,61 @@ teardown() {
 	[[ -f "$schema_file" ]]
 	grep -q '"merge_blocked"' "$schema_file"
 }
+
+# =============================================================================
+# BEHAVIORAL: process-pr SKILL.md contains AC4 merge-block gate logic
+# =============================================================================
+# SKILL_FILE is derived from ORCHESTRATOR_SCRIPT (set at load time, real path).
+# SCRIPT_DIR is re-set by sourced orchestrator functions and points to TEST_TMP.
+
+@test "process-pr SKILL.md reads merge_blocked_reason from status.json before merging" {
+	local skill_file
+	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+
+	[[ -f "$skill_file" ]]
+	grep -q '\.merge_blocked_reason // empty' "$skill_file"
+}
+
+@test "process-pr SKILL.md block check precedes merge-mr.sh invocation" {
+	local skill_file
+	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+
+	[[ -f "$skill_file" ]]
+
+	local block_line merge_line
+	block_line=$(grep -n 'merge_blocked_reason // empty' "$skill_file" | head -1 | cut -d: -f1)
+	# Match the actual invocation line (contains PLATFORM_DIR), not prose references
+	merge_line=$(grep -n 'PLATFORM_DIR.*merge-mr\.sh\|merge-mr\.sh.*PR_NUMBER' "$skill_file" | head -1 | cut -d: -f1)
+
+	[[ -n "$block_line" ]]
+	[[ -n "$merge_line" ]]
+	(( block_line < merge_line ))
+}
+
+@test "process-pr SKILL.md exits without merging when MERGE_BLOCKED_REASON is set" {
+	local skill_file
+	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+
+	[[ -f "$skill_file" ]]
+	# Skill must document a non-merge exit path when the block reason is populated
+	grep -q 'MERGE BLOCKED' "$skill_file"
+	grep -q 'Leave the PR open' "$skill_file"
+}
+
+@test "process-pr SKILL.md supports BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 override" {
+	local skill_file
+	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+
+	[[ -f "$skill_file" ]]
+	grep -q 'BLOCK_MERGE_ON_CONVERGENCE_FAILURE' "$skill_file"
+}
+
+@test "process-pr SKILL.md falls back to degraded_stages scan when merge_blocked_reason absent" {
+	local skill_file
+	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+
+	[[ -f "$skill_file" ]]
+	# Skill must document the degraded_stages fallback path
+	grep -q 'degraded_stages' "$skill_file"
+	grep -q 'quality:convergence_failure' "$skill_file"
+}

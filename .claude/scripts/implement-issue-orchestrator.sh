@@ -7048,14 +7048,6 @@ To override this gate and merge anyway, re-run with \`BLOCK_MERGE_ON_CONVERGENCE
 $merge_blocked_reason}" \
                 "default"
             set_final_state "merge_blocked"
-
-            # Persist degraded stages before exiting so downstream tooling sees them.
-            if (( ${#DEGRADED_STAGES[@]} > 0 )); then
-                local degraded_json
-                degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]}" | jq -R . | jq -s .)
-                jq --argjson degraded "$degraded_json" '.degraded_stages = $degraded' \
-                    "$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
-            fi
             cp "$STATUS_FILE" "$LOG_BASE/status.json"
 
             log "=========================================="
