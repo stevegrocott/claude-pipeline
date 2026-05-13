@@ -216,3 +216,111 @@ _simulate_state_routing() {
 	[[ "$sim_impl_status" == "success" ]]
 	[[ "$sim_warn_msg" == *"recovering as success"* ]]
 }
+
+# =============================================================================
+# TASK 2: merge_blocked counted in its own progress column
+# =============================================================================
+
+# --- Static analysis: update_progress ---
+
+@test "update_progress jq filter includes a merge_blocked progress field" {
+	# The update_progress function must assign .progress.merge_blocked
+	local body
+	body=$(awk '/^update_progress\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'progress.merge_blocked'* ]]
+}
+
+@test "update_progress does not count merge_blocked under failed" {
+	local body
+	body=$(awk '/^update_progress\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	# Grab only the line that sets progress.failed
+	local failed_line
+	failed_line=$(printf '%s\n' "$body" | grep 'progress\.failed')
+	# The failed selector must not also select merge_blocked issues
+	[[ "$failed_line" != *'merge_blocked'* ]]
+}
+
+@test "update_progress does not count merge_blocked under completed" {
+	local body
+	body=$(awk '/^update_progress\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	local completed_line
+	completed_line=$(printf '%s\n' "$body" | grep 'progress\.completed')
+	[[ "$completed_line" != *'merge_blocked'* ]]
+}
+
+# --- Static analysis: init_status ---
+
+@test "init_status progress object includes merge_blocked field" {
+	local body
+	body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'merge_blocked'* ]]
+}
+
+# --- Functional simulation ---
+#
+# Build a mock status.json with mixed issue statuses and verify that the
+# correct update_progress jq logic produces the expected per-column counts.
+# The helper _simulate_update_progress replicates the post-fix jq filter.
+
+_make_mixed_status_json() {
+	local file="$1"
+	jq -n '{
+		state: "running",
+		progress: {
+			total: 5,
+			completed: 0,
+			failed: 0,
+			pending: 0,
+			in_progress: 0,
+			merge_blocked: 0
+		},
+		issues: [
+			{number: "1", status: "completed"},
+			{number: "2", status: "merge_blocked"},
+			{number: "3", status: "failed"},
+			{number: "4", status: "merge_blocked"},
+			{number: "5", status: "pending"}
+		],
+		last_update: "2024-01-01T00:00:00Z"
+	}' > "$file"
+}
+
+_simulate_update_progress() {
+	local status_file="$1"
+	jq '.progress.completed = ([.issues[] | select(.status == "completed" or .status == "already_done")] | length) |
+		.progress.failed = ([.issues[] | select(.status == "failed" or .status == "skipped")] | length) |
+		.progress.merge_blocked = ([.issues[] | select(.status == "merge_blocked")] | length) |
+		.progress.in_progress = ([.issues[] | select(.status == "in_progress")] | length) |
+		.progress.pending = ([.issues[] | select(.status == "pending")] | length)' \
+		"$status_file"
+}
+
+@test "progress simulation: merge_blocked issues counted in merge_blocked column" {
+	local status_file="$TEST_TMP/sim-status.json"
+	_make_mixed_status_json "$status_file"
+	local result
+	result=$(_simulate_update_progress "$status_file")
+	local count
+	count=$(printf '%s' "$result" | jq '.progress.merge_blocked')
+	[[ "$count" == "2" ]]
+}
+
+@test "progress simulation: merge_blocked issues not counted under failed" {
+	local status_file="$TEST_TMP/sim-status.json"
+	_make_mixed_status_json "$status_file"
+	local result
+	result=$(_simulate_update_progress "$status_file")
+	local count
+	count=$(printf '%s' "$result" | jq '.progress.failed')
+	[[ "$count" == "1" ]]
+}
+
+@test "progress simulation: merge_blocked issues not counted under completed" {
+	local status_file="$TEST_TMP/sim-status.json"
+	_make_mixed_status_json "$status_file"
+	local result
+	result=$(_simulate_update_progress "$status_file")
+	local count
+	count=$(printf '%s' "$result" | jq '.progress.completed')
+	[[ "$count" == "1" ]]
+}

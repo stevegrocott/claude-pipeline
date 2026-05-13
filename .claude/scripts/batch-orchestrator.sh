@@ -332,6 +332,7 @@ init_status() {
                 total: $total,
                 completed: 0,
                 failed: 0,
+                merge_blocked: 0,
                 pending: $total,
                 in_progress: 0
             },
@@ -374,6 +375,7 @@ update_issue_field() {
 update_progress() {
     jq '.progress.completed = ([.issues[] | select(.status == "completed" or .status == "already_done")] | length) |
         .progress.failed = ([.issues[] | select(.status == "failed" or .status == "skipped")] | length) |
+        .progress.merge_blocked = ([.issues[] | select(.status == "merge_blocked")] | length) |
         .progress.in_progress = ([.issues[] | select(.status == "in_progress")] | length) |
         .progress.pending = ([.issues[] | select(.status == "pending")] | length) |
         .last_update = (now | todate)' \
