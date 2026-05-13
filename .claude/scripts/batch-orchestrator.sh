@@ -682,6 +682,11 @@ process_issue() {
             already_implemented)
                 impl_status="already_implemented"
                 ;;
+            merge_blocked)
+                impl_status="merge_blocked"
+                pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
+                log "PR #${pr_number:-?} left open — merge blocked by quality gate"
+                ;;
             error|max_iterations_quality|max_iterations_pr_review)
                 impl_status="error"
                 impl_error="Script exited with state: $state"
@@ -730,6 +735,17 @@ process_issue() {
     if [[ "$impl_status" == "already_implemented" ]]; then
         log "Issue #$issue_num was already implemented in a prior run — skipping PR creation."
         update_issue_field "$issue_num" "status" "already_done"
+        update_progress
+        git checkout "$BRANCH" 2>/dev/null || true
+        return 0
+    fi
+
+    if [[ "$impl_status" == "merge_blocked" ]]; then
+        log "Issue #$issue_num PR #${pr_number:-?} left open — merge blocked by quality gate."
+        update_issue_field "$issue_num" "status" "merge_blocked"
+        if [[ -n "$pr_number" ]]; then
+            update_issue_field "$issue_num" "pr" "$pr_number" "true"
+        fi
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
         return 0
