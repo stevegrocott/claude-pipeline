@@ -204,3 +204,22 @@ _agent_of_first_task() {
 		return 1
 	}
 }
+
+@test "(10) _normalize_agent_name emits a WARN on stderr when falling back to 'default'" {
+	[[ ! -f "$AGENTS_DIR/totally-bogus-agent.md" ]] \
+		|| skip "unexpected: totally-bogus-agent.md exists in the repo"
+
+	_source_orchestrator_functions
+
+	run --separate-stderr _normalize_agent_name "totally-bogus-agent"
+	[ "$status" -eq 0 ]
+	[ "$output" = "default" ]
+	[[ "$stderr" == *"WARN"* ]] || {
+		printf 'FAIL: expected a WARN on stderr for unknown agent, got: %s\n' "$stderr" >&2
+		return 1
+	}
+	[[ "$stderr" == *"totally-bogus-agent"* ]] || {
+		printf 'FAIL: WARN should mention the unknown agent name, got: %s\n' "$stderr" >&2
+		return 1
+	}
+}
