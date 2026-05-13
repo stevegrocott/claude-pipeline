@@ -86,11 +86,14 @@ _source_timeout_functions() {
 		/^TEST_LOOP_PLANNED_ITERATIONS=/  { print; next }
 		/^TEST_ITER_WALL_TIME_SLACK=/     { print; next }
 		/^TEST_LOOP_WALL_BUDGET=/         { print; next }
+		/^PR_REVIEW_WALL_TIME_SLACK=/     { print; next }
+		/^PR_REVIEW_WALL_BUDGET=/         { print; next }
 		/^get_stage_timeout\(\) \{$/,/^\}$/                      { print; next }
 		/^get_pr_review_config\(\) \{$/,/^\}$/                   { print; next }
 		/^apply_profile_to_pr_review_max_iter\(\) \{$/,/^\}$/   { print; next }
 		/^apply_profile_to_test_max_iter\(\) \{$/,/^\}$/         { print; next }
 		/^calc_test_loop_budget\(\) \{$/,/^\}$/                  { print; next }
+		/^calc_orchestrator_wall_time\(\) \{$/,/^\}$/            { print; next }
 		/^check_test_loop_wall_timeout\(\) \{$/,/^\}$/           { print; next }
 	' "$ORCHESTRATOR" >> "$func_file"
 	# shellcheck disable=SC1090
@@ -487,6 +490,111 @@ _mock_diff_count() {
 		printf \
 			'FAIL: planned=1 budget %ds < test-iter timeout %ds\n' \
 			"$budget" "$test_iter_timeout" >&2
+		return 1
+	}
+}
+
+# =============================================================================
+# (5) Orchestrator wall time >= sum of phase budgets
+# =============================================================================
+#
+# Contract:
+#   calc_orchestrator_wall_time() returns a value >= the sum of:
+#     test-loop budget (from calc_test_loop_budget) +
+#     pr-review budget (worst-case: 1200s × max_iter + slack)
+#
+#   The default MAX_ORCHESTRATOR_WALL_TIME >= calc_orchestrator_wall_time()
+#   so the global clock never fires while an inner loop is within its own
+#   budget.
+#
+#   PR_REVIEW_WALL_BUDGET override is honoured in the sum.
+# =============================================================================
+
+@test "(5a) calc_orchestrator_wall_time >= test-loop + worst-case pr-review" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	unset PR_REVIEW_WALL_BUDGET TEST_LOOP_WALL_BUDGET
+	MAX_PR_REVIEW_ITERATIONS=2
+	PR_REVIEW_WALL_TIME_SLACK=120
+	TEST_LOOP_PLANNED_ITERATIONS=3
+	TEST_ITER_WALL_TIME_SLACK=120
+	_source_timeout_functions
+
+	local budget test_budget pr_budget pr_iter
+	budget=$(calc_orchestrator_wall_time)
+	test_budget=$(calc_test_loop_budget)
+	pr_iter=$(( MAX_PR_REVIEW_ITERATIONS > 1 ? MAX_PR_REVIEW_ITERATIONS : 1 ))
+	pr_budget=$(( 1200 * pr_iter + PR_REVIEW_WALL_TIME_SLACK ))
+
+	(( budget >= test_budget + pr_budget )) || {
+		printf \
+			'FAIL: orchestrator budget %ds < test(%ds) + pr-review(%ds)\n' \
+			"$budget" "$test_budget" "$pr_budget" >&2
+		return 1
+	}
+}
+
+@test "(5b) default MAX_ORCHESTRATOR_WALL_TIME >= calc_orchestrator_wall_time()" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	unset MAX_ORCHESTRATOR_WALL_TIME
+	unset PR_REVIEW_WALL_BUDGET TEST_LOOP_WALL_BUDGET
+	_source_timeout_functions
+
+	local phase_sum
+	phase_sum=$(calc_orchestrator_wall_time)
+
+	(( MAX_ORCHESTRATOR_WALL_TIME >= phase_sum )) || {
+		printf \
+			'FAIL: default MAX_ORCHESTRATOR_WALL_TIME=%ds < phase sum=%ds\n' \
+			"$MAX_ORCHESTRATOR_WALL_TIME" "$phase_sum" >&2
+		return 1
+	}
+}
+
+@test "(5c) calc_orchestrator_wall_time respects PR_REVIEW_WALL_BUDGET override" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	PR_REVIEW_WALL_BUDGET=9999
+	unset TEST_LOOP_WALL_BUDGET
+	TEST_LOOP_PLANNED_ITERATIONS=3
+	TEST_ITER_WALL_TIME_SLACK=120
+	_source_timeout_functions
+
+	local budget test_budget expected
+	budget=$(calc_orchestrator_wall_time)
+	test_budget=$(calc_test_loop_budget)
+	expected=$(( test_budget + 9999 + 5700 ))
+
+	[[ "$budget" -eq "$expected" ]] || {
+		printf \
+			'FAIL: expected %ds (test %ds + pr override 9999 + overhead 5700), got %ds\n' \
+			"$expected" "$test_budget" "$budget" >&2
+		return 1
+	}
+}
+
+@test "(5d) calc_orchestrator_wall_time default value is 11040" {
+	[[ -f "$ORCHESTRATOR" ]] \
+		|| fail "orchestrator not present: $ORCHESTRATOR"
+
+	unset PR_REVIEW_WALL_BUDGET TEST_LOOP_WALL_BUDGET
+	unset TEST_LOOP_PLANNED_ITERATIONS TEST_ITER_WALL_TIME_SLACK
+	unset MAX_PR_REVIEW_ITERATIONS PR_REVIEW_WALL_TIME_SLACK
+	_source_timeout_functions
+
+	local budget
+	budget=$(calc_orchestrator_wall_time)
+
+	# Default: test-loop(900×3+120=2820) + pr-review(1200×2+120=2520)
+	#          + overhead(5700) = 11040
+	[[ "$budget" -eq 11040 ]] || {
+		printf \
+			'FAIL: expected default budget=11040, got %s\n' \
+			"$budget" >&2
 		return 1
 	}
 }

@@ -222,9 +222,27 @@ readonly -a _STAGE_PREFIXES=(
 #   when either guard fires.  Within its own budget, the loop is protected
 #   from global-clock exhaustion caused by earlier stages.
 #
+# Global orchestrator wall-clock budget (MAX_ORCHESTRATOR_WALL_TIME):
+#   Default = sum of all per-phase budgets so the global cap never fires
+#   while an inner loop is within its own budget.
+#   Formula: calc_orchestrator_wall_time()
+#     = calc_test_loop_budget()
+#       + PR-review worst-case (1200s × max(MAX_PR_REVIEW_ITERATIONS,1)
+#                               + PR_REVIEW_WALL_TIME_SLACK)
+#       + overhead (validate_plan 1800 + implement 1800 + task-review 900
+#                   + test 600 + pr-create 600 = 5700s)
+#   Default: 11040s (2820 + 2520 + 5700)
+#   Enforced at the complexity-adjustment step (after env vars take effect).
+#   Env vars:
+#     MAX_ORCHESTRATOR_WALL_TIME — initial base (default 11040s; raised to
+#                                  the phase-budget sum if env value is less)
+#   After the phase-budget floor, per-L-task bumps (1800s each) are added
+#   on top, capped at 4× the phase-budget-floored base value.
+#
 # Decision logic / enforcement: implement-issue-orchestrator.sh
-# (search for PR_REVIEW_WALL_BUDGET / check_pr_review_wall_timeout and
-#  TEST_LOOP_WALL_BUDGET / check_test_loop_wall_timeout / calc_test_loop_budget)
+# (search for PR_REVIEW_WALL_BUDGET / check_pr_review_wall_timeout,
+#  TEST_LOOP_WALL_BUDGET / check_test_loop_wall_timeout / calc_test_loop_budget,
+#  and calc_orchestrator_wall_time / MAX_ORCHESTRATOR_WALL_TIME)
 # =============================================================================
 
 # =============================================================================

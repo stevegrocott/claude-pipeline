@@ -86,7 +86,18 @@ MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
 MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
 MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
-MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"
+# Default = sum of per-phase budgets so the global cap never pre-empts
+# a loop that is within its own budget.  See calc_orchestrator_wall_time()
+# for the formula; the numeric default mirrors its calculation:
+#   test-loop  (900s × 3 + 120s slack)               = 2820s
+#   pr-review  (1200s × 2 + 120s slack, 200+ lines)  = 2520s
+#   overhead   (validate 1800 + implement 1800
+#               + task-review 900 + test 600 + pr 600) = 5700s
+#                                              Total : 11040s (~3h)
+# Recalculated at runtime by calc_orchestrator_wall_time() using the
+# actual env-overridden per-phase budget variables.
+# Override via MAX_ORCHESTRATOR_WALL_TIME env to set a different base.
+MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-11040}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
 # Slack added on top of the per-iteration timeout when computing the
 # PR-review loop wall-clock budget.  Override via env to tune.
@@ -243,6 +254,36 @@ calc_test_loop_budget() {
         ? TEST_LOOP_PLANNED_ITERATIONS : 1 ))
     printf '%s' "$(( test_iter_timeout * effective_iter \
         + TEST_ITER_WALL_TIME_SLACK ))"
+}
+
+# Compute the minimum orchestrator wall-clock budget as the sum of all
+# per-phase budgets.  Used as a floor for MAX_ORCHESTRATOR_WALL_TIME at
+# the complexity-adjustment step so the global cap never fires while a
+# per-loop budget still has time remaining.
+#
+# Components:
+#   test loop   — calc_test_loop_budget() (respects TEST_LOOP_WALL_BUDGET)
+#   pr review   — PR_REVIEW_WALL_BUDGET when set; otherwise worst-case:
+#                 1200s × max(MAX_PR_REVIEW_ITERATIONS,1) +
+#                 PR_REVIEW_WALL_TIME_SLACK  (200+ line diff, full iters)
+#   overhead    — stages outside the per-loop budgets (constants from
+#                 get_stage_timeout):
+#                   validate_plan(1800) + implement-one-task(1800)
+#                   + task-review(900) + test-single(600) + pr-create(600)
+#                 = 5700s
+#
+# Output: minimum budget seconds to stdout
+calc_orchestrator_wall_time() {
+	local test_budget pr_budget pr_iter
+	test_budget=$(calc_test_loop_budget)
+	if [[ -n "${PR_REVIEW_WALL_BUDGET:-}" ]]; then
+		pr_budget="$PR_REVIEW_WALL_BUDGET"
+	else
+		pr_iter=$(( MAX_PR_REVIEW_ITERATIONS > 1 \
+			? MAX_PR_REVIEW_ITERATIONS : 1 ))
+		pr_budget=$(( 1200 * pr_iter + PR_REVIEW_WALL_TIME_SLACK ))
+	fi
+	printf '%s' "$(( test_budget + pr_budget + 5700 ))"
 }
 
 # =============================================================================
@@ -6039,8 +6080,15 @@ $excerpt
     # 'minimal' skips optional quality/simplify stages and 'full' enforces them.
 
     # -------------------------------------------------------------------------
-    # COMPLEXITY-ADJUSTED WALL-CLOCK BUDGET
-    # Add 1800s per L-sized task, capped at 4x the base value.
+    # WALL-CLOCK BUDGET: phase-budget floor then complexity bump
+    #
+    # Step 1 — Phase-budget floor: raise MAX_ORCHESTRATOR_WALL_TIME to at
+    #   least the sum of all per-phase budgets (calc_orchestrator_wall_time).
+    #   Computed here — after all env vars have taken effect — so env
+    #   overrides to per-phase budgets are reflected in the floor.
+    #
+    # Step 2 — Complexity bump: add 1800s per L-sized task on top of the
+    #   already-floored base, capped at 4x to limit runaway wall times.
     # -------------------------------------------------------------------------
     local l_task_count base_wall_time max_wall_time wall_time_bump
     l_task_count=$(printf '%s' "$tasks_json" | jq -r '.[].description' \
@@ -6049,6 +6097,17 @@ $excerpt
             [[ -n "$s" ]] && printf '%s\n' "$s"
           done \
         | grep -c '^L$' || true)
+
+    # Step 1: phase-budget floor
+    local phase_budget_sum
+    phase_budget_sum=$(calc_orchestrator_wall_time)
+    if (( MAX_ORCHESTRATOR_WALL_TIME < phase_budget_sum )); then
+        log "Wall-clock budget raised to phase-budget sum:" \
+            "${MAX_ORCHESTRATOR_WALL_TIME}s → ${phase_budget_sum}s"
+        MAX_ORCHESTRATOR_WALL_TIME=$phase_budget_sum
+    fi
+
+    # Step 2: complexity bump
     base_wall_time="$MAX_ORCHESTRATOR_WALL_TIME"
     max_wall_time=$(( base_wall_time * 4 ))
     wall_time_bump=$(( l_task_count * 1800 ))
