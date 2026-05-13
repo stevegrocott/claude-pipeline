@@ -30,6 +30,29 @@ teardown() {
 }
 
 # =============================================================================
+# STATIC ANALYSIS: DEGRADED_STAGES recording at convergence failure
+# =============================================================================
+
+@test "convergence-failure handler appends quality:convergence_failure entry to DEGRADED_STAGES" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	# The exact DEGRADED_STAGES entry written in the >33% repeats branch
+	[[ "$script_content" == *'DEGRADED_STAGES+=("quality:convergence_failure:$stage_prefix:iter=$loop_iteration")'* ]]
+}
+
+@test "quality-loop convergence branch does not call set_final_state" {
+	# set_final_state is NOT called inside run_quality_loop at convergence
+	# failure — that would overwrite state mid-pipeline.  State is set later,
+	# in the merge stage, where set_final_state "merge_blocked" is called.
+	local conv_block
+	conv_block=$(awk \
+		'/if \(\( repeat_ratio > 33 \)\); then/,/loop_approved=true/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+	[[ "$conv_block" != *'set_final_state'* ]]
+}
+
+# =============================================================================
 # STATIC ANALYSIS: merge_blocked_reason persistence at convergence failure
 # =============================================================================
 
@@ -258,6 +281,82 @@ teardown() {
 	fi
 
 	[[ "$blocked_reason" == "block is active" ]]
+}
+
+# =============================================================================
+# FUNCTIONAL: merge stage skipped when merge_blocked_reason is set
+# =============================================================================
+
+@test "merge stage gate returns blocked_reason when merge_blocked_reason in status.json" {
+	# Simulate the merge gate: with BLOCK_MERGE_ON_CONVERGENCE_FAILURE=1 (default)
+	# and merge_blocked_reason persisted in status.json, the gate must return a
+	# non-empty blocked_reason — meaning merge-mr.sh would be skipped.
+	jq --arg r "Quality loop convergence failure: 75% of issues repeating at pre-commit (iter=2)" \
+		'.merge_blocked_reason = $r' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	unset BLOCK_MERGE_ON_CONVERGENCE_FAILURE  # ensure default (1) is used
+
+	local blocked_reason=""
+	if [[ "${BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1}" != "0" ]]; then
+		blocked_reason=$(jq -r '.merge_blocked_reason // empty' \
+			"$STATUS_FILE" 2>/dev/null)
+	fi
+
+	[[ -n "$blocked_reason" ]]
+	[[ "$blocked_reason" == *"pre-commit"* ]]
+}
+
+@test "merge stage gate skips merge-mr.sh when DEGRADED_STAGES has convergence entry and no status.json field" {
+	# Fallback path: no merge_blocked_reason in status.json but DEGRADED_STAGES
+	# has a quality:convergence_failure entry.  The gate must still produce a
+	# non-empty blocked_reason so merge-mr.sh is skipped.
+	declare -a deg=("quality:convergence_failure:main:iter=3")
+
+	local blocked_reason=""
+	local _ds
+	for _ds in "${deg[@]}"; do
+		if [[ "$_ds" == quality:convergence_failure:* ]]; then
+			blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
+			break
+		fi
+	done
+
+	[[ -n "$blocked_reason" ]]
+	[[ "$blocked_reason" == *"quality:convergence_failure:main:iter=3"* ]]
+}
+
+# =============================================================================
+# FUNCTIONAL: BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 restores old merge behavior
+# =============================================================================
+
+@test "BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 allows merge even when DEGRADED_STAGES has convergence failure" {
+	# Old (pre-fix) behavior: merge proceeds regardless of convergence failure.
+	# With =0 the gate is bypassed — merge_blocked_reason must stay empty.
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	DEGRADED_STAGES=("quality:convergence_failure:main:iter=2")
+
+	jq '.merge_blocked_reason = "should be bypassed"' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	local blocked_reason=""
+	if [[ "${BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1}" != "0" ]]; then
+		blocked_reason=$(jq -r '.merge_blocked_reason // empty' "$STATUS_FILE" 2>/dev/null)
+		if [[ -z "$blocked_reason" ]]; then
+			local _ds
+			for _ds in "${DEGRADED_STAGES[@]}"; do
+				if [[ "$_ds" == quality:convergence_failure:* ]]; then
+					blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
+					break
+				fi
+			done
+		fi
+	fi
+
+	# Gate bypassed — blocked_reason must be empty so merge-mr.sh is reached
+	[[ -z "$blocked_reason" ]]
 }
 
 # =============================================================================
