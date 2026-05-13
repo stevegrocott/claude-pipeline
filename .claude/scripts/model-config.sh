@@ -125,6 +125,29 @@ readonly -a _STAGE_PREFIXES=(
 # Operators can tune these via environment variables without modifying the
 # orchestrator source.
 #
+# Defaults below were calibrated against tools/analyze-turns.sh run on the
+# first batch of real pipeline runs (initial calibration, 2026-05-13):
+#
+#   === Turns-Used Distribution by Stage Type ===
+#       (from 24 stage logs across 31 scanned)
+#
+#     Stage               N    Min    p50    p90   Max
+#     --------------------------------------------------
+#     implement-task      14      8   16.0   28.0    38
+#     simplify             6      4    6.5   10.0    11
+#     fix-review           4      9   13.5   17.0    19
+#
+#   simplify p90=10 → cap at 12 (20% headroom above p90; below the
+#   haiku light-tier generic cap of 15 that would otherwise apply).
+#
+#   fix-review p90=17 → cap at 20 (17% headroom; below the sonnet
+#   generic cap of 25 that would otherwise apply).
+#
+#   Note: num_turns is capped by each run's --max-turns budget, so p90/Max
+#   understate true demand for runs that hit the prior cap. Re-run
+#   analyze-turns.sh after accumulating ≥50 logs per class before tuning.
+#   To regenerate: tools/analyze-turns.sh logs/implement-issue
+#
 # simplify-* stages (haiku model, light-tier):
 #   Default: 12 turns   Env: MAX_TURNS_SIMPLIFY
 #   Targeted edits — more scope than parse, less than full implement.

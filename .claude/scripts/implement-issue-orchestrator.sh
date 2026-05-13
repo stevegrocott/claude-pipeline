@@ -1437,7 +1437,14 @@ run_stage() {
     # those still need enough turns to read files, make edits, and produce output.
     #
     # PR creation gets a separate cap — it only needs to run glab/gh mr create,
-    # push if needed, and format a description. 10 turns is plenty.
+    # push if needed, and format a description. 5 turns is plenty.
+    #
+    # simplify-* gets a dedicated haiku cap (env: MAX_TURNS_SIMPLIFY, default 12) —
+    # targeted TypeScript edits; more scope than parse but less than full implement.
+    #
+    # fix/fix-review-* gets a dedicated sonnet cap (env: MAX_TURNS_FIX_REVIEW,
+    # default 20) — targeted corrections, less scope than implement/review.
+    # pr/pr-review/research turn limits are unchanged.
     local -a turns_args=()
     local _matched_prefix _inherent_tier
     _matched_prefix=$(_match_stage_prefix "$stage_name") || true
@@ -1448,6 +1455,14 @@ run_stage() {
     elif [[ "${_matched_prefix:-}" == "pr-review" ]]; then
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (PR review — focused diff analysis)"
+    elif [[ "${_matched_prefix:-}" == "simplify" && "$model" == "haiku" ]]; then
+        local _max_simplify="${MAX_TURNS_SIMPLIFY:-12}"
+        turns_args=(--max-turns "$_max_simplify")
+        log "  Max turns: $_max_simplify (simplify haiku — targeted edits, env: MAX_TURNS_SIMPLIFY)"
+    elif [[ "${_matched_prefix:-}" == "fix" && "$model" == "sonnet" ]]; then
+        local _max_fix_review="${MAX_TURNS_FIX_REVIEW:-20}"
+        turns_args=(--max-turns "$_max_fix_review")
+        log "  Max turns: $_max_fix_review (fix/fix-review sonnet — targeted fix, env: MAX_TURNS_FIX_REVIEW)"
     elif [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (inherently light stage)"
