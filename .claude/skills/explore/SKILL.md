@@ -219,7 +219,7 @@ The `## Implementation Tasks` section must use this parseable convention:
 - Agent name MUST be wrapped in square brackets inside backticks: `` `[agent-name]` `` — the bracket-less form `` `agent-name` `` is tolerated by the parser but must not be written deliberately.
 - NEVER write `[test-engineer]` — it is a legacy alias that no longer maps to a real agent. Use `[playwright-test-developer]` for Playwright E2E tests, or `[default]` for general test/config tasks.
 - `[playwright-test-developer]` is ONLY for Playwright E2E test files. For unit tests, config changes, or documentation, use `[default]`.
-- NEVER write `[fullstack-engineer]` — it is a planning/gap-analysis role, not an implementation agent. Use `[default]` for general implementation tasks.
+- NEVER write `[fullstack-engineer]` — it is not a pipeline agent. Split fullstack work into a `[fastify-backend-developer]` task (API/data layer) and a separate `[react-frontend-developer]` task (UI layer).
 
 **Parsing rule:** Regex `- \[[ x]\] \x60\[(.+?)\]\x60 (.+)` extracts agent and description. Task IDs assigned sequentially.
 
@@ -261,4 +261,4 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Task description over ~200 chars | Truncated in UI and hard to scan; put details in the issue body instead |
 | Writing `[test-engineer]` as agent | Legacy alias — write `[playwright-test-developer]` for E2E or `[default]` for general tests |
 | Missing square brackets: `` `agent-name` `` instead of `` `[agent-name]` `` | Parser accepts it, but explicit brackets make intent clear — always use brackets |
-| Writing `[fullstack-engineer]` as agent | Planning/gap-analysis role, not an implementation agent — use `[default]` for implementation tasks |
+| Writing `[fullstack-engineer]` as agent | Unknown agent — normalizer silently downgrades to `default`, losing backend and frontend specialization; split into `[fastify-backend-developer]` + `[react-frontend-developer]` instead |
