@@ -2536,7 +2536,7 @@ Repeating issues:
                 fi
                 if [[ -f "$STATUS_FILE" ]]; then
                     local degraded_json
-                    degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]}" | jq -R . | jq -s .)
+                    degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | jq -R . | jq -s .)
                     jq --arg reason "$block_reason" \
                        --argjson stages "$degraded_json" \
                        '.merge_blocked_reason = $reason | .degraded_stages = $stages | .last_update = (now | todate)' \
@@ -7379,7 +7379,7 @@ $complete_skill
         if (( ${#DEGRADED_STAGES[@]} > 0 )); then
             degraded_warning="⚠️ **Quality Warning:** The following stages hit their iteration limits and were soft-failed:
 "
-            for ds in "${DEGRADED_STAGES[@]}"; do
+            for ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
                 degraded_warning+="- \`$ds\`
 "
             done
@@ -7433,7 +7433,7 @@ $complete_summary
                 "$STATUS_FILE" 2>/dev/null || printf '')
             if [[ -z "$merge_blocked_reason" ]]; then
                 local _ds
-                for _ds in "${DEGRADED_STAGES[@]}"; do
+                for _ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
                     if [[ "$_ds" == quality:convergence_failure:* ]]; then
                         merge_blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
                         break
@@ -7508,7 +7508,7 @@ $merge_blocked_reason}" \
     # Record degraded stages in status.json
     if (( ${#DEGRADED_STAGES[@]} > 0 )); then
         local degraded_json
-        degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]}" | jq -R . | jq -s .)
+        degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | jq -R . | jq -s .)
         jq --argjson degraded "$degraded_json" '.degraded_stages = $degraded' "$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
     fi
 
