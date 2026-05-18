@@ -117,6 +117,10 @@ Focus questions on:
   - **Unit tests:** What test runner? What command?
   - **E2E tests:** Does the project have or need browser-based testing? If yes: Playwright already configured or needs setup? Base URL for test environment?
   - **Manual QA:** Is there a manual testing process that could be automated with Playwright?
+- **Auth:**
+  - **Route root:** Where are protected routes declared? (e.g., `src/routes/`, `app/api/`, router config file)
+  - **Guard function names:** What are the auth guard / middleware function names? (e.g., `withAuth`, `requireAuth`, `authenticate`)
+  - **Guard middleware files:** Which files define or export these guards? (e.g., `src/middleware/auth.ts`, `middleware.ts`)
 - **MCP tools:**
   - **Context7:** Available? What frameworks/libraries should agents look up via Context7?
   - **Serena:** Available? Useful for codebase navigation in this project?

@@ -79,6 +79,18 @@ Delete entries when they're no longer relevant.
 - Auth middleware: always use `withAuth()` HOC from `src/middleware/auth.ts` — do NOT replicate the JWT decode logic inline
 -->
 
+## Auth Guards
+
+<!-- Document the auth guard / middleware pattern so agents never replicate JWT
+     decode logic inline or bypass protection on protected routes. -->
+
+<!-- Examples (delete and replace with your own):
+- Protected routes root: `src/routes/` — all files here require auth unless explicitly marked public
+- Guard HOC: `withAuth()` from `src/middleware/auth.ts` — wrap page components; do NOT inline JWT decode
+- Guard middleware: `authenticate` from `src/middleware/auth.ts` — apply to Fastify routes via `preHandler: [authenticate]`
+- Guard function name: `requireRole(role)` from `src/middleware/rbac.ts` — use after `authenticate` for role-restricted endpoints
+-->
+
 ## Environment Notes
 
 <!-- Document environment-specific facts that aren't obvious from the code:
