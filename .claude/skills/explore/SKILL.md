@@ -142,7 +142,7 @@ PLATFORM_DIR=".claude/scripts/platform"
  - No NAS concern (CI, docs, unrelated scripts) → OMIT this section entirely]
 - **Target environment:** [staging|test|nas|production]
 - **Health endpoint:** [full URL to health check endpoint, e.g., https://test-beegeefarm.grocott.com.au/health]
-- **Verification command:** [bash scripts/deploy-nas-from-local.sh | bash scripts/deploy-nas-from-local.sh --health-only]
+- **Verification command:** [bash scripts/deploy-nas-from-local.sh or bash scripts/deploy-nas-from-local.sh --health-only]
 
 ## Acceptance Criteria
 - [ ] AC1: [measurable criterion]
