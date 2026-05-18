@@ -409,59 +409,76 @@ Based on brainstorming answers, modify `.claude/config/platform.sh`:
 
 **Parallel execution:** Tasks in different workstreams with no shared files can run in parallel using `dispatching-parallel-agents`.
 
-### Phase 5.5: Test Layout
+### Phase 5.5: Test Framework Detection
 
-Before full verification, auto-detect which categories of changes were made and run a targeted layout test for each.
+Detect the project's test frameworks, confirm with the user, and write the `## Test Layout` block to `PLATFORM_CONTEXT_FILE` (`.claude/config/context.md`).
 
-**Auto-detection logic:**
+**Step 1 — Auto-detect test formats:**
+
+Scan the project root and common config locations to identify which test frameworks are in use:
 
 ```
 detect:
-  new_skills:      glob .claude/skills/**/SKILL.md — diff against pre-execution inventory
-  new_agents:      glob .claude/agents/*.md — diff against pre-execution inventory
-  modified_hooks:  diff .claude/settings.json against pre-execution snapshot
-  local_overrides: ls .claude/local/ — non-empty means apply-local.sh must run
-  deleted_files:   compare pre-execution inventory with current state — any gaps?
+  jest:    package.json contains "jest" key OR jest.config.{js,ts,cjs,mjs} exists
+  vitest:  package.json contains "vitest" key OR vitest.config.{js,ts} exists
+  pytest:  pytest.ini OR pyproject.toml [tool.pytest.*] OR conftest.py exists
+  go_test: *_test.go files present anywhere in the repo
+  rspec:   .rspec OR spec/spec_helper.rb exists
+  bats:    *.bats files present OR test/*.bats exists
 ```
 
-For each detected category, run the corresponding test block:
+Collect all matched formats into a list.
 
-```yaml
-test_layout:
-  - category: new_skills
-    when: new SKILL.md files detected
-    checks:
-      - frontmatter has name and description fields
-      - skill is referenced in at least one agent or settings hook
-      - no broken composes entries pointing to non-existent skills
+**Step 2 — Detect auth guards (web stacks only):**
 
-  - category: new_agents
-    when: new agent .md files detected
-    checks:
-      - agent has required fields (name, description, tools)
-      - agent is reachable from at least one skill or orchestration script
-      - no hardcoded project paths from the source pipeline
+Only perform this step if the project is a web application (has a frontend framework — Next.js, React Router, Nuxt, Rails, Django, Laravel, etc.). Signs of a web stack: `next.config.*`, `vite.config.*` with JSX, `routes/` or `views/` directories, `app/Http/` (Laravel), `urls.py` (Django).
 
-  - category: modified_hooks
-    when: settings.json changed
-    checks:
-      - all hook commands reference existing files
-      - no hook triggers reference deleted skills or agents
-
-  - category: local_overrides
-    when: .claude/local/ is non-empty
-    checks:
-      - apply-local.sh exists and is executable
-      - each file in .claude/local/ has a corresponding target path in .claude/
-
-  - category: deleted_files
-    when: inventory gaps detected
-    checks:
-      - no remaining references to deleted file names anywhere in .claude/
-      - MEMORY.md and skill composes lists do not reference deleted items
+If web stack detected, scan for auth guard patterns:
+```
+- Protected route root (e.g. src/routes/, app/routes/)
+- Auth HOC or middleware (withAuth, authenticate, requireLogin, login_required)
+- RBAC helpers (requireRole, hasPermission)
 ```
 
-**If any check fails:** Fix before proceeding to Phase 6. Layout errors compound — a broken reference found now costs one edit; the same error found during a live workflow costs a derailed task.
+Skip this step entirely for non-web stacks (CLI tools, libraries, data pipelines, Go services without HTTP).
+
+**Step 3 — Show detected layout and confirm:**
+
+Present the detected layout to the user before writing anything:
+
+```
+Detected test layout:
+  formats: jest, vitest
+  auth_guards: withAuth() from src/middleware/auth.ts (web stack)
+
+Write this to context.md as the ## Test Layout block? [Y/n]
+```
+
+If the user corrects the layout, update the detected values before proceeding.
+
+**Step 4 — Write `## Test Layout` block to context.md:**
+
+Append (or replace if already present) the `## Test Layout` block in `PLATFORM_CONTEXT_FILE`:
+
+```markdown
+## Test Layout
+
+formats: jest, vitest          <!-- space-separated list of detected frameworks -->
+
+<!-- auth_guards: omit this subsection entirely for non-web stacks -->
+auth_guards:
+  - protected_root: src/routes/   <!-- directory where all routes require auth by default -->
+  - guard: withAuth() HOC from src/middleware/auth.ts — wrap page components
+  - middleware: authenticate from src/middleware/auth.ts — apply via preHandler
+  - rbac: requireRole(role) from src/middleware/rbac.ts — use after authenticate
+```
+
+Rules for writing the block:
+- `formats` line is always present; list only the detected frameworks (no placeholders).
+- `auth_guards` subsection is **only written for web stacks**. For non-web stacks, omit it entirely — do not leave a commented-out placeholder.
+- If the block already exists in context.md, replace it in-place rather than appending.
+
+**If detection finds no frameworks:** Ask the user to specify manually before writing anything.
 
 ### Phase 6: Verify
 
@@ -474,6 +491,21 @@ After all modifications:
 5. **Agent coordination audit** — Deferral relationships between agents are consistent
 6. **Dry run** — Walk through a typical workflow (e.g., implement-issue) mentally to verify the pipeline makes sense
 7. **Local override check** — Verify all customized files exist in `.claude/local/` and `apply-local.sh` runs cleanly
+
+## Design Notes
+
+### Test Layout fallback at runtime
+
+If the `## Test Layout` block is absent from `context.md` when an implement agent runs, the agent should **not** silently proceed with unknown test commands. The correct fallback behavior is:
+
+1. **Auto-detect** test frameworks from the project root (same logic as Phase 5.5 above).
+2. **Warn the user** with a clear message:
+
+   > ⚠️ No `## Test Layout` block found in context.md. Detected formats: `jest`. Run the `adapting-claude-pipeline` skill to persist this configuration and avoid repeated detection on every task.
+
+3. Use the auto-detected formats for the current task only — do not write to context.md automatically (that is the adapting-claude-pipeline skill's job).
+
+This ensures the pipeline degrades gracefully on unadapted repos without silently skipping test validation.
 
 ## Common Adaptation Patterns
 

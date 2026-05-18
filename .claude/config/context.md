@@ -57,15 +57,21 @@ Delete entries when they're no longer relevant.
 
 ## Test Layout
 
-<!-- Document the test directory structure and file naming conventions so agents
-     know where to find existing tests and where to place new ones. -->
+<!-- Populated by the adapting-claude-pipeline skill (Phase 5.5).
+     Run that skill to auto-detect frameworks and write the block below.
+     If this block is absent at runtime, implement agents will auto-detect
+     and warn you to run adapting-claude-pipeline to persist the config. -->
 
-<!-- Examples (delete and replace with your own):
-- Unit tests: `tests/unit/` — mirror the `src/` directory tree (e.g., `src/services/foo.ts` → `tests/unit/services/foo.test.ts`)
-- Integration tests: `tests/integration/` — test cross-service boundaries; require a running database
-- E2E tests: `tests/e2e/` — Playwright specs; require a running local server on port 3000
-- Fixtures: `tests/fixtures/` — shared test data; import via `@/tests/fixtures/[name]`
-- Test commands: `npm test` (unit), `npm run test:e2e` (E2E), `npm run test:all` (full suite)
+<!-- Example format (delete and replace with detected values):
+
+formats: jest vitest          # space-separated list of detected test frameworks
+
+# auth_guards subsection — ONLY for web stacks. Omit entirely for non-web projects.
+auth_guards:
+  - protected_root: src/routes/   # directory where all routes require auth by default
+  - guard: withAuth() HOC from src/middleware/auth.ts — wrap page components; do NOT inline JWT decode
+  - middleware: authenticate from src/middleware/auth.ts — apply to routes via preHandler: [authenticate]
+  - rbac: requireRole(role) from src/middleware/rbac.ts — use after authenticate for role-restricted endpoints
 -->
 
 ## Existing Service Patterns
@@ -77,18 +83,6 @@ Delete entries when they're no longer relevant.
 - Climate lookups: see `src/services/climate-service.ts` → `getClimateForLocation()` — copy this pattern, do NOT write a new raw query
 - Irrigation suitability: see `src/services/irrigation-service.ts` for the canonical cell lookup pattern
 - Auth middleware: always use `withAuth()` HOC from `src/middleware/auth.ts` — do NOT replicate the JWT decode logic inline
--->
-
-## Auth Guards
-
-<!-- Document the auth guard / middleware pattern so agents never replicate JWT
-     decode logic inline or bypass protection on protected routes. -->
-
-<!-- Examples (delete and replace with your own):
-- Protected routes root: `src/routes/` — all files here require auth unless explicitly marked public
-- Guard HOC: `withAuth()` from `src/middleware/auth.ts` — wrap page components; do NOT inline JWT decode
-- Guard middleware: `authenticate` from `src/middleware/auth.ts` — apply to Fastify routes via `preHandler: [authenticate]`
-- Guard function name: `requireRole(role)` from `src/middleware/rbac.ts` — use after `authenticate` for role-restricted endpoints
 -->
 
 ## Environment Notes
