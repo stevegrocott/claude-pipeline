@@ -40,8 +40,10 @@ Discover existing tests before writing new ones. Run 6 phases to find what alrea
 Create these todos with TodoWrite before starting any phase:
 
 - [ ] **Phase 0** — Read `$PLATFORM_CONTEXT_FILE`; warn and auto-detect layout if missing
-- [ ] **Phase 2** — Run import-filter: `grep -rl "from.*${SOURCE_STEM}"` across test files
-- [ ] **Phase 3** — Run mock-filter: `grep -L "jest\.mock\|^\s*//"` on consumer tests
+- [ ] **Phase 1** — Find co-located unit/spec tests via find; collect as `unit_tests[]`
+- [ ] **Phase 2** — Run import-filter: `grep -rl "from.*${SOURCE_STEM}"` across test files; collect as `consumer_tests[]`
+- [ ] **Phase 3** — Run mock-filter: `grep -EL "jest\.mock"` on consumer tests
+- [ ] **Phase 4** — Find E2E specs referencing `$SOURCE_STEM`; collect as `e2e_specs[]`
 - [ ] **Phase 4b** — Extract changed functions from `git diff HEAD~1`; promote matching E2E specs to `e2e_specs_primary`
 - [ ] **Phase 5** — Trace auth guards; set `auth_risk: true` if a guard file was recently changed
 - [ ] **Phase 6** — Evaluate decision; dispatch to `test-driven-development` for `write_new`/`both`; follow update steps for `update_existing`
@@ -95,14 +97,14 @@ Find all test files in the project that import the source file:
 grep -rl "from.*${SOURCE_STEM}" --include="*.test.*" --include="*.spec.*" . 2>/dev/null
 ```
 
-Merge unique results into `unit_tests[]`. These are **consumer tests**.
+Collect results as `consumer_tests[]`. These are **consumer tests** — files that import the source but are not the primary co-located test. Merge unique entries into `unit_tests[]` for the Phase 6 decision step.
 
 ### Phase 3: Mock Filter
 
 From consumer tests, exclude files that mock the source entirely — they test the mock, not the real code:
 
 ```bash
-grep -L "jest\.mock\|^\s*//" "${consumer_tests[@]}" 2>/dev/null
+grep -EL "jest\.mock" "${consumer_tests[@]}" 2>/dev/null
 ```
 
 Files passing this filter are **real unit tests** and the primary target for updates.
