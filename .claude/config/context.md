@@ -55,6 +55,19 @@ Delete entries when they're no longer relevant.
 - Mock external HTTP calls with `msw` — do NOT let tests hit real third-party APIs; mark any test that does as `@skip` until mocked
 -->
 
+## Test Layout
+
+<!-- Document the test directory structure and file naming conventions so agents
+     know where to find existing tests and where to place new ones. -->
+
+<!-- Examples (delete and replace with your own):
+- Unit tests: `tests/unit/` — mirror the `src/` directory tree (e.g., `src/services/foo.ts` → `tests/unit/services/foo.test.ts`)
+- Integration tests: `tests/integration/` — test cross-service boundaries; require a running database
+- E2E tests: `tests/e2e/` — Playwright specs; require a running local server on port 3000
+- Fixtures: `tests/fixtures/` — shared test data; import via `@/tests/fixtures/[name]`
+- Test commands: `npm test` (unit), `npm run test:e2e` (E2E), `npm run test:all` (full suite)
+-->
+
 ## Existing Service Patterns
 
 <!-- When adding a new feature that touches a shared service or shared table,
