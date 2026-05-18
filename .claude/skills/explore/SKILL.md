@@ -92,7 +92,11 @@ Break the chosen approach into implementable tasks:
 
 **Before creating the issue, ask the user which epic to parent it under** using `AskUserQuestion`. Look up open epics in the project to offer relevant options. For Precis/KIKS, all issues must sit under KIKS-410 (the Precis initiative) within an appropriate epic. Present the most likely epics as options based on the research context (e.g., if the work is UI-related, suggest "KIKS-546 UI Enhancements").
 
-**Deploy Verification section (optional):** Include a `## Deploy Verification` section if the issue involves environment-specific bugs or requires deployment testing. This section guides the deploy-verify stage by specifying target environment, health endpoint, and custom verification logic. Include this for bugs that only reproduce in test/staging/production but not locally.
+**Deploy Verification section (scope-dependent):** Whether to include a `## Deploy Verification` section and what to put in it depends on which files are changed:
+
+- **Backend or shared packages changed** (`apps/backend/`, `packages/`): Include the section with a full rebuild command (e.g., `bash scripts/deploy-nas-from-local.sh`). The NAS Docker image must be rebuilt to pick up backend changes.
+- **Frontend-only changes** (`apps/frontend/`, CSS, components, pages): Include the section but use the `--health-only` flag (e.g., `bash scripts/deploy-nas-from-local.sh --health-only`). The NAS backend hasn't changed; a health-check curl (~5 s) is sufficient.
+- **No NAS environment concern** (CI config, documentation, scripts unrelated to the deployed service): **Omit the section entirely.** An absent `## Deploy Verification` section means the orchestrator skips the deploy-verify stage.
 
 Create the issue using the platform wrapper with `--parent` set to the chosen epic:
 
@@ -132,10 +136,13 @@ PLATFORM_DIR=".claude/scripts/platform"
 - [ ] `[playwright-test-developer]` **(S)** Write E2E test for [user flow] (if TEST_E2E_CMD configured) — `tests/e2e/dashboard.spec.ts:L22-55`
 
 ## Deploy Verification
-[Include if this issue involves bugs in specific environments or requires deployment testing]
+[Scope rule: include ONLY if this issue touches the NAS environment.
+ - apps/backend/ or packages/ changed → full rebuild: bash scripts/deploy-nas-from-local.sh
+ - apps/frontend/ only → health-only: bash scripts/deploy-nas-from-local.sh --health-only
+ - No NAS concern (CI, docs, unrelated scripts) → OMIT this section entirely]
 - **Target environment:** [staging|test|nas|production]
-- **Health endpoint:** [full URL to health check endpoint, e.g., https://example.com/health]
-- **Verification command:** [optional — custom shell command to verify deployment, e.g., "curl -s https://example.com/api/status | jq .status"]
+- **Health endpoint:** [full URL to health check endpoint, e.g., https://test-beegeefarm.grocott.com.au/health]
+- **Verification command:** [bash scripts/deploy-nas-from-local.sh | bash scripts/deploy-nas-from-local.sh --health-only]
 
 ## Acceptance Criteria
 - [ ] AC1: [measurable criterion]
