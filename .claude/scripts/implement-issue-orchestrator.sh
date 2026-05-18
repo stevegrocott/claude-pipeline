@@ -6755,9 +6755,15 @@ $full_scope_failures
             # Scope-aware gate: downgrade to --health-only when no
             # backend or package files are in this branch's diff, so
             # front-end-only changes skip a full redeploy.
+            # Fail-safe: if the diff is empty (git failed or genuinely
+            # empty), default to the full deploy rather than silently
+            # downgrading to health-only.
             local changed_files
-            changed_files=$(git diff main...HEAD --name-only 2>/dev/null)
-            if ! grep -qE '^(apps/backend|packages)/' <<< "$changed_files"; then
+            changed_files=$(git -C "." diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+            if [[ -z "$changed_files" ]]; then
+                log "Scope gate: empty diff vs $BASE_BRANCH —" \
+                    "defaulting to full deploy"
+            elif ! grep -qE '^(apps/backend|packages)/' <<< "$changed_files"; then
                 log "Scope gate: no backend/package changes —" \
                     "downgrading to --health-only"
                 DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD} --health-only"
