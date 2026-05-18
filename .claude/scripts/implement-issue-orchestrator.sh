@@ -6751,6 +6751,18 @@ $full_scope_failures
             set_stage_completed "deploy_verify"
         else
             set_stage_started "deploy_verify"
+
+            # Scope-aware gate: downgrade to --health-only when no
+            # backend or package files are in this branch's diff, so
+            # front-end-only changes skip a full redeploy.
+            local changed_files
+            changed_files=$(git diff main...HEAD --name-only 2>/dev/null)
+            if ! grep -qE '^(apps/backend|packages)/' <<< "$changed_files"; then
+                log "Scope gate: no backend/package changes —" \
+                    "downgrading to --health-only"
+                DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD} --health-only"
+            fi
+
             log "Triggering deploy via: $DEPLOY_VERIFY_CMD"
             comment_issue "Deploy Verify: Deploying" \
                 "🚀 Triggering deployment via \`$DEPLOY_VERIFY_CMD\`..." \
