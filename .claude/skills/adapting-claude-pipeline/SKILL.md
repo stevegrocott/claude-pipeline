@@ -1,6 +1,18 @@
 ---
 name: adapting-claude-pipeline
 description: Use when adapting the generic .claude pipeline folder to a specific codebase - adjusting skills, agents, hooks, scripts, prompts, and settings for the target project's tech stack and workflows
+inputs:
+  - name: project_description
+    type: string
+    required: false
+    description: Brief description of the target project's stack, domain, and workflows; used to guide brainstorming if not yet collected
+outputs:
+  - name: adapted_claude_directory
+    type: file_path
+    description: Path to the .claude/ directory after all modifications and apply-local.sh has been run
+  - name: adaptation_summary
+    type: string
+    description: Summary of all changes made — skills added/removed, agents created, hooks updated, settings changed
 side_effects:
   - modifies_claude_local_directory
   - runs_apply_local_sh
@@ -392,6 +404,60 @@ Based on brainstorming answers, modify `.claude/config/platform.sh`:
 - Set TEST_UNIT_CMD, TEST_E2E_CMD, LINT_CMD, FORMAT_CMD based on project stack
 
 **Parallel execution:** Tasks in different workstreams with no shared files can run in parallel using `dispatching-parallel-agents`.
+
+### Phase 5.5: Test Layout
+
+Before full verification, auto-detect which categories of changes were made and run a targeted layout test for each.
+
+**Auto-detection logic:**
+
+```
+detect:
+  new_skills:      glob .claude/skills/**/SKILL.md — diff against pre-execution inventory
+  new_agents:      glob .claude/agents/*.md — diff against pre-execution inventory
+  modified_hooks:  diff .claude/settings.json against pre-execution snapshot
+  local_overrides: ls .claude/local/ — non-empty means apply-local.sh must run
+  deleted_files:   compare pre-execution inventory with current state — any gaps?
+```
+
+For each detected category, run the corresponding test block:
+
+```yaml
+test_layout:
+  - category: new_skills
+    when: new SKILL.md files detected
+    checks:
+      - frontmatter has name and description fields
+      - skill is referenced in at least one agent or settings hook
+      - no broken composes entries pointing to non-existent skills
+
+  - category: new_agents
+    when: new agent .md files detected
+    checks:
+      - agent has required fields (name, description, tools)
+      - agent is reachable from at least one skill or orchestration script
+      - no hardcoded project paths from the source pipeline
+
+  - category: modified_hooks
+    when: settings.json changed
+    checks:
+      - all hook commands reference existing files
+      - no hook triggers reference deleted skills or agents
+
+  - category: local_overrides
+    when: .claude/local/ is non-empty
+    checks:
+      - apply-local.sh exists and is executable
+      - each file in .claude/local/ has a corresponding target path in .claude/
+
+  - category: deleted_files
+    when: inventory gaps detected
+    checks:
+      - no remaining references to deleted file names anywhere in .claude/
+      - MEMORY.md and skill composes lists do not reference deleted items
+```
+
+**If any check fails:** Fix before proceeding to Phase 6. Layout errors compound — a broken reference found now costs one edit; the same error found during a live workflow costs a derailed task.
 
 ### Phase 6: Verify
 
