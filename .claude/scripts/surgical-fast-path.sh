@@ -174,18 +174,34 @@ pr_number=""
 
 # --- 1. Dirty tree check ---------------------------------------------------
 #
-# On resume, the implement stage already wrote files but they should have
-# been committed before the crash. If the tree is dirty AND we have prior
-# completed work, those uncommitted changes are leftover scratch and we
-# should still bail — the operator needs to investigate.
+# On fresh start (fast_path_implement not yet completed), stash any
+# uncommitted changes before branch checkout, then pop after checkout.
+# On resume (fast_path_implement already completed), a dirty tree means
+# leftover scratch from a prior crash — bail so the operator can
+# investigate.
 
+_stash_pushed=0
 if [[ -n "$(git status --porcelain 2>/dev/null || true)" ]]; then
-    bail "dirty_tree"
+    if is_stage_completed fast_path_implement; then
+        bail "dirty_tree"
+    fi
+    log "Dirty working tree on fresh start — auto-stashing"
+    if ! git stash push --include-untracked \
+            -m "fast-path auto-stash #${ISSUE_NUMBER}" 2>>"$LOG_FILE"; then
+        bail "dirty_tree"
+    fi
+    _stash_pushed=1
 fi
 
 # --- 2. Branch setup -------------------------------------------------------
 
 git checkout "$BRANCH" 2>>"$LOG_FILE" || bail "branch_checkout_failed"
+
+if [[ "${_stash_pushed}" == "1" ]]; then
+    if ! git stash pop 2>>"$LOG_FILE"; then
+        bail "stash_pop_conflict"
+    fi
+fi
 
 # --- 3. Implement (skip if already completed) ------------------------------
 
