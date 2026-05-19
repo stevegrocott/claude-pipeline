@@ -122,6 +122,19 @@ PLATFORM_DIR=".claude/scripts/platform"
 **Current behavior:** [what happens now]
 **Desired behavior:** [what should happen]
 
+## Relevant Existing Tests
+**Unit tests:**
+- `path/to/unit.test.ts:L1-30` — [what behavior is covered]
+
+**Consumer tests:**
+- `path/to/integration.test.ts:L1-30` — [what integration is covered]
+
+**E2E specs:**
+- `path/to/spec.e2e.ts:L1-30` — [what user flow is covered]
+
+**Coverage gaps:**
+- [what is not tested — inform implementation task descriptions]
+
 ## Evaluation
 **Approach:** [chosen approach — 1 sentence]
 **Rationale:** [why this approach — 2-3 sentences]
