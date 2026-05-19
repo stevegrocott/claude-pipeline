@@ -1609,8 +1609,9 @@ run_stage() {
     _matched_prefix=$(_match_stage_prefix "$stage_name") || true
     _inherent_tier=$(_stage_to_tier "${_matched_prefix:-}")
     if [[ "${_matched_prefix:-}" == "pr" && "${_matched_prefix:-}" != "pr-review" && "${_matched_prefix:-}" != "pr-fix" ]]; then
-        turns_args=(--max-turns 5)
-        log "  Max turns: 5 (PR creation — push + create MR)"
+        local _max_pr="${MAX_TURNS_PR:-10}"
+        turns_args=(--max-turns "$_max_pr")
+        log "  Max turns: $_max_pr (PR creation — push + create MR, env: MAX_TURNS_PR)"
     elif [[ "${_matched_prefix:-}" == "pr-review" ]]; then
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (PR review — focused diff analysis)"
