@@ -61,11 +61,7 @@ Refine the vague input into concrete requirements:
 
 **Test Surface Discovery (run after identifying affected files):**
 
-Run Phases 0–3 of the `test-discovery` skill against the touched files (cap at 5 files):
-1. **Phase 0 — Locate:** Find co-located test files for each touched source file
-2. **Phase 1 — Inventory:** List existing `describe`/`it` blocks and fixture references
-3. **Phase 2 — Gap-map:** Identify exported functions/branches with no test coverage
-4. **Phase 3 — Risk-rank:** Flag high-risk uncovered paths relevant to this change
+Run Phases 0–3 of the `test-discovery` skill against the touched files (cap at 5 files). The skill itself documents what each phase does.
 
 > **Graceful fallback:** If `.claude/skills/test-discovery/SKILL.md` does not exist, skip this sub-step and note "test-discovery skill unavailable" in the research findings.
 
