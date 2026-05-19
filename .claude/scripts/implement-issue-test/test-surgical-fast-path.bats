@@ -56,7 +56,11 @@ setup() {
     unset MOCK_GIT_DIRTY MOCK_GIT_HOOK_FAILURE MOCK_GIT_PUSH_EXIT_CODE \
           MOCK_GIT_GREP_FILE_COUNT MOCK_GH_MERGE_STATE \
           MOCK_GH_MERGE_STATE_SEQ MOCK_GH_MERGE_STATE_CTR \
-          MOCK_GH_PR_CREATE_EXIT_CODE MOCK_GH_PR_MERGE_EXIT_CODE || true
+          MOCK_GH_PR_CREATE_EXIT_CODE MOCK_GH_PR_MERGE_EXIT_CODE \
+          MOCK_GIT_STASH_PUSH_EXIT_CODE MOCK_GIT_STASH_POP_EXIT_CODE || true
+    # Clear stash marker files left over from prior tests (per-test $TEST_TMP
+    # is fresh, but be explicit for resume-style tests that re-enter setup).
+    rm -f "$TEST_TMP/git-stash-pushed" "$TEST_TMP/git-stash-popped" || true
     unset FAST_PATH_MERGE_CHECK_ATTEMPTS FAST_PATH_MERGE_CHECK_DELAY || true
 
     # Default: zero retry delay so tests don't sleep.
@@ -157,7 +161,10 @@ case "${1:-}" in
         exit 0
         ;;
     status)
-        if [[ "${MOCK_GIT_DIRTY:-0}" == "1" ]]; then
+        # If the working tree was already stashed away by the fast-path's
+        # fresh-start handling, status must report clean — otherwise the
+        # script would loop on the dirty check after pop.
+        if [[ "${MOCK_GIT_DIRTY:-0}" == "1" ]] && [[ ! -f "$TEST_TMP/git-stash-pushed" ]]; then
             echo " M some-file.ts"
         fi
         exit 0
@@ -168,6 +175,26 @@ case "${1:-}" in
             exit 0
         fi
         exit 0
+        ;;
+    stash)
+        case "${2:-}" in
+            push|save|"")
+                : > "$TEST_TMP/git-stash-pushed"
+                exit "${MOCK_GIT_STASH_PUSH_EXIT_CODE:-0}"
+                ;;
+            pop)
+                if [[ "${MOCK_GIT_STASH_POP_EXIT_CODE:-0}" != "0" ]]; then
+                    echo "CONFLICT (content): Merge conflict in some-file.ts" >&2
+                    exit "${MOCK_GIT_STASH_POP_EXIT_CODE}"
+                fi
+                : > "$TEST_TMP/git-stash-popped"
+                rm -f "$TEST_TMP/git-stash-pushed"
+                exit 0
+                ;;
+            *)
+                exit 0
+                ;;
+        esac
         ;;
     checkout|switch)
         exit "${MOCK_GIT_CHECKOUT_EXIT_CODE:-0}"
@@ -443,14 +470,64 @@ invoke_fast_path_script() {
     "$SCRIPT_DIR/surgical-fast-path.sh"
 }
 
-@test "13 fast-path bails cleanly on dirty tree → state=failed, error=dirty_tree, exits non-zero" {
+@test "13 fast-path on RESUME with dirty tree → bails state=failed, error=dirty_tree" {
+    # Resume scenario: a prior run already completed fast_path_implement, so
+    # any dirty tree we encounter now is leftover scratch the operator needs
+    # to investigate. The script must still bail with dirty_tree.
     export MOCK_GIT_DIRTY=1
+    # Mark fast_path_implement as completed to simulate a resumed run.
+    jq '.stages.fast_path_implement.status = "completed"' \
+        "$STATUS_FILE" > "$STATUS_FILE.tmp"
+    mv "$STATUS_FILE.tmp" "$STATUS_FILE"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
     [ "$status" -ne 0 ]
     assert_json_field "$STATUS_FILE" '.state' 'failed'
     assert_json_field "$STATUS_FILE" '.error' 'dirty_tree'
+    # On resume we must NOT have stashed — that would silently lose the
+    # operator's investigation context.
+    [[ ! -f "$TEST_TMP/git-stash-pushed" ]]
+}
+
+@test "13a fast-path on FRESH start with dirty tree → stashes, proceeds, pops" {
+    # Fresh-start scenario: fast_path_implement still pending. Unrelated
+    # uncommitted changes in the working tree should be stashed away,
+    # the fast-path should run normally, and the stash should be popped
+    # after branch checkout completes.
+    export MOCK_GIT_DIRTY=1
+    export MOCK_GH_MERGE_STATE=CLEAN
+    export MOCK_GH_PR_NUMBER=99
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'completed'
+    # Stash push must have happened so the dirty tree didn't block checkout.
+    [[ -f "$TEST_TMP/git-stash-popped" ]]
+    # And the operator's uncommitted work must have been restored.
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_implement.status' 'completed'
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_pr.status' 'completed'
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_merge.status' 'completed'
+}
+
+@test "13b fast-path stash pop conflict on fresh start → bails error=stash_pop_conflict" {
+    # If git stash pop conflicts (the branch checkout modified files that
+    # overlap the stash), the script must surface this as a distinct error
+    # so the operator can recover their uncommitted work — never silently
+    # continue and risk losing it.
+    export MOCK_GIT_DIRTY=1
+    export MOCK_GIT_STASH_POP_EXIT_CODE=1
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -ne 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'failed'
+    assert_json_field "$STATUS_FILE" '.error' 'stash_pop_conflict'
+    # Stash push happened (so the dirty check passed and checkout proceeded)
+    # but pop failed — the marker for a successful pop must NOT be present.
+    [[ -f "$TEST_TMP/git-stash-pushed" ]]
+    [[ ! -f "$TEST_TMP/git-stash-popped" ]]
 }
 
 @test "14 fast-path bails on hook failure → captures stderr to triage.json.hook_failure_output" {
