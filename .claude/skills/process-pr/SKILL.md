@@ -249,6 +249,8 @@ PLATFORM_DIR=".claude/scripts/platform"
 "$PLATFORM_DIR/merge-mr.sh" "$PR_NUMBER"
 ```
 
+**IMPORTANT — do NOT check `mergeStateStatus` directly.** The `UNKNOWN` value is transient (can persist 2–30 s while GitHub recomputes merge status) and is not a reliable signal. `merge-mr.sh` handles all mergeability polling internally — it retries until the state resolves or a hard failure is confirmed. Attempting to read `mergeStateStatus` yourself and treating `UNKNOWN` as a failure will cause spurious aborts on perfectly mergeable PRs.
+
 **If merge fails:**
 - Log error with reason
 - Stop - do not proceed to close issue or create follow-ups
