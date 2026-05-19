@@ -40,6 +40,8 @@ failure_modes:
     mitigation: Stop and return failure; do NOT close the issue
   - id: rerun_failed
     mitigation: Log error and include in output; do not retry automatically
+  - id: mergeStateStatus_false_positive
+    mitigation: Do not check mergeStateStatus directly; call merge-mr.sh which polls .mergeable until MERGEABLE or timeout
 ---
 
 # Process PR/MR
