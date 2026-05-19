@@ -108,6 +108,23 @@ update_status() {
         "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
 
+# Load a skill's SKILL.md content for injection into stage prompts.
+# Usage: local content; content=$(load_skill "test-discovery")
+# Returns empty string if skill file not found (non-fatal).
+load_skill() {
+    local skill_name="$1"
+    # CLAUDE_PROJECT_DIR is set by Claude Code but absent when run from batch/shell directly.
+    # Fall back to the script's own repo root so skills load correctly in both contexts.
+    local _project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    local skill_file="$_project_dir/.claude/skills/$skill_name/SKILL.md"
+    if [[ -f "$skill_file" ]]; then
+        cat "$skill_file"
+    else
+        log "Skill file not found: $skill_file"
+        printf ''
+    fi
+}
+
 # --- Metrics ---
 START_EPOCH=$(date +%s)
 ESCALATIONS=0
@@ -134,6 +151,8 @@ FALLBACK=$(_next_model_up "$MODEL")
 MODEL_USED="$MODEL"
 log "  Model: $MODEL (fallback: $FALLBACK)"
 
+test_discovery_skill=$(load_skill "test-discovery")
+
 PROMPT="You are a research agent investigating a project codebase.
 
 ## Your task
@@ -144,7 +163,13 @@ $IDEA
 ## Project directory
 $PROJECT_DIR
 
-## Instructions
+${test_discovery_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$test_discovery_skill
+
+## End Skill Instructions
+
+}## Instructions
 1. Explore the project structure, key files, and relevant code
 2. Understand the current behavior related to the idea
 3. Identify files that would need to change
