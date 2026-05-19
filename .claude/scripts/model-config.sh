@@ -156,13 +156,16 @@ readonly -a _STAGE_PREFIXES=(
 #   Default: 20 turns   Env: MAX_TURNS_FIX_REVIEW
 #   Targeted corrections — less scope than implement/review.
 #
-# pr / pr-review budgets are intentionally fixed and NOT affected by these
-# env vars:
-#   pr:        5 turns  (push + create MR)
+# pr stage (sonnet model, standard-tier):
+#   Default: 10 turns   Env: MAX_TURNS_PR
+#   Push + create MR; default is 10 rather than 5 to accommodate a
+#   rebase-before-push when the branch has drifted from main.
+#
+# pr-review budget is intentionally fixed and NOT affected by env vars:
 #   pr-review: 10 turns (focused diff analysis)
 #
 # Decision logic: implement-issue-orchestrator.sh
-# (search for MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW)
+# (search for MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW / MAX_TURNS_PR)
 # =============================================================================
 
 # =============================================================================
