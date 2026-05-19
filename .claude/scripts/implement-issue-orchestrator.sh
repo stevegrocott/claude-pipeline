@@ -3700,10 +3700,18 @@ run_task_in_worktree() {
 
 		local line_range_hint
 		line_range_hint=$(build_line_range_hint "$task_desc")
+		local test_discovery_skill
+		test_discovery_skill=$(load_skill "test-discovery")
 		local impl_prompt
 		impl_prompt="${PLATFORM_PATTERNS_PREFIX}Implement task $task_id on branch $wt_branch in the current working directory:
 
-$task_desc${line_range_hint}${files_block}
+${test_discovery_skill:+## Skill Instructions — READ AND FOLLOW THESE
+
+$test_discovery_skill
+
+## End Skill Instructions
+
+}$task_desc${line_range_hint}${files_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
