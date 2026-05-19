@@ -2161,6 +2161,21 @@ _run_triage_composition() {
 run_triage_stage() {
     local issue_body_file="${1:-$LOG_BASE/context/issue-body.md}"
 
+    # Kill switch: DISABLE_SURGICAL_FAST_PATH bypasses triage entirely,
+    # forces full route, and writes kill_switch_engaged:true to triage.json.
+    if [[ -n "${DISABLE_SURGICAL_FAST_PATH:-}" ]]; then
+        log "Triage: DISABLE_SURGICAL_FAST_PATH set — forcing full route"
+        jq -n '{
+            route: "full",
+            kill_switch_engaged: true,
+            timestamp: (now | todate)
+        }' > "$LOG_BASE/triage.json"
+        set_stage_started "triage"
+        update_stage triage completed route full
+        printf 'full\n'
+        return 0
+    fi
+
     set_stage_started "triage"
 
     if [[ ! -f "$issue_body_file" ]]; then
