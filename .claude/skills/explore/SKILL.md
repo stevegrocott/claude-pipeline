@@ -214,6 +214,8 @@ URL: https://github.com/...
 Ready for implementation: /implement-issue NNN main
 ```
 
+The issue body includes a **Relevant Existing Tests** section populated during Step 2 test surface discovery — implementers use this to know which tests to update and which coverage gaps remain.
+
 ## Task Format Specification
 
 The `## Implementation Tasks` section must use this parseable convention:
@@ -288,3 +290,4 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Writing `[test-engineer]` as agent | Legacy alias — write `[playwright-test-developer]` for E2E or `[default]` for general tests |
 | Missing square brackets: `` `agent-name` `` instead of `` `[agent-name]` `` | Parser accepts it, but explicit brackets make intent clear — always use brackets |
 | Writing `[fullstack-engineer]` as agent | Unknown agent — normalizer silently downgrades to `default`, losing backend and frontend specialization; split into `[fastify-backend-developer]` + `[react-frontend-developer]` instead |
+| Skip test discovery when affected files are identified | Implementers won't know which tests to update or extend; new tests may duplicate existing coverage and gaps remain invisible |
