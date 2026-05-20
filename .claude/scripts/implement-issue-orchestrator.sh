@@ -6761,146 +6761,32 @@ $full_scope_failures
         "$branch" "$branch_scope" "$pipeline_profile" "$max_task_size"
 
     # -------------------------------------------------------------------------
-    # STAGE: DEPLOY VERIFY
-    # Deploys to a configured target environment (test/nas/staging) and polls
-    # the health URL until the service is live, then runs a verification prompt
-    # against the deployed environment.
-    # Gated on: (a) DEPLOY_VERIFY_CMD set in platform.sh, AND
-    #           (b) issue has env:test/env:nas/env:staging label OR body
-    #               contains a "## Deploy Verification" section.
-    # Added in claude-pipeline#64.
+    # NAS PRE-MERGE NOTIFICATION
+    # If the issue carries the env:nas-premerge label the pipeline cannot run
+    # the NAS build automatically pre-merge; instead it posts a comment asking
+    # the human to trigger the NAS build manually before merging the PR.
+    # The pipeline then proceeds to PR creation without blocking.
+    # Full deploy_verify (env:test/env:nas/env:staging) runs post-merge below.
     # -------------------------------------------------------------------------
-    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "deploy_verify"; then
-        log "Skipping deploy_verify stage (already completed)"
-    else
-        if ! should_run_deploy_verify "$ISSUE_NUMBER"; then
-            log "Skipping deploy_verify stage: gate conditions not met"
-            set_stage_started "deploy_verify"
-            if [[ -n "${DEPLOY_VERIFY_CMD:-}" ]]; then
-                comment_issue "Deploy Verify: Skipped" \
-                    "⏭️ Deploy verification skipped (no \`env:*\` label or \`## Deploy Verification\` section found)." \
-                    "default"
-            fi
-            set_stage_completed "deploy_verify"
-        else
-            set_stage_started "deploy_verify"
+    local nas_pm_labels=""
+    case "${TRACKER:-github}" in
+        github)
+            nas_pm_labels=$(gh issue view "$ISSUE_NUMBER" \
+                --json labels -q '.labels[].name' 2>/dev/null || true)
+            ;;
+        jira)
+            nas_pm_labels=$(acli jira workitem view "$ISSUE_NUMBER" \
+                --fields labels --json 2>/dev/null \
+                | jq -r '.fields.labels[]?' 2>/dev/null || true)
+            ;;
+    esac
 
-            # Scope-aware gate: downgrade to --health-only when no
-            # backend or package files are in this branch's diff, so
-            # front-end-only changes skip a full redeploy.
-            # Fail-safe: if the diff is empty (git failed or genuinely
-            # empty), default to the full deploy rather than silently
-            # downgrading to health-only.
-            local changed_files
-            changed_files=$(git diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
-            if [[ -z "$changed_files" ]]; then
-                log "Scope gate: empty diff vs $BASE_BRANCH —" \
-                    "defaulting to full deploy"
-            elif ! grep -qE '^(apps/backend|packages)/' <<< "$changed_files"; then
-                log "No backend changes detected —" \
-                    "downgrading deploy-verify to health-check-only."
-                DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD} --health-only"
-            fi
+    if printf '%s\n' "$nas_pm_labels" | grep -q '^env:nas-premerge$'; then
+        comment_issue "NAS Pre-Merge Build Required" \
+            "⚠️ This issue has the \`env:nas-premerge\` label. Please trigger a NAS build manually before merging this PR.
 
-            log "Triggering deploy via: $DEPLOY_VERIFY_CMD"
-            comment_issue "Deploy Verify: Deploying" \
-                "🚀 Triggering deployment via \`$DEPLOY_VERIFY_CMD\`..." \
-                "default"
-
-            # Run the deploy command
-            local deploy_exit=0
-            if ! bash -c "$DEPLOY_VERIFY_CMD" >>"${LOG_FILE:-/dev/null}" 2>&1; then
-                deploy_exit=1
-            fi
-
-            if ((deploy_exit != 0)); then
-                log_error "Deploy command failed (exit $deploy_exit)"
-                comment_issue "Deploy Verify: Failed" \
-                    "❌ Deploy command \`$DEPLOY_VERIFY_CMD\` exited with code $deploy_exit. Skipping health poll and verification." \
-                    "default"
-                # Deploy failure is intentionally non-blocking: the pipeline continues
-                # to the PR stage so the work is not lost. The failure surfaces via
-                # the issue comment above; no retry loop is triggered.
-                set_stage_completed "deploy_verify"
-            else
-                log "Deploy command succeeded"
-
-                # Poll health URL if configured; poll_health_url returns 0 if the
-                # URL is empty (skip = healthy) or a 2xx response is received.
-                local poll_interval=10
-                local max_retries=$(( ${DEPLOY_VERIFY_TIMEOUT_SECS:-900} / poll_interval ))
-                local health_ok=false
-                if [[ -n "${DEPLOY_VERIFY_HEALTH_URL:-}" ]]; then
-                    log "Polling health URL: $DEPLOY_VERIFY_HEALTH_URL (${poll_interval}s intervals, $max_retries retries max)"
-                else
-                    log "No DEPLOY_VERIFY_HEALTH_URL configured — skipping health poll"
-                fi
-                if poll_health_url "${DEPLOY_VERIFY_HEALTH_URL:-}" "$max_retries" "$poll_interval"; then
-                    health_ok=true
-                else
-                    log_error "Health check failed after $max_retries attempts ($(( max_retries * poll_interval / 60 )) min)"
-                    comment_issue "Deploy Verify: Health Timeout" \
-                        "❌ Health endpoint \`$DEPLOY_VERIFY_HEALTH_URL\` did not return 2xx after $max_retries attempts ($(( max_retries * poll_interval / 60 )) min). Deployment may have failed." \
-                        "default"
-                    set_stage_completed "deploy_verify"
-                fi
-
-                # Run verification prompt if health is OK
-                if $health_ok; then
-                    log "Running deploy verification prompt"
-
-                    # Extract Deploy Verification section from issue body
-                    local deploy_verify_section=""
-                    local issue_body_file="$LOG_BASE/context/issue-body.md"
-                    if [[ -f "$issue_body_file" ]]; then
-                        deploy_verify_section=$(awk '/^## Deploy Verification/{found=1; next} found && /^## /{exit} found{print}' "$issue_body_file")
-                    fi
-
-                    local deploy_verify_prompt="Verify the deployment for issue #$ISSUE_NUMBER against the live environment.
-
-DEPLOYED ENVIRONMENT:
-- Deploy command: $DEPLOY_VERIFY_CMD
-- Health URL: ${DEPLOY_VERIFY_HEALTH_URL:-N/A}
-- Health status: passed
-
-ISSUE ACCEPTANCE CRITERIA:
-$(awk '/^## Acceptance Criteria/{found=1; next} found && /^## /{exit} found{print}' "$issue_body_file" 2>/dev/null || printf '%s' '(not found)')
-
-DEPLOY VERIFICATION INSTRUCTIONS:
-${deploy_verify_section:-No specific deploy verification instructions in the issue. Verify the deployment is functional by checking health endpoints and basic functionality.}
-
-STEPS:
-1. Confirm the health endpoint returns a 2xx response
-2. Test the key functionality described in the acceptance criteria against the live URL
-3. Check for any error logs or degraded behavior
-4. Report status as 'success', 'error', or 'partial' with a detailed summary"
-
-                    local deploy_verify_result
-                    deploy_verify_result=$(run_stage "deploy-verify" "$deploy_verify_prompt" "implement-issue-deploy-verify.json" "default")
-
-                    local dv_status dv_health dv_summary
-                    dv_status=$(printf '%s' "$deploy_verify_result" | jq -r '.output.status // "unknown"')
-                    dv_health=$(printf '%s' "$deploy_verify_result" | jq -r '.output.health_status // "unknown"')
-                    dv_summary=$(printf '%s' "$deploy_verify_result" | jq -r '.output.summary // "Deploy verification completed"')
-
-                    local dv_icon="✅"
-                    [[ "$dv_status" == "error" ]] && dv_icon="❌"
-                    [[ "$dv_status" == "partial" ]] && dv_icon="⚠️"
-
-                    comment_issue "Deploy Verify" "$dv_icon **Status:** $dv_status | **Health:** $dv_health
-
-$dv_summary" "default"
-
-                    if [[ "$dv_status" == "error" ]]; then
-                        log_error "Deploy verification failed"
-                    else
-                        log "Deploy verification: $dv_status"
-                    fi
-
-                    set_stage_completed "deploy_verify"
-                fi
-            fi
-        fi
+The pipeline is proceeding to PR creation. Once you have triggered and confirmed the NAS pre-merge build, this PR can be merged." \
+            "default"
     fi
 
     # -------------------------------------------------------------------------
@@ -7463,7 +7349,6 @@ $complete_summary
     # -------------------------------------------------------------------------
     if [[ -n "$RESUME_MODE" ]] && is_stage_completed "merge_pr"; then
         log "Skipping merge_pr stage (already completed)"
-        set_final_state "completed"
     else
         set_stage_started "merge_pr"
         log "merge_pr: stage started"
@@ -7544,7 +7429,6 @@ $merge_blocked_reason}" \
                 "✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully." \
                 "default"
             set_stage_completed "merge_pr"
-            set_final_state "completed"
         else
             log "merge_pr: merge-mr.sh failed for PR #$pr_number"
             log_error "Failed to merge PR #$pr_number"
@@ -7555,6 +7439,179 @@ $merge_blocked_reason}" \
             exit 1
         fi
     fi
+
+    # -------------------------------------------------------------------------
+    # STAGE: DEPLOY VERIFY (post-merge)
+    # Deploys to a configured target environment (test/nas/staging) and polls
+    # the health URL until the service is live, then runs a verification prompt
+    # against the deployed environment.
+    # Runs AFTER merge so the NAS always builds from the merged origin/main.
+    # Gated on: (a) DEPLOY_VERIFY_CMD set in platform.sh, AND
+    #           (b) issue has env:test/env:nas/env:staging label OR body
+    #               contains a "## Deploy Verification" section.
+    # Scope gate uses git diff HEAD~1..HEAD (post-merge diff) so the scope
+    # reflects the actual merged commit rather than the pre-merge branch diff.
+    # -------------------------------------------------------------------------
+    if [[ -n "$RESUME_MODE" ]] && is_stage_completed "deploy_verify"; then
+        log "Skipping deploy_verify stage (already completed)"
+    else
+        if ! should_run_deploy_verify "$ISSUE_NUMBER"; then
+            log "Skipping deploy_verify stage: gate conditions not met"
+            set_stage_started "deploy_verify"
+            if [[ -n "${DEPLOY_VERIFY_CMD:-}" ]]; then
+                comment_issue "Deploy Verify: Skipped" \
+                    "⏭️ Deploy verification skipped (no \`env:*\` label or \`## Deploy Verification\` section found)." \
+                    "default"
+            fi
+            set_stage_completed "deploy_verify"
+        else
+            set_stage_started "deploy_verify"
+
+            # Scope-aware gate: downgrade to --health-only when no backend
+            # or package files changed in the merged commit, so front-end-only
+            # changes skip a full redeploy.
+            # Uses HEAD~1..HEAD (post-merge diff) so the scope reflects the
+            # actual merged commit, not the pre-merge branch diff.
+            # Fail-safe: if the diff is empty (git failed or genuinely empty),
+            # default to the full deploy rather than silently downgrading.
+            local changed_files
+            changed_files=$(git diff HEAD~1..HEAD --name-only 2>/dev/null \
+                || true)
+            if [[ -z "$changed_files" ]]; then
+                log "Scope gate: empty diff HEAD~1..HEAD —" \
+                    "defaulting to full deploy"
+            elif ! grep -qE '^(apps/backend|packages)/' <<< "$changed_files"
+            then
+                log "No backend changes detected —" \
+                    "downgrading deploy-verify to health-check-only."
+                DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD} --health-only"
+            fi
+
+            log "Triggering deploy via: $DEPLOY_VERIFY_CMD"
+            comment_issue "Deploy Verify: Deploying" \
+                "🚀 Triggering deployment via \`$DEPLOY_VERIFY_CMD\`..." \
+                "default"
+
+            # Run the deploy command
+            local deploy_exit=0
+            if ! bash -c "$DEPLOY_VERIFY_CMD" \
+                >>"${LOG_FILE:-/dev/null}" 2>&1; then
+                deploy_exit=1
+            fi
+
+            if ((deploy_exit != 0)); then
+                log_error "Deploy command failed (exit $deploy_exit)"
+                comment_issue "Deploy Verify: Failed" \
+                    "❌ Deploy command \`$DEPLOY_VERIFY_CMD\` exited with code $deploy_exit. Skipping health poll and verification." \
+                    "default"
+                # Deploy failure is intentionally non-blocking: the pipeline
+                # finishes and the failure surfaces via the issue comment.
+                set_stage_completed "deploy_verify"
+            else
+                log "Deploy command succeeded"
+
+                # Poll health URL if configured; poll_health_url returns 0
+                # if the URL is empty (skip = healthy) or 2xx received.
+                local poll_interval=10
+                local max_retries=$(( \
+                    ${DEPLOY_VERIFY_TIMEOUT_SECS:-900} / poll_interval ))
+                local health_ok=false
+                if [[ -n "${DEPLOY_VERIFY_HEALTH_URL:-}" ]]; then
+                    log "Polling health URL: $DEPLOY_VERIFY_HEALTH_URL" \
+                        "(${poll_interval}s intervals, $max_retries retries max)"
+                else
+                    log "No DEPLOY_VERIFY_HEALTH_URL configured —" \
+                        "skipping health poll"
+                fi
+                if poll_health_url \
+                    "${DEPLOY_VERIFY_HEALTH_URL:-}" \
+                    "$max_retries" \
+                    "$poll_interval"; then
+                    health_ok=true
+                else
+                    log_error "Health check failed after $max_retries" \
+                        "attempts ($(( max_retries * poll_interval / 60 )) min)"
+                    comment_issue "Deploy Verify: Health Timeout" \
+                        "❌ Health endpoint \`$DEPLOY_VERIFY_HEALTH_URL\` did not return 2xx after $max_retries attempts ($(( max_retries * poll_interval / 60 )) min). Deployment may have failed." \
+                        "default"
+                    set_stage_completed "deploy_verify"
+                fi
+
+                # Run verification prompt if health check passed
+                if $health_ok; then
+                    log "Running deploy verification prompt"
+
+                    # Extract Deploy Verification section from issue body
+                    local deploy_verify_section=""
+                    local issue_body_file="$LOG_BASE/context/issue-body.md"
+                    if [[ -f "$issue_body_file" ]]; then
+                        deploy_verify_section=$(awk \
+                            '/^## Deploy Verification/{found=1; next}
+                             found && /^## /{exit}
+                             found{print}' \
+                            "$issue_body_file")
+                    fi
+
+                    local deploy_verify_prompt
+                    deploy_verify_prompt="Verify the deployment for issue #$ISSUE_NUMBER against the live environment.
+
+DEPLOYED ENVIRONMENT:
+- Deploy command: $DEPLOY_VERIFY_CMD
+- Health URL: ${DEPLOY_VERIFY_HEALTH_URL:-N/A}
+- Health status: passed
+
+ISSUE ACCEPTANCE CRITERIA:
+$(awk '/^## Acceptance Criteria/{found=1; next} found && /^## /{exit} found{print}' \
+    "$issue_body_file" 2>/dev/null || printf '%s' '(not found)')
+
+DEPLOY VERIFICATION INSTRUCTIONS:
+${deploy_verify_section:-No specific deploy verification instructions in the issue. Verify the deployment is functional by checking health endpoints and basic functionality.}
+
+STEPS:
+1. Confirm the health endpoint returns a 2xx response
+2. Test the key functionality described in the acceptance criteria against the live URL
+3. Check for any error logs or degraded behavior
+4. Report status as 'success', 'error', or 'partial' with a detailed summary"
+
+                    local deploy_verify_result
+                    deploy_verify_result=$(run_stage \
+                        "deploy-verify" \
+                        "$deploy_verify_prompt" \
+                        "implement-issue-deploy-verify.json" \
+                        "default")
+
+                    local dv_status dv_health dv_summary
+                    dv_status=$(printf '%s' "$deploy_verify_result" \
+                        | jq -r '.output.status // "unknown"')
+                    dv_health=$(printf '%s' "$deploy_verify_result" \
+                        | jq -r '.output.health_status // "unknown"')
+                    dv_summary=$(printf '%s' "$deploy_verify_result" \
+                        | jq -r \
+                        '.output.summary // "Deploy verification completed"')
+
+                    local dv_icon="✅"
+                    [[ "$dv_status" == "error" ]] && dv_icon="❌"
+                    [[ "$dv_status" == "partial" ]] && dv_icon="⚠️"
+
+                    comment_issue "Deploy Verify" \
+                        "$dv_icon **Status:** $dv_status | **Health:** $dv_health
+
+$dv_summary" \
+                        "default"
+
+                    if [[ "$dv_status" == "error" ]]; then
+                        log_error "Deploy verification failed"
+                    else
+                        log "Deploy verification: $dv_status"
+                    fi
+
+                    set_stage_completed "deploy_verify"
+                fi
+            fi
+        fi
+    fi
+
+    set_final_state "completed"
 
     # Record degraded stages in status.json
     if (( ${#DEGRADED_STAGES[@]} > 0 )); then

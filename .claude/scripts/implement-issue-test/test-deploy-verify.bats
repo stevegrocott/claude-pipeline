@@ -569,3 +569,55 @@ EOF
     [ "$status_val" = "partial" ] || \
         fail "Expected status=partial, got: $status_val (full output: $result)"
 }
+
+# =============================================================================
+# SECTION 10: env:nas-premerge LABEL — deploy_verify must NOT trigger
+# The env:nas-premerge label is handled by the NAS pre-merge notification
+# path (a comment asking the human to trigger manually), not by
+# should_run_deploy_verify.  These tests confirm the gate returns 1 so the
+# post-merge deploy_verify stage is skipped for such issues.
+# =============================================================================
+
+@test "should_run_deploy_verify returns 1 for env:nas-premerge label" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export TRACKER="github"
+
+    gh() {
+        printf 'env:nas-premerge\n'
+    }
+    export -f gh
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 1 ]
+}
+
+@test "should_run_deploy_verify returns 1 for env:nas-premerge with no body section" {
+    # env:nas-premerge alone (no ## Deploy Verification body) must skip the
+    # post-merge deploy_verify — the NAS pre-merge notification block handles
+    # these issues by posting a comment pre-PR instead.
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export TRACKER="github"
+
+    gh() {
+        printf 'env:nas-premerge\n'
+    }
+    export -f gh
+
+    rm -f "$LOG_BASE/context/issue-body.md"
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 1 ]
+}
+
+@test "should_run_deploy_verify returns 0 for env:nas (regular NAS deploy, not premerge)" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export TRACKER="github"
+
+    gh() {
+        printf 'env:nas\n'
+    }
+    export -f gh
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 0 ]
+}

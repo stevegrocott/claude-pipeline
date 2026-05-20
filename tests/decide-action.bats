@@ -495,3 +495,60 @@ _load_deploy_verify_fn() {
 	run --separate-stderr should_run_deploy_verify "99"
 	[ "$status" -eq 1 ]
 }
+
+# ===========================================================================
+# (should_run_deploy_verify) env:nas-premerge label
+# env:nas-premerge issues are handled by the NAS pre-merge notification block
+# (a comment posted pre-PR asking the human to trigger the NAS build manually).
+# The post-merge deploy_verify stage must NOT fire for this label alone.
+# ===========================================================================
+
+@test "(11) should_run_deploy_verify returns 1 for env:nas-premerge label" {
+	[[ -f "$ORCHESTRATOR_SCRIPT" ]] \
+		|| fail "orchestrator script not found: $ORCHESTRATOR_SCRIPT"
+
+	_load_deploy_verify_fn
+
+	STATUS_FILE="$TEST_TMP/status.json"
+	LOG_BASE="$TEST_TMP/logs"
+	DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+	TRACKER="github"
+	export STATUS_FILE LOG_BASE DEPLOY_VERIFY_CMD TRACKER
+
+	mkdir -p "$LOG_BASE/context"
+	printf '{"route":"full","state":"running"}\n' > "$STATUS_FILE"
+	# No issue body file — label check is the only gate.
+	rm -f "$LOG_BASE/context/issue-body.md"
+
+	# env:nas-premerge does NOT match env:(test|nas|staging) — gate must skip.
+	gh() { printf 'env:nas-premerge\n'; }
+	export -f gh
+
+	run --separate-stderr should_run_deploy_verify "99"
+	[ "$status" -eq 1 ]
+}
+
+@test "(12) should_run_deploy_verify returns 0 for env:nas (not premerge variant)" {
+	# Confirm env:nas (without -premerge suffix) still triggers deploy_verify,
+	# distinguishing it from the env:nas-premerge notification path.
+	[[ -f "$ORCHESTRATOR_SCRIPT" ]] \
+		|| fail "orchestrator script not found: $ORCHESTRATOR_SCRIPT"
+
+	_load_deploy_verify_fn
+
+	STATUS_FILE="$TEST_TMP/status.json"
+	LOG_BASE="$TEST_TMP/logs"
+	DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+	TRACKER="github"
+	export STATUS_FILE LOG_BASE DEPLOY_VERIFY_CMD TRACKER
+
+	mkdir -p "$LOG_BASE/context"
+	printf '{"route":"full","state":"running"}\n' > "$STATUS_FILE"
+	rm -f "$LOG_BASE/context/issue-body.md"
+
+	gh() { printf 'env:nas\n'; }
+	export -f gh
+
+	run --separate-stderr should_run_deploy_verify "99"
+	[ "$status" -eq 0 ]
+}
