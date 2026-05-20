@@ -2787,10 +2787,20 @@ should_run_deploy_verify() {
         return 0
     fi
 
-    # Check for ## Deploy Verification section in issue body
+    # Check for ## Deploy Verification section with non-empty
+    # **Verification command:** line; heading alone is not enough.
+    # Use [*] instead of \* — BSD awk on macOS does not honour the
+    # backslash escape for * in ERE the same way gawk does.
     local issue_body_file="$LOG_BASE/context/issue-body.md"
     if [[ -f "$issue_body_file" ]]; then
-        if grep -q '^## Deploy Verification' "$issue_body_file"; then
+        local ver_cmd_pat
+        ver_cmd_pat='^[*][*]Verification command:[*][*][[:space:]]*[^[:space:]]'
+        if awk -v pat="$ver_cmd_pat" '
+            /^## Deploy Verification/ { in_section=1; next }
+            in_section && /^## /     { in_section=0 }
+            in_section && $0 ~ pat   { found=1; exit }
+            END                      { exit !found }
+        ' "$issue_body_file"; then
             return 0
         fi
     fi

@@ -135,7 +135,7 @@ teardown() {
 # SECTION 3: ISSUE BODY SECTION DETECTION (gate b — body fallback)
 # =============================================================================
 
-@test "should_run_deploy_verify returns 0 when issue body has Deploy Verification section" {
+@test "should_run_deploy_verify returns 0 when issue body has Deploy Verification section with non-empty Verification command" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
     export TRACKER="github"
 
@@ -145,7 +145,35 @@ teardown() {
     }
     export -f gh
 
-    # Create issue body with ## Deploy Verification section
+    # Create issue body with ## Deploy Verification section and
+    # a non-empty **Verification command:** line
+    local issue_body_file="$LOG_BASE/context/issue-body.md"
+    cat > "$issue_body_file" << 'EOF'
+## Acceptance Criteria
+- Feature works
+
+## Deploy Verification
+
+**Verification command:** curl -s http://localhost:8080/health
+
+- Check that health endpoint returns 200
+- Verify the feature is live
+EOF
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 0 ]
+}
+
+@test "should_run_deploy_verify returns 1 when Deploy Verification section has no Verification command line" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+    export TRACKER="github"
+
+    gh() {
+        printf 'bug\n'
+    }
+    export -f gh
+
+    # Section exists but no **Verification command:** line at all
     local issue_body_file="$LOG_BASE/context/issue-body.md"
     cat > "$issue_body_file" << 'EOF'
 ## Acceptance Criteria
@@ -157,7 +185,78 @@ teardown() {
 EOF
 
     run should_run_deploy_verify "$ISSUE_NUMBER"
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
+}
+
+@test "should_run_deploy_verify returns 1 when Verification command line is empty" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+    export TRACKER="github"
+
+    gh() {
+        printf 'bug\n'
+    }
+    export -f gh
+
+    # Section and heading exist but **Verification command:** has no value
+    local issue_body_file="$LOG_BASE/context/issue-body.md"
+    cat > "$issue_body_file" << 'EOF'
+## Deploy Verification
+
+**Verification command:**
+
+- Check that health endpoint returns 200
+EOF
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 1 ]
+}
+
+@test "should_run_deploy_verify returns 1 when Verification command line is whitespace only" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+    export TRACKER="github"
+
+    gh() {
+        printf 'bug\n'
+    }
+    export -f gh
+
+    # **Verification command:**   (trailing spaces, no real value)
+    local issue_body_file="$LOG_BASE/context/issue-body.md"
+    printf '%s\n' \
+        '## Deploy Verification' \
+        '' \
+        '**Verification command:**   ' \
+        '' \
+        '- Check health' \
+        > "$LOG_BASE/context/issue-body.md"
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 1 ]
+}
+
+@test "should_run_deploy_verify ignores Verification command outside Deploy Verification section" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+    export TRACKER="github"
+
+    gh() {
+        printf 'bug\n'
+    }
+    export -f gh
+
+    # **Verification command:** appears in a different section — must not trigger
+    local issue_body_file="$LOG_BASE/context/issue-body.md"
+    cat > "$issue_body_file" << 'EOF'
+## Testing Notes
+
+**Verification command:** curl http://other-section.example.com
+
+## Deploy Verification
+
+**Verification command:**
+EOF
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 1 ]
 }
 
 @test "should_run_deploy_verify returns 1 when issue body lacks Deploy Verification section" {
