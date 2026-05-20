@@ -98,11 +98,21 @@ Break the chosen approach into implementable tasks:
 
 **Before creating the issue, ask the user which epic to parent it under** using `AskUserQuestion`. Look up open epics in the project to offer relevant options. For Precis/KIKS, all issues must sit under KIKS-410 (the Precis initiative) within an appropriate epic. Present the most likely epics as options based on the research context (e.g., if the work is UI-related, suggest "KIKS-546 UI Enhancements").
 
-**Deploy Verification section (scope-dependent):** Whether to include a `## Deploy Verification` section and what to put in it depends on which files are changed:
+**Deploy Verification section (scope-dependent):** Before deciding whether to include a `## Deploy Verification` section, read `.claude/config/platform.sh` and check `DEPLOY_VERIFY_CMD` and `FRONTEND_PATH_PATTERNS`:
 
-- **Backend or shared packages changed** (`apps/backend/`, `packages/`): Include the section with a full rebuild command (e.g., `bash scripts/deploy-nas-from-local.sh`). The NAS Docker image must be rebuilt to pick up backend changes.
-- **Frontend-only changes** (`apps/frontend/`, CSS, components, pages): Include the section but use the `--health-only` flag (e.g., `bash scripts/deploy-nas-from-local.sh --health-only`). The NAS backend hasn't changed; a health-check curl (~5 s) is sufficient.
-- **No NAS environment concern** (CI config, documentation, scripts unrelated to the deployed service): **Omit the section entirely.** An absent `## Deploy Verification` section means the orchestrator skips the deploy-verify stage.
+- **`DEPLOY_VERIFY_CMD` is empty or unset:** **Omit the section entirely.** The orchestrator skips the deploy-verify stage when no command is configured — do not add the section even if files changed.
+- **`DEPLOY_VERIFY_CMD` is set and all changed files match `FRONTEND_PATH_PATTERNS`:** Include the section; use `$DEPLOY_VERIFY_CMD --health-only` as the Verification command. Frontend-only changes do not require a full redeploy.
+- **`DEPLOY_VERIFY_CMD` is set and any changed file does not match `FRONTEND_PATH_PATTERNS`:** Include the section; use `$DEPLOY_VERIFY_CMD` (no flag) as the Verification command. Backend or shared changes require a full redeploy.
+
+The `## Deploy Verification` section body **must** include a `**Verification command:**` line (the orchestrator's body-scan gate requires it):
+
+```
+## Deploy Verification
+
+**Verification command:** <DEPLOY_VERIFY_CMD or DEPLOY_VERIFY_CMD --health-only>
+
+<optional notes about what the deploy does>
+```
 
 Create the issue using the platform wrapper with `--parent` set to the chosen epic:
 

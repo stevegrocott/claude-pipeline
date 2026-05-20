@@ -574,7 +574,7 @@ _load_deploy_verify_fn() {
 
 	mkdir -p "$LOG_BASE/context"
 	printf '{"route":"full","state":"running"}\n' > "$STATUS_FILE"
-	printf '## Deploy Verification\n\nRun smoke tests after deploy.\n' \
+	printf '## Deploy Verification\n\n**Verification command:** ./scripts/deploy-test.sh\n\nRun smoke tests after deploy.\n' \
 		> "$LOG_BASE/context/issue-body.md"
 
 	# No qualifying env: label — body-scan must be the trigger.
@@ -599,7 +599,7 @@ _load_deploy_verify_fn() {
 
 	mkdir -p "$LOG_BASE/context"
 	printf '{"route":"full","state":"running"}\n' > "$STATUS_FILE"
-	printf '## Deploy Verification\n\nRun smoke tests after deploy.\n' \
+	printf '## Deploy Verification\n\n**Verification command:** ./scripts/deploy-test.sh\n\nRun smoke tests after deploy.\n' \
 		> "$LOG_BASE/context/issue-body.md"
 
 	# No qualifying env: label present either.
