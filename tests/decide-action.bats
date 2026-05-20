@@ -552,3 +552,60 @@ _load_deploy_verify_fn() {
 	run --separate-stderr should_run_deploy_verify "99"
 	[ "$status" -eq 0 ]
 }
+
+# ===========================================================================
+# (should_run_deploy_verify) body-scan gate
+# Tests verify that should_run_deploy_verify() uses the "## Deploy
+# Verification" section in issue-body.md as a fallback gate when no
+# qualifying env: label is present.
+# ===========================================================================
+
+@test "(13) should_run_deploy_verify returns 0 when body has Deploy Verification section and DEPLOY_VERIFY_CMD is set" {
+	[[ -f "$ORCHESTRATOR_SCRIPT" ]] \
+		|| fail "orchestrator script not found: $ORCHESTRATOR_SCRIPT"
+
+	_load_deploy_verify_fn
+
+	STATUS_FILE="$TEST_TMP/status.json"
+	LOG_BASE="$TEST_TMP/logs"
+	DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+	TRACKER="github"
+	export STATUS_FILE LOG_BASE DEPLOY_VERIFY_CMD TRACKER
+
+	mkdir -p "$LOG_BASE/context"
+	printf '{"route":"full","state":"running"}\n' > "$STATUS_FILE"
+	printf '## Deploy Verification\n\nRun smoke tests after deploy.\n' \
+		> "$LOG_BASE/context/issue-body.md"
+
+	# No qualifying env: label — body-scan must be the trigger.
+	gh() { printf ''; }
+	export -f gh
+
+	run --separate-stderr should_run_deploy_verify "99"
+	[ "$status" -eq 0 ]
+}
+
+@test "(14) should_run_deploy_verify returns 1 when body has Deploy Verification section but DEPLOY_VERIFY_CMD is empty" {
+	[[ -f "$ORCHESTRATOR_SCRIPT" ]] \
+		|| fail "orchestrator script not found: $ORCHESTRATOR_SCRIPT"
+
+	_load_deploy_verify_fn
+
+	STATUS_FILE="$TEST_TMP/status.json"
+	LOG_BASE="$TEST_TMP/logs"
+	DEPLOY_VERIFY_CMD=""
+	TRACKER="github"
+	export STATUS_FILE LOG_BASE DEPLOY_VERIFY_CMD TRACKER
+
+	mkdir -p "$LOG_BASE/context"
+	printf '{"route":"full","state":"running"}\n' > "$STATUS_FILE"
+	printf '## Deploy Verification\n\nRun smoke tests after deploy.\n' \
+		> "$LOG_BASE/context/issue-body.md"
+
+	# No qualifying env: label present either.
+	gh() { printf ''; }
+	export -f gh
+
+	run --separate-stderr should_run_deploy_verify "99"
+	[ "$status" -eq 1 ]
+}
