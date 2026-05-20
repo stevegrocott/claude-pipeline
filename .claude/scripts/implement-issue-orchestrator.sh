@@ -2759,6 +2759,7 @@ should_run_deploy_verify() {
     local route
     route=$(jq -r '.route // "full"' "$STATUS_FILE" 2>/dev/null || true)
     if [[ "$route" == "fast-path" ]]; then
+        log "Skipping deploy_verify stage: fast-path route"
         return 1
     fi
 
