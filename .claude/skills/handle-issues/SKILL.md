@@ -485,15 +485,37 @@ The orchestrator will:
 
 ### Step 6: Monitor Progress
 
-Check status.json every minute until complete, then display the completion summary. Both the monitoring loop and summary are in a single bash block so they execute atomically:
+The Bash tool has a 2-minute execution limit — `sleep 300` would never complete its second
+iteration. Monitoring instead uses **ScheduleWakeup**: Claude runs the check block once, then
+schedules a wakeup 270 seconds later (just under the 300-second prompt-cache TTL). On each
+wakeup the check block reruns until the batch reaches a terminal state.
+
+**Immediately after the orchestrator launches**, initialize the snapshot file and schedule the
+first check:
 
 ```bash
-echo ""
-echo "Monitoring progress (checking every minute)..."
-echo ""
+# Capture baseline per-issue snapshot (bash 3.2 compatible — no declare -A)
+jq -r '[.issues[] | .number + "=" + .status] | join(",")' status.json \
+    > logs/handle-issues/.status-snapshot
+echo "Monitoring started. First check in 270s."
+```
 
+Then call `ScheduleWakeup` with `delaySeconds=270`, `reason="handle-issues batch polling"`, and
+`prompt="Re-run the Step 6 check block for handle-issues — poll status.json for transitions"`.
+
+**Check block** — run once per wakeup, then reschedule or proceed to the completion block:
+
+```bash
 BASE_BRANCH=$(jq -r '.base_branch' status.json)
-DEADLINE=$((SECONDS + 10800))  # 3-hour wall-clock guard
+LOG_DIR=$(jq -r '.log_dir' status.json)
+STATE=$(jq -r '.state' status.json)
+COMPLETED=$(jq -r '.progress.completed' status.json)
+FAILED=$(jq -r '.progress.failed' status.json)
+TOTAL=$(jq -r '.progress.total' status.json)
+CURRENT=$(jq -r '.current_issue // "none"' status.json)
+CURRENT_STAGE=$(jq -r '.current_stage // ""' status.json)
+STAGE_STARTED_AT=$(jq -r '.stage_started_at // ""' status.json)
+RATE_LIMITED=$(jq -r '.rate_limit.waiting' status.json)
 
 # Expected timeouts per stage (seconds) — used for stuck detection
 _stage_timeout() {
@@ -504,83 +526,94 @@ _stage_timeout() {
     esac
 }
 
-while true; do
-    # Wall-clock deadline guard
-    if (( SECONDS > DEADLINE )); then
-        echo "⚠️ Monitor timeout — check status.json manually"
-        break
-    fi
-
-    # Check if orchestrator is still running
-    if [[ -f logs/handle-issues/.orchestrator.pid ]]; then
-        ORCHESTRATOR_PID=$(cat logs/handle-issues/.orchestrator.pid)
-        if ! kill -0 "$ORCHESTRATOR_PID" 2>/dev/null; then
-            echo "Orchestrator process finished."
-            rm -f logs/handle-issues/.orchestrator.pid
-            break
+# Compute stage elapsed time
+ELAPSED_STR=""
+STUCK_WARNING=""
+if [[ -n "$STAGE_STARTED_AT" && "$STAGE_STARTED_AT" != "null" ]]; then
+    NOW=$(date +%s)
+    # Parse ISO 8601 — try GNU date first, fall back to BSD date (macOS)
+    STAGE_START=$(date -d "$STAGE_STARTED_AT" +%s 2>/dev/null \
+        || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$STAGE_STARTED_AT" +%s 2>/dev/null \
+        || echo "")
+    if [[ -n "$STAGE_START" && "$STAGE_START" =~ ^[0-9]+$ ]]; then
+        ELAPSED=$(( NOW - STAGE_START ))
+        ELAPSED_MIN=$(( ELAPSED / 60 ))
+        ELAPSED_SEC=$(( ELAPSED % 60 ))
+        ELAPSED_STR=" (${ELAPSED_MIN}m ${ELAPSED_SEC}s running)"
+        STAGE_TIMEOUT=$(_stage_timeout "$CURRENT_STAGE")
+        THRESHOLD=$(( STAGE_TIMEOUT * 80 / 100 ))
+        if (( ELAPSED > THRESHOLD )); then
+            STUCK_WARNING="⚠️ Stage running longer than expected — may need attention"
         fi
-    else
-        break
     fi
+fi
 
-    # Read and display progress
-    if [[ -f status.json ]]; then
-        STATE=$(jq -r '.state' status.json)
-        COMPLETED=$(jq -r '.progress.completed' status.json)
-        FAILED=$(jq -r '.progress.failed' status.json)
-        TOTAL=$(jq -r '.progress.total' status.json)
-        CURRENT=$(jq -r '.current_issue // "none"' status.json)
-        CURRENT_STAGE=$(jq -r '.current_stage // ""' status.json)
-        STAGE_STARTED_AT=$(jq -r '.stage_started_at // ""' status.json)
-        RATE_LIMITED=$(jq -r '.rate_limit.waiting' status.json)
+# Lines changed vs base branch
+LINES_CHANGED=$(git diff "$BASE_BRANCH"...HEAD --shortstat 2>/dev/null \
+    | grep -oE '[0-9]+ insertion|[0-9]+ deletion' \
+    | grep -oE '[0-9]+' | paste -sd+ | bc 2>/dev/null || echo "0")
 
-        # Compute stage elapsed time
-        ELAPSED_STR=""
-        STUCK_WARNING=""
-        if [[ -n "$STAGE_STARTED_AT" && "$STAGE_STARTED_AT" != "null" ]]; then
-            NOW=$(date +%s)
-            # Parse ISO 8601 — try GNU date first, fall back to BSD date (macOS)
-            STAGE_START=$(date -d "$STAGE_STARTED_AT" +%s 2>/dev/null \
-                || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$STAGE_STARTED_AT" +%s 2>/dev/null \
-                || echo "")
-            if [[ -n "$STAGE_START" && "$STAGE_START" =~ ^[0-9]+$ ]]; then
-                ELAPSED=$(( NOW - STAGE_START ))
-                ELAPSED_MIN=$(( ELAPSED / 60 ))
-                ELAPSED_SEC=$(( ELAPSED % 60 ))
-                ELAPSED_STR=" (${ELAPSED_MIN}m ${ELAPSED_SEC}s running)"
+if [[ "$RATE_LIMITED" == "true" ]]; then
+    RESUME_AT=$(jq -r '.rate_limit.resume_at' status.json)
+    echo "[$(date +%H:%M)] $COMPLETED/$TOTAL | #$CURRENT $CURRENT_STAGE$ELAPSED_STR | Lines: $LINES_CHANGED | Rate limited until $RESUME_AT"
+else
+    echo "[$(date +%H:%M)] $COMPLETED/$TOTAL | #$CURRENT $CURRENT_STAGE$ELAPSED_STR | Lines: $LINES_CHANGED"
+fi
+[[ -n "$STUCK_WARNING" ]] && echo "$STUCK_WARNING"
 
-                STAGE_TIMEOUT=$(_stage_timeout "$CURRENT_STAGE")
-                THRESHOLD=$(( STAGE_TIMEOUT * 80 / 100 ))
-                if (( ELAPSED > THRESHOLD )); then
-                    STUCK_WARNING="⚠️ Stage running longer than expected — may need attention"
+# Per-issue transition detection (bash 3.2-compatible snapshot diff — no declare -A)
+PREV_SNAPSHOT=$(cat logs/handle-issues/.status-snapshot 2>/dev/null || echo "")
+CURR_SNAPSHOT=$(jq -r '[.issues[] | .number + "=" + .status] | join(",")' status.json)
+
+if [[ "$CURR_SNAPSHOT" != "$PREV_SNAPSHOT" ]]; then
+    while IFS='=' read -r num status; do
+        prev_status=$(printf '%s' "$PREV_SNAPSHOT" \
+            | tr ',' '\n' | grep "^${num}=" | cut -d'=' -f2)
+        [[ "$status" == "$prev_status" ]] && continue
+        case "$status" in
+            completed)
+                PR=$(jq -r --arg n "$num" \
+                    '.issues[] | select(.number == ($n | tonumber)) | .pr // empty' \
+                    status.json)
+                if [[ -n "$PR" ]]; then
+                    echo "✅ #${num} completed — PR #${PR} merged"
+                else
+                    echo "✅ #${num} completed"
                 fi
-            fi
-        fi
+                ;;
+            failed)
+                # Read stage-level detail; fall back to top-level error if file absent
+                ISSUE_STATUS_FILE="${LOG_DIR}/issue-${num}-status.json"
+                if [[ -f "$ISSUE_STATUS_FILE" ]]; then
+                    FAIL_STAGE=$(jq -r '.current_stage // "unknown"' \
+                        "$ISSUE_STATUS_FILE")
+                    ERROR_KIND=$(jq -r \
+                        --arg s "$FAIL_STAGE" \
+                        '.stages[$s].error_kind // .error // "unknown"' \
+                        "$ISSUE_STATUS_FILE")
+                    echo "❌ #${num} failed at ${FAIL_STAGE}: ${ERROR_KIND}"
+                else
+                    ERR=$(jq -r --arg n "$num" \
+                        '.issues[] | select(.number == ($n | tonumber)) | .error // "unknown"' \
+                        status.json)
+                    echo "❌ #${num} failed: ${ERR}"
+                fi
+                ;;
+            merge_blocked)
+                echo "⚠️ #${num} merge blocked"
+                ;;
+        esac
+    done < <(printf '%s' "$CURR_SNAPSHOT" | tr ',' '\n')
+    printf '%s\n' "$CURR_SNAPSHOT" > logs/handle-issues/.status-snapshot
+fi
+```
 
-        # Calculate lines changed since start (vs base branch)
-        LINES_CHANGED=$(git diff "$BASE_BRANCH"...HEAD --shortstat 2>/dev/null | grep -oE '[0-9]+ insertion|[0-9]+ deletion' | grep -oE '[0-9]+' | paste -sd+ | bc 2>/dev/null || echo "0")
+If `STATE` is **not** `completed`, `completed_with_errors`, or `circuit_breaker`, call
+`ScheduleWakeup` again with `delaySeconds=270`. Otherwise run the **completion block** below.
 
-        if [[ "$RATE_LIMITED" == "true" ]]; then
-            RESUME_AT=$(jq -r '.rate_limit.resume_at' status.json)
-            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL | #$CURRENT $CURRENT_STAGE$ELAPSED_STR | Lines changed: $LINES_CHANGED | Rate limited until $RESUME_AT"
-        else
-            echo "[$(date +%H:%M)] $COMPLETED/$TOTAL | #$CURRENT $CURRENT_STAGE$ELAPSED_STR | Lines changed: $LINES_CHANGED"
-        fi
+**Completion block** — run once when the batch reaches a terminal state:
 
-        if [[ -n "$STUCK_WARNING" ]]; then
-            echo "$STUCK_WARNING"
-        fi
-
-        # Exit conditions
-        if [[ "$STATE" == "completed" || "$STATE" == "completed_with_errors" || "$STATE" == "circuit_breaker" ]]; then
-            break
-        fi
-    fi
-
-    sleep 300  # 5 minutes
-done
-
-# Output completion summary (same bash block — always executes after loop)
+```bash
 STATE=$(jq -r '.state' status.json)
 COMPLETED=$(jq -r '.progress.completed' status.json)
 FAILED=$(jq -r '.progress.failed' status.json)
@@ -592,8 +625,8 @@ echo "## Handle Issues Complete"
 echo ""
 echo "**State:** $STATE"
 echo "**Progress:** $COMPLETED/$TOTAL completed, $FAILED failed"
-# Issues whose orchestrator exited with state="merge_blocked" (BLOCK_MERGE_ON_CONVERGENCE_FAILURE gate)
-# are surfaced as a distinct `merge_blocked` column in `.progress` — count them separately from `failed`.
+# Issues whose orchestrator exited with state="merge_blocked" (BLOCK_MERGE_ON_CONVERGENCE_FAILURE
+# gate) are surfaced as a distinct `merge_blocked` column in `.progress` — counted separately.
 echo ""
 echo "### Results"
 echo ""
@@ -602,12 +635,29 @@ echo "|-------|-----|--------|------------|"
 
 jq -r '.issues[] | "| #\(.number) | \(if .pr then "#\(.pr)" else "—" end) | \(.status) | \(.follow_ups // [] | if length > 0 then map("#\(.)") | join(", ") else "—" end) |"' status.json
 
-# Show failures if any
+# Show failures with stage-level detail from issue-NNN-status.json
 if [[ $FAILED -gt 0 ]]; then
     echo ""
     echo "### Failed Issues"
     echo ""
-    jq -r '.issues[] | select(.status == "failed" or .status == "skipped") | "- **#\(.number)**: \(.error // "Unknown error")"' status.json
+    while read -r num; do
+        ISSUE_STATUS_FILE="${LOG_DIR}/issue-${num}-status.json"
+        if [[ -f "$ISSUE_STATUS_FILE" ]]; then
+            FAIL_STAGE=$(jq -r '.current_stage // "unknown"' "$ISSUE_STATUS_FILE")
+            ERROR_KIND=$(jq -r \
+                --arg s "$FAIL_STAGE" \
+                '.stages[$s].error_kind // .error // "unknown"' \
+                "$ISSUE_STATUS_FILE")
+            echo "- **#${num}**: failed at ${FAIL_STAGE}: ${ERROR_KIND}"
+        else
+            ERR=$(jq -r --arg n "$num" \
+                '.issues[] | select(.number == ($n | tonumber)) | .error // "Unknown error"' \
+                status.json)
+            echo "- **#${num}**: ${ERR}"
+        fi
+    done < <(jq -r \
+        '.issues[] | select(.status == "failed" or .status == "skipped") | .number' \
+        status.json)
 fi
 
 # Show circuit breaker message if triggered
@@ -629,6 +679,12 @@ FOLLOWUPS=$(jq -r '[.issues[].follow_ups // [] | .[]] | unique | join(" ")' stat
 if [[ -n "$FOLLOWUPS" ]]; then
     echo ""
     echo "Follow-up issues found: ${FOLLOWUPS}. Run: /handle-issues ${FOLLOWUPS} on branch main"
+fi
+
+# macOS batch-end notification (silently skipped if osascript is unavailable)
+if command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"$COMPLETED/$TOTAL completed, $FAILED failed\" \
+        with title \"handle-issues done\" sound name \"Glass\""
 fi
 ```
 
