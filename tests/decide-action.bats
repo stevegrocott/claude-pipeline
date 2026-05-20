@@ -27,6 +27,7 @@ bats_require_minimum_version 1.5.0
 # Resolve repo-root paths once at load time so tests are CWD-independent.
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
 DECIDE_ACTION_SCRIPT="$REPO_ROOT/.claude/scripts/decide-action.sh"
+ORCHESTRATOR_SCRIPT="$REPO_ROOT/.claude/scripts/implement-issue-orchestrator.sh"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown
@@ -384,4 +385,113 @@ MOCK
 			"$stderr" >&2
 		return 1
 	}
+}
+
+# ===========================================================================
+# (should_run_deploy_verify) fast-path gate
+# Tests verify that should_run_deploy_verify() skips the deploy-verify
+# stage when STATUS_FILE contains ".route = fast-path".  These exercise
+# the gate added in issue #354 at the tests/ suite level.
+# ===========================================================================
+
+# Extract should_run_deploy_verify() from the orchestrator into an
+# isolated file and source it into the calling test's subshell.
+_load_deploy_verify_fn() {
+	local fn_file="$TEST_TMP/deploy_verify_fn.bash"
+	awk '
+		/^should_run_deploy_verify\(\) \{$/,/^\}$/ { print; next }
+	' "$ORCHESTRATOR_SCRIPT" > "$fn_file"
+	# shellcheck disable=SC1090
+	source "$fn_file"
+}
+
+@test "(7) should_run_deploy_verify returns 1 when STATUS_FILE route is fast-path" {
+	[[ -f "$ORCHESTRATOR_SCRIPT" ]] \
+		|| fail "orchestrator script not found: $ORCHESTRATOR_SCRIPT"
+
+	_load_deploy_verify_fn
+
+	STATUS_FILE="$TEST_TMP/status.json"
+	LOG_BASE="$TEST_TMP/logs"
+	DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+	TRACKER="github"
+	export STATUS_FILE LOG_BASE DEPLOY_VERIFY_CMD TRACKER
+
+	mkdir -p "$LOG_BASE/context"
+	printf '{"route":"fast-path","state":"running"}\n' > "$STATUS_FILE"
+
+	# A qualifying label is present — the fast-path gate must win.
+	gh() { printf 'env:test\n'; }
+	export -f gh
+
+	run --separate-stderr should_run_deploy_verify "99"
+	[ "$status" -eq 1 ]
+}
+
+@test "(8) should_run_deploy_verify returns 0 when STATUS_FILE route is full" {
+	[[ -f "$ORCHESTRATOR_SCRIPT" ]] \
+		|| fail "orchestrator script not found: $ORCHESTRATOR_SCRIPT"
+
+	_load_deploy_verify_fn
+
+	STATUS_FILE="$TEST_TMP/status.json"
+	LOG_BASE="$TEST_TMP/logs"
+	DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+	TRACKER="github"
+	export STATUS_FILE LOG_BASE DEPLOY_VERIFY_CMD TRACKER
+
+	mkdir -p "$LOG_BASE/context"
+	printf '{"route":"full","state":"running"}\n' > "$STATUS_FILE"
+
+	gh() { printf 'env:test\n'; }
+	export -f gh
+
+	run --separate-stderr should_run_deploy_verify "99"
+	[ "$status" -eq 0 ]
+}
+
+@test "(9) should_run_deploy_verify returns 0 when STATUS_FILE has no route key" {
+	[[ -f "$ORCHESTRATOR_SCRIPT" ]] \
+		|| fail "orchestrator script not found: $ORCHESTRATOR_SCRIPT"
+
+	_load_deploy_verify_fn
+
+	STATUS_FILE="$TEST_TMP/status.json"
+	LOG_BASE="$TEST_TMP/logs"
+	DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+	TRACKER="github"
+	export STATUS_FILE LOG_BASE DEPLOY_VERIFY_CMD TRACKER
+
+	mkdir -p "$LOG_BASE/context"
+	# Omit .route — jq default of "full" means the gate must not fire.
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+
+	gh() { printf 'env:test\n'; }
+	export -f gh
+
+	run --separate-stderr should_run_deploy_verify "99"
+	[ "$status" -eq 0 ]
+}
+
+@test "(10) should_run_deploy_verify fast-path gate wins over env:staging label" {
+	[[ -f "$ORCHESTRATOR_SCRIPT" ]] \
+		|| fail "orchestrator script not found: $ORCHESTRATOR_SCRIPT"
+
+	_load_deploy_verify_fn
+
+	STATUS_FILE="$TEST_TMP/status.json"
+	LOG_BASE="$TEST_TMP/logs"
+	DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+	TRACKER="github"
+	export STATUS_FILE LOG_BASE DEPLOY_VERIFY_CMD TRACKER
+
+	mkdir -p "$LOG_BASE/context"
+	printf '{"route":"fast-path","state":"running"}\n' > "$STATUS_FILE"
+
+	# env:staging is normally a qualifying label — fast-path must still skip.
+	gh() { printf 'env:staging\n'; }
+	export -f gh
+
+	run --separate-stderr should_run_deploy_verify "99"
+	[ "$status" -eq 1 ]
 }
