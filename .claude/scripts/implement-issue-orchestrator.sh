@@ -2753,6 +2753,15 @@ should_run_docs_stage() {
 should_run_deploy_verify() {
     local issue_number="$1"
 
+    # Fast-path gate: triage-classified fast-path issues are handled by
+    # surgical-fast-path.sh; deploy-verify is a full-pipeline stage and
+    # must be skipped when .route is "fast-path".
+    local route
+    route=$(jq -r '.route // "full"' "$STATUS_FILE" 2>/dev/null || true)
+    if [[ "$route" == "fast-path" ]]; then
+        return 1
+    fi
+
     # Gate (a): DEPLOY_VERIFY_CMD must be configured
     if [[ -z "${DEPLOY_VERIFY_CMD:-}" ]]; then
         return 1

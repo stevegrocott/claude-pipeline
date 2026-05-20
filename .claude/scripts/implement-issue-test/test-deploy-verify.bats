@@ -215,7 +215,66 @@ EOF
 }
 
 # =============================================================================
-# SECTION 4: SCHEMA OUTPUT FORMAT
+# SECTION 4: FAST-PATH GATE
+# =============================================================================
+
+@test "should_run_deploy_verify returns 1 when route is fast-path" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+
+    # Write a status.json with route set to fast-path
+    printf '{"route":"fast-path","state":"running"}\n' \
+        > "$STATUS_FILE"
+
+    gh() { printf 'env:test\n'; }
+    export -f gh
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 1 ]
+}
+
+@test "should_run_deploy_verify is not blocked when route is full" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+
+    # Write a status.json with route set to full
+    printf '{"route":"full","state":"running"}\n' \
+        > "$STATUS_FILE"
+
+    gh() { printf 'env:test\n'; }
+    export -f gh
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 0 ]
+}
+
+@test "should_run_deploy_verify is not blocked when STATUS_FILE has no route" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+
+    # Write a status.json with no route field (defaults to full)
+    printf '{"state":"running"}\n' > "$STATUS_FILE"
+
+    gh() { printf 'env:test\n'; }
+    export -f gh
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 0 ]
+}
+
+@test "should_run_deploy_verify fast-path gate wins over env:test label" {
+    # Even with a qualifying label, fast-path must skip deploy-verify
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-test.sh"
+
+    printf '{"route":"fast-path","state":"running"}\n' \
+        > "$STATUS_FILE"
+
+    gh() { printf 'env:staging\n'; }
+    export -f gh
+
+    run should_run_deploy_verify "$ISSUE_NUMBER"
+    [ "$status" -eq 1 ]
+}
+
+# =============================================================================
+# SECTION 5: SCHEMA OUTPUT FORMAT
 # =============================================================================
 
 @test "deploy-verify schema file exists" {
@@ -306,7 +365,7 @@ EOF
 }
 
 # =============================================================================
-# SECTION 5: MODEL AND TIER CONFIGURATION
+# SECTION 6: MODEL AND TIER CONFIGURATION
 # =============================================================================
 
 @test "deploy-verify stage maps to light tier (haiku)" {
@@ -329,7 +388,7 @@ EOF
 }
 
 # =============================================================================
-# SECTION 6: STAGE TIMEOUT VALUE
+# SECTION 7: STAGE TIMEOUT VALUE
 # =============================================================================
 
 @test "deploy-verify stage gets 900s timeout" {
@@ -345,7 +404,7 @@ EOF
 }
 
 # =============================================================================
-# SECTION 7: HEALTH POLLING LOGIC
+# SECTION 8: HEALTH POLLING LOGIC
 # =============================================================================
 
 @test "health poll succeeds immediately on first 2xx response" {
@@ -439,7 +498,7 @@ EOF
 }
 
 # =============================================================================
-# SECTION 8: run_stage integration for deploy-verify schema
+# SECTION 9: run_stage integration for deploy-verify schema
 # =============================================================================
 
 @test "run_stage accepts deploy-verify schema and extracts status field" {
