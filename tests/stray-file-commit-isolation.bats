@@ -100,6 +100,9 @@ _post_commit_path_allowlist_check() {
 		[[ -n "$path" ]] || continue
 		case "$path" in
 			tests/*) continue ;;
+			prisma/**) continue ;;
+			docker-compose*.yml) continue ;;
+			docs/**) continue ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs | *.sh | *.bats)
 				continue
 				;;
@@ -236,6 +239,82 @@ _orchestrator_guard_function_name() {
 	[ "$status" -ne 0 ] || fail "allowlist check accepted a .serena/ commit"
 	[[ "$output" == *".serena/project.yml"* ]] || {
 		printf 'FAIL: expected the error to name .serena/project.yml, got:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(4a) reference allowlist check accepts a commit of only prisma/ paths" {
+	local repo
+	repo="$(_make_repo guard-prisma)"
+
+	mkdir -p "$repo/prisma/migrations/20260519_add_users"
+	printf 'datasource db {\n  provider = "postgresql"\n}\n' \
+		> "$repo/prisma/schema.prisma"
+	printf 'CREATE TABLE users (id serial PRIMARY KEY);\n' \
+		> "$repo/prisma/migrations/20260519_add_users/migration.sql"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "feat: add users migration"
+
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: allowlist check rejected a prisma/ commit: %s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(4b) reference allowlist check accepts a commit of only docker-compose*.yml paths" {
+	local repo
+	repo="$(_make_repo guard-docker)"
+
+	printf 'services:\n  backend:\n    environment:\n      JWT_SECRET: s3cr3t\n' \
+		> "$repo/docker-compose.base.yml"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "feat: add JWT_SECRET env var"
+
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: allowlist check rejected a docker-compose.base.yml commit: %s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(4c) reference allowlist check accepts a commit of only docs/ paths" {
+	local repo
+	repo="$(_make_repo guard-docs)"
+
+	mkdir -p "$repo/docs"
+	printf '# Architecture\n\nService overview.\n' \
+		> "$repo/docs/01-ARCHITECTURE.md"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "docs: update architecture overview"
+
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: allowlist check rejected a docs/ commit: %s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(5a) reference allowlist check rejects a commit that includes .github/workflows/ paths" {
+	local repo
+	repo="$(_make_repo guard-github-workflows)"
+
+	mkdir -p "$repo/.github/workflows" "$repo/src"
+	printf 'export const a = 1;\n' > "$repo/src/a.ts"
+	printf 'name: ci\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n' \
+		> "$repo/.github/workflows/ci.yml"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "feat: add ci workflow"
+
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -ne 0 ] \
+		|| fail "allowlist check accepted a .github/workflows/ commit"
+	[[ "$output" == *".github/workflows/ci.yml"* ]] || {
+		printf 'FAIL: expected error to name .github/workflows/ci.yml, got:\n%s\n' \
 			"$output" >&2
 		return 1
 	}
