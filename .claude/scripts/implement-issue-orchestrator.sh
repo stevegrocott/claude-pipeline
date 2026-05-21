@@ -2628,6 +2628,11 @@ Repeating issues:
 
             local fix_prompt="${PLATFORM_PATTERNS_PREFIX}Address code review feedback in working directory $loop_dir on branch $loop_branch.
 
+SCOPE: Fix ONLY items under '## Blocking Issues — Fix Before Merge'.
+Do NOT fix or commit anything under
+'## Follow-up Only — Do Not Fix In This PR' — those items are
+intentionally deferred and must not be touched in this PR.
+
 Current iteration findings:
 $review_comments
 
@@ -2640,7 +2645,7 @@ When committing: run 'git diff --name-only' to list the files
 you changed, then 'git add' only those specific files. Never
 use 'git add -A' or 'git add .' — only stage files the task
 actually modified.
-Fix the issues and commit. Output a summary of fixes applied."
+Fix only the blocking issues and commit. Output a summary of fixes applied."
 
             verify_on_feature_branch "$loop_branch" || true
 
