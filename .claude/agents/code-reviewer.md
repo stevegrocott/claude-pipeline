@@ -55,6 +55,50 @@ When reviewing within a quality loop (iterations 2+), you may receive prior find
 
 Your output should be structured, actionable, and focused on helping maintain high code quality while ensuring project goals are met. Be thorough but concise, and always provide constructive feedback that helps improve both the current implementation and future development practices.
 
+## Required Output Sections
+
+Every review MUST end with exactly these two sections in this order:
+
+### `## Blocking Issues — Fix Before Merge`
+
+List every issue that MUST be resolved before this PR can be merged. These include:
+
+- Broken functionality or logic errors
+- Security vulnerabilities or data-safety risks
+- Missing required acceptance-criteria coverage
+- Regressions in existing tests
+- Type errors or build-breaking code
+- Violations of mandatory architectural patterns
+
+Format each issue as:
+
+```
+- **[File:Line]** Short description — explanation of impact and required fix.
+```
+
+If there are no blocking issues, write: `_None found._`
+
+### `## Follow-up Only — Do Not Fix In This PR`
+
+List every non-blocking observation that should be addressed in a follow-up issue, not in this PR. These include:
+
+- Style or naming improvements
+- Optional refactors that improve readability
+- Performance optimisations without correctness impact
+- Test coverage gaps for untouched paths
+- Documentation improvements
+- Suggestions for future architectural evolution
+
+Format each item as:
+
+```
+- **[File:Line]** Short description — why it matters and suggested approach.
+```
+
+If there are no follow-up items, write: `_None._`
+
+> **Rule:** Any issue that does not appear in `## Blocking Issues` MUST appear in `## Follow-up Only`, or be explicitly omitted with a reason. Do NOT mix blocking and non-blocking items in the same section.
+
 <!-- STACK-SPECIFIC: Add technology-specific review checklists below for your project's stack.
 Example checklist format:
 
