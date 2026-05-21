@@ -1616,11 +1616,11 @@ run_stage() {
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (PR review — focused diff analysis)"
     elif [[ "${_matched_prefix:-}" == "simplify" && "$model" == "haiku" ]]; then
-        local _max_simplify="${MAX_TURNS_SIMPLIFY:-12}"
+        local _max_simplify="${MAX_TURNS_SIMPLIFY:-15}"
         turns_args=(--max-turns "$_max_simplify")
         log "  Max turns: $_max_simplify (simplify haiku — targeted edits, env: MAX_TURNS_SIMPLIFY)"
     elif [[ "${_matched_prefix:-}" == "fix" && "$model" == "sonnet" ]]; then
-        local _max_fix_review="${MAX_TURNS_FIX_REVIEW:-20}"
+        local _max_fix_review="${MAX_TURNS_FIX_REVIEW:-30}"
         turns_args=(--max-turns "$_max_fix_review")
         log "  Max turns: $_max_fix_review (fix/fix-review sonnet — targeted fix, env: MAX_TURNS_FIX_REVIEW)"
     elif [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
