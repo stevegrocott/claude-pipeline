@@ -3951,6 +3951,9 @@ guard_commit_path_allowlist() {
 		[[ -n "$path" ]] || continue
 		case "$path" in
 			tests/*) continue ;;
+			prisma/**) continue ;;
+			docker-compose*.yml) continue ;;
+			docs/**) continue ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs)
 				continue ;;
 			*.sh | *.bats | *.py | *.go | *.rb | *.java | *.rs)
