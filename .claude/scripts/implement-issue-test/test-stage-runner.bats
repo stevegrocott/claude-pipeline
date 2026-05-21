@@ -1338,6 +1338,24 @@ EOF
         fail "Expected --max-turns 8 (MAX_TURNS_SIMPLIFY=8). Calls: $(cat "$claude_calls")"
 }
 
+@test "run_stage uses default --max-turns 15 for simplify when MAX_TURNS_SIMPLIFY is unset" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    unset MAX_TURNS_SIMPLIFY
+
+    run_stage "simplify-task-1-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 15" "$claude_calls" || \
+        fail "Expected default --max-turns 15 when MAX_TURNS_SIMPLIFY is unset. Calls: $(cat "$claude_calls")"
+}
+
 @test "run_stage logs simplify haiku cap with env var name" {
     source "$TEST_TMP/model-config.sh"
     timeout() {
@@ -1438,6 +1456,24 @@ EOF
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--max-turns 15" "$claude_calls" || \
         fail "Expected --max-turns 15 (MAX_TURNS_FIX_REVIEW=15 for fix-review). Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage uses default --max-turns 30 for fix-review when MAX_TURNS_FIX_REVIEW is unset" {
+    source "$TEST_TMP/model-config.sh"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    unset MAX_TURNS_FIX_REVIEW
+
+    run_stage "fix-review-task-1-iter-1" "prompt" "test-schema.json" "" "" "" "sonnet"
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 30" "$claude_calls" || \
+        fail "Expected default --max-turns 30 when MAX_TURNS_FIX_REVIEW is unset. Calls: $(cat "$claude_calls")"
 }
 
 @test "run_stage does not apply simplify cap when model is not haiku" {
