@@ -914,6 +914,10 @@ if [[ -n "${CLAUDE_USAGE_SESSION_KEY:-}${CLAUDE_USAGE_SESSION_KEY_FILE:-}" ]] \
             log "Pre-flight: $_m available (utilization ${_pct}%, resets $_reset)"
         fi
     done
+else
+    log_warn "Pre-flight: CLAUDE_USAGE_SESSION_KEY unset — no usage check"
+    log_warn "Pre-flight: export CLAUDE_USAGE_SESSION_KEY=<session-cookie>"
+    log_warn "Pre-flight: export CLAUDE_USAGE_ORG_ID=<org-id> to enable"
 fi
 
 consecutive_failures=0

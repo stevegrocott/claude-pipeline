@@ -324,3 +324,35 @@ _simulate_update_progress() {
 	count=$(printf '%s' "$result" | jq '.progress.completed')
 	[[ "$count" == "1" ]]
 }
+
+# =============================================================================
+# TASK 3: pre-flight else-branch warns when session key is unset
+# =============================================================================
+
+@test "pre-flight block has an else branch" {
+	# The if block at the session-key check must have a corresponding else
+	# so operators receive a warning when CLAUDE_USAGE_SESSION_KEY is unset.
+	local body
+	body=$(awk '/Pre-flight usage check/,/^consecutive_failures/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'else'* ]]
+}
+
+@test "pre-flight else branch emits a log_warn call" {
+	local body
+	body=$(awk '/Pre-flight usage check/,/^consecutive_failures/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'log_warn'* ]]
+}
+
+@test "pre-flight else branch warns that session key is unset" {
+	grep -q 'CLAUDE_USAGE_SESSION_KEY unset' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "pre-flight else branch includes export setup hint for session key" {
+	grep -q 'export CLAUDE_USAGE_SESSION_KEY' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "pre-flight else branch includes export setup hint for org ID" {
+	grep -q 'export CLAUDE_USAGE_ORG_ID' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
