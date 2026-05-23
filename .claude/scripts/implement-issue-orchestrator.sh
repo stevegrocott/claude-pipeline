@@ -126,6 +126,12 @@ ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
 readonly RATE_LIMIT_BUFFER=60
 readonly RATE_LIMIT_DEFAULT_WAIT=3600
+# Waits longer than this imply a weekly-cap exhaustion (rather than a transient
+# 5-hour-window backoff). When handle_rate_limit sees a parsed wait above this
+# threshold it records an inferred-exhaustion entry via claude-usage.sh so
+# subsequent stages escalate via effective_model instead of sleeping.
+# Env-overridable for tests / tuning. See issue #364.
+readonly RATE_LIMIT_EXHAUSTION_THRESHOLD="${RATE_LIMIT_EXHAUSTION_THRESHOLD:-1800}"
 
 # =============================================================================
 # PORTABLE TIMEOUT (macOS does not ship GNU timeout)
@@ -1311,9 +1317,10 @@ extract_wait_time() {
 
 handle_rate_limit() {
     local output="$1"
-    local wait_time
-    wait_time=$(extract_wait_time "$output")
-    wait_time=$((wait_time + RATE_LIMIT_BUFFER))
+    local model="${2:-}"
+    local parsed_wait wait_time
+    parsed_wait=$(extract_wait_time "$output")
+    wait_time=$((parsed_wait + RATE_LIMIT_BUFFER))
 
     local resume_at
     resume_at=$(date -Iseconds -d "+${wait_time} seconds" 2>/dev/null || date -v+${wait_time}S -Iseconds 2>/dev/null)
@@ -1323,6 +1330,20 @@ handle_rate_limit() {
         "stage=${_RUN_STAGE_NAME:-}" \
         "retry_after_seconds:=$wait_time" \
         "resume_at=${resume_at:-}"
+
+    # Long waits imply a weekly-cap exhaustion. Record a synthetic exhaustion
+    # entry so subsequent stages escalate via effective_model instead of
+    # repeatedly sleeping. Only do this when we know which model to mark; if
+    # claude-usage.sh did not provide the helper (older checkout / test stub)
+    # the recording is skipped silently — the sleep below still proceeds.
+    if [[ -n "$model" ]] \
+        && (( parsed_wait > RATE_LIMIT_EXHAUSTION_THRESHOLD )) \
+        && declare -F record_inferred_exhaustion >/dev/null 2>&1; then
+        log "Wait ${parsed_wait}s > ${RATE_LIMIT_EXHAUSTION_THRESHOLD}s — recording inferred exhaustion for $model"
+        record_inferred_exhaustion "$model" "$parsed_wait" || \
+            log_warn "record_inferred_exhaustion failed for $model"
+    fi
+
     sleep "$wait_time"
 }
 
@@ -1856,7 +1877,7 @@ for m in re.finditer(r'\[\s*\{', t):
             _error_kind="max_turns_exhausted"
         fi
     elif detect_rate_limit "$output"; then
-        handle_rate_limit "$output"
+        handle_rate_limit "$output" "$model"
         _error_kind="rate_limit"
     elif [[ -z "$structured" && -z "$_fallback_result" ]]; then
         # No parseable output of any kind
