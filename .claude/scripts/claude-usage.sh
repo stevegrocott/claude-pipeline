@@ -32,6 +32,7 @@ _CLAUDE_USAGE_SOURCED=1
 # across all worktrees / projects) and never accidentally committed.
 _CLAUDE_USAGE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/claude-pipeline"
 _CLAUDE_USAGE_CACHE_FILE="$_CLAUDE_USAGE_CACHE_DIR/usage.json"
+_CLAUDE_USAGE_SYNTH_FILE="$_CLAUDE_USAGE_CACHE_DIR/synthetic_exhaustion.json"
 
 # Defaults (overridable via env). See SKILL.md for semantics.
 : "${CLAUDE_USAGE_CACHE_TTL:=30}"
@@ -240,6 +241,13 @@ is_model_exhausted() {
         return 1
     fi
 
+    # Check synthetic exhaustion before a network round-trip.
+    # record_inferred_exhaustion() writes this when the orchestrator
+    # infers a rate-limit from API error responses.
+    if _is_synthetically_exhausted "$model"; then
+        return 0
+    fi
+
     fetch_usage || return 1   # graceful: no data, treat as not exhausted
     [[ -f "$_CLAUDE_USAGE_CACHE_FILE" ]] || return 1
 
@@ -286,4 +294,70 @@ is_model_exhausted() {
     fi
 
     return 1
+}
+
+# --- record_inferred_exhaustion / synthetic exhaustion ----------------------
+# Lets the orchestrator record a model as exhausted when it infers a
+# rate-limit from API error responses without a real usage API fetch.
+# The record persists for WAIT_SECS seconds; after expiry the function
+# returns false and normal cache/API checks resume.
+
+_is_synthetically_exhausted() {
+    local model="$1"
+    [[ -f "$_CLAUDE_USAGE_SYNTH_FILE" ]] || return 1
+
+    local exhausted_until
+    exhausted_until=$(jq -r --arg m "$model" \
+        '.[$m].exhausted_until // empty' \
+        "$_CLAUDE_USAGE_SYNTH_FILE" 2>/dev/null)
+    [[ -n "$exhausted_until" ]] || return 1
+
+    (( exhausted_until > $(date +%s) ))
+}
+
+# record_inferred_exhaustion MODEL WAIT_SECS
+# Atomic-write a synthetic exhaustion record for MODEL expiring in
+# WAIT_SECS seconds.  Merges with existing records; other models' state
+# is preserved.  is_model_exhausted() checks this file before fetch_usage.
+record_inferred_exhaustion() {
+    local model="$1" wait_secs="$2"
+
+    [[ -n "$model" ]] || {
+        _usage_warn "record_inferred_exhaustion: missing MODEL"
+        return 1
+    }
+    [[ -n "$wait_secs" ]] || {
+        _usage_warn "record_inferred_exhaustion: missing WAIT_SECS"
+        return 1
+    }
+
+    mkdir -p "$_CLAUDE_USAGE_CACHE_DIR"
+
+    local exhausted_until
+    exhausted_until=$(( $(date +%s) + wait_secs ))
+
+    # Merge with existing records — preserve other models' state.
+    local existing_json='{}'
+    if [[ -f "$_CLAUDE_USAGE_SYNTH_FILE" ]] \
+            && jq empty "$_CLAUDE_USAGE_SYNTH_FILE" 2>/dev/null; then
+        existing_json=$(< "$_CLAUDE_USAGE_SYNTH_FILE")
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp "${_CLAUDE_USAGE_CACHE_DIR}/synthetic.XXXXXX")
+
+    jq --arg m "$model" --argjson u "$exhausted_until" \
+        '.[$m] = {"exhausted_until": $u}' \
+        <<< "$existing_json" \
+        > "$tmp_file" 2>/dev/null \
+        && mv "$tmp_file" "$_CLAUDE_USAGE_SYNTH_FILE" \
+        || {
+            rm -f "$tmp_file"
+            _usage_warn \
+                "record_inferred_exhaustion: write failed for $model"
+            return 1
+        }
+
+    _usage_log \
+        "INFO claude-usage: synthetic exhaustion model=$model wait=${wait_secs}s"
 }

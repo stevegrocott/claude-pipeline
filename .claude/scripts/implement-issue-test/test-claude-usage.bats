@@ -361,3 +361,113 @@ JSON
         return 1
     fi
 }
+
+# ============================================================================
+# record_inferred_exhaustion / synthetic exhaustion
+# ============================================================================
+
+@test "70 record_inferred_exhaustion creates synthetic file" {
+    local synth_file="$XDG_CACHE_HOME/claude-pipeline/synthetic_exhaustion.json"
+    run record_inferred_exhaustion sonnet 3600
+    [ "$status" -eq 0 ]
+    [ -f "$synth_file" ]
+    local until
+    until=$(jq -r '.sonnet.exhausted_until' "$synth_file")
+    [ "$until" != "null" ]
+    [ "$until" != "" ]
+}
+
+@test "71 is_model_exhausted returns exhausted when synthetic record is active" {
+    # Record sonnet as exhausted for 1 hour.
+    record_inferred_exhaustion sonnet 3600
+
+    # Real-data fixture shows sonnet NOT exhausted (low utilization).
+    make_usage_response <<'JSON'
+{
+  "five_hour": {"utilization": 0, "resets_at": null},
+  "seven_day": {"utilization": 0, "resets_at": null},
+  "seven_day_sonnet": {"utilization": 0, "resets_at": null},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+    run is_model_exhausted sonnet
+    [ "$status" -eq 0 ]   # exhausted via synthetic record
+}
+
+@test "72 is_model_exhausted NOT exhausted when synthetic record has expired" {
+    local synth_file="$XDG_CACHE_HOME/claude-pipeline/synthetic_exhaustion.json"
+    mkdir -p "$XDG_CACHE_HOME/claude-pipeline"
+    local past
+    past=$(( $(date +%s) - 100 ))
+    printf '{"sonnet":{"exhausted_until":%s}}\n' "$past" > "$synth_file"
+
+    make_usage_response <<'JSON'
+{
+  "five_hour": {"utilization": 0, "resets_at": null},
+  "seven_day": {"utilization": 0, "resets_at": null},
+  "seven_day_sonnet": {"utilization": 0, "resets_at": null},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+    run is_model_exhausted sonnet
+    [ "$status" -ne 0 ]   # expired record: not exhausted
+}
+
+@test "73 record_inferred_exhaustion merges: recording sonnet preserves opus" {
+    record_inferred_exhaustion opus 3600
+    record_inferred_exhaustion sonnet 1800
+
+    local synth_file="$XDG_CACHE_HOME/claude-pipeline/synthetic_exhaustion.json"
+    local opus_until sonnet_until
+    opus_until=$(jq -r '.opus.exhausted_until // empty' "$synth_file")
+    sonnet_until=$(jq -r '.sonnet.exhausted_until // empty' "$synth_file")
+    [ -n "$opus_until" ]
+    [ -n "$sonnet_until" ]
+}
+
+@test "74 record_inferred_exhaustion returns non-zero when MODEL is empty" {
+    run record_inferred_exhaustion "" 3600
+    [ "$status" -ne 0 ]
+}
+
+@test "75 record_inferred_exhaustion returns non-zero when WAIT_SECS is empty" {
+    run record_inferred_exhaustion sonnet ""
+    [ "$status" -ne 0 ]
+}
+
+@test "76 is_model_exhausted handles corrupt synthetic file gracefully" {
+    local synth_file="$XDG_CACHE_HOME/claude-pipeline/synthetic_exhaustion.json"
+    mkdir -p "$XDG_CACHE_HOME/claude-pipeline"
+    printf 'NOT VALID JSON\n' > "$synth_file"
+
+    make_usage_response <<'JSON'
+{
+  "five_hour": {"utilization": 0, "resets_at": null},
+  "seven_day": {"utilization": 0, "resets_at": null},
+  "seven_day_sonnet": {"utilization": 0, "resets_at": null},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+    run is_model_exhausted sonnet
+    # Corrupt file: synthetic check returns false, falls through to real check.
+    [ "$status" -ne 0 ]   # not exhausted
+}
+
+@test "77 synthetic record for one model does not exhaust another" {
+    record_inferred_exhaustion sonnet 3600
+
+    make_usage_response <<'JSON'
+{
+  "five_hour": {"utilization": 0, "resets_at": null},
+  "seven_day": {"utilization": 0, "resets_at": null},
+  "seven_day_sonnet": {"utilization": 0, "resets_at": null},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+    run is_model_exhausted opus
+    [ "$status" -ne 0 ]   # opus not exhausted; only sonnet was recorded
+}
