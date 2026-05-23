@@ -137,6 +137,11 @@ teardown() {
     [ "$RATE_LIMIT_DEFAULT_WAIT" -eq 3600 ]
 }
 
+@test "RATE_LIMIT_EXHAUSTION_THRESHOLD is defined with default 1800" {
+    [ -n "$RATE_LIMIT_EXHAUSTION_THRESHOLD" ]
+    [ "$RATE_LIMIT_EXHAUSTION_THRESHOLD" -eq 1800 ]
+}
+
 # =============================================================================
 # HANDLE_RATE_LIMIT (cannot fully test sleep, but test structure)
 # =============================================================================
@@ -152,6 +157,87 @@ teardown() {
     local log_output
     log_output=$(handle_rate_limit "$output" 2>&1)
     [[ "$log_output" == *"Rate limit hit"* ]] || fail "Expected 'Rate limit hit' in output: $log_output"
+}
+
+# =============================================================================
+# HANDLE_RATE_LIMIT - INFERRED EXHAUSTION (issue #364)
+# =============================================================================
+
+@test "handle_rate_limit records inferred exhaustion when wait exceeds threshold" {
+    # Mock sleep to avoid actual delay
+    sleep() { :; }
+    export -f sleep
+
+    # Mock record_inferred_exhaustion to record invocation in a sentinel file
+    local sentinel="$TEST_TMP/exhaustion-called"
+    record_inferred_exhaustion() {
+        printf '%s %s\n' "$1" "$2" > "$sentinel"
+    }
+    export -f record_inferred_exhaustion
+
+    # Retry-After of 7200s is well above the 1800s threshold
+    local output='{"result":"Rate limited. Retry-After: 7200 seconds"}'
+
+    handle_rate_limit "$output" "sonnet" >/dev/null 2>&1
+
+    [ -f "$sentinel" ] || fail "record_inferred_exhaustion was not called"
+
+    local call
+    call=$(cat "$sentinel")
+    [[ "$call" == sonnet\ * ]] || fail "Expected model=sonnet recorded; got: $call"
+
+    # The recorded wait should be the parsed value (7200), not buffered
+    [[ "$call" == *"7200" ]] || fail "Expected wait=7200 recorded; got: $call"
+}
+
+@test "handle_rate_limit does NOT record exhaustion when wait at or below threshold" {
+    sleep() { :; }
+    export -f sleep
+
+    local sentinel="$TEST_TMP/exhaustion-called"
+    record_inferred_exhaustion() {
+        printf '%s %s\n' "$1" "$2" > "$sentinel"
+    }
+    export -f record_inferred_exhaustion
+
+    # Retry-After of 1800s — at threshold boundary, must NOT trigger
+    local output='{"result":"Rate limited. Retry-After: 1800 seconds"}'
+
+    handle_rate_limit "$output" "sonnet" >/dev/null 2>&1
+
+    [ ! -f "$sentinel" ] || fail "record_inferred_exhaustion was unexpectedly called for wait <= threshold"
+}
+
+@test "handle_rate_limit does NOT record exhaustion when model is empty" {
+    sleep() { :; }
+    export -f sleep
+
+    local sentinel="$TEST_TMP/exhaustion-called"
+    record_inferred_exhaustion() {
+        printf '%s %s\n' "$1" "$2" > "$sentinel"
+    }
+    export -f record_inferred_exhaustion
+
+    # Long wait but no model — should skip exhaustion recording
+    local output='{"result":"Rate limited. Retry-After: 7200 seconds"}'
+
+    handle_rate_limit "$output" "" >/dev/null 2>&1
+
+    [ ! -f "$sentinel" ] || fail "record_inferred_exhaustion called despite empty model"
+}
+
+@test "handle_rate_limit tolerates missing record_inferred_exhaustion function" {
+    sleep() { :; }
+    export -f sleep
+
+    # Ensure the function is NOT defined in this test scope
+    unset -f record_inferred_exhaustion 2>/dev/null || true
+
+    local output='{"result":"Rate limited. Retry-After: 7200 seconds"}'
+
+    # Must complete without error even when the helper is missing
+    run handle_rate_limit "$output" "sonnet"
+    [ "$status" -eq 0 ]
 }
 
 # =============================================================================
