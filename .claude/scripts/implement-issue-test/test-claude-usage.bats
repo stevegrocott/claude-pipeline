@@ -300,6 +300,16 @@ JSON
     [ -f "$XDG_CACHE_HOME/claude-pipeline/usage.json" ]
 }
 
+@test "43 pre-flight: SESSION_KEY set but CLAUDE_USAGE_ORG_ID unset → fetch returns false, logs WARN" {
+    unset CLAUDE_USAGE_ORG_ID
+    run fetch_usage 2>&1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"WARN"* || "$output" == *"warn"* ]]
+    # Must not have curled — no network round-trip when ORG_ID is missing.
+    n=$(cat "$MOCK_CURL_COUNTER_FILE" 2>/dev/null || echo 0)
+    [ "$n" -eq 0 ]
+}
+
 # ============================================================================
 # Failure modes
 # ============================================================================
@@ -470,4 +480,38 @@ JSON
 JSON
     run is_model_exhausted opus
     [ "$status" -ne 0 ]   # opus not exhausted; only sonnet was recorded
+}
+
+@test "78 round-trip: record_inferred_exhaustion sonnet 7200 → is_model_exhausted returns exhausted" {
+    # Acceptance criterion AC1: record_inferred_exhaustion sonnet 7200 must cause
+    # is_model_exhausted to return 0 even when the usage API shows low utilization.
+    record_inferred_exhaustion sonnet 7200
+
+    make_usage_response <<'JSON'
+{
+  "five_hour": {"utilization": 0, "resets_at": null},
+  "seven_day": {"utilization": 0, "resets_at": null},
+  "seven_day_sonnet": {"utilization": 0, "resets_at": null},
+  "seven_day_opus": null,
+  "extra_usage": {"is_enabled": false, "utilization": 0}
+}
+JSON
+    run is_model_exhausted sonnet
+    [ "$status" -eq 0 ]   # exhausted via synthetic record with 7200s wait
+}
+
+@test "79 round-trip: exhausted_until is approximately now + wait_secs" {
+    local wait_secs=300
+    local before after
+    before=$(date +%s)
+    record_inferred_exhaustion sonnet "$wait_secs"
+    after=$(date +%s)
+
+    local synth_file="$XDG_CACHE_HOME/claude-pipeline/synthetic_exhaustion.json"
+    local until
+    until=$(jq -r '.sonnet.exhausted_until' "$synth_file")
+
+    # exhausted_until must be in [before+wait_secs, after+wait_secs+5]
+    (( until >= before + wait_secs ))
+    (( until <= after + wait_secs + 5 ))
 }
