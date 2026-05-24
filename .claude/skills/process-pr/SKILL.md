@@ -401,6 +401,7 @@ Log each: `Created follow-up issue #XXX: "$TITLE"`
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
 "$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
+<!-- pipeline-autocreated -->
 ## Context
 Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
 
