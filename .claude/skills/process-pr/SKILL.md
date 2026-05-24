@@ -376,6 +376,7 @@ For each extracted issue (after deduplication check passes), route by classifica
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
 "$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
+<!-- pipeline-autocreated -->
 ## Context
 Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
 
@@ -390,7 +391,7 @@ $EXTRACTED_DESCRIPTION
 - PR/MR: #$PR_NUMBER
 - Reviewer: @$REVIEWER
 EOF
-)" --labels "$LABELS"
+)" --labels "${LABELS:+$LABELS,}needs-explore"
 ```
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`
