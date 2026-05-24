@@ -102,6 +102,9 @@ _install_gh_stub() {
 		printf '\t*timeline*)\n'
 		printf "\t\tprintf '%%s' %q\n" "$timeline_json"
 		printf '\t\t;;\n'
+		printf '\t*nameWithOwner*)\n'
+		printf "\t\tprintf '%%s' '{\"nameWithOwner\":\"example/repo\"}'\n"
+		printf '\t\t;;\n'
 		printf '\t*)\n'
 		printf "\t\tprintf '%%s' %q\n" "$files_json"
 		printf '\t\t;;\n'
@@ -188,15 +191,10 @@ _assemble_section() {
 		return 1
 	}
 
-	# The changed-file list appears as the final pipe-delimited field; each
-	# stub-supplied filename surfaces in the output (comma-joined per the
-	# task spec).
-	[[ "$output" == *"src/a.ts"* ]] || {
-		printf 'FAIL: expected file "src/a.ts" in output:\n%s\n' "$output" >&2
-		return 1
-	}
-	[[ "$output" == *"tests/a.bats"* ]] || {
-		printf 'FAIL: expected file "tests/a.bats" in output:\n%s\n' "$output" >&2
+	# The changed-file list appears as the final pipe-delimited field,
+	# emitted as a comma-delimited list (not raw JSON).
+	[[ "$output" == *"src/a.ts,tests/a.bats"* ]] || {
+		printf 'FAIL: expected comma-delimited file list "src/a.ts,tests/a.bats" in output:\n%s\n' "$output" >&2
 		return 1
 	}
 }

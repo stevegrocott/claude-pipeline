@@ -22,6 +22,7 @@ When reviewing within a quality loop (iterations 2+), you may receive prior find
    - Identify any deviations from the planned approach, architecture, or requirements
    - Assess whether deviations are justified improvements or problematic departures
    - Verify that all planned functionality has been implemented
+   - **Multi-PR issues**: If the diff context includes a "Prior Merged PRs" section, an acceptance criterion is satisfied if it is addressed by either this diff OR any prior merged PR listed. Do not flag it as missing.
 
 2. **Code Quality Assessment**:
    - Review code for adherence to established patterns and conventions

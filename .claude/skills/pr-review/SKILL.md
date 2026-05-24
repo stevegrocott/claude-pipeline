@@ -59,6 +59,15 @@ Review a pull request diff against the issue requirements. Produce a verdict (ap
 | Scope creep | Are there changes unrelated to the issue? Flag as major if they introduce risk |
 | Missing files | Does the issue mention files that don't appear in the diff? |
 
+## Multi-PR Issues
+
+When the prompt contains a **Prior Merged PRs** section (injected by the orchestrator), the issue spans multiple pull requests. Apply these rules:
+
+- **An AC is DONE if it is addressed by either this diff OR any PR listed in the Prior Merged PRs section.** Do not flag it as missing.
+- Only flag an AC as missing if it is absent from both this diff and all prior merged PRs.
+- A prior merged PR "addresses" an AC if its title or the files it touched plausibly cover that requirement.
+- Never request changes for ACs already satisfied by prior merged PRs.
+
 ## Code Review Checklist
 
 Apply only the items relevant to the technology in the diff. Skip items that don't apply.
