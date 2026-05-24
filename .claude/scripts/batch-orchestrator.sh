@@ -74,6 +74,7 @@ MANIFEST=""
 ISSUES=""
 BRANCH=""
 AGENT=""
+ENRICH_FOLLOWUPS=false
 
 usage() {
     echo "Usage: $0 --manifest <path>"
@@ -85,6 +86,8 @@ usage() {
     echo "  --issues <list>     Comma-separated list of issue numbers"
     echo "  --branch <name>     Base branch for PRs"
     echo "  --agent <name>      Agent for implement-issue stage (optional)"
+    echo "  --enrich-followups  After batch, enrich needs-explore issues created"
+    echo "                      during this run (calls /enrich-issue on each)"
     echo ""
     echo "Available agents:"
     echo "  react-frontend-developer        React, Next.js, shadcn/ui, Tailwind"
@@ -116,6 +119,10 @@ while [[ $# -gt 0 ]]; do
             [[ -n "${2:-}" ]] || { echo "ERROR: --agent requires a value" >&2; exit 3; }
             AGENT="$2"
             shift 2
+            ;;
+        --enrich-followups)
+            ENRICH_FOLLOWUPS=true
+            shift
             ;;
         --help|-h)
             usage
@@ -881,6 +888,66 @@ process_issue() {
 }
 
 # =============================================================================
+# POST-BATCH SWEEP: enrich needs-explore follow-up issues
+# =============================================================================
+#
+# sweep_enrich_followups — called after the primary issue loop when
+# --enrich-followups is set.  Queries gh for every open issue tagged
+# needs-explore that was created since BATCH_START_TIME, then invokes
+# /enrich-issue N on each one via dispatch_composition.
+#
+# Design notes:
+#   - Scoped to this batch run via BATCH_START_TIME — avoids touching
+#     follow-ups from prior batches.
+#   - Failures are logged as warnings only; they do NOT increment
+#     consecutive_failures and do NOT trigger the circuit breaker.
+#   - Uses dispatch_composition (non-isolated path) so the enrich-issue
+#     skill can use interactive tools (gh, MCP, etc.) without a worktree.
+
+sweep_enrich_followups() {
+	log "========================================"
+	log "Post-batch sweep: needs-explore issues"
+	log "========================================"
+	log "Batch start time: $BATCH_START_TIME"
+
+	local found_issues
+	found_issues=$(gh issue list \
+		--label needs-explore \
+		--state open \
+		--json number,createdAt \
+		2>/dev/null \
+		| jq -r --arg since "$BATCH_START_TIME" \
+		'[.[] | select(.createdAt >= $since)] | .[].number' \
+		2>/dev/null) || found_issues=""
+
+	if [[ -z "$found_issues" ]]; then
+		log "Sweep: no needs-explore issues found since $BATCH_START_TIME"
+		return 0
+	fi
+
+	local issue_num
+	while IFS= read -r issue_num; do
+		[[ -z "$issue_num" ]] && continue
+		log "Sweep: enriching issue #$issue_num"
+		local enrich_output enrich_rc
+		enrich_output=$(dispatch_composition \
+			"/enrich-issue $issue_num" false 2>&1)
+		enrich_rc=$?
+		if (( enrich_rc != 0 )); then
+			log_warn \
+				"Sweep: enrich-issue #$issue_num failed (rc=$enrich_rc)" \
+				"— skipping, batch unaffected"
+			[[ -n "$enrich_output" ]] && \
+				log_warn "Sweep: enrich-issue #$issue_num output: $enrich_output"
+		else
+			log "Sweep: enriched issue #$issue_num successfully"
+		fi
+	done <<< "$found_issues"
+
+	log "Sweep: done"
+}
+
+# =============================================================================
 # MAIN LOOP
 # =============================================================================
 
@@ -894,7 +961,17 @@ log "Process-PR agent: code-reviewer"
 log "Log dir: $LOG_BASE"
 log "Timeout per issue: ${ISSUE_TIMEOUT}s"
 log "Max consecutive failures: $MAX_CONSECUTIVE_FAILURES"
+log "Enrich follow-ups: $ENRICH_FOLLOWUPS"
 emit_event "batch_start" "total_issues:=${#ISSUE_ARRAY[@]}" "branch=$BRANCH"
+
+# Capture batch start time for scoping the post-batch follow-up sweep.
+# Must be set before the primary issue loop so any needs-explore issues
+# created during this run are in scope for sweep_enrich_followups.
+# Use UTC with the trailing 'Z' to match the format gh emits for
+# `createdAt` — this lets jq compare the two values lexicographically
+# without timezone-offset skew (a local "+10:00" timestamp would never
+# compare correctly against a UTC "Z" timestamp from gh).
+BATCH_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 init_status
 
@@ -951,6 +1028,15 @@ for issue in "${ISSUE_ARRAY[@]}"; do
         fi
     fi
 done
+
+# Post-batch sweep: enrich any needs-explore follow-up issues that were
+# created during this run.  Runs even when the circuit breaker fired so
+# that follow-ups from the issues that DID complete get enriched.
+# Failures inside sweep_enrich_followups are warnings only — they never
+# change exit_code or the batch state.
+if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
+	sweep_enrich_followups
+fi
 
 # Final state
 final_failed=$(jq '.progress.failed' "$STATUS_FILE")

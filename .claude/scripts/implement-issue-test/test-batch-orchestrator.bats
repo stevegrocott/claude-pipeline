@@ -356,3 +356,73 @@ _simulate_update_progress() {
 @test "pre-flight else branch includes export setup hint for org ID" {
 	grep -q 'export CLAUDE_USAGE_ORG_ID' "$BATCH_ORCHESTRATOR_SCRIPT"
 }
+
+# =============================================================================
+# TASK 5: --enrich-followups flag and post-batch needs-explore sweep
+# =============================================================================
+
+@test "--enrich-followups flag is recognised in argument parsing" {
+	grep -qE '^\s+--enrich-followups\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "ENRICH_FOLLOWUPS variable is initialised before argument parsing" {
+	grep -q 'ENRICH_FOLLOWUPS' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "usage documents the --enrich-followups flag" {
+	local body
+	body=$(awk '/^usage\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'enrich-followups'* ]]
+}
+
+@test "BATCH_START_TIME is captured before the main issue loop" {
+	# Must be set before the main 'for issue in "${ISSUE_ARRAY[@]}"' loop so
+	# that the sweep can filter to issues created during this batch run.
+	# Pin to the ACTUAL assignment (BATCH_START_TIME=) — not comments — and
+	# to the LAST occurrence of the for-loop, which is the main loop (other
+	# matches are inside helper functions like init_status()).
+	local start_line loop_line
+	start_line=$(grep -n '^BATCH_START_TIME=' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	loop_line=$(grep -n 'for issue in.*ISSUE_ARRAY' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| tail -1 | cut -d: -f1)
+	[[ -n "$start_line" ]]
+	[[ -n "$loop_line" ]]
+	(( start_line < loop_line ))
+}
+
+@test "sweep_enrich_followups function is defined in the script" {
+	grep -qE '^sweep_enrich_followups\(\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "sweep_enrich_followups queries gh for needs-explore label" {
+	local body
+	body=$(awk '/^sweep_enrich_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'needs-explore'* ]]
+}
+
+@test "sweep_enrich_followups filters by BATCH_START_TIME" {
+	local body
+	body=$(awk '/^sweep_enrich_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'BATCH_START_TIME'* ]]
+}
+
+@test "sweep_enrich_followups invokes enrich-issue for each found issue" {
+	local body
+	body=$(awk '/^sweep_enrich_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'enrich-issue'* ]]
+}
+
+@test "sweep_enrich_followups does not touch consecutive_failures" {
+	# Enrichment errors must not trigger the circuit breaker.
+	local body
+	body=$(awk '/^sweep_enrich_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" != *'consecutive_failures'* ]]
+}
+
+@test "main body calls sweep_enrich_followups when ENRICH_FOLLOWUPS is true" {
+	# After the primary issue loop, the script must call the sweep function
+	# conditionally on the flag.
+	grep -q 'sweep_enrich_followups' "$BATCH_ORCHESTRATOR_SCRIPT"
+	grep -qE 'ENRICH_FOLLOWUPS.*true|true.*ENRICH_FOLLOWUPS' "$BATCH_ORCHESTRATOR_SCRIPT"
+}

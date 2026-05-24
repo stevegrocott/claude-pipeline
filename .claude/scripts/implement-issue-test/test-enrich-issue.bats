@@ -98,3 +98,30 @@ teardown() {
 @test "SKILL.md references gh issue edit or remove-label for label ops" {
 	grep -qE 'gh issue edit|remove-label' "$SKILL_FILE"
 }
+
+# =============================================================================
+# Group 5: batch-orchestrator.sh integration (--enrich-followups sweep)
+# =============================================================================
+
+@test "batch-orchestrator.sh exists at expected path" {
+	local script
+	script="$PROJECT_DIR/.claude/scripts/batch-orchestrator.sh"
+	[[ -f "$script" ]]
+}
+
+@test "batch-orchestrator.sh accepts --enrich-followups flag" {
+	local script
+	script="$PROJECT_DIR/.claude/scripts/batch-orchestrator.sh"
+	grep -q 'enrich-followups' "$script"
+}
+
+@test "handle-issues SKILL.md documents --enrich-followups flag" {
+	local skill
+	skill="$PROJECT_DIR/.claude/skills/handle-issues/SKILL.md"
+	[[ -f "$skill" ]]
+	grep -q 'enrich-followups' "$skill"
+}
+
+@test "enrich-issue SKILL.md integration section references batch-orchestrator" {
+	grep -qiE 'batch-orchestrator|enrich-followups' "$SKILL_FILE"
+}
