@@ -6008,6 +6008,124 @@ Investigate the root cause and fix the issue. Commit your changes."
 }
 
 # =============================================================================
+# PRIOR-PR LOOKUP HELPER
+# =============================================================================
+#
+# _prior_merged_prs_for_issue <issue_number> [exclude_pr_number]
+#
+# Queries the GitHub issue timeline API and emits one record per merged PR
+# that was cross-referenced from the issue. Each record is a single line in
+# the form:
+#   PR#|title|merged_at|file1,file2,...
+#
+# Purpose: the pr-review stage builds its diff with `git diff base...HEAD`,
+# which contains only the current PR's commits. On multi-PR issues the
+# reviewer cannot see what prior merged PRs already shipped to main, so it
+# reports those acceptance criteria as missing. This helper surfaces the
+# prior PRs so the prompt-construction code can inject a "Prior Merged PRs"
+# context block.
+#
+# Gating: TRACKER must be "github" (default). On any other tracker, on a
+# missing issue number, or when the gh API call fails, the function emits
+# no output and returns 0 — callers see "no prior PRs" and behave as today.
+#
+# Arguments:
+#   $1 - issue number (required; non-empty)
+#   $2 - PR number to exclude from output (optional; e.g. the current PR
+#        being reviewed, so the reviewer never sees its own diff listed
+#        as a prior PR)
+#
+# Stdout: zero or more newline-delimited records, no trailing blank line.
+# Stderr: warnings via log_warn on recoverable lookup failures.
+# Returns: always 0 — callers must check whether stdout is empty, not exit
+#          status, to decide whether to inject the section.
+_prior_merged_prs_for_issue() {
+	local issue_number="$1"
+	local exclude_pr="${2:-}"
+
+	# Gate: only the GitHub timeline endpoint is supported. Jira/GitLab
+	# return silently — the caller's prompt is unchanged.
+	[[ "${TRACKER:-github}" == "github" ]] || return 0
+	[[ -n "$issue_number" ]] || return 0
+
+	# Resolve owner/repo for the timeline endpoint. `gh repo view` reads
+	# the current git remote; failure here means we're not in a gh-aware
+	# checkout and the lookup cannot proceed.
+	local repo
+	repo=$(gh repo view --json nameWithOwner -q '.nameWithOwner' \
+		2>/dev/null)
+	if [[ -z "$repo" ]]; then
+		log_warn "_prior_merged_prs_for_issue: could not resolve" \
+			"repo via gh repo view; skipping prior-PR lookup"
+		return 0
+	fi
+
+	# Query the timeline for cross-referenced events whose source is a
+	# merged PR. --paginate yields one JSON array per page; jq -cs 'add'
+	# below flattens them into a single array.
+	local timeline_json
+	timeline_json=$(GH_PAGER='' gh api \
+		"repos/${repo}/issues/${issue_number}/timeline" \
+		--paginate \
+		--jq '[
+			.[]
+			| select(.event == "cross-referenced"
+				and .source.issue.pull_request.merged_at
+					!= null)
+			| {pr: .source.issue.number,
+			   title: .source.issue.title,
+			   merged: .source.issue.pull_request.merged_at}
+		]' 2>/dev/null)
+
+	if [[ -z "$timeline_json" || "$timeline_json" == "null" ]]; then
+		return 0
+	fi
+
+	local merged_prs
+	merged_prs=$(printf '%s' "$timeline_json" \
+		| jq -cs 'add // []' 2>/dev/null)
+	[[ -z "$merged_prs" || "$merged_prs" == "[]" ]] && return 0
+
+	# Walk the merged-PR array and emit one pipe-delimited record per PR.
+	# A second gh call per PR fetches its changed files — bounded by the
+	# number of prior PRs (typically 1–3 on real issues).
+	local pr_count
+	pr_count=$(printf '%s' "$merged_prs" | jq 'length' 2>/dev/null)
+	[[ -z "$pr_count" || "$pr_count" == "0" ]] && return 0
+
+	local i=0 pr_num pr_title pr_merged pr_files
+	while ((i < pr_count)); do
+		pr_num=$(printf '%s' "$merged_prs" \
+			| jq -r ".[$i].pr // empty" 2>/dev/null)
+		if [[ -z "$pr_num" ]]; then
+			((i++))
+			continue
+		fi
+		if [[ -n "$exclude_pr" && "$pr_num" == "$exclude_pr" ]]; then
+			((i++))
+			continue
+		fi
+		pr_title=$(printf '%s' "$merged_prs" \
+			| jq -r ".[$i].title // \"\"" 2>/dev/null)
+		pr_merged=$(printf '%s' "$merged_prs" \
+			| jq -r ".[$i].merged // \"\"" 2>/dev/null)
+
+		# Comma-delimited file list; empty string if the lookup fails.
+		# We use gh pr view (auto-detects repo) rather than gh api to
+		# keep this consistent with other gh calls in this script.
+		pr_files=$(gh pr view "$pr_num" \
+			--repo "$repo" \
+			--json files \
+			--jq '[.files[].path] | join(",")' 2>/dev/null)
+		pr_files="${pr_files:-}"
+
+		printf '%s|%s|%s|%s\n' \
+			"$pr_num" "$pr_title" "$pr_merged" "$pr_files"
+		((i++))
+	done
+}
+
+# =============================================================================
 # MAIN FLOW
 # =============================================================================
 
