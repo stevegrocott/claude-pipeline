@@ -314,20 +314,22 @@ Scan all review comments for indicators of follow-up work:
 
 | Classification | Criteria | Action |
 |---|---|---|
-| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — enough context to implement |
-| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Attempt to expand via /explore; fall back to direct create with needs-explore label if /explore fails |
+| **precise** | References a specific file or function AND covers ≤2 files in scope | Create issue immediately — no `needs-explore` label; has enough context to implement |
+| **vague** | No file/function reference, broad scope, or uses open-ended trigger phrases alone | Create issue immediately with `needs-explore` label — a later `/enrich-issue` sweep researches and fleshes out the body |
 
-Open-ended trigger phrases that signal a **vague** follow-up (do not auto-create):
+> **Deprecation notice:** A previous version of this skill invoked `/explore` as a nested Claude CLI process to enrich vague follow-ups before creating them. That path is removed. The `batch-orchestrator.sh --enrich-followups` flag now handles enrichment asynchronously via the `enrich-issue` skill, which is idempotent and rate-limit-safe.
+
+Open-ended trigger phrases that signal a **vague** follow-up (create with `needs-explore` label):
 `"consider adding:"`, `"nice to have:"`, `"future improvement:"`, `"we could also..."`
 
 Examples:
 
 ```
-# PRECISE — create issue
+# PRECISE — create issue immediately (no needs-explore label)
 "follow-up needed: extract retry logic in scripts/merge-mr.sh:handle_merge() into a shared helper"
 "technical debt: auth/token.sh:validate_token doesn't handle clock skew — add leeway param"
 
-# VAGUE — skip, do not auto-create
+# VAGUE — create issue immediately WITH needs-explore label (enrich-issue sweep fleshes out later)
 "consider adding more tests"
 "future improvement: better error handling throughout"
 "nice to have: improve logging"
