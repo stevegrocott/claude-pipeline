@@ -7363,11 +7363,14 @@ ${major_descriptions}"
                     # Validate/build body to enforce canonical task format
                     local validated_body
                     validated_body=$(_build_adj_body "$adj_body" "$adj_title")
+                    validated_body="${validated_body}
+<!-- pipeline-autocreated -->"
 
                     local new_num
                     new_num=$("$PLATFORM_DIR/create-issue.sh" \
                         --title "$adj_title" --body "$validated_body" \
-                        --labels "pipeline-followup" 2>/dev/null || true)
+                        --labels "pipeline-followup,needs-explore" \
+                        2>/dev/null || true)
                     if [[ -n "$new_num" ]]; then
                         created_nums+=("#$new_num")
                         log "Created follow-up issue #$new_num: $adj_title"
