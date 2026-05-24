@@ -24,6 +24,7 @@ side_effects:
 composes:
   - implement-issue
   - process-pr
+  - enrich-issue
 failure_modes:
   - id: circuit_breaker
     mitigation: fix the failing issues then run /handle-issues "resume" to continue the batch
@@ -47,6 +48,10 @@ Batch process multiple GitHub issues by launching `batch-orchestrator.sh` which 
 - `/handle-issues "all open bugs labeled 'critical'"`
 - `/handle-issues "issues in milestone v2.0 by creation date"`
 - `/handle-issues "Tailwind removal issues 306-308"` (frontend work)
+- `/handle-issues "critical bugs" --enrich-followups` — also enriches auto-created follow-up issues after the batch completes
+
+**Flags:**
+- `--enrich-followups` — after the main batch finishes, sweep every issue tagged `needs-explore` that was created during this batch run and invoke `/enrich-issue` on each one; see [Post-Batch Follow-up Enrichment](#post-batch-follow-up-enrichment) below
 
 ## Agent Selection
 
@@ -688,11 +693,46 @@ if command -v osascript >/dev/null 2>&1; then
 fi
 ```
 
+## Post-Batch Follow-up Enrichment
+
+When a `handle-issues` batch creates follow-up issues (via the `adjacent_issues` path during PR review or the `process-pr` precise path post-merge), those issues are created quickly with a minimal body: parent reference, raw description, and a single synthesised `[default] (M) <title>` task line. They are automatically tagged with the `needs-explore` label and contain a `<!-- pipeline-autocreated -->` HTML comment marker.
+
+Running `/handle-issues` with `--enrich-followups` (or `batch-orchestrator.sh --enrich-followups`) triggers a post-batch sweep that calls `/enrich-issue N` on each follow-up created during the current batch:
+
+```bash
+# Launch orchestrator with enrichment sweep enabled
+nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --enrich-followups \
+  > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
+```
+
+**Sweep behaviour:**
+- Only processes issues with the `needs-explore` label created since `BATCH_START_TIME` (scoped to this batch — does not touch prior batches' follow-ups)
+- Enrichment failures are logged but do **not** fail the batch or trigger the circuit breaker
+- Use `--enrich-all-needs-explore` (an explicit operator opt-in on `batch-orchestrator.sh`) to sweep ALL `needs-explore` issues regardless of creation time
+
+### `/enrich-issue` Skill
+
+The `/enrich-issue N` skill reads an existing issue, verifies the `<!-- pipeline-autocreated -->` marker is present (bails with a no-op if it's missing — guards against overwriting a human-edited body), then runs the same research + planning pipeline as `/explore` and rewrites the issue body in place:
+
+- Context, Research Findings, Relevant Existing Tests, Evaluation (approaches + risks)
+- Parseable file-scoped implementation tasks
+- Acceptance Criteria
+
+On success it removes the `needs-explore` label. The skill is **idempotent**: running it on an already-enriched issue (marker absent or label already removed) produces a clear log message and exits without modifying the issue.
+
+**When to use manually:**
+```
+/enrich-issue 456
+```
+Useful for any sparsely-described issue — whether pipeline-created or filed by a human with a `needs-explore` label applied manually.
+
+> **Deprecation note:** The `process-pr` vague path previously invoked `/explore` as a nested Claude CLI subprocess (`claude --dangerously-skip-permissions --print "/explore <description>"`). That approach is fragile — no observability, no log capture into the parent run, exit-code-only signal — and is now **deprecated**. Both the precise and vague `process-pr` paths use the label-and-sweep pattern instead: create a minimal issue tagged `needs-explore`, and rely on `/enrich-issue` (triggered manually or via `--enrich-followups`) to research and rewrite the body. This makes enrichment observable and opt-in rather than silent and mandatory.
+
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `.claude/scripts/batch-orchestrator.sh` | Main orchestration script (loops through issues) |
+| `.claude/scripts/batch-orchestrator.sh` | Main orchestration script (loops through issues); supports `--enrich-followups` flag |
 | `.claude/scripts/schemas/implement-issue.json` | JSON schema for implement-issue output |
 | `.claude/scripts/schemas/process-pr.json` | JSON schema for process-pr output |
 | `status.json` | Real-time status (read by this skill, written by orchestrator) |
@@ -707,6 +747,7 @@ fi
 - `.claude/scripts/schemas/*.json` (JSON schemas)
 - `implement-issue` skill (invoked by orchestrator)
 - `process-pr` skill (invoked by orchestrator)
+- `enrich-issue` skill (invoked by orchestrator when `--enrich-followups` is set)
 - Platform CLI authenticated (gh, glab, or acli — configured in .claude/config/platform.sh)
 - `jq` for JSON parsing
 - Claude Code CLI installed
@@ -714,7 +755,8 @@ fi
 **Creates:**
 - One PR per issue (via implement-issue)
 - Merged PRs with closed issues (via process-pr)
-- Follow-up issues from review comments (via process-pr)
+- Follow-up issues from review comments (via process-pr), tagged `needs-explore` with `<!-- pipeline-autocreated -->` marker
+- Enriched follow-up issues with full research + planning (when `--enrich-followups` is set, via enrich-issue)
 - status.json with real-time progress
 - Log directory with per-issue logs
 
