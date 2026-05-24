@@ -355,3 +355,37 @@ _assemble_section() {
 		return 1
 	}
 }
+
+# ===========================================================================
+# Task 2 — injection block contract: current-PR filter and 10-row cap
+# ===========================================================================
+
+@test "(8) orchestrator passes the current PR number as exclude arg to the helper" {
+	[[ -f "$ORCHESTRATOR" ]] || fail "orchestrator script not present"
+
+	# The injection block must call _prior_merged_prs_for_issue with
+	# "$pr_number" as the second argument so the reviewer never sees the
+	# current PR listed as prior work.
+	# Fails RED until issue #366 task 2 lands on the branch under test.
+	grep -qE \
+		'_prior_merged_prs_for_issue[[:space:]].*"\$pr_number"' \
+		"$ORCHESTRATOR" || {
+		printf 'FAIL: orchestrator must call _prior_merged_prs_for_issue with "$pr_number" as exclude arg\n' >&2
+		return 1
+	}
+}
+
+@test "(9) orchestrator caps the prior-PRs block at ten entries" {
+	[[ -f "$ORCHESTRATOR" ]] || fail "orchestrator script not present"
+
+	# The injection block must limit the rows returned by the helper to a
+	# maximum of 10 so the review prompt does not balloon on long-lived issues
+	# with many merged PRs.
+	# Fails RED until issue #366 task 2 lands on the branch under test.
+	grep -qE \
+		'head[[:space:]]+-n[[:space:]]+10' \
+		"$ORCHESTRATOR" || {
+		printf 'FAIL: orchestrator must apply a 10-row cap (head -n 10) on prior PRs\n' >&2
+		return 1
+	}
+}

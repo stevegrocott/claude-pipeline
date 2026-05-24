@@ -6040,7 +6040,7 @@ Investigate the root cause and fix the issue. Commit your changes."
 # Returns: always 0 — callers must check whether stdout is empty, not exit
 #          status, to decide whether to inject the section.
 _prior_merged_prs_for_issue() {
-	local issue_number="$1"
+	local issue_number="${1:-$ISSUE_NUMBER}"
 	local exclude_pr="${2:-}"
 
 	# Gate: only the GitHub timeline endpoint is supported. Jira/GitLab
@@ -6121,8 +6121,9 @@ _prior_merged_prs_for_issue() {
 
 		printf '%s|%s|%s|%s\n' \
 			"$pr_num" "$pr_title" "$pr_merged" "$pr_files"
-		((i++))
+		((i++)) || true
 	done
+	return 0
 }
 
 # =============================================================================
@@ -7231,6 +7232,22 @@ For sibling files, only report major-severity findings (omit minor findings)."
         local pr_review_skill
         pr_review_skill=$(load_skill "pr-review")
 
+        # Inject prior merged PRs for this issue into the review prompt.
+        # Filter out the current PR (exclude "$pr_number") so the reviewer
+        # does not see the current diff listed as prior work.
+        # Cap at 10 rows to keep the prompt size bounded.
+        local prior_prs_rows prior_prs_prompt=""
+        prior_prs_rows=$(
+            _prior_merged_prs_for_issue "$ISSUE_NUMBER" "$pr_number" \
+                | head -n 10)
+        if [[ -n "$prior_prs_rows" ]]; then
+            prior_prs_prompt="
+## Prior Merged PRs for Issue #${ISSUE_NUMBER}
+
+${prior_prs_rows}
+"
+        fi
+
         local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
 ${pr_review_skill:+## Skill Instructions — READ AND FOLLOW THESE
@@ -7239,7 +7256,7 @@ $pr_review_skill
 
 ## End Skill Instructions
 
-}Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
+}${prior_prs_prompt}Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
 
 Here is the diff to review (do NOT run git diff yourself — use this):
