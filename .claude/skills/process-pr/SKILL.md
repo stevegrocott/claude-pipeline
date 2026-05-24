@@ -395,30 +395,19 @@ EOF
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`
 
-**Vague follow-up** — invoke `/explore` to flesh out context before creating the issue:
+**Vague follow-up** — create issue immediately with `needs-explore` label; a later explore sweep will flesh it out:
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
-
-# Attempt to expand the vague item via /explore
-EXPLORE_OUTPUT=$(claude --dangerously-skip-permissions --print "/explore $(printf '%s' "$EXTRACTED_DESCRIPTION")" 2>&1)
-EXPLORE_EXIT=$?
-
-if [ $EXPLORE_EXIT -eq 0 ]; then
-  # /explore succeeded — it creates a fully-formed issue internally; log and continue
-  echo "Explored and created issue from vague item: \"$ISSUE_TITLE\""
-else
-  # /explore failed — fall back to direct creation with needs-explore label
-  echo "Warning: /explore failed (exit $EXPLORE_EXIT) for \"$ISSUE_TITLE\"; falling back to direct create with needs-explore label"
-  "$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
+"$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
 ## Context
 Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
 
 ## Description
 $EXTRACTED_DESCRIPTION
 
-> **Note:** This item was classified as vague. The /explore subprocess failed to expand it.
-> A human should research and flesh out the implementation tasks before acting on this issue.
+> **Note:** This item was classified as vague and needs further research before implementation.
+> A human or automated explore sweep should flesh out the implementation tasks.
 
 ## References
 - Parent Issue: #$ISSUE_NUMBER
@@ -426,8 +415,9 @@ $EXTRACTED_DESCRIPTION
 - Reviewer: @$REVIEWER
 EOF
 )" --labels "${LABELS:+$LABELS,}needs-explore"
-fi
 ```
+
+Log each: `Created vague follow-up issue #XXX: "$TITLE" (needs-explore)`
 
 ---
 
