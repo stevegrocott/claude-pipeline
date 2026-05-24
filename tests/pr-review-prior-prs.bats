@@ -103,7 +103,7 @@ _install_gh_stub() {
 		printf "\t\tprintf '%%s' %q\n" "$timeline_json"
 		printf '\t\t;;\n'
 		printf '\t*nameWithOwner*)\n'
-		printf "\t\tprintf '%%s' '{\"nameWithOwner\":\"example/repo\"}'\n"
+		printf "\t\tprintf '%%s' 'example/repo'\n"
 		printf '\t\t;;\n'
 		printf '\t*)\n'
 		printf "\t\tprintf '%%s' %q\n" "$files_json"
@@ -158,7 +158,7 @@ _assemble_section() {
 	# Two merged PRs for issue #366 with disjoint file lists.
 	_install_gh_stub \
 		'[{"pr":363,"title":"feat: ship schema","merged":"2026-05-22T09:00:00Z"},{"pr":364,"title":"feat: add tests","merged":"2026-05-23T11:00:00Z"}]' \
-		'[{"filename":"src/a.ts"},{"filename":"tests/a.bats"}]'
+		'src/a.ts,tests/a.bats'
 
 	_source_orchestrator_functions
 	declare -F _prior_merged_prs_for_issue >/dev/null || {
