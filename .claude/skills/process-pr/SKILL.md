@@ -371,7 +371,7 @@ Task 2: $INFERRED_TASK_DESCRIPTION
 
 For each extracted issue (after deduplication check passes), route by classification:
 
-**Precise follow-up** — create issue immediately:
+**Precise follow-up** — create issue immediately (no `needs-explore` label — already has enough context to implement):
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
@@ -391,7 +391,7 @@ $EXTRACTED_DESCRIPTION
 - PR/MR: #$PR_NUMBER
 - Reviewer: @$REVIEWER
 EOF
-)" --labels "${LABELS:+$LABELS,}needs-explore"
+)" ${LABELS:+--labels "$LABELS"}
 ```
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`

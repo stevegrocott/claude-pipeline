@@ -75,6 +75,7 @@ ISSUES=""
 BRANCH=""
 AGENT=""
 ENRICH_FOLLOWUPS=false
+ENRICH_ALL_NEEDS_EXPLORE=false
 
 usage() {
     echo "Usage: $0 --manifest <path>"
@@ -88,6 +89,9 @@ usage() {
     echo "  --agent <name>      Agent for implement-issue stage (optional)"
     echo "  --enrich-followups  After batch, enrich needs-explore issues created"
     echo "                      during this run (calls /enrich-issue on each)"
+    echo "  --enrich-all-needs-explore"
+    echo "                      After batch, enrich ALL open needs-explore issues"
+    echo "                      regardless of creation time (implies --enrich-followups)"
     echo ""
     echo "Available agents:"
     echo "  react-frontend-developer        React, Next.js, shadcn/ui, Tailwind"
@@ -122,6 +126,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --enrich-followups)
             ENRICH_FOLLOWUPS=true
+            shift
+            ;;
+        --enrich-all-needs-explore)
+            ENRICH_FOLLOWUPS=true
+            ENRICH_ALL_NEEDS_EXPLORE=true
             shift
             ;;
         --help|-h)
@@ -911,14 +920,27 @@ sweep_enrich_followups() {
 	log "Batch start time: $BATCH_START_TIME"
 
 	local found_issues
-	found_issues=$(gh issue list \
-		--label needs-explore \
-		--state open \
-		--json number,createdAt \
-		2>/dev/null \
-		| jq -r --arg since "$BATCH_START_TIME" \
-		'[.[] | select(.createdAt >= $since)] | .[].number' \
-		2>/dev/null) || found_issues=""
+	if [[ "$ENRICH_ALL_NEEDS_EXPLORE" == true ]]; then
+		log "Sweep: --enrich-all-needs-explore set — including ALL open needs-explore issues"
+		found_issues=$(gh issue list \
+			--label needs-explore \
+			--state open \
+			--limit 1000 \
+			--json number,createdAt \
+			2>/dev/null \
+			| jq -r '.[].number' \
+			2>/dev/null) || found_issues=""
+	else
+		found_issues=$(gh issue list \
+			--label needs-explore \
+			--state open \
+			--limit 1000 \
+			--json number,createdAt \
+			2>/dev/null \
+			| jq -r --arg since "$BATCH_START_TIME" \
+			'[.[] | select(.createdAt >= $since)] | .[].number' \
+			2>/dev/null) || found_issues=""
+	fi
 
 	if [[ -z "$found_issues" ]]; then
 		log "Sweep: no needs-explore issues found since $BATCH_START_TIME"

@@ -7363,8 +7363,8 @@ ${major_descriptions}"
                     # Validate/build body to enforce canonical task format
                     local validated_body
                     validated_body=$(_build_adj_body "$adj_body" "$adj_title")
-                    validated_body="${validated_body}
-<!-- pipeline-autocreated -->"
+                    validated_body="<!-- pipeline-autocreated -->
+${validated_body}"
 
                     local new_num
                     new_num=$("$PLATFORM_DIR/create-issue.sh" \

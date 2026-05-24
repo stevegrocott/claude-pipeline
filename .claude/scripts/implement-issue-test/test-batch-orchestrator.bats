@@ -422,7 +422,16 @@ _simulate_update_progress() {
 
 @test "main body calls sweep_enrich_followups when ENRICH_FOLLOWUPS is true" {
 	# After the primary issue loop, the script must call the sweep function
-	# conditionally on the flag.
-	grep -q 'sweep_enrich_followups' "$BATCH_ORCHESTRATOR_SCRIPT"
-	grep -qE 'ENRICH_FOLLOWUPS.*true|true.*ENRICH_FOLLOWUPS' "$BATCH_ORCHESTRATOR_SCRIPT"
+	# conditionally on the flag.  Two independent file-wide greps would pass
+	# even if the guard and call are in unrelated positions (e.g. inside the
+	# function definition vs the call site).  Scope the assertion to the
+	# post-loop section by capturing only the content after the LAST bare
+	# 'done' line (which closes the main issue for-loop), then verifying both
+	# the ENRICH_FOLLOWUPS conditional guard and the sweep_enrich_followups
+	# call are present within that scoped block.
+	local post_loop
+	post_loop=$(awk 'BEGIN{n=0} /^done$/{n=NR} {lines[NR]=$0} END{for(i=n+1;i<=NR;i++) print lines[i]}' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$post_loop" == *'sweep_enrich_followups'* ]]
+	[[ "$post_loop" == *'ENRICH_FOLLOWUPS'* ]]
 }
