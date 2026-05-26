@@ -24,6 +24,7 @@
 #   1  Usage error
 #
 
+set -u
 set -o pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
