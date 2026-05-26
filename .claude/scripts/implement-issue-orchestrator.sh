@@ -5227,6 +5227,58 @@ Files: $(echo "$playwright_test_files" | tr '\n' ', ')
 "
         fi
 
+        # Run deterministic linter on changed test files BEFORE loading the
+        # test-validation skill. Findings are injected into the prompt so the
+        # LLM agent merges them verbatim into validation_issues. Gated by
+        # LINT_TEST_ASSERTIONS env var (default: enabled). Findings emitted
+        # as JSON array on stdout; empty array means no issues found.
+        local precheck_section=""
+        local lint_script="$SCRIPT_DIR/lint-test-assertions.sh"
+        if [[ "${LINT_TEST_ASSERTIONS:-1}" != "0" ]] \
+                && [[ -n "$changed_test_files" ]] \
+                && [[ -f "$lint_script" ]]; then
+            local -a precheck_files=()
+            local _ptf
+            while IFS= read -r _ptf; do
+                [[ -z "$_ptf" ]] && continue
+                precheck_files+=("$_ptf")
+            done <<< "$changed_test_files"
+
+            local precheck_json
+            precheck_json=$(cd "$loop_dir" \
+                && bash "$lint_script" "${precheck_files[@]}" 2>/dev/null \
+                || printf '[]')
+            if ! printf '%s' "$precheck_json" \
+                    | jq -e 'type == "array"' >/dev/null 2>&1; then
+                log_warn "lint-test-assertions.sh emitted non-array output — ignoring"
+                precheck_json="[]"
+            fi
+
+            local precheck_count
+            precheck_count=$(printf '%s' "$precheck_json" \
+                | jq 'length' 2>/dev/null || echo 0)
+
+            if (( precheck_count > 0 )); then
+                log "Deterministic pre-check identified" \
+                    "$precheck_count test-quality issue(s)"
+                precheck_section="
+
+Deterministic pre-checks already identified:
+The following test-quality issues were detected by lint-test-assertions.sh
+before this LLM validation stage. You MUST include each finding verbatim
+in your \`validation_issues\` array (preserving the file, line, pattern,
+snippet, and severity fields):
+
+$precheck_json
+"
+            fi
+        elif [[ "${LINT_TEST_ASSERTIONS:-1}" != "0" ]] \
+                && [[ -n "$changed_test_files" ]] \
+                && [[ ! -f "$lint_script" ]]; then
+            log_warn "lint-test-assertions.sh not found at $lint_script" \
+                "— skipping deterministic pre-check"
+        fi
+
         local test_validation_skill
         test_validation_skill=$(load_skill "test-validation")
 
@@ -5245,7 +5297,7 @@ $test_command
 Report pass/fail with test counts and failure details.
 If tests fail, set validation_result to 'skipped' (no point validating failing tests).
 ${playwright_notice}
-${e2e_section}${bats_section}$validation_section
+${e2e_section}${bats_section}$validation_section${precheck_section}
 
 Output both test results and validation findings in one structured response.
 - result: 'passed' or 'failed' (from Jest test execution — BATS failures do NOT affect this)
