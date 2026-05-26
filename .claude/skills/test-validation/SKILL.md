@@ -53,11 +53,16 @@ Run the test suite and validate test quality. Execute commands, check results, r
 
 Only check these items. Do not add your own criteria.
 
+**Pre-identified findings rule:** If the prompt contains a "Deterministic pre-checks already identified:" section, include every finding from that section in `validation_issues` verbatim — do not deduplicate, reword, or omit them. Then continue with the checklist below to catch anything the deterministic gate may have missed.
+
 **For each changed test file:**
 
 1. **No hollow assertions** — Every `expect()` / `assert` must check a meaningful value. Flag: `expect(true)`, `expect(result).toBeTruthy()` without checking the actual value, `$this->assertTrue(true)`.
 2. **No commented-out tests** — Flag `// test(`, `// it(`, `/* test`, or `$this->markTestSkipped()` without explanation.
 3. **Assertions present** — Each test function must contain at least one assertion. Flag empty test bodies.
+4. **No mock-timing perf assertions** — Flag when a file uses `jest.mock`/`vi.mock` and an assertion measures elapsed time via `performance.now()` with a numeric threshold (e.g., `toBeLessThan(200)`). The mocked function resolves in microseconds so the threshold is unfalsifiable. Example: `const t=performance.now(); await mockedFn(); expect(performance.now()-t).toBeLessThan(200)`.
+5. **No constant-arithmetic tautologies** — Flag assertions where both sides reduce to compile-time constants. These assert arithmetic, not behaviour. Examples: `expect(30000/5).toBe(6000)`, `expect(413+369.4 < 1024).toBe(true)`.
+6. **No self-referential matchers** — Flag assertions where both sides derive from the same source object or call, with no concrete expected value. These pass even when both sides are wrong. Example: `expect(result1.userThreshold).toBe(result2.userThreshold)` where `result1` and `result2` both come from the same function under test.
 
 **Do NOT check:**
 - Coverage percentages (not available without instrumentation)
