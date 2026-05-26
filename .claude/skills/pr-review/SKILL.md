@@ -97,6 +97,9 @@ Apply only the items relevant to the technology in the diff. Skip items that don
 - Assertions check meaningful values (no hollow `expect(true).toBe(true)`)
 - Test names describe the behavior being verified
 - No test-only methods added to production code
+- No subject-under-test mocks — a test file that `jest.mock`s the same module it claims to test is verifying the mock, not the real code; e.g., `UserService.test.ts` that calls `jest.mock('../../UserService')` tests nothing meaningful
+- Every function changed in the diff has at least one test exercising the new behavior — e.g., if `calculateTotal()` was modified, at least one test calls `calculateTotal()` and asserts the updated expected result, not just a pre-existing happy-path case
+- If auth middleware was added or changed, at least one test asserts `401`/`403` for unauthenticated requests — e.g., `expect(response.status).toBe(401)` when no `Authorization` header is sent to the protected route
 
 ## Severity Guide
 
