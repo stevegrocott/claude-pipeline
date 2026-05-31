@@ -35,7 +35,18 @@ fi
 # e.g., "src/components/*|src/pages/*|tests/e2e/*"
 FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 
+# Migration path patterns — pipe-separated globs used by _matches_migration_pattern()
+# to detect when a branch touches database migrations (schema changes, seeders,
+# data fixes).  The orchestrator uses this to gate migration-aware review steps.
+# e.g., "migrations/*|db/migrate/*|prisma/migrations/*"
+MIGRATION_PATH_PATTERNS="${MIGRATION_PATH_PATTERNS:-}"
+
 # Deploy verification (configure during /adapt if project has a test environment)
+# Set DEPLOY_LOCAL_CMD to a shell command that launches the app locally for manual
+# or automated smoke-testing (e.g., "npm run dev", "./scripts/start-local.sh").
+# Leave empty to skip local-launch steps; the orchestrator will not attempt to
+# start the app in that case.
+DEPLOY_LOCAL_CMD="${DEPLOY_LOCAL_CMD:-}"
 # Set DEPLOY_VERIFY_CMD to a shell command that triggers a deploy to the target
 # environment (e.g., "./scripts/deploy-test.sh").  Leave empty to skip the stage.
 # Set DEPLOY_VERIFY_HEALTH_URL to the health-check endpoint of that environment;
