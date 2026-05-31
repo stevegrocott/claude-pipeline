@@ -720,3 +720,143 @@ EOF
     run should_run_deploy_verify "$ISSUE_NUMBER"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# SECTION 11: _select_deploy_cmd() TIER SELECTION
+# =============================================================================
+
+@test "_select_deploy_cmd: tier 1 — frontend-only changes return health-only cmd" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local.sh"
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    local changed="src/components/Button.tsx
+src/pages/index.tsx"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh --health-only" ]
+}
+
+@test "_select_deploy_cmd: tier 2 — backend logic-only changes return local deploy cmd" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    local changed="apps/backend/src/services/user-service.ts
+apps/backend/src/routes/user.ts"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-local-backend.sh" ]
+}
+
+@test "_select_deploy_cmd: tier 3 — backend changes with migration file return full deploy cmd" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    local changed="apps/backend/src/services/user-service.ts
+apps/backend/prisma/migrations/20260101_add_users.sql"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh" ]
+}
+
+@test "_select_deploy_cmd: tier 3 — schema.prisma change forces full deploy" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    local changed="apps/backend/src/services/crop.ts
+apps/backend/prisma/schema.prisma"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh" ]
+}
+
+@test "_select_deploy_cmd: tier 3 — .env file change forces full deploy" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    local changed="apps/backend/src/index.ts
+.env.production"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh" ]
+}
+
+@test "_select_deploy_cmd: packages/ change treated as backend (tier 2 when no migrations)" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    local changed="packages/shared/src/utils.ts
+packages/api-client/src/client.ts"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-local-backend.sh" ]
+}
+
+@test "_select_deploy_cmd: empty diff fail-safe returns full deploy cmd" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    run _select_deploy_cmd ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh" ]
+}
+
+@test "_select_deploy_cmd: unset DEPLOY_LOCAL_CMD — backend logic change falls through to full deploy" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    unset DEPLOY_LOCAL_CMD
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    local changed="apps/backend/src/services/user-service.ts"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh" ]
+}
+
+@test "_select_deploy_cmd: empty DEPLOY_LOCAL_CMD — backend logic change falls through to full deploy" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD=""
+    export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
+
+    local changed="apps/backend/src/services/user-service.ts"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh" ]
+}
+
+@test "_select_deploy_cmd: empty MIGRATION_PATH_PATTERNS — no downgrade (require explicit opt-in)" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    export MIGRATION_PATH_PATTERNS=""
+
+    local changed="apps/backend/src/services/user-service.ts"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh" ]
+}
+
+@test "_select_deploy_cmd: unset MIGRATION_PATH_PATTERNS — no downgrade (require explicit opt-in)" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    unset MIGRATION_PATH_PATTERNS
+
+    local changed="apps/backend/src/services/user-service.ts"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "$output" = "./scripts/deploy-nas.sh" ]
+}
