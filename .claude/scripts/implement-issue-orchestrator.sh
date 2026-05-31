@@ -2875,6 +2875,80 @@ poll_health_url() {
     return 1
 }
 
+# Selects the deploy command based on the set of changed files in the merged
+# commit.  Three-tier selection (evaluated top-to-bottom):
+#   0. Empty diff (git failed or commit was truly empty) → full DEPLOY_VERIFY_CMD
+#      Fail-safe: never silently downgrade on unknown scope.
+#   1. No apps/backend or packages/ files changed → DEPLOY_VERIFY_CMD --health-only
+#      Frontend-only change: skip rebuild, just poll the health endpoint.
+#   2. Backend changes with migration/schema/env files → full DEPLOY_VERIFY_CMD
+#      Migrations must run on NAS to catch DB-level failures.
+#   3. Backend logic-only change, DEPLOY_LOCAL_CMD set → DEPLOY_LOCAL_CMD
+#      No migration risk: local Docker build gives same confidence in a fraction
+#      of the time (~5-10 min vs 60-120 min NAS deploy).
+# Arguments:
+#   $1 - newline-separated list of changed files (may be empty)
+# Outputs:
+#   The deploy command string to execute (stdout only)
+# Side-effects:
+#   Writes tier-selection log lines via log() (stderr)
+_select_deploy_cmd() {
+    local changed_files="$1"
+
+    # Tier 0 (fail-safe): empty diff → full deploy
+    if [[ -z "$changed_files" ]]; then
+        log "Scope gate: empty diff HEAD~1..HEAD —" \
+            "defaulting to full deploy"
+        printf '%s\n' "${DEPLOY_VERIFY_CMD}"
+        return 0
+    fi
+
+    # Tier 1: no backend or packages changes → health-only
+    if ! grep -qE '^(apps/backend|packages)/' <<< "$changed_files"; then
+        log "No backend changes detected —" \
+            "downgrading deploy-verify to health-check-only."
+        printf '%s\n' "${DEPLOY_VERIFY_CMD} --health-only"
+        return 0
+    fi
+
+    # Backend changes present.  Check for migration/schema/env files.
+    local has_migration=false
+    if [[ -n "${MIGRATION_PATH_PATTERNS:-}" ]]; then
+        local file
+        while IFS= read -r file; do
+            local IFS='|'
+            local pattern
+            for pattern in $MIGRATION_PATH_PATTERNS; do
+                # shellcheck disable=SC2254
+                case "$file" in
+                    $pattern) has_migration=true; break 2 ;;
+                esac
+            done
+        done <<< "$changed_files"
+    fi
+
+    if $has_migration; then
+        log "Migration files detected —" \
+            "using full NAS deploy."
+        printf '%s\n' "${DEPLOY_VERIFY_CMD}"
+        return 0
+    fi
+
+    # Tier 3: backend logic-only, DEPLOY_LOCAL_CMD set → local deploy
+    if [[ -n "${DEPLOY_LOCAL_CMD:-}" ]]; then
+        log "Backend logic-only change —" \
+            "using local deploy: $DEPLOY_LOCAL_CMD"
+        printf '%s\n' "${DEPLOY_LOCAL_CMD}"
+        return 0
+    fi
+
+    # DEPLOY_LOCAL_CMD not configured → fall through to full NAS deploy
+    log "DEPLOY_LOCAL_CMD not set —" \
+        "falling back to full NAS deploy."
+    printf '%s\n' "${DEPLOY_VERIFY_CMD}"
+    return 0
+}
+
 # Check if all tasks in status.json are S-complexity.
 # Returns:
 #   0 if all tasks are S-complexity (docs can be skipped)
@@ -7699,34 +7773,25 @@ $merge_blocked_reason}" \
         else
             set_stage_started "deploy_verify"
 
-            # Scope-aware gate: downgrade to --health-only when no backend
-            # or package files changed in the merged commit, so front-end-only
-            # changes skip a full redeploy.
-            # Uses HEAD~1..HEAD (post-merge diff) so the scope reflects the
+            # Select deploy command via three-tier scope gate:
+            # frontend-only → --health-only; backend + migrations →
+            # DEPLOY_VERIFY_CMD (full NAS); backend logic-only →
+            # DEPLOY_LOCAL_CMD when set, else DEPLOY_VERIFY_CMD.
+            # Diff uses HEAD~1..HEAD (post-merge) so scope reflects the
             # actual merged commit, not the pre-merge branch diff.
-            # Fail-safe: if the diff is empty (git failed or genuinely empty),
-            # default to the full deploy rather than silently downgrading.
-            local changed_files
+            local changed_files deploy_cmd
             changed_files=$(git diff HEAD~1..HEAD --name-only 2>/dev/null \
                 || true)
-            if [[ -z "$changed_files" ]]; then
-                log "Scope gate: empty diff HEAD~1..HEAD —" \
-                    "defaulting to full deploy"
-            elif ! grep -qE '^(apps/backend|packages)/' <<< "$changed_files"
-            then
-                log "No backend changes detected —" \
-                    "downgrading deploy-verify to health-check-only."
-                DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD} --health-only"
-            fi
+            deploy_cmd=$(_select_deploy_cmd "$changed_files")
 
-            log "Triggering deploy via: $DEPLOY_VERIFY_CMD"
+            log "Triggering deploy via: $deploy_cmd"
             comment_issue "Deploy Verify: Deploying" \
-                "🚀 Triggering deployment via \`$DEPLOY_VERIFY_CMD\`..." \
+                "🚀 Triggering deployment via \`$deploy_cmd\`..." \
                 "default"
 
             # Run the deploy command
             local deploy_exit=0
-            if ! bash -c "$DEPLOY_VERIFY_CMD" \
+            if ! bash -c "$deploy_cmd" \
                 >>"${LOG_FILE:-/dev/null}" 2>&1; then
                 deploy_exit=1
             fi
@@ -7734,7 +7799,7 @@ $merge_blocked_reason}" \
             if ((deploy_exit != 0)); then
                 log_error "Deploy command failed (exit $deploy_exit)"
                 comment_issue "Deploy Verify: Failed" \
-                    "❌ Deploy command \`$DEPLOY_VERIFY_CMD\` exited with code $deploy_exit. Skipping health poll and verification." \
+                    "❌ Deploy command \`$deploy_cmd\` exited with code $deploy_exit. Skipping health poll and verification." \
                     "default"
                 # Deploy failure is intentionally non-blocking: the pipeline
                 # finishes and the failure surfaces via the issue comment.
@@ -7788,7 +7853,7 @@ $merge_blocked_reason}" \
                     deploy_verify_prompt="Verify the deployment for issue #$ISSUE_NUMBER against the live environment.
 
 DEPLOYED ENVIRONMENT:
-- Deploy command: $DEPLOY_VERIFY_CMD
+- Deploy command: $deploy_cmd
 - Health URL: ${DEPLOY_VERIFY_HEALTH_URL:-N/A}
 - Health status: passed
 
