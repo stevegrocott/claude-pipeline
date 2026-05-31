@@ -2927,6 +2927,7 @@ _select_deploy_cmd() {
         done <<< "$changed_files"
     fi
 
+    # Tier 2: migration detected → full NAS deploy
     if $has_migration; then
         log "Migration files detected —" \
             "using full NAS deploy."
@@ -2935,7 +2936,7 @@ _select_deploy_cmd() {
     fi
 
     # Tier 3: backend logic-only, DEPLOY_LOCAL_CMD set → local deploy
-    if [[ -n "${DEPLOY_LOCAL_CMD:-}" ]]; then
+    if [[ -n "${DEPLOY_LOCAL_CMD:-}" ]] && [[ -n "${MIGRATION_PATH_PATTERNS:-}" ]]; then
         log "Backend logic-only change —" \
             "using local deploy: $DEPLOY_LOCAL_CMD"
         printf '%s\n' "${DEPLOY_LOCAL_CMD}"

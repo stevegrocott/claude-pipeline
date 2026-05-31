@@ -738,7 +738,7 @@ src/pages/index.tsx"
     [ "$output" = "./scripts/deploy-nas.sh --health-only" ]
 }
 
-@test "_select_deploy_cmd: tier 2 — backend logic-only changes return local deploy cmd" {
+@test "_select_deploy_cmd: tier 3 — backend logic-only changes return local deploy cmd" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
@@ -751,7 +751,7 @@ apps/backend/src/routes/user.ts"
     [ "$output" = "./scripts/deploy-local-backend.sh" ]
 }
 
-@test "_select_deploy_cmd: tier 3 — backend changes with migration file return full deploy cmd" {
+@test "_select_deploy_cmd: tier 2 — backend changes with migration file return full deploy cmd" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
@@ -764,7 +764,7 @@ apps/backend/prisma/migrations/20260101_add_users.sql"
     [ "$output" = "./scripts/deploy-nas.sh" ]
 }
 
-@test "_select_deploy_cmd: tier 3 — schema.prisma change forces full deploy" {
+@test "_select_deploy_cmd: tier 2 — schema.prisma change forces full deploy" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
@@ -777,7 +777,7 @@ apps/backend/prisma/schema.prisma"
     [ "$output" = "./scripts/deploy-nas.sh" ]
 }
 
-@test "_select_deploy_cmd: tier 3 — .env file change forces full deploy" {
+@test "_select_deploy_cmd: tier 2 — .env file change forces full deploy" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
@@ -790,7 +790,7 @@ apps/backend/prisma/schema.prisma"
     [ "$output" = "./scripts/deploy-nas.sh" ]
 }
 
-@test "_select_deploy_cmd: packages/ change treated as backend (tier 2 when no migrations)" {
+@test "_select_deploy_cmd: packages/ change treated as backend (tier 3 when no migrations)" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
