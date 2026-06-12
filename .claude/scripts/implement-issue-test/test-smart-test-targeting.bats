@@ -312,6 +312,33 @@ teardown() {
 	[ "$scope" = "config" ]
 }
 
+@test "detect_change_scope returns 'bash' for .claude/scripts/platform/*.sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-platform-sh
+	mkdir -p .claude/scripts/platform
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/platform/foo.sh
+	git add .claude/scripts/platform/foo.sh
+	git commit -q -m "add .claude/scripts/platform script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/implement-issue-test/*.bats" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-iit-foo-bats
+	mkdir -p .claude/scripts/implement-issue-test
+	printf "@test 'hello' { true; }\n" \
+		> .claude/scripts/implement-issue-test/foo.bats
+	git add .claude/scripts/implement-issue-test/foo.bats
+	git commit -q -m "add .claude/scripts/implement-issue-test bats"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
 # =============================================================================
 # run_test_loop() SMART ROUTING - STRUCTURE TESTS
 # =============================================================================
