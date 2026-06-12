@@ -4933,9 +4933,15 @@ detect_change_scope() {
 
         case "$file" in
             *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) has_ts=true ;;
-            # Pipeline files (.claude/) are not application bash — skip them
-            .claude/*.sh|.claude/*.bats) ;;
-            *.sh|*.bats) has_bash=true ;;
+            # Pipeline scripts (.claude/scripts/) have bats tests — route to bash
+            # Note: in case patterns, * matches / so .claude/scripts/*.sh covers
+            # any depth under scripts/ (e.g. .claude/scripts/sub/file.sh)
+            .claude/scripts/*.sh) has_bash=true ;;
+            # ALL bats files need bash tests regardless of location
+            *.bats) has_bash=true ;;
+            # Other .claude files (config, schemas, skills, CLAUDE.md) — skip
+            .claude/*) ;;
+            *.sh) has_bash=true ;;
             # Config/docs: no tests needed
             *.md|*.json|*.yaml|*.yml|*.toml|*.env|*.lock|*.gitignore) ;;
             # Any other extension (css, sql, py, etc.): treat as testable code

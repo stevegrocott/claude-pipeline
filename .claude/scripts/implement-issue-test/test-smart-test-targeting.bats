@@ -253,6 +253,66 @@ teardown() {
 }
 
 # =============================================================================
+# detect_change_scope() .claude/scripts/ ROUTING
+# These tests verify fix for: .claude/scripts/*.sh and *.bats files must route
+# to has_bash=true, not be silently skipped as "pipeline files".
+# =============================================================================
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/*.sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-scripts-sh
+	mkdir -p .claude/scripts
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/my-script.sh
+	git add .claude/scripts/my-script.sh
+	git commit -q -m "add .claude/scripts script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/ subdirectory .sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-scripts-subdir-sh
+	mkdir -p .claude/scripts/implement-issue-test
+	printf '#!/usr/bin/env bash\n' \
+		> .claude/scripts/implement-issue-test/helper.sh
+	git add .claude/scripts/implement-issue-test/helper.sh
+	git commit -q -m "add nested .claude/scripts script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/scripts/*.bats" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-scripts-bats
+	mkdir -p .claude/scripts/implement-issue-test
+	printf "@test 'hello' { true; }\n" \
+		> .claude/scripts/implement-issue-test/test-foo.bats
+	git add .claude/scripts/implement-issue-test/test-foo.bats
+	git commit -q -m "add .claude/scripts bats"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'config' for non-scripts .claude/.sh files" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-hooks-sh
+	mkdir -p .claude/hooks
+	printf '#!/usr/bin/env bash\n' > .claude/hooks/pre-commit.sh
+	git add .claude/hooks/pre-commit.sh
+	git commit -q -m "add .claude/hooks script"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "config" ]
+}
+
+# =============================================================================
 # run_test_loop() SMART ROUTING - STRUCTURE TESTS
 # =============================================================================
 
@@ -1064,7 +1124,7 @@ teardown() {
 # .claude/ PIPELINE FILES EXCLUDED FROM SCOPE (claude-pipeline#41)
 # =============================================================================
 
-@test "detect_change_scope excludes .claude/*.sh from bash scope" {
+@test "detect_change_scope returns 'bash' for .claude/scripts/*.sh files" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-claude-sh
     mkdir -p .claude/scripts
@@ -1074,11 +1134,11 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    # .claude/ shell scripts should NOT trigger bash scope
-    [ "$scope" = "config" ]
+    # .claude/scripts/ shell scripts MUST trigger bash scope (they have bats tests)
+    [ "$scope" = "bash" ]
 }
 
-@test "detect_change_scope excludes .claude/*.bats from bash scope" {
+@test "detect_change_scope returns 'bash' for .claude/ bats files" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-claude-bats
     mkdir -p .claude/scripts/implement-issue-test
@@ -1088,11 +1148,11 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    # .claude/ bats files should NOT trigger bash scope
-    [ "$scope" = "config" ]
+    # ALL bats files MUST trigger bash scope regardless of location
+    [ "$scope" = "bash" ]
 }
 
-@test "detect_change_scope returns 'typescript' when .claude/ and app TS files both change" {
+@test "detect_change_scope returns 'mixed' when .claude/scripts/ and app TS files both change" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-claude-plus-ts
     mkdir -p .claude/scripts
@@ -1103,8 +1163,8 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    # Should be typescript, NOT mixed (because .claude/ bash is excluded)
-    [ "$scope" = "typescript" ]
+    # Should be mixed: .claude/scripts/*.sh triggers bash + app.ts triggers typescript
+    [ "$scope" = "mixed" ]
 }
 
 @test "detect_change_scope still returns 'bash' for non-.claude/ sh files" {
