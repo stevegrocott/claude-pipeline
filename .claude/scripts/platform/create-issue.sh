@@ -36,7 +36,7 @@ case "$TRACKER" in
         child_id=$(gh api "repos/$repo/issues/$issue_num" \
           --jq '.id' 2>/dev/null) || true
         if [[ -n "$child_id" ]]; then
-          gh api "repos/$repo/issues/$parent_num/sub_issues" \
+          gh api -X POST "repos/$repo/issues/$parent_num/sub_issues" \
             -F "sub_issue_id=$child_id" >/dev/null 2>&1 || \
             printf 'WARNING: failed to link #%s as sub-issue of #%s\n' \
               "$issue_num" "$parent_num" >&2
