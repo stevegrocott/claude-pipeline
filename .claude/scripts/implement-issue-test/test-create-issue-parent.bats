@@ -9,6 +9,9 @@
 #   3. --parent <non-numeric> (e.g. a Jira key) → no sub_issues POST, exits 0
 #
 
+# Stream separation on `run` (--separate-stderr) requires bats >= 1.5.0
+bats_require_minimum_version 1.5.0
+
 # Absolute path to the real script under test
 # BATS_TEST_FILENAME is .claude/scripts/implement-issue-test/test-*.bats
 # ../../.. from implement-issue-test reaches the repo root
@@ -78,7 +81,10 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 _run_create_issue() {
-    run bash "$CREATE_ISSUE_SH" "$@"
+    # --separate-stderr keeps WARNING lines (emitted to stderr on linkage
+    # failure / non-numeric parent) out of $output, so stdout-only assertions
+    # like [[ "$output" == "99" ]] verify the issue-number contract correctly.
+    run --separate-stderr bash "$CREATE_ISSUE_SH" "$@"
 }
 
 # =============================================================================
