@@ -30,6 +30,19 @@ if [[ -z "${E2E_TDD_ENABLED:-}" ]]; then
   [[ -n "${TEST_E2E_CMD:-}" ]] && E2E_TDD_ENABLED=true || E2E_TDD_ENABLED=false
 fi
 
+# RTK (Rust Token Killer) opt-in — https://github.com/rtk-ai/rtk
+# Rewrites verbose commands (git status, ls, grep, find, git diff, test
+# runners) and filters/truncates output, cutting LLM token use 60-90%.
+# Scoped to THIS repo only — never run `rtk init -g` (global hook).
+#
+# Setup:    brew install rtk
+#           OR: curl -fsSL https://rtk.sh | sh
+#           Set RTK_ENABLED=1 in your environment or export it before running.
+# Enable:   RTK_ENABLED=1
+# Rollback: RTK_ENABLED=0  (or unset RTK_ENABLED)
+#           Remove the PreToolUse hook entry from .claude/settings.local.json
+RTK_ENABLED="${RTK_ENABLED:-0}"
+
 # Frontend path patterns — pipe-separated globs used by _matches_frontend_pattern()
 # to decide whether a branch touches frontend code (gates E2E verification)
 # e.g., "src/components/*|src/pages/*|tests/e2e/*"
