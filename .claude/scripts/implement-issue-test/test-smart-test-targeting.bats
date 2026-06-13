@@ -1526,3 +1526,170 @@ teardown() {
     captured_complexity=$(< "$complexity_file")
     [ "$captured_complexity" = "M" ] || fail "Expected complexity 'M' passed to fix-test-quality run_stage, got '$captured_complexity'"
 }
+
+# =============================================================================
+# RTK-REWRITE HOOK BEHAVIORAL TESTS (issue-381)
+# Tests for .claude/hooks/rtk-rewrite.sh — the opt-in RTK command-rewrite hook.
+# Hook contract:
+#   - Reads PreToolUse JSON from stdin: {"tool_name":"Bash","tool_input":{"command":"..."}}
+#   - No-ops (exit 0, empty stdout) when RTK_ENABLED != 1 or rtk binary is absent
+#   - When enabled, rewrites allowlisted commands by prepending "rtk" and outputs
+#     modified tool_input JSON; passes parse-sensitive and non-allowlisted commands
+#     through unchanged (exit 0, empty stdout)
+# =============================================================================
+
+_rtk_hook() {
+    echo "${BATS_TEST_DIRNAME}/../../hooks/rtk-rewrite.sh"
+}
+
+_rtk_bash_input() {
+    local cmd="$1"
+    printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$cmd"
+}
+
+_rtk_mock_bin() {
+    cat > "$TEST_TMP/bin/rtk" << 'EOF'
+#!/usr/bin/env bash
+echo "rtk-mock: $*"
+EOF
+    chmod +x "$TEST_TMP/bin/rtk"
+}
+
+@test "rtk-rewrite.sh hook file exists" {
+    [[ -f "$(_rtk_hook)" ]]
+}
+
+@test "rtk-rewrite.sh hook is executable" {
+    [[ -x "$(_rtk_hook)" ]]
+}
+
+@test "rtk-rewrite hook no-ops when RTK_ENABLED is unset" {
+    unset RTK_ENABLED
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED="" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook no-ops when RTK_ENABLED=0" {
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED=0 bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook no-ops when rtk binary absent even if RTK_ENABLED=1" {
+    local out exit_code
+    # Use a PATH that contains no rtk binary
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED=1 PATH="/usr/bin:/bin" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook no-ops for non-Bash tool calls" {
+    _rtk_mock_bin
+    local out exit_code
+    out=$(printf '{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook rewrites 'git status' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk git status"* ]]
+}
+
+@test "rtk-rewrite hook rewrites 'git diff' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git diff HEAD"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk git diff"* ]]
+}
+
+@test "rtk-rewrite hook rewrites 'ls' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk ls"* ]]
+}
+
+@test "rtk-rewrite hook rewrites 'grep' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"grep -r pattern src/"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk grep"* ]]
+}
+
+@test "rtk-rewrite hook rewrites 'find' when enabled and rtk present" {
+    _rtk_mock_bin
+    local out
+    # Use printf '%s' so the embedded \" escapes survive as literal backslash-quote
+    # (a format-string printf drops them, yielding invalid JSON the hook rejects).
+    out=$(printf '%s' '{"tool_name":"Bash","tool_input":{"command":"find . -name \"*.ts\""}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ "$out" == *"rtk find"* ]]
+}
+
+@test "rtk-rewrite hook passes through non-allowlisted commands unchanged" {
+    _rtk_mock_bin
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"npm run build"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook passes through commands piped to jq (parse-sensitive)" {
+    _rtk_mock_bin
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status | jq ."}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook passes through commands piped to gh (parse-sensitive)" {
+    _rtk_mock_bin
+    local out exit_code
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git log | gh api /repos"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    exit_code=$?
+    [ "$exit_code" -eq 0 ]
+    [[ -z "$out" ]]
+}
+
+@test "rtk-rewrite hook outputs valid JSON when rewriting a command" {
+    _rtk_mock_bin
+    local out
+    out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
+        | RTK_ENABLED=1 PATH="$TEST_TMP/bin:$PATH" bash "$(_rtk_hook)" 2>/dev/null)
+    [ $? -eq 0 ]
+    [[ -n "$out" ]]
+    # Output must be valid JSON parseable by python3 or jq
+    if command -v python3 &>/dev/null; then
+        python3 -c "import json,sys; json.loads(sys.stdin.read())" <<< "$out"
+    elif command -v jq &>/dev/null; then
+        jq . <<< "$out" > /dev/null
+    fi
+}
