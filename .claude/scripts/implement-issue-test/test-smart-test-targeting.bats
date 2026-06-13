@@ -1564,10 +1564,9 @@ EOF
 }
 
 @test "rtk-rewrite hook no-ops when RTK_ENABLED is unset" {
-    unset RTK_ENABLED
     local out exit_code
     out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git status"}}' \
-        | RTK_ENABLED="" bash "$(_rtk_hook)" 2>/dev/null)
+        | env -u RTK_ENABLED bash "$(_rtk_hook)" 2>/dev/null)
     exit_code=$?
     [ "$exit_code" -eq 0 ]
     [[ -z "$out" ]]

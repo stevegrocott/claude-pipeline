@@ -444,6 +444,7 @@ A pre-commit hook (`skill-validate.sh`) validates every skill file against this 
 
 - **Session Start** (`hooks/session-start.sh`): Injects `using-skills` into every conversation
 - **Post-PR Simplify** (`hooks/post-pr-simplify.sh`): Runs code-simplifier after PR/MR creation (platform-agnostic)
+- **RTK Command Rewrite** (`hooks/rtk-rewrite.sh`): PreToolUse hook that rewrites verbose Bash commands through [RTK](https://rtk.sh) (Rust Token Killer) to reduce token consumption. Opt-in via `RTK_ENABLED=1`. Registered as a repo-local hook in `.claude/settings.local.json` (not synced).
 
 ## Testing
 
@@ -499,6 +500,23 @@ Your CLAUDE.md is re-read on every message in every conversation. Each line comp
 - Keep it under 30-40 lines. Move rarely-needed sections to separate files.
 - The `/adapting-claude-pipeline` skill includes a lean CLAUDE.md template.
 - Remove technology checklists from agent definitions — put them in stage-specific prompts loaded only when needed.
+
+### RTK (Rust Token Killer)
+
+RTK rewrites verbose Bash command output (git, ls, grep, find) at the shell level before it enters the context window, reducing token consumption on read-heavy operations.
+
+**Install:**
+```bash
+brew install rtk
+# or
+curl -fsSL https://rtk.sh | sh
+```
+
+**Enable:** Add `export RTK_ENABLED=1` to your shell profile, or set it per session. The `rtk-rewrite.sh` PreToolUse hook activates automatically once registered in `.claude/settings.local.json`.
+
+**Measure gain:** Run `claude-spend` before and after enabling RTK on a typical pipeline run. Token counts on Bash tool calls with git/ls/grep output will decrease proportional to output verbosity.
+
+**Rollback:** `unset RTK_ENABLED` or set `RTK_ENABLED=0`. The hook no-ops immediately — no restart required.
 
 ### Pipeline-Specific
 
