@@ -74,7 +74,7 @@ MANIFEST=""
 ISSUES=""
 BRANCH=""
 AGENT=""
-ENRICH_FOLLOWUPS=false
+ENRICH_FOLLOWUPS=true
 ENRICH_ALL_NEEDS_EXPLORE=false
 
 usage() {
@@ -92,6 +92,9 @@ usage() {
     echo "  --enrich-all-needs-explore"
     echo "                      After batch, enrich ALL open needs-explore issues"
     echo "                      regardless of creation time (implies --enrich-followups)"
+    echo "  --no-enrich-followups"
+    echo "                      Disable auto-enrichment of needs-explore follow-up"
+    echo "                      issues (overrides the default-on behaviour)"
     echo ""
     echo "Available agents:"
     echo "  react-frontend-developer        React, Next.js, shadcn/ui, Tailwind"
@@ -126,6 +129,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --enrich-followups)
             ENRICH_FOLLOWUPS=true
+            shift
+            ;;
+        --no-enrich-followups)
+            ENRICH_FOLLOWUPS=false
             shift
             ;;
         --enrich-all-needs-explore)

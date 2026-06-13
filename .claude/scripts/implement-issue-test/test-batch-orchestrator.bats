@@ -435,3 +435,29 @@ _simulate_update_progress() {
 	[[ "$post_loop" == *'sweep_enrich_followups'* ]]
 	[[ "$post_loop" == *'ENRICH_FOLLOWUPS'* ]]
 }
+
+# =============================================================================
+# TASK 1 (i380): ENRICH_FOLLOWUPS defaults to true; --no-enrich-followups opt-out
+# =============================================================================
+
+@test "ENRICH_FOLLOWUPS is initialised to true by default" {
+	# The default assignment must be ENRICH_FOLLOWUPS=true so enrichment runs
+	# without requiring an explicit flag.
+	grep -qE '^ENRICH_FOLLOWUPS=true' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "--no-enrich-followups flag is recognised in argument parsing" {
+	grep -qE '^\s+--no-enrich-followups\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "--no-enrich-followups case sets ENRICH_FOLLOWUPS to false" {
+	local body
+	body=$(awk '/--no-enrich-followups\)/,/^\s+;;/' "$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null)
+	[[ "$body" == *'ENRICH_FOLLOWUPS=false'* ]]
+}
+
+@test "usage documents the --no-enrich-followups flag" {
+	local body
+	body=$(awk '/^usage\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'no-enrich-followups'* ]]
+}
