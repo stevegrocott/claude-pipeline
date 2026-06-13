@@ -2,12 +2,17 @@
 #
 # test-followup-label.bats
 # Tests asserting that create-issue.sh is invoked with the needs-explore label
-# when processing adjacent_issues entries from a code-reviewer PR result.
+# when processing adjacent_issues entries from a code-reviewer PR result, and
+# that the process-pr skill's precise follow-up path also carries needs-explore.
 #
 # The adjacent_issues path in implement-issue-orchestrator.sh creates GitHub
 # follow-up issues for major-severity adjacent issues found during PR review.
 # Each created issue must receive the "needs-explore" label so that the
 # enrich-issue skill can later research and enrich the issue body.
+#
+# The process-pr skill's precise follow-up path (Step 4g) also applies the
+# needs-explore label on create-issue.sh calls, ensuring every pipeline-created
+# issue is eligible for enrichment regardless of follow-up classification.
 #
 # Cases covered:
 #   1. Static: orchestrator source contains needs-explore on the
@@ -16,17 +21,20 @@
 #      same --labels argument
 #   3. Static: the create-issue.sh call with needs-explore is inside the
 #      adjacent_issues block (not some other code path)
-#   4. Functional: stub create-issue.sh receives needs-explore when verdict
+#   4. Static: process-pr SKILL.md precise follow-up --labels argument
+#      includes needs-explore
+#   5. Functional: stub create-issue.sh receives needs-explore when verdict
 #      is approved and adjacent issue has major severity
-#   5. Functional: pipeline-followup label also applied (both labels present)
-#   6. Functional: create-issue.sh is NOT called when verdict ≠ approved
-#   7. Functional: create-issue.sh is NOT called for minor-severity issues
-#   8. Functional: create-issue.sh is NOT called when adjacent_issues is empty
+#   6. Functional: pipeline-followup label also applied (both labels present)
+#   7. Functional: create-issue.sh is NOT called when verdict ≠ approved
+#   8. Functional: create-issue.sh is NOT called for minor-severity issues
+#   9. Functional: create-issue.sh is NOT called when adjacent_issues is empty
 #
 
 load 'helpers/test-helper.bash'
 
 ORCHESTRATOR_SRC="$SCRIPT_DIR/implement-issue-orchestrator.sh"
+PROCESS_PR_SKILL="$SCRIPT_DIR/../skills/process-pr/SKILL.md"
 
 setup() {
 	setup_test_env
@@ -160,6 +168,13 @@ ${validated_body}"
 		"$ORCHESTRATOR_SRC" 2>/dev/null)
 	[[ "$block" == *"needs-explore"* ]]
 	[[ "$block" == *"create-issue.sh"* ]]
+}
+
+@test "process-pr SKILL.md precise follow-up --labels argument includes needs-explore" {
+	# Extract the precise follow-up section and assert needs-explore is present.
+	local block
+	block=$(awk '/Precise follow-up/,/Vague follow-up/' "$PROCESS_PR_SKILL" 2>/dev/null)
+	[[ "$block" == *"needs-explore"* ]]
 }
 
 # =============================================================================
