@@ -735,7 +735,7 @@ src/pages/index.tsx"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh --health-only" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh --health-only" ]
 }
 
 @test "_select_deploy_cmd: tier 3 — backend logic-only changes return local deploy cmd" {
@@ -748,10 +748,10 @@ apps/backend/src/routes/user.ts"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-local-backend.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh" ]
 }
 
-@test "_select_deploy_cmd: tier 2 — backend changes with migration file return full deploy cmd" {
+@test "_select_deploy_cmd: tier 2 — backend changes with migration file with DEPLOY_LOCAL_CMD set runs local then full deploy" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
@@ -761,10 +761,10 @@ apps/backend/prisma/migrations/20260101_add_users.sql"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh && ./scripts/deploy-nas.sh" ]
 }
 
-@test "_select_deploy_cmd: tier 2 — schema.prisma change forces full deploy" {
+@test "_select_deploy_cmd: tier 2 — schema.prisma change with DEPLOY_LOCAL_CMD set runs local then full deploy (schema.prisma)" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
@@ -774,10 +774,10 @@ apps/backend/prisma/schema.prisma"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh && ./scripts/deploy-nas.sh" ]
 }
 
-@test "_select_deploy_cmd: tier 2 — .env file change forces full deploy" {
+@test "_select_deploy_cmd: tier 2 — .env file change with DEPLOY_LOCAL_CMD set runs local then full deploy (.env)" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS="apps/backend/prisma/migrations/*|apps/backend/prisma/schema.prisma|.env*"
@@ -787,7 +787,7 @@ apps/backend/prisma/schema.prisma"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh && ./scripts/deploy-nas.sh" ]
 }
 
 @test "_select_deploy_cmd: packages/ change treated as backend (tier 3 when no migrations)" {
@@ -800,7 +800,7 @@ packages/api-client/src/client.ts"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-local-backend.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh" ]
 }
 
 @test "_select_deploy_cmd: empty diff fail-safe returns full deploy cmd" {
@@ -810,7 +810,7 @@ packages/api-client/src/client.ts"
 
     run _select_deploy_cmd ""
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
 }
 
 @test "_select_deploy_cmd: unset DEPLOY_LOCAL_CMD — backend logic change falls through to full deploy" {
@@ -822,7 +822,7 @@ packages/api-client/src/client.ts"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
 }
 
 @test "_select_deploy_cmd: empty DEPLOY_LOCAL_CMD — backend logic change falls through to full deploy" {
@@ -834,7 +834,7 @@ packages/api-client/src/client.ts"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
 }
 
 @test "_select_deploy_cmd: empty MIGRATION_PATH_PATTERNS — no downgrade (require explicit opt-in)" {
@@ -846,7 +846,7 @@ packages/api-client/src/client.ts"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
 }
 
 @test "_select_deploy_cmd: unset MIGRATION_PATH_PATTERNS — no downgrade (require explicit opt-in)" {
@@ -858,5 +858,5 @@ packages/api-client/src/client.ts"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "$output" = "./scripts/deploy-nas.sh" ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
 }

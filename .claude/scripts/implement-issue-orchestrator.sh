@@ -2881,8 +2881,8 @@ poll_health_url() {
 #      Fail-safe: never silently downgrade on unknown scope.
 #   1. No apps/backend or packages/ files changed → DEPLOY_VERIFY_CMD --health-only
 #      Frontend-only change: skip rebuild, just poll the health endpoint.
-#   2. Backend changes with migration/schema/env files → full DEPLOY_VERIFY_CMD
-#      Migrations must run on NAS to catch DB-level failures.
+#   2. Backend changes with migration/schema/env files → DEPLOY_LOCAL_CMD && DEPLOY_VERIFY_CMD
+#      Local build catches app-level failures fast; NAS deploy runs migrations on real DB.
 #   3. Backend logic-only change, DEPLOY_LOCAL_CMD set → DEPLOY_LOCAL_CMD
 #      No migration risk: local Docker build gives same confidence in a fraction
 #      of the time (~5-10 min vs 60-120 min NAS deploy).
@@ -2927,11 +2927,17 @@ _select_deploy_cmd() {
         done <<< "$changed_files"
     fi
 
-    # Tier 2: migration detected → full NAS deploy
+    # Tier 2: migration detected → local first, then full NAS deploy
     if $has_migration; then
-        log "Migration files detected —" \
-            "using full NAS deploy."
-        printf '%s\n' "${DEPLOY_VERIFY_CMD}"
+        if [[ -n "${DEPLOY_LOCAL_CMD:-}" ]]; then
+            log "Migration files detected —" \
+                "running local deploy first, then full NAS deploy."
+            printf '%s\n' "${DEPLOY_LOCAL_CMD} && ${DEPLOY_VERIFY_CMD}"
+        else
+            log "Migration files detected, DEPLOY_LOCAL_CMD not set —" \
+                "using full NAS deploy."
+            printf '%s\n' "${DEPLOY_VERIFY_CMD}"
+        fi
         return 0
     fi
 
