@@ -1548,6 +1548,7 @@ _rtk_bash_input() {
 }
 
 _rtk_mock_bin() {
+    mkdir -p "$TEST_TMP/bin"
     cat > "$TEST_TMP/bin/rtk" << 'EOF'
 #!/usr/bin/env bash
 echo "rtk-mock: $*"

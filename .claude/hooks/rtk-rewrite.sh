@@ -104,7 +104,7 @@ except Exception:
                 "\\") cmd="${cmd%\\}\\" ;;
                 *) cmd+="$char" ;;
             esac
-            prev="$char"
+            prev=""
             continue
         fi
         [[ "$char" == '"' ]] && break

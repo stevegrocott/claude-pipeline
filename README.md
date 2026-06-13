@@ -512,7 +512,27 @@ brew install rtk
 curl -fsSL https://rtk.sh | sh
 ```
 
-**Enable:** Add `export RTK_ENABLED=1` to your shell profile, or set it per session. The `rtk-rewrite.sh` PreToolUse hook activates automatically once registered in `.claude/settings.local.json`.
+**Enable:** Add `export RTK_ENABLED=1` to your shell profile, or set it per session. Register the hook in `.claude/settings.local.json` (this file is gitignored — create it if absent):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/rtk-rewrite.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook activates automatically once registered.
 
 **Measure gain:** Run `claude-spend` before and after enabling RTK on a typical pipeline run. Token counts on Bash tool calls with git/ls/grep output will decrease proportional to output verbosity.
 
