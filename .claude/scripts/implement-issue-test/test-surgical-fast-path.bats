@@ -57,7 +57,8 @@ setup() {
           MOCK_GIT_GREP_FILE_COUNT MOCK_GH_MERGE_STATE \
           MOCK_GH_MERGE_STATE_SEQ MOCK_GH_MERGE_STATE_CTR \
           MOCK_GH_PR_CREATE_EXIT_CODE MOCK_GH_PR_MERGE_EXIT_CODE \
-          MOCK_GIT_STASH_PUSH_EXIT_CODE MOCK_GIT_STASH_POP_EXIT_CODE || true
+          MOCK_GIT_STASH_PUSH_EXIT_CODE MOCK_GIT_STASH_POP_EXIT_CODE \
+          MOCK_GIT_POST_IMPL_FILES || true
     # Clear stash marker files left over from prior tests (per-test $TEST_TMP
     # is fresh, but be explicit for resume-style tests that re-enter setup).
     rm -f "$TEST_TMP/git-stash-pushed" "$TEST_TMP/git-stash-popped" || true
@@ -167,6 +168,11 @@ case "${1:-}" in
         if [[ "${MOCK_GIT_DIRTY:-0}" == "1" ]] && [[ ! -f "$TEST_TMP/git-stash-pushed" ]]; then
             echo " M some-file.ts"
         fi
+        # Two-phase support: after implement fires, return post-impl files so
+        # before/after snapshot tests can assert only the delta is staged.
+        if [[ -f "$TEST_TMP/impl-ran" && -n "${MOCK_GIT_POST_IMPL_FILES:-}" ]]; then
+            printf '%s\n' "${MOCK_GIT_POST_IMPL_FILES}"
+        fi
         exit 0
         ;;
     diff)
@@ -200,6 +206,8 @@ case "${1:-}" in
         exit "${MOCK_GIT_CHECKOUT_EXIT_CODE:-0}"
         ;;
     add)
+        # Record staged args so tests can assert which files were staged.
+        printf '%s\n' "${@:2}" >> "$TEST_TMP/git-add-args"
         exit 0
         ;;
     commit)
@@ -291,6 +299,20 @@ echo "[mock] gh: $*"
 exit "${MOCK_GH_EXIT_CODE:-0}"
 GH_MOCK
     chmod +x "$mock_bin/gh"
+
+    # Override mock claude to drop an impl-ran marker so the git status mock
+    # can return different output before vs. after the implement step runs.
+    cat > "$mock_bin/claude" <<'CLAUDE_MOCK'
+#!/usr/bin/env bash
+: > "$TEST_TMP/impl-ran"
+if [[ -n "${MOCK_CLAUDE_RESPONSE:-}" && -f "$MOCK_CLAUDE_RESPONSE" ]]; then
+    cat "$MOCK_CLAUDE_RESPONSE"
+else
+    echo '{"result":"mock response","structured_output":{"status":"success"}}'
+fi
+exit "${MOCK_CLAUDE_EXIT_CODE:-0}"
+CLAUDE_MOCK
+    chmod +x "$mock_bin/claude"
 }
 
 # ============================================================================
@@ -779,4 +801,52 @@ JSON
     assert_json_field "$STATUS_FILE" '.stages.fast_path_merge.status' 'completed'
     # Stored pr_number must be preserved (proves we read it, didn't overwrite).
     assert_json_field "$STATUS_FILE" '.stages.fast_path_pr.pr_number' '4242'
+}
+
+# ============================================================================
+# SCOPE-SAFE STAGING (AC1 + AC2 from issue #392)
+# ============================================================================
+
+@test "25 only modified files staged — git add receives impl-delta, not -A" {
+    # AC1: the fast-path stages only files the implement step changed (via a
+    # before/after git status --porcelain snapshot), never the full tree.
+    # Verified by recording which args are passed to git add and asserting that
+    # -A is absent and the impl file is present.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    # After implement runs, one new file appears in the working tree.
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+    export MOCK_GH_MERGE_STATE=CLEAN
+    export MOCK_GH_PR_NUMBER=99
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'completed'
+    # git add must have received the impl file explicitly by path.
+    [[ -f "$TEST_TMP/git-add-args" ]]
+    grep -qF "src/things.test.ts" "$TEST_TMP/git-add-args"
+    # Must NOT have used git add -A (whole-tree staging).
+    ! grep -qF -- "-A" "$TEST_TMP/git-add-args"
+}
+
+@test "26 guard rejects out-of-scope path in staged delta → bails before commit" {
+    # AC2: if the implement step modifies a .claude/ path, the scope guard
+    # fires before commit and the run aborts — the path never reaches main.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    # After implement, delta includes an out-of-scope pipeline path.
+    export MOCK_GIT_POST_IMPL_FILES=" M .claude/scripts/orchestrate.sh
+ M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -ne 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'failed'
+    err=$(jq -r '.error // ""' "$STATUS_FILE")
+    # Error name must signal scope rejection (exact string owned by the impl).
+    [[ "$err" == *scope* || "$err" == *pipeline* || "$err" == *out_of_scope* || "$err" == *staged_path* ]]
+    # fast_path_pr must NOT be completed — commit was aborted.
+    pr_status=$(jq -r '.stages.fast_path_pr.status // "pending"' "$STATUS_FILE")
+    [[ "$pr_status" != "completed" ]]
 }
