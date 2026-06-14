@@ -2942,7 +2942,7 @@ _select_deploy_cmd() {
     fi
 
     # Tier 3: backend logic-only, DEPLOY_LOCAL_CMD set → local deploy
-    if [[ -n "${DEPLOY_LOCAL_CMD:-}" ]] && [[ -n "${MIGRATION_PATH_PATTERNS:-}" ]]; then
+    if [[ -n "${DEPLOY_LOCAL_CMD:-}" ]]; then
         log "Backend logic-only change —" \
             "using local deploy: $DEPLOY_LOCAL_CMD"
         printf '%s\n' "${DEPLOY_LOCAL_CMD}"
