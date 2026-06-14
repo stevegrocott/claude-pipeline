@@ -80,5 +80,5 @@ GH_EOF
     chmod +x "$TEST_TMP/bin/gh"
     run run_platform_script create-issue.sh --title "Error test" --body "Should fail"
     [ "$status" -ne 0 ]
-    [[ "$output" != *"GraphQL"* ]]
+    [ -z "$output" ]
 }

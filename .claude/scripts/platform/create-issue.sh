@@ -22,7 +22,12 @@ case "$TRACKER" in
   github)
     ARGS=(gh issue create --title "$TITLE" --body "$BODY")
     [[ -n "$LABELS" ]] && ARGS+=(--label "$LABELS")
-    issue_url=$("${ARGS[@]}" 2>&1)
+    if ! issue_url=$("${ARGS[@]}" 2>/dev/null); then
+      exit 1
+    fi
+    if [[ ! "$issue_url" =~ ^https://github\.com/.+/issues/[0-9]+$ ]]; then
+      exit 1
+    fi
     issue_num="${issue_url##*/}"
     printf '%s\n' "$issue_num"
     if [[ -n "$PARENT" ]]; then
