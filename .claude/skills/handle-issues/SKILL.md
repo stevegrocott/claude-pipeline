@@ -375,7 +375,7 @@ fi
 1. Resume (continue with pending issues)
 2. Start fresh (abandon previous batch)
 
-If resuming, skip to Step 5 (launch orchestrator). The orchestrator's idempotency check will skip completed issues.
+If resuming, skip to Step 5 (launch orchestrator). Note: the orchestrator calls `init_status` on startup, which overwrites `status.json` and re-queues all issues as "pending" — the status-based skip check never fires on resume. Duplicate work is prevented by `implement-issue` detecting already-completed branches and PRs (returning `already_implemented`), not by the orchestrator's status check.
 
 ### Step 1: Parse Context Query
 
