@@ -48,17 +48,32 @@ RTK_ENABLED="${RTK_ENABLED:-0}"
 # e.g., "src/components/*|src/pages/*|tests/e2e/*"
 FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 
-# Migration path patterns — pipe-separated globs used by _matches_migration_pattern()
+# Migration path patterns — pipe-separated globs used by _select_deploy_cmd()
 # to detect when a branch touches database migrations (schema changes, seeders,
-# data fixes).  The orchestrator uses this to gate migration-aware review steps.
+# data fixes).  Matching files promote a Tier-3 backend deploy to Tier 2
+# (local build first, then full remote deploy).
 # e.g., "migrations/*|db/migrate/*|prisma/migrations/*"
 MIGRATION_PATH_PATTERNS="${MIGRATION_PATH_PATTERNS:-}"
 
-# Deploy verification (configure during /adapt if project has a test environment)
-# Set DEPLOY_LOCAL_CMD to a shell command that launches the app locally for manual
-# or automated smoke-testing (e.g., "npm run dev", "./scripts/start-local.sh").
-# Leave empty to skip local-launch steps; the orchestrator will not attempt to
-# start the app in that case.
+# Change-aware deploy tiers — _select_deploy_cmd() selects the deploy command
+# based on which files changed in the merged commit (first match wins):
+#
+#   Tier 0  empty diff → DEPLOY_VERIFY_CMD (fail-safe; never downgrade)
+#   Tier 1  no apps/backend or packages/ changes →
+#           DEPLOY_VERIFY_CMD --health-only  (frontend-only; skip rebuild)
+#   Tier 2  backend + MIGRATION_PATH_PATTERNS match →
+#           DEPLOY_LOCAL_CMD && DEPLOY_VERIFY_CMD  (local first, then remote)
+#           (falls back to DEPLOY_VERIFY_CMD when DEPLOY_LOCAL_CMD unset)
+#   Tier 3  backend, no migration, DEPLOY_LOCAL_CMD set →
+#           DEPLOY_LOCAL_CMD only  (~5-10 min vs 60-120 min remote deploy)
+#           (falls back to DEPLOY_VERIFY_CMD when DEPLOY_LOCAL_CMD unset)
+#
+# Activate Tier-3 local-only deploys: set DEPLOY_LOCAL_CMD below.
+# Promote Tier-3 to Tier-2 on migrations: set MIGRATION_PATH_PATTERNS above.
+#
+# DEPLOY_LOCAL_CMD — shell command that builds/starts the app locally
+# (e.g., "npm run dev", "./scripts/start-local.sh", "docker compose up -d").
+# Leave empty to skip local-launch steps entirely.
 DEPLOY_LOCAL_CMD="${DEPLOY_LOCAL_CMD:-}"
 # Set DEPLOY_VERIFY_CMD to a shell command that triggers a deploy to the target
 # environment (e.g., "./scripts/deploy-test.sh").  Leave empty to skip the stage.
