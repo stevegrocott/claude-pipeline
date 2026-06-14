@@ -392,6 +392,7 @@ init_status() {
             "session_id": null,
             "error": null,
             "follow_ups": [],
+            "deploy_verify_failed": false,
             "started_at": null,
             "stage_started_at": null,
             "completed_at": null
@@ -854,6 +855,27 @@ process_issue() {
         fi
     fi
 
+    # Propagate non-blocking deploy-verify failure flag from per-issue
+    # status file to batch status.json. The deploy-verify stage is
+    # intentionally non-blocking: a failed deploy command does NOT fail
+    # the issue, but the failure must surface in the batch post-run
+    # summary so operators can investigate the deployment. The flag
+    # (.stages.deploy_verify.deploy_cmd_failed) is set by task 1 of
+    # issue #397 in implement-issue-orchestrator.sh.
+    if [[ -f "$issue_status_file" ]]; then
+        local dv_cmd_failed
+        dv_cmd_failed=$(jq -r \
+            '.stages.deploy_verify.deploy_cmd_failed // false' \
+            "$issue_status_file" 2>/dev/null) || dv_cmd_failed=false
+        if [[ "$dv_cmd_failed" == "true" ]]; then
+            log_warn \
+                "Issue #$issue_num: deploy-verify command failed" \
+                "(non-blocking — see issue comment for details)"
+            update_issue_field \
+                "$issue_num" "deploy_verify_failed" "true" "true"
+        fi
+    fi
+
     if [[ "$impl_status" == "already_implemented" ]]; then
         log "Issue #$issue_num was already implemented in a prior run — skipping PR creation."
         update_issue_field "$issue_num" "status" "already_done"
@@ -1214,16 +1236,44 @@ log "Batch Complete"
 log "=========================================="
 log "Final state: $(jq -r '.state' "$STATUS_FILE")"
 log "Progress: $(jq -c '.progress' "$STATUS_FILE")"
+
+# Surface non-blocking deploy-verify failures so they are not silently
+# missed across a multi-issue batch. The failures are recorded per-issue
+# (deploy_verify_failed: true) by process_issue() when the implement-issue
+# orchestrator sets stages.deploy_verify.deploy_cmd_failed = true.
+_dv_failed_count=$(jq \
+    '[.issues[] | select(.deploy_verify_failed == true)] | length' \
+    "$STATUS_FILE" 2>/dev/null) || _dv_failed_count=0
+if ((_dv_failed_count > 0)); then
+    log_warn "=========================================="
+    log_warn "DEPLOY-VERIFY FAILURES: $_dv_failed_count issue(s)"
+    log_warn "(non-blocking — issue comment has details)"
+    log_warn "=========================================="
+    while IFS= read -r _dv_entry; do
+        log_warn "  $_dv_entry"
+    done < <(jq -r \
+        '.issues[]
+         | select(.deploy_verify_failed == true)
+         | "Issue #\(.number) PR \(.pr // "N/A"): deploy command failed"' \
+        "$STATUS_FILE" 2>/dev/null)
+fi
+
 _batch_outcome=$(jq -r '.state' "$STATUS_FILE" 2>/dev/null)
 [[ -z "$_batch_outcome" || "$_batch_outcome" == "null" ]] && _batch_outcome="failed"
 emit_event "batch_end" "outcome=$_batch_outcome"
 
-# Write summary
+# Write summary — include deploy_verify_failed per issue and a
+# deploy_verify_failed count in .progress so consumers can query it.
 jq '{
     state: .state,
     base_branch: .base_branch,
-    progress: .progress,
-    issues: [.issues[] | {number, status, pr, follow_ups, error}],
+    progress: (.progress + {
+        deploy_verify_failed:
+            ([.issues[] | select(.deploy_verify_failed == true)] | length)
+    }),
+    issues: [.issues[] | {
+        number, status, pr, follow_ups, error, deploy_verify_failed
+    }],
     log_dir: .log_dir,
     completed_at: (now | todate)
 }' "$STATUS_FILE" > "$LOG_BASE/summary.json"
