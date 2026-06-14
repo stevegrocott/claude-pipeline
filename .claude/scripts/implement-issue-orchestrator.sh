@@ -7847,6 +7847,10 @@ $merge_blocked_reason}" \
                     "default"
                 # Deploy failure is intentionally non-blocking: the pipeline
                 # finishes and the failure surfaces via the issue comment.
+                # Also record a degraded-stage flag in status.json so the
+                # batch summary surfaces the failure (comments are not read
+                # by the batch orchestrator).
+                DEGRADED_STAGES+=("deploy_verify:deploy_failed:exit=$deploy_exit")
                 set_stage_completed "deploy_verify"
             else
                 log "Deploy command succeeded"
@@ -7875,6 +7879,9 @@ $merge_blocked_reason}" \
                     comment_issue "Deploy Verify: Health Timeout" \
                         "❌ Health endpoint \`$DEPLOY_VERIFY_HEALTH_URL\` did not return 2xx after $max_retries attempts ($(( max_retries * poll_interval / 60 )) min). Deployment may have failed." \
                         "default"
+                    # Non-blocking: flag in status.json so the batch summary
+                    # surfaces the health timeout, not just the issue comment.
+                    DEGRADED_STAGES+=("deploy_verify:health_timeout:attempts=$max_retries")
                     set_stage_completed "deploy_verify"
                 fi
 
@@ -7939,6 +7946,14 @@ STEPS:
 
 $dv_summary" \
                         "default"
+
+                    # Non-blocking: record a degraded-stage flag in
+                    # status.json for error/partial verdicts so the batch
+                    # summary surfaces the result beyond the issue comment.
+                    if [[ "$dv_status" == "error" \
+                        || "$dv_status" == "partial" ]]; then
+                        DEGRADED_STAGES+=("deploy_verify:verify_$dv_status")
+                    fi
 
                     if [[ "$dv_status" == "error" ]]; then
                         log_error "Deploy verification failed"
