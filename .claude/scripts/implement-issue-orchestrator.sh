@@ -840,6 +840,21 @@ _rewrite_running_to_interrupted() {
 	sync_status_to_log
 }
 
+# _propagate_sigterm() — called from the TERM trap before exit 143 to forward
+# SIGTERM to every background task PID registered in _bg_pids.  Sending to
+# the process group (-PID) first ensures entire subtrees are torn down when
+# the background subshell is a group leader; the individual-PID fallback
+# handles subshells that did not acquire a new process group.
+_propagate_sigterm() {
+	local pid
+	for pid in "${_bg_pids[@]+"${_bg_pids[@]}"}"; do
+		# Try group kill first; silence errors when pid is not a PGID.
+		kill -TERM -- -"$pid" 2>/dev/null || true
+		# Also signal the process itself in case it is not a group leader.
+		kill -TERM "$pid" 2>/dev/null || true
+	done
+}
+
 # write_task_summary_to_status() — compute task summary and persist it as
 # .task_summary in status.json.  Called on every exit path via the EXIT trap.
 write_task_summary_to_status() {
@@ -1132,6 +1147,11 @@ STAGE_COUNTER=0
 _CONSECUTIVE_TIMEOUTS=0
 _TIMED_OUT_STAGE_NAMES=""
 
+# Registry of top-level background task PIDs.  Populated as each parallel
+# subshell is launched so the TERM handler can forward SIGTERM before
+# exit 143 is called, preventing orphaned child processes.
+_bg_pids=()
+
 # Register EXIT trap so interrupted runs surface as a distinct state and
 # metrics are always exported.  All three helpers are forward-referenced —
 # bash traps evaluate at exit time, so the definitions need not precede this
@@ -1146,7 +1166,10 @@ trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metr
 # not run the EXIT pseudo-signal handler when it is blocked waiting on a child
 # process (e.g. a running claude stage) and receives SIGTERM.  Exit code 143
 # encodes SIGTERM (128 + 15) per POSIX convention.
-trap 'exit 143' TERM
+# _propagate_sigterm is forward-referenced — defined near the other EXIT-trap
+# helpers — it sends SIGTERM to every registered background task PID/group so
+# that child subshells do not outlive the orchestrator.
+trap '_propagate_sigterm; exit 143' TERM
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
@@ -4246,6 +4269,7 @@ execute_batch_parallel() {
 		) &
 		local last_pid=$!
 		pids+=("$last_pid")
+		_bg_pids+=("$last_pid")
 		log "Task $tid launched (PID $last_pid," \
 			"wall-time limit ${MAX_TASK_WALL_TIME_SECS}s)" \
 			"in $wt_path"
@@ -5857,6 +5881,7 @@ $e2e_verify_summary" "playwright-test-developer"
 			fi
 		) &
 		e2e_pid=$!
+		_bg_pids+=("$e2e_pid")
 	fi
 
 	if $run_acceptance; then
@@ -5946,6 +5971,7 @@ $acceptance_summary" "default"
 			fi
 		) &
 		acceptance_pid=$!
+		_bg_pids+=("$acceptance_pid")
 	fi
 
 	# ------------------------------------------------------------------

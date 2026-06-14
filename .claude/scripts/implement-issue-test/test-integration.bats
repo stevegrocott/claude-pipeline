@@ -1458,10 +1458,25 @@ BATCH_STUB
 
     # One SIGTERM to the batch; cleanup trap must propagate to the orchestrator group.
     kill -TERM "$batch_pid"
-    sleep 0.5
 
-    # Assert: orchestrator process group has no survivors and did not respawn.
+    # Poll until the orchestrator group dies (up to 5 s) instead of a fixed
+    # delay — faster on fast systems, resilient on slow CI.
+    local j=0
+    while kill -0 -- -"$orch_pgid" 2>/dev/null && (( j++ < 50 )); do
+        sleep 0.1
+    done
+
+    # Assert: orchestrator process group has no survivors after teardown.
     kill -0 -- -"$orch_pgid" 2>/dev/null \
         && fail "orchestrator pgid $orch_pgid still has survivors after single SIGTERM to batch"
+
+    # Assert: the group stays gone — re-poll over a short window to confirm it
+    # was not respawned (the "no respawn" half of this test's contract).
+    local k=0
+    while (( k++ < 5 )); do
+        sleep 0.1
+        kill -0 -- -"$orch_pgid" 2>/dev/null \
+            && fail "orchestrator pgid $orch_pgid respawned after teardown"
+    done
     return 0
 }
