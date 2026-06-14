@@ -352,6 +352,37 @@ teardown() {
         || fail "Expected output to contain 'timeout'; got: $output"
 }
 
+@test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
+    # Reproduce the original bug: perl alarm() wrapper and claude child are
+    # both dead, leaving a childless subshell that blocks indefinitely.
+    # Because timeout() is a bash function (not a subprocess), the stage
+    # subshell has NO child processes from the moment it starts — it is
+    # childless.  Unlike the "inner timeout wrapper hangs" test (which has
+    # the retry return 124 immediately), here BOTH the initial attempt and
+    # the retry block childlessly, exercising the retry-path watchdog too.
+    # run_stage must return a failure within the wall-limit on both passes.
+    local hang_fifo="$TEST_TMP/childless-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+
+    timeout() {
+        # bash function: no child processes exist — the stage subshell is
+        # childless.  Block on a FIFO with no writer; only the parent
+        # watchdog's SIGTERM can interrupt this read.  No output is emitted
+        # so run_stage cannot recover structured data from either attempt.
+        read -r _ < "$hang_fifo" 2>/dev/null || true
+    }
+    export -f timeout
+
+    # 1s timeout_override keeps wall-time short (~2 s total: 1 s initial +
+    # 1 s retry) while exercising both the initial and retry watchdogs.
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [ "$status" -eq 1 ] \
+        || fail "Expected run_stage to fail (childless subshell wedge); status=$status output=$output"
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected 'timeout' in output (childless subshell wedge); got: $output"
+}
+
 # =============================================================================
 # CASCADE TIMEOUT DETECTION
 # =============================================================================
