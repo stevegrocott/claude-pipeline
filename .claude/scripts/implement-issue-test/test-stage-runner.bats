@@ -319,6 +319,37 @@ teardown() {
         fail "Expected retry timeout ${expected_retry}s, got ${second_timeout}s"
 }
 
+@test "parent watchdog fires when inner timeout wrapper hangs" {
+    # Simulate an inner timeout(1) wrapper that never exits — the
+    # parent-side watchdog must enforce stage_timeout independently
+    # and return a stage failure.  A FIFO is used to block the first
+    # call without spawning orphan sleep processes; a counter file
+    # ensures the retry path returns 124 immediately (no infinite block).
+    local hang_fifo="$TEST_TMP/hang.fifo"
+    mkfifo "$hang_fifo"
+    local wd_calls_file="$TEST_TMP/wd-calls.txt"
+    export wd_calls_file
+    timeout() {
+        local _n
+        _n=$(wc -l < "$wd_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$wd_calls_file"
+        if (( _n == 0 )); then
+            # First call: block on FIFO until killed by the watchdog
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            # Subsequent calls (retry): simulate timeout immediately
+            return 124
+        fi
+    }
+    export -f timeout
+    export hang_fifo
+
+    # Pass 1s as timeout_override (arg 6) so the test completes quickly
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"timeout"* ]]
+}
+
 # =============================================================================
 # CASCADE TIMEOUT DETECTION
 # =============================================================================
