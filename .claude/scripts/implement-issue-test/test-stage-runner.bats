@@ -283,7 +283,8 @@ teardown() {
 
     run run_stage "test" "prompt" "test-schema.json"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"timeout"* ]]
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected output to contain 'timeout'; got: $output"
 }
 
 @test "run_stage retries with 20% longer timeout after initial timeout" {
@@ -347,7 +348,8 @@ teardown() {
     # Pass 1s as timeout_override (arg 6) so the test completes quickly
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"timeout"* ]]
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected output to contain 'timeout'; got: $output"
 }
 
 # =============================================================================

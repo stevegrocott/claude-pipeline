@@ -1827,15 +1827,52 @@ run_stage() {
             "stage_attempt:=2"
 
         exit_code=0
-        output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
-            ${agent_args[@]+"${agent_args[@]}"} \
-            --model "$model" \
-            ${fallback_args[@]+"${fallback_args[@]}"} \
-            ${turns_args[@]+"${turns_args[@]}"} \
-            --dangerously-skip-permissions \
-            --output-format json \
-            --json-schema "$schema" \
-            2>&1) || exit_code=$?
+        local _retry_out_tmp
+        _retry_out_tmp=$(mktemp 2>/dev/null) \
+            || _retry_out_tmp="${TMPDIR:-/tmp}/stage-retry-out-$$.tmp"
+
+        # Use the same background-subshell + temp-file + polling-watchdog
+        # pattern as the initial invocation: if timeout(1) fires but the
+        # CLI ignores SIGTERM, the pipe in a plain $(timeout ...) would
+        # stay open and block run_stage indefinitely.  The watchdog
+        # enforces retry_timeout independently and kills the subshell.
+        (
+            trap - TERM
+            timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+                -p "$prompt" \
+                ${agent_args[@]+"${agent_args[@]}"} \
+                --model "$model" \
+                ${fallback_args[@]+"${fallback_args[@]}"} \
+                ${turns_args[@]+"${turns_args[@]}"} \
+                --dangerously-skip-permissions \
+                --output-format json \
+                --json-schema "$schema" \
+                2>&1
+        ) > "$_retry_out_tmp" 3>&- &
+        local _retry_pid=$!
+
+        (
+            local _waited=0
+            while (( _waited < retry_timeout )); do
+                kill -0 "$_retry_pid" 2>/dev/null || exit 0
+                sleep 1
+                _waited=$(( _waited + 1 ))
+            done
+            kill "$_retry_pid" 2>/dev/null
+        ) </dev/null >/dev/null 2>&1 3>&- &
+        local _retry_watchdog_pid=$!
+
+        wait "$_retry_pid" 2>/dev/null || exit_code=$?
+
+        kill "$_retry_watchdog_pid" 2>/dev/null || true
+        wait "$_retry_watchdog_pid" 2>/dev/null || true
+
+        if (( exit_code == 143 )); then
+            exit_code=124
+        fi
+
+        output=$(< "$_retry_out_tmp")
+        rm -f "$_retry_out_tmp"
 
         printf '%s\n' "$output" >> "$stage_log"
         printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"
