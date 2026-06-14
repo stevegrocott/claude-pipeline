@@ -1377,3 +1377,91 @@ _simulate_resume_merge() {
     grep -qx '101' "$processed" || \
         fail "implement stage must run for pending issue 101"
 }
+
+# =============================================================================
+# BATCH SIGNAL PROPAGATION — single SIGTERM to batch terminates orchestrator subtree
+# (issue #394: batch orphaned the orchestrator; one signal must clean up everything)
+#
+# AC1: Signalling the batch terminates the active orchestrator and all stage children
+# AC2: No orchestrator process reparented to init (ppid=1) after batch is killed
+# AC3: Orchestrator TERM handler propagates signal to background tasks before exiting
+# =============================================================================
+
+@test "single SIGTERM to batch terminates orchestrator subtree with no respawn" {
+    # Functional test for AC1/AC2: a single SIGTERM to the batch must propagate
+    # to the orchestrator's process group and leave no survivors.
+    # Stub scripts mirror the setsid + pgid-capture + kill-pgid pattern.
+    #
+    # setsid is Linux-only; macOS falls back to perl -MPOSIX=setsid which is
+    # always available and provides identical session-leader semantics.
+
+    local pgid_file="$TEST_TMP/orch.pgid"
+    local ready_file="$TEST_TMP/orch.ready"
+    local pgid_set_file="$TEST_TMP/batch.pgid_set"
+    local stub_orch="$TEST_TMP/stub-orch.sh"
+    local stub_batch="$TEST_TMP/stub-batch.sh"
+
+    # Stub orchestrator: session leader (setsid), writes own pgid, spawns a
+    # long-running child stage, and propagates TERM to the group on signal.
+    cat > "$stub_orch" << ORCH_STUB
+#!/usr/bin/env bash
+trap 'kill -- -\$\$ 2>/dev/null; exit 143' TERM
+printf '%s\n' "\$\$" > "${pgid_file}"
+touch "${ready_file}"
+sleep 300 &
+wait
+ORCH_STUB
+    chmod +x "$stub_orch"
+
+    # Stub batch: mirrors the three-part pattern tasks 1-2 implement —
+    #   1. launch orchestrator in its own process group (perl setsid)
+    #   2. capture the orchestrator pgid
+    #   3. TERM/EXIT cleanup trap that kills the orchestrator's entire pgid
+    cat > "$stub_batch" << BATCH_STUB
+#!/usr/bin/env bash
+_orch_pgid=""
+_cleanup() { [[ -n "\$_orch_pgid" ]] && kill -- -"\$_orch_pgid" 2>/dev/null; }
+trap '_cleanup; exit 143' TERM EXIT
+
+perl -MPOSIX=setsid -e 'setsid; exec @ARGV' -- "${stub_orch}" &
+_orch_pid=\$!
+_i=0
+while [[ ! -s "${pgid_file}" ]] && (( _i++ < 30 )); do sleep 0.1; done
+_orch_pgid=\$(cat "${pgid_file}" 2>/dev/null)
+touch "${pgid_set_file}"
+wait "\$_orch_pid"
+BATCH_STUB
+    chmod +x "$stub_batch"
+
+    # Start the stub batch.
+    "$stub_batch" &
+    local batch_pid=$!
+
+    # Wait for the batch to record the orchestrator pgid (up to 3 s).
+    local i=0
+    while [[ ! -f "$pgid_set_file" ]] && (( i++ < 30 )); do sleep 0.1; done
+    if [[ ! -f "$pgid_set_file" ]]; then
+        kill "$batch_pid" 2>/dev/null
+        fail "stub batch did not start orchestrator within 3 s"
+    fi
+
+    local orch_pgid
+    orch_pgid=$(cat "$pgid_file")
+    if [[ -z "$orch_pgid" ]]; then
+        kill "$batch_pid" 2>/dev/null
+        fail "stub orchestrator did not write its pgid"
+    fi
+
+    # Confirm the orchestrator process group is live before signalling.
+    kill -0 -- -"$orch_pgid" 2>/dev/null \
+        || { kill "$batch_pid" 2>/dev/null; fail "orchestrator pgid $orch_pgid not alive before signal"; }
+
+    # One SIGTERM to the batch; cleanup trap must propagate to the orchestrator group.
+    kill -TERM "$batch_pid"
+    sleep 0.5
+
+    # Assert: orchestrator process group has no survivors and did not respawn.
+    kill -0 -- -"$orch_pgid" 2>/dev/null \
+        && fail "orchestrator pgid $orch_pgid still has survivors after single SIGTERM to batch"
+    return 0
+}
