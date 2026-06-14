@@ -73,13 +73,34 @@ teardown() {
 @test "accepts --status-file option" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --status-file custom-status.json 2>&1
     [ -n "$output" ]
-    [[ "$output" == *"Status file: custom-status.json"* ]]
+    [[ "$output" == *"Status file: "*"custom-status.json"* ]]
 }
 
 @test "fails with --status-file but no value" {
     run bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --status-file 2>&1
     [ "$status" -eq 3 ]
     [[ "$output" == *"--status-file requires a value"* ]]
+}
+
+@test "default status file is resolved to an absolute path" {
+    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
+    [ -n "$output" ]
+    [[ "$output" =~ "Status file: /" ]]
+}
+
+@test "relative --status-file is resolved to an absolute path" {
+    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" \
+        --issue 123 --branch test --status-file relative.json 2>&1
+    [ -n "$output" ]
+    [[ "$output" =~ "Status file: /" ]]
+    [[ "$output" == *"relative.json"* ]]
+}
+
+@test "absolute --status-file is kept as-is" {
+    run timeout 2 bash "$ORCHESTRATOR_SCRIPT" \
+        --issue 123 --branch test --status-file /tmp/absolute.json 2>&1
+    [ -n "$output" ]
+    [[ "$output" == *"Status file: /tmp/absolute.json"* ]]
 }
 
 # =============================================================================
@@ -135,7 +156,7 @@ teardown() {
 @test "defaults status file to status.json" {
     run timeout 2 bash "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test 2>&1
     [ -n "$output" ]
-    [[ "$output" == *"Status file: status.json"* ]]
+    [[ "$output" == *"Status file: "*"status.json"* ]]
 }
 
 # =============================================================================

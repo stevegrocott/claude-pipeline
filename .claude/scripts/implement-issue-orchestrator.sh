@@ -328,6 +328,7 @@ ISSUE_NUMBER=""
 BASE_BRANCH=""
 AGENT=""
 STATUS_FILE="status.json"
+[[ "$STATUS_FILE" != /* ]] && STATUS_FILE="$(pwd)/$STATUS_FILE"
 RESUME_MODE=""
 RESUME_LOG_DIR=""
 QUIET=false
@@ -376,6 +377,7 @@ while [[ $# -gt 0 ]]; do
         --status-file)
             [[ -n "${2:-}" ]] || { echo "ERROR: --status-file requires a value" >&2; exit 3; }
             STATUS_FILE="$2"
+            [[ "$STATUS_FILE" != /* ]] && STATUS_FILE="$(pwd)/$STATUS_FILE"
             shift 2
             ;;
         --quiet)
@@ -1107,6 +1109,7 @@ if [[ "$RESUME_MODE" == "logdir" ]]; then
 
     load_resume_state "$local_status_file"
     STATUS_FILE="$local_status_file"
+    [[ "$STATUS_FILE" != /* ]] && STATUS_FILE="$(pwd)/$STATUS_FILE"
     # LOG_BASE was set by load_resume_state
 
 elif [[ "$RESUME_MODE" == "status" ]]; then
