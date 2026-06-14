@@ -361,3 +361,30 @@ teardown() {
     iteration=$(jq -r '.stages.pr_review.iteration' "$STATUS_FILE")
     [ "$iteration" = "2" ]
 }
+
+# =============================================================================
+# WORKTREE CWD — status writes target repo-root status.json
+# =============================================================================
+
+@test "status write from worktree subdirectory cwd updates repo-root status.json" {
+    # STATUS_FILE is an absolute path set by setup; init at repo root
+    init_status
+
+    # Simulate the worktree subdirectory the orchestrator cds into during run_stage
+    local wt_subdir="$TEST_TMP/logs/implement-issue/issue-123/worktrees/task-1"
+    mkdir -p "$wt_subdir"
+
+    # Move cwd into the worktree subdirectory
+    cd "$wt_subdir"
+
+    # Write status from within the subdirectory
+    update_stage "setup" "in_progress"
+
+    # The repo-root status.json (absolute path) must reflect the update
+    local status
+    status=$(jq -r '.stages.setup.status' "$STATUS_FILE")
+    [ "$status" = "in_progress" ]
+
+    # No stray status.json should appear in the worktree subdirectory
+    [ ! -f "./status.json" ]
+}
