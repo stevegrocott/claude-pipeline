@@ -43,6 +43,29 @@ teardown() {
 }
 
 # =============================================================================
+# PORTABLE TIMEOUT — EXIT-124 SEMANTICS
+#
+# _timeout_perl_fallback is always defined in the orchestrator (regardless of
+# host binaries) so BATS can call it directly to verify that the perl path
+# exits 124 on timeout and passes through command exit codes on success.
+# =============================================================================
+
+@test "perl fallback exits 124 when command times out" {
+    run _timeout_perl_fallback 1 sleep 5
+    [ "$status" -eq 124 ]
+}
+
+@test "perl fallback exits 0 when command completes within timeout" {
+    run _timeout_perl_fallback 5 true
+    [ "$status" -eq 0 ]
+}
+
+@test "perl fallback passes through non-zero exit code on success" {
+    run _timeout_perl_fallback 5 bash -c "exit 42"
+    [ "$status" -eq 42 ]
+}
+
+# =============================================================================
 # SCHEMA VALIDATION
 # =============================================================================
 

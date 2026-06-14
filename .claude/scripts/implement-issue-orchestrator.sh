@@ -136,20 +136,40 @@ readonly RATE_LIMIT_EXHAUSTION_THRESHOLD="${RATE_LIMIT_EXHAUSTION_THRESHOLD:-180
 # =============================================================================
 # PORTABLE TIMEOUT (macOS does not ship GNU timeout)
 # =============================================================================
+#
+# Prefer the coreutils timeout binary when present — it exits 124 on timeout,
+# matching the GNU contract.  When absent, fall back to the perl implementation
+# below which provides identical exit-124 semantics.
+#
+# Detection order:
+#   1. timeout  — GNU coreutils (standard on Linux, optional on macOS via Homebrew)
+#   2. gtimeout — GNU coreutils installed with g-prefix (common macOS Homebrew config)
+#   3. perl     — portable fallback; exits 124 via SIGALRM handler
+#
+# The named helper _timeout_perl_fallback is always defined so that BATS tests
+# can call it directly to verify exit-124 semantics independent of host binaries.
 
-if ! command -v timeout &>/dev/null; then
-    timeout() {
-        local duration="$1"; shift
-        perl -e '
-            use POSIX ":sys_wait_h";
-            alarm shift @ARGV;
-            $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
-            $pid = fork // die "fork: $!";
-            if ($pid == 0) { exec @ARGV; die "exec: $!" }
-            waitpid($pid, 0);
-            exit ($? >> 8);
-        ' "$duration" "$@"
-    }
+_timeout_perl_fallback() {
+    local duration="$1"; shift
+    perl -e '
+        use POSIX ":sys_wait_h";
+        alarm shift @ARGV;
+        $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
+        $pid = fork // die "fork: $!";
+        if ($pid == 0) { exec @ARGV; die "exec: $!" }
+        waitpid($pid, 0);
+        exit ($? >> 8);
+    ' "$duration" "$@"
+}
+
+if command -v timeout &>/dev/null; then
+    : # coreutils timeout binary available — use it directly (exits 124 on timeout)
+elif command -v gtimeout &>/dev/null; then
+    # GNU coreutils installed as gtimeout (common on macOS via Homebrew)
+    timeout() { gtimeout "$@"; }
+else
+    # No timeout binary — perl fallback with identical exit-124 semantics
+    timeout() { _timeout_perl_fallback "$@"; }
 fi
 
 # =============================================================================
