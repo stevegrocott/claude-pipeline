@@ -751,6 +751,19 @@ apps/backend/src/routes/user.ts"
     [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh" ]
 }
 
+@test "_select_deploy_cmd: tier 3 — DEPLOY_LOCAL_CMD set, MIGRATION_PATH_PATTERNS unset, backend-only change returns local deploy cmd" {
+    export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
+    export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
+    unset MIGRATION_PATH_PATTERNS
+
+    local changed="apps/backend/src/services/user-service.ts
+apps/backend/src/routes/user.ts"
+
+    run _select_deploy_cmd "$changed"
+    [ "$status" -eq 0 ]
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh" ]
+}
+
 @test "_select_deploy_cmd: tier 2 — backend changes with migration file with DEPLOY_LOCAL_CMD set runs local then full deploy" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
