@@ -598,3 +598,168 @@ _make_gh_skip_status_json() {
 	count=$(printf '%s' "$result" | jq '.progress.failed')
 	[[ "$count" == "0" ]]
 }
+
+# =============================================================================
+# ISSUE #397: surface deploy-verify failures in batch post-run summary
+# =============================================================================
+
+# --- Static analysis: deploy_verify_failed field in per-issue structure ---
+
+@test "init_status per-issue structure includes deploy_verify_failed field" {
+	# Each issue entry built in init_status() must include
+	# deploy_verify_failed: false so the field is always present in
+	# status.json even before the orchestrator runs.
+	local body
+	body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'deploy_verify_failed'* ]]
+}
+
+@test "deploy_verify_failed initialised to false (not null or missing)" {
+	# Must be boolean false, not null, so select(.deploy_verify_failed == true)
+	# never matches an uninitialised field.
+	local body
+	body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'"deploy_verify_failed": false'* ]]
+}
+
+# --- Static analysis: flag propagation in process_issue ---
+
+@test "process_issue reads deploy_cmd_failed flag from per-issue status file" {
+	# The batch orchestrator must check the deploy_cmd_failed field set by
+	# implement-issue-orchestrator.sh (task 1 of issue #397) so that
+	# non-blocking failures are surfaced in the batch summary.
+	grep -q 'deploy_cmd_failed' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "process_issue updates deploy_verify_failed field in batch status.json" {
+	# When deploy_cmd_failed is true the batch must record the failure in
+	# the per-issue entry via update_issue_field "deploy_verify_failed".
+	local body
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'deploy_verify_failed'* ]]
+}
+
+@test "process_issue deploy-verify check does not set impl_status to error" {
+	# A non-blocking deploy-verify failure must NOT change impl_status —
+	# the issue still completes. Verify the flag-propagation block only
+	# calls update_issue_field, not any impl_status assignment.
+	local body
+	body=$(awk '/Propagate non-blocking deploy-verify/,/already_implemented/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null)
+	[[ "$body" != *'impl_status='* ]]
+}
+
+# --- Static analysis: post-run warning block ---
+
+@test "batch complete section warns about deploy-verify failures" {
+	# The post-run summary must log a warning when any issue has
+	# deploy_verify_failed set, so operators cannot miss it.
+	grep -qE 'DEPLOY-VERIFY FAILURES|deploy.verify.fail' \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "batch complete warning block checks deploy_verify_failed count" {
+	# The warning must only fire when there are actual failures, not on
+	# every batch run. Verify the count variable gates the warning block.
+	grep -q '_dv_failed_count' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "batch complete warning appears after Batch Complete header" {
+	# The deploy-verify failure block must be in the post-run section
+	# (after the Batch Complete header), not inside a per-issue function.
+	local bc_line dv_line
+	bc_line=$(grep -n 'Batch Complete' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| tail -1 | cut -d: -f1)
+	dv_line=$(grep -n '_dv_failed_count' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| tail -1 | cut -d: -f1)
+	[[ -n "$bc_line" ]]
+	[[ -n "$dv_line" ]]
+	(( dv_line > bc_line ))
+}
+
+# --- Static analysis: summary.json includes deploy_verify_failed ---
+
+@test "summary.json jq filter includes deploy_verify_failed per-issue field" {
+	# The summary.json written at the end must expose deploy_verify_failed
+	# so callers (handle-issues, CI, humans) can query failures without
+	# parsing the full status.json.
+	local body
+	body=$(awk '/Write summary/,/log.*Summary written/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'deploy_verify_failed'* ]]
+}
+
+@test "summary.json includes deploy_verify_failed count in progress" {
+	# .progress.deploy_verify_failed must be emitted so consumers can see
+	# the failure count at a glance without iterating over .issues[].
+	local body
+	body=$(awk '/Write summary.*include/,/log.*Summary written/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'deploy_verify_failed'* ]]
+}
+
+# --- Functional simulation: deploy_verify_failed summary count ---
+
+_make_deploy_verify_status_json() {
+	local file="$1"
+	jq -n '{
+		state: "completed",
+		progress: {
+			total: 4,
+			completed: 3,
+			failed: 1,
+			pending: 0,
+			in_progress: 0,
+			merge_blocked: 0
+		},
+		issues: [
+			{number: "10", status: "completed", pr: 5,
+			 deploy_verify_failed: true},
+			{number: "11", status: "completed", pr: 6,
+			 deploy_verify_failed: false},
+			{number: "12", status: "completed", pr: 7,
+			 deploy_verify_failed: true},
+			{number: "13", status: "failed", pr: null,
+			 deploy_verify_failed: false}
+		],
+		last_update: "2024-01-01T00:00:00Z"
+	}' > "$file"
+}
+
+_simulate_dv_failed_count() {
+	local status_file="$1"
+	jq '[.issues[] | select(.deploy_verify_failed == true)] | length' \
+		"$status_file"
+}
+
+@test "functional: deploy_verify_failed count is 2 from mixed-status batch" {
+	local status_file="$TEST_TMP/dv-status.json"
+	_make_deploy_verify_status_json "$status_file"
+	local count
+	count=$(_simulate_dv_failed_count "$status_file")
+	[[ "$count" == "2" ]]
+}
+
+@test "functional: failed issues with deploy_verify_failed false not counted" {
+	# A failed issue that did not reach deploy-verify must not inflate the count.
+	local status_file="$TEST_TMP/dv-status.json"
+	_make_deploy_verify_status_json "$status_file"
+	local count
+	count=$(jq \
+		'[.issues[] | select(.status == "failed" and .deploy_verify_failed == true)] | length' \
+		"$status_file")
+	[[ "$count" == "0" ]]
+}
+
+@test "functional: summary progress deploy_verify_failed count computed correctly" {
+	# Simulate the summary.json .progress computation and verify the count.
+	local status_file="$TEST_TMP/dv-status.json"
+	_make_deploy_verify_status_json "$status_file"
+	local result count
+	result=$(jq '(.progress + {
+		deploy_verify_failed:
+			([.issues[] | select(.deploy_verify_failed == true)] | length)
+	})' "$status_file")
+	count=$(printf '%s' "$result" | jq '.deploy_verify_failed')
+	[[ "$count" == "2" ]]
+}
