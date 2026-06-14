@@ -45,6 +45,18 @@ if ! command -v timeout &>/dev/null; then
 fi
 
 # =============================================================================
+# PORTABLE SETSID (macOS / older systems may not ship setsid)
+# =============================================================================
+
+if ! command -v setsid &>/dev/null; then
+    setsid() {
+        # Call setsid(2) via perl then exec the target command so that the
+        # caller's $! resolves to the exec'd process (pid == pgid == sid).
+        exec perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$@"
+    }
+fi
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -59,6 +71,11 @@ PLATFORM_DIR="$SCRIPT_DIR/platform"
 LOG_BASE="logs/batch-$(date +%Y%m%d-%H%M%S)"
 STATUS_FILE="status.json"
 LOCK_FILE="logs/.batch-orchestrator.lock"
+
+# pgid of the currently active per-issue orchestrator process group.
+# Set by process_issue() before blocking on wait; cleared on exit.
+# The batch-level TERM/EXIT cleanup trap uses this to kill the subtree.
+ACTIVE_ORCH_PGID=""
 
 # Timeouts and limits
 readonly ISSUE_TIMEOUT=10800  # 180 minutes per issue
@@ -717,15 +734,46 @@ process_issue() {
     log "Running: implement-issue-orchestrator.sh --issue $issue_num --branch $BRANCH ${agent_args[@]+"${agent_args[@]}"}"
 
     local impl_exit=0
+    local orch_pgid=""
+
+    # Named pipe: lets tee fan orchestrator output to log and stdout
+    # while keeping the orchestrator in its own tracked process group.
+    local orch_out_fifo="$LOG_BASE/issue-$issue_num-out.fifo"
+    rm -f "$orch_out_fifo"
+    mkfifo "$orch_out_fifo" || {
+        log_error "mkfifo failed: $orch_out_fifo — cannot track pgid"
+        return 1
+    }
 
     printf '%s\n' "=== implement-issue output ===" >> "$issue_log"
-    "$SCRIPT_DIR/implement-issue-orchestrator.sh" \
+
+    # tee reads from the fifo: writes to log file and stdout for live view.
+    tee -a "$issue_log" < "$orch_out_fifo" &
+    local tee_pid=$!
+
+    # Launch orchestrator in its own process group via setsid so the batch
+    # can terminate the entire subtree with one signal.
+    # After setsid the new process is its own session leader: pid == pgid.
+    setsid "$SCRIPT_DIR/implement-issue-orchestrator.sh" \
         --issue "$issue_num" \
         --branch "$BRANCH" \
         ${agent_args[@]+"${agent_args[@]}"} \
         --status-file "$issue_status_file" \
-        2>&1 | tee -a "$issue_log"
-    impl_exit=${PIPESTATUS[0]}
+        > "$orch_out_fifo" 2>&1 &
+    local orch_pid=$!
+    orch_pgid=$orch_pid  # setsid: pid == pgid for the new session leader
+    ACTIVE_ORCH_PGID=$orch_pgid  # expose to batch-level TERM/EXIT trap (#394)
+
+    # The fifo name is no longer needed; both ends hold open file descriptors.
+    rm -f "$orch_out_fifo"
+
+    log "Orchestrator PID=$orch_pid PGID=$orch_pgid (issue #$issue_num)"
+
+    wait "$orch_pid"
+    impl_exit=$?
+    wait "$tee_pid"  # Flush tee before reading status file
+
+    ACTIVE_ORCH_PGID=""  # Clear: orchestrator has exited
     printf '%s\n' "=== exit code: $impl_exit ===" >> "$issue_log"
 
     # Parse result from status file
