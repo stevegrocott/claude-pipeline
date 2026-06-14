@@ -23,6 +23,8 @@
 #      adjacent_issues block (not some other code path)
 #   4. Static: process-pr SKILL.md precise follow-up --labels argument
 #      includes needs-explore
+#   4a. Static: process-pr SKILL.md classification table precise row specifies
+#       NO needs-explore label (precise=no-label scenario — AC4)
 #   5. Functional: stub create-issue.sh receives needs-explore when verdict
 #      is approved and adjacent issue has major severity
 #   6. Functional: pipeline-followup label also applied (both labels present)
@@ -175,6 +177,17 @@ ${validated_body}"
 	local block
 	block=$(awk '/Precise follow-up/,/Vague follow-up/' "$PROCESS_PR_SKILL" 2>/dev/null)
 	[[ "$block" == *"needs-explore"* ]]
+}
+
+@test "process-pr SKILL.md classification table: precise row specifies no needs-explore label" {
+	# AC4 (precise=no-label scenario): the classification table must document that
+	# precise follow-ups (specific file+function reference, ≤2 files in scope) do
+	# NOT receive the needs-explore label.  Precise issues already carry full
+	# context; adding needs-explore would trigger a wasteful /enrich-issue call
+	# that overwrites the precise body with exploratory prose.
+	local precise_row
+	precise_row=$(grep '\*\*precise\*\*' "$PROCESS_PR_SKILL" | head -1)
+	[[ "$precise_row" == *"no \`needs-explore\` label"* ]]
 }
 
 # =============================================================================
