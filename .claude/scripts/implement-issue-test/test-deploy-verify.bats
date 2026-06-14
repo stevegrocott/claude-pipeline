@@ -929,3 +929,38 @@ packages/api-client/src/client.ts"
     [ "$status" -eq 0 ]
     [ "$output" = "deploy_verify:deploy_failed:exit=1" ]
 }
+
+@test "non-blocking deploy failure: stage completes AND flag is written to status.json" {
+    # Functional test: exercises set_stage_completed() directly (not static string
+    # matching) to assert the two invariants of a non-blocking deploy failure —
+    # (a) the stage reaches "completed" so the pipeline is not halted, and
+    # (b) the deploy_verify:deploy_failed flag lands in .degraded_stages so
+    # the batch summary surfaces the failure without requiring a comment read.
+    printf '{"state":"running","stages":{"deploy_verify":{"status":"started"}},"escalations":[]}\n' \
+        > "$STATUS_FILE"
+
+    # Simulate the orchestrator failure path from main():
+    #   DEGRADED_STAGES+=("deploy_verify:deploy_failed:exit=$deploy_exit")
+    #   set_stage_completed "deploy_verify"
+    local -a DEGRADED_STAGES=("deploy_verify:deploy_failed:exit=127")
+    set_stage_completed "deploy_verify"
+
+    # Run the recording block that main() executes after all stages complete
+    local degraded_json
+    degraded_json=$(printf '%s\n' \
+        "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | jq -R . | jq -s .)
+    jq --argjson degraded "$degraded_json" \
+        '.degraded_stages = $degraded' "$STATUS_FILE" \
+        > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+    # (a) Non-blocking: stage must be completed, not failed/errored
+    run jq -r '.stages.deploy_verify.status' "$STATUS_FILE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "completed" ]
+
+    # (b) Visibility flag: failure must appear in .degraded_stages
+    run jq -r '.degraded_stages[0]' "$STATUS_FILE"
+    [ "$status" -eq 0 ]
+    [[ "$output" == deploy_verify:deploy_failed:* ]]
+}
