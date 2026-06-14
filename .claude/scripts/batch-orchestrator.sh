@@ -355,7 +355,7 @@ init_status() {
             | jq -r --arg num "$issue" '.[$num] // empty')
         if [[ -n "$prior" ]]; then
             issue_status="$prior"
-            ((preserved_count++))
+            preserved_count=$((preserved_count + 1))
         fi
         issues_json=$(printf '%s' "$issues_json" \
             | jq --arg num "$issue" --arg status "$issue_status" '. + [{

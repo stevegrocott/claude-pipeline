@@ -498,27 +498,34 @@ _simulate_update_progress() {
 @test "up-front skip gate: closed issue sets status to completed" {
 	# Verify the closed-issue branch updates the issue to completed so
 	# update_progress counts it correctly (not as failed/skipped).
+	# Anchor on code structure (_upfront_issue_state == CLOSED condition)
+	# rather than log message wording.
 	local block
-	block=$(awk '/already closed on GitHub/,/continue/' \
+	block=$(awk '/_upfront_issue_state.*==.*CLOSED/,/continue/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT" | head -10)
-	[[ "$block" == *'status" "completed'* ]] || \
-		[[ "$block" == *'"status" "completed"'* ]]
+	[[ "$block" == *'update_issue_field'* ]]
+	[[ "$block" == *'"status"'* ]]
+	[[ "$block" == *'"completed"'* ]]
 }
 
 @test "up-front skip gate: merged PR sets status to completed" {
+	# Anchor on code structure (_merged_pr detection block) not log wording.
 	local block
-	block=$(awk '/already merged/,/continue/' \
+	block=$(awk '/\[\[ -n.*_merged_pr/,/continue/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT" | head -10)
-	[[ "$block" == *'status" "completed'* ]] || \
-		[[ "$block" == *'"status" "completed"'* ]]
+	[[ "$block" == *'update_issue_field'* ]]
+	[[ "$block" == *'"status"'* ]]
+	[[ "$block" == *'"completed"'* ]]
 }
 
 @test "up-front skip gate: merged PR update also stores the PR number" {
 	# The PR field must be written so handle-issues progress table shows it.
+	# Anchor on code structure (_merged_pr detection block) not log wording.
 	local block
-	block=$(awk '/already merged/,/update_progress/' \
+	block=$(awk '/\[\[ -n.*_merged_pr/,/update_progress/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
-	[[ "$block" == *'"pr"'* ]] || [[ "$block" == *"\"pr\""* ]]
+	[[ "$block" == *'update_issue_field'* ]]
+	[[ "$block" == *'"pr"'* ]]
 }
 
 @test "up-front skip gate: gh failures are non-fatal (|| true pattern)" {
