@@ -15,6 +15,12 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Path to script under test
 ORCHESTRATOR_SCRIPT="$SCRIPT_DIR/implement-issue-orchestrator.sh"
 
+# Stable path to batch-orchestrator.sh captured at load time. SCRIPT_DIR is
+# clobbered to TEST_TMP once source_orchestrator_functions() sources the
+# extracted SCRIPT_DIR= line, so resume tests must not resolve the batch
+# script through SCRIPT_DIR after setup runs.
+BATCH_ORCHESTRATOR_SCRIPT_PATH="$SCRIPT_DIR/batch-orchestrator.sh"
+
 # Temp directory for test artifacts
 TEST_TMP=""
 
@@ -397,4 +403,28 @@ EOF
     if [[ -f "$TEST_TMP/model-config.sh" ]]; then
         source "$TEST_TMP/model-config.sh"
     fi
+}
+
+# Source a single named function from batch-orchestrator.sh in isolation,
+# without running its top-level argument parsing or main loop. Used to
+# functionally test resume behaviour (init_status) without spinning up a
+# full batch. The closing brace must be at column 0 (the project style),
+# so the awk range captures exactly one function body.
+source_batch_function() {
+    local func_name="$1"
+    local batch_script="$BATCH_ORCHESTRATOR_SCRIPT_PATH"
+    local func_file="$TEST_TMP/batch_${func_name}.bash"
+
+    awk -v fn="$func_name" '
+        $0 ~ "^"fn"\\(\\) \\{$" { capture = 1 }
+        capture { print }
+        capture && /^\}$/ { capture = 0 }
+    ' "$batch_script" > "$func_file"
+
+    # Provide harmless stand-ins for collaborators init_status touches so the
+    # extracted function runs without the rest of the script. Tests may
+    # override these after sourcing.
+    log() { :; }
+
+    source "$func_file"
 }

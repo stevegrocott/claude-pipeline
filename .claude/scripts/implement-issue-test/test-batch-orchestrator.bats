@@ -481,6 +481,12 @@ _simulate_update_progress() {
 	grep -qE 'GIT_HOST.*github' "$BATCH_ORCHESTRATOR_SCRIPT"
 }
 
+# MAINTENANCE NOTE: the tests below anchor awk ranges and greps on exact log
+# message text ('already closed on GitHub', 'already merged'). They will
+# silently stop matching — passing vacuously or failing — if that wording is
+# reworded in batch-orchestrator.sh. If you change a log string there, update
+# the matching pattern here in lockstep. Where practical, prefer anchoring on
+# code structure (e.g. 'gh issue view', 'status" "completed') over prose.
 @test "up-front skip gate: closed issue triggers a log message" {
 	grep -q 'already closed on GitHub' "$BATCH_ORCHESTRATOR_SCRIPT"
 }
