@@ -873,3 +873,59 @@ packages/api-client/src/client.ts"
     [ "$status" -eq 0 ]
     [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
 }
+
+# =============================================================================
+# SECTION 12: NON-BLOCKING DEPLOY-VERIFY FAILURE FLAGS (status.json)
+# Non-blocking deploy-verify failures must record a DEGRADED_STAGES flag so
+# the failure is written to status.json (.degraded_stages) and surfaces in the
+# batch summary — issue comments alone are not read by the batch orchestrator.
+# These are static-analysis tests (the failure paths live inline in main()),
+# plus a functional test of the recording mechanism.
+# =============================================================================
+
+@test "deploy command failure appends a deploy_verify:deploy_failed flag" {
+    local script_content
+    script_content=$(< "$ORCHESTRATOR_SCRIPT")
+    [[ "$script_content" == \
+        *'DEGRADED_STAGES+=("deploy_verify:deploy_failed:exit=$deploy_exit")'* ]]
+}
+
+@test "health timeout appends a deploy_verify:health_timeout flag" {
+    local script_content
+    script_content=$(< "$ORCHESTRATOR_SCRIPT")
+    [[ "$script_content" == \
+        *'DEGRADED_STAGES+=("deploy_verify:health_timeout:attempts=$max_retries")'* ]]
+}
+
+@test "verify error/partial verdict appends a deploy_verify:verify_<status> flag" {
+    local script_content
+    script_content=$(< "$ORCHESTRATOR_SCRIPT")
+    [[ "$script_content" == \
+        *'DEGRADED_STAGES+=("deploy_verify:verify_$dv_status")'* ]]
+}
+
+@test "verify flag is gated on error or partial status only" {
+    # The flag must not fire for success/unknown verdicts.
+    local script_content
+    script_content=$(< "$ORCHESTRATOR_SCRIPT")
+    [[ "$script_content" == *'"$dv_status" == "error"'*'"$dv_status" == "partial"'* ]]
+}
+
+@test "deploy_verify flags are written to status.json .degraded_stages" {
+    # Reproduce the recording block from main() (lines ~7957-7962) and assert
+    # a deploy_verify flag lands in status.json.
+    printf '{"state":"completed"}\n' > "$STATUS_FILE"
+    local -a DEGRADED_STAGES=("deploy_verify:deploy_failed:exit=1")
+
+    local degraded_json
+    degraded_json=$(printf '%s\n' \
+        "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | jq -R . | jq -s .)
+    jq --argjson degraded "$degraded_json" \
+        '.degraded_stages = $degraded' "$STATUS_FILE" \
+        > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+    run jq -r '.degraded_stages[0]' "$STATUS_FILE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "deploy_verify:deploy_failed:exit=1" ]
+}
