@@ -462,3 +462,126 @@ _simulate_update_progress() {
 	body=$(awk '/^usage\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'no-enrich-followups'* ]]
 }
+
+# =============================================================================
+# TASK 2 (i393): up-front skip gate — closed issue OR merged PR via gh
+# =============================================================================
+
+@test "up-front skip gate: gh issue view check is present in main loop" {
+	grep -qE "gh issue view.*--json state" "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "up-front skip gate: gh pr list merged check is present in main loop" {
+	grep -qE "gh pr list.*--state merged" "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "up-front skip gate: gated on GIT_HOST=github" {
+	# The check must be conditional on GIT_HOST to avoid running gh
+	# commands on non-GitHub platforms (e.g. GitLab + Jira setups).
+	grep -qE 'GIT_HOST.*github' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "up-front skip gate: closed issue triggers a log message" {
+	grep -q 'already closed on GitHub' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "up-front skip gate: merged PR triggers a log message" {
+	grep -q 'already merged' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "up-front skip gate: closed issue sets status to completed" {
+	# Verify the closed-issue branch updates the issue to completed so
+	# update_progress counts it correctly (not as failed/skipped).
+	local block
+	block=$(awk '/already closed on GitHub/,/continue/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -10)
+	[[ "$block" == *'status" "completed'* ]] || \
+		[[ "$block" == *'"status" "completed"'* ]]
+}
+
+@test "up-front skip gate: merged PR sets status to completed" {
+	local block
+	block=$(awk '/already merged/,/continue/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -10)
+	[[ "$block" == *'status" "completed'* ]] || \
+		[[ "$block" == *'"status" "completed"'* ]]
+}
+
+@test "up-front skip gate: merged PR update also stores the PR number" {
+	# The PR field must be written so handle-issues progress table shows it.
+	local block
+	block=$(awk '/already merged/,/update_progress/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
+	[[ "$block" == *'"pr"'* ]] || [[ "$block" == *"\"pr\""* ]]
+}
+
+@test "up-front skip gate: gh failures are non-fatal (|| true pattern)" {
+	# Network errors from gh must not abort the batch; the gate must use
+	# || true (or equivalent) to suppress non-zero exit codes.
+	local block
+	block=$(awk '/Up-front skip gate/,/fi.*#.*end.*GIT_HOST|^\s+fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -40)
+	[[ "$block" == *'|| true'* ]]
+}
+
+@test "up-front skip gate: appears before process_issue call in the loop" {
+	local upfront_line process_line
+	upfront_line=$(grep -n "gh issue view.*--json state" \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | tail -1 | cut -d: -f1)
+	process_line=$(grep -n "if process_issue" \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | tail -1 | cut -d: -f1)
+	[[ -n "$upfront_line" ]]
+	[[ -n "$process_line" ]]
+	(( upfront_line < process_line ))
+}
+
+@test "up-front skip gate: complements not replaces the status.json check" {
+	# Both checks must be present: status.json line AND the gh gate.
+	grep -qE 'current_status.*completed' "$BATCH_ORCHESTRATOR_SCRIPT"
+	grep -qE "gh issue view.*--json state" "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+# --- Functional simulation: update_progress after gh-skip ---
+#
+# When the up-front gate sets status=completed for a skipped issue,
+# update_progress must count it under .progress.completed, not under
+# .progress.failed.
+
+_make_gh_skip_status_json() {
+	local file="$1"
+	jq -n '{
+		state: "running",
+		progress: {
+			total: 3,
+			completed: 0,
+			failed: 0,
+			pending: 0,
+			in_progress: 0,
+			merge_blocked: 0
+		},
+		issues: [
+			{number: "10", status: "completed"},
+			{number: "11", status: "completed"},
+			{number: "12", status: "pending"}
+		],
+		last_update: "2024-01-01T00:00:00Z"
+	}' > "$file"
+}
+
+@test "gh-skipped issues (status=completed) counted in progress.completed" {
+	local status_file="$TEST_TMP/gh-skip-status.json"
+	_make_gh_skip_status_json "$status_file"
+	local result count
+	result=$(_simulate_update_progress "$status_file")
+	count=$(printf '%s' "$result" | jq '.progress.completed')
+	[[ "$count" == "2" ]]
+}
+
+@test "gh-skipped issues (status=completed) not counted in progress.failed" {
+	local status_file="$TEST_TMP/gh-skip-status.json"
+	_make_gh_skip_status_json "$status_file"
+	local result count
+	result=$(_simulate_update_progress "$status_file")
+	count=$(printf '%s' "$result" | jq '.progress.failed')
+	[[ "$count" == "0" ]]
+}

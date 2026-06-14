@@ -1038,6 +1038,40 @@ for issue in "${ISSUE_ARRAY[@]}"; do
         continue
     fi
 
+    # ---------------------------------------------------------------
+    # Up-front skip gate: closed issue OR merged PR (via gh).
+    # Complements the status.json idempotency check above by querying
+    # live platform state before spinning up the orchestrator.
+    # Only active when GIT_HOST=github.  A gh failure (network error,
+    # unauthenticated) is non-fatal: the empty result falls through so
+    # the orchestrator's already_implemented detection remains the
+    # safety net.
+    # ---------------------------------------------------------------
+    if [[ "${GIT_HOST:-github}" == "github" ]]; then
+        _upfront_issue_state=""
+        _upfront_issue_state=$(gh issue view "$issue" --json state \
+            --jq '.state' 2>/dev/null) || true
+        if [[ "$_upfront_issue_state" == "CLOSED" ]]; then
+            log "Skipping issue #$issue (already closed on GitHub)"
+            update_issue_field "$issue" "status" "completed"
+            update_progress
+            continue
+        fi
+
+        _merged_pr=""
+        _merged_pr=$(gh pr list --state merged \
+            --head "feature/issue-$issue" \
+            --json number --jq '.[0].number // empty' \
+            2>/dev/null) || true
+        if [[ -n "$_merged_pr" ]]; then
+            log "Skipping issue #$issue (PR #$_merged_pr already merged)"
+            update_issue_field "$issue" "status" "completed"
+            update_issue_field "$issue" "pr" "$_merged_pr" "true"
+            update_progress
+            continue
+        fi
+    fi
+
     if process_issue "$issue"; then
         consecutive_failures=0
         log "Issue #$issue processed successfully"
