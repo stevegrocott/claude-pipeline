@@ -283,6 +283,32 @@ PROMPT
         <(printf '%s\n' "$_pre_impl_porcelain" | sort) \
         <(printf '%s\n' "$_post_impl_porcelain" | sort))
 
+    # Scope guard: abort before commit if the implement delta contains paths
+    # that are never legitimate fast-path targets — pipeline internals
+    # (.claude/), documentation (docs/), or build-artifact directories.
+    # This prevents a misbehaving implement from silently modifying the
+    # pipeline itself and slipping through code review.
+    _out_of_scope_prefixes=(
+        ".claude/"
+        "docs/"
+        "dist/"
+        "build/"
+        ".next/"
+        ".nuxt/"
+        "coverage/"
+        "node_modules/"
+    )
+    if [[ ${#_changed_paths[@]} -gt 0 ]]; then
+        for _guard_path in "${_changed_paths[@]}"; do
+            for _prefix in "${_out_of_scope_prefixes[@]}"; do
+                if [[ "$_guard_path" == "${_prefix}"* ]]; then
+                    log "Scope guard: out-of-scope path in staged delta: $_guard_path"
+                    bail "out_of_scope_path_staged"
+                fi
+            done
+        done
+    fi
+
     set_stage_completed fast_path_implement
     log "Fast-path implement complete"
 fi
