@@ -325,6 +325,32 @@ teardown() {
 	[ "$scope" = "bash" ]
 }
 
+@test "detect_change_scope returns 'bash' for .claude/hooks/hook.sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-hooks-hook-sh
+	mkdir -p .claude/hooks
+	printf '#!/usr/bin/env bash\n' > .claude/hooks/hook.sh
+	git add .claude/hooks/hook.sh
+	git commit -q -m "add .claude/hooks/hook.sh"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
+@test "detect_change_scope returns 'bash' for .claude/config/platform.sh" {
+	cd "$TEST_TMP/repo"
+	git checkout -q -b feature-claude-config-platform-sh
+	mkdir -p .claude/config
+	printf '#!/usr/bin/env bash\n' > .claude/config/platform.sh
+	git add .claude/config/platform.sh
+	git commit -q -m "add .claude/config/platform.sh"
+
+	local scope
+	scope=$(detect_change_scope "." "main")
+	[ "$scope" = "bash" ]
+}
+
 @test "detect_change_scope returns 'bash' for .claude/scripts/platform/*.sh" {
 	cd "$TEST_TMP/repo"
 	git checkout -q -b feature-claude-platform-sh
