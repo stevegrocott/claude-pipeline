@@ -859,13 +859,14 @@ process_issue() {
     # status file to batch status.json. The deploy-verify stage is
     # intentionally non-blocking: a failed deploy command does NOT fail
     # the issue, but the failure must surface in the batch post-run
-    # summary so operators can investigate the deployment. The flag
-    # (.stages.deploy_verify.deploy_cmd_failed) is set by task 1 of
-    # issue #397 in implement-issue-orchestrator.sh.
+    # summary so operators can investigate the deployment.
+    # implement-issue-orchestrator.sh appends entries of the form
+    # "deploy_verify:<reason>:..." to the .degraded_stages array when a
+    # deploy-verify step fails (set by DEGRADED_STAGES in the orchestrator).
     if [[ -f "$issue_status_file" ]]; then
         local dv_cmd_failed
         dv_cmd_failed=$(jq -r \
-            '.stages.deploy_verify.deploy_cmd_failed // false' \
+            '[.degraded_stages[]? | select(startswith("deploy_verify:"))] | length > 0' \
             "$issue_status_file" 2>/dev/null) || dv_cmd_failed=false
         if [[ "$dv_cmd_failed" == "true" ]]; then
             log_warn \

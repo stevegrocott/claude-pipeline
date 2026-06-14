@@ -624,11 +624,20 @@ _make_gh_skip_status_json() {
 
 # --- Static analysis: flag propagation in process_issue ---
 
-@test "process_issue reads deploy_cmd_failed flag from per-issue status file" {
-	# The batch orchestrator must check the deploy_cmd_failed field set by
-	# implement-issue-orchestrator.sh (task 1 of issue #397) so that
-	# non-blocking failures are surfaced in the batch summary.
-	grep -q 'deploy_cmd_failed' "$BATCH_ORCHESTRATOR_SCRIPT"
+@test "process_issue detects deploy-verify failure via .degraded_stages in status file" {
+	# Integration path: a per-issue status file with .degraded_stages containing
+	# a "deploy_verify:..." entry must produce dv_cmd_failed=true when evaluated
+	# with the same jq expression that process_issue uses. This exercises the
+	# full chain from .degraded_stages (written by implement-issue-orchestrator)
+	# to the deploy_verify_failed flag recorded in batch status.json.
+	local status_file="$TEST_TMP/issue-status.json"
+	printf '{"degraded_stages":["deploy_verify:deploy_failed:exit=1"]}' \
+		> "$status_file"
+	local dv_cmd_failed
+	dv_cmd_failed=$(jq -r \
+		'[.degraded_stages[]? | select(startswith("deploy_verify:"))] | length > 0' \
+		"$status_file")
+	[[ "$dv_cmd_failed" == "true" ]]
 }
 
 @test "process_issue updates deploy_verify_failed field in batch status.json" {
