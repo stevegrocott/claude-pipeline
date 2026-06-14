@@ -4945,6 +4945,8 @@ detect_change_scope() {
             .claude/scripts/*.sh) has_bash=true ;;
             # ALL bats files need bash tests regardless of location
             *.bats) has_bash=true ;;
+            # Hooks and config shell scripts also have bats tests — route to bash
+            .claude/hooks/*.sh|.claude/config/*.sh) has_bash=true ;;
             # Other .claude files (config, schemas, skills, CLAUDE.md) — skip
             .claude/*) ;;
             *.sh) has_bash=true ;;
