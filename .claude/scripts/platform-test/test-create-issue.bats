@@ -68,3 +68,17 @@ teardown() {
     run run_platform_script create-issue.sh --title "Fail" --body "Should fail"
     [ "$status" -ne 0 ]
 }
+
+@test "create-issue github: gh error text is not printed as issue number" {
+    export TRACKER="github"
+    cat > "$TEST_TMP/bin/gh" << 'GH_EOF'
+#!/usr/bin/env bash
+echo "gh $*" >> "$TEST_TMP/mock_calls.log"
+echo "GraphQL: Could not resolve to a Repository with the login of 'no-such-repo'."
+exit 1
+GH_EOF
+    chmod +x "$TEST_TMP/bin/gh"
+    run run_platform_script create-issue.sh --title "Error test" --body "Should fail"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"GraphQL"* ]]
+}
