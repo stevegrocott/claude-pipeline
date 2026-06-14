@@ -172,11 +172,16 @@ ${validated_body}"
 	[[ "$block" == *"create-issue.sh"* ]]
 }
 
-@test "process-pr SKILL.md precise follow-up --labels argument includes needs-explore" {
-	# Extract the precise follow-up section and assert needs-explore is present.
-	local block
+@test "process-pr SKILL.md precise follow-up --labels argument does NOT include needs-explore" {
+	# Precise follow-ups must NOT carry needs-explore — precise issues already
+	# have full context, so adding needs-explore would trigger a wasteful
+	# enrich-issue call that overwrites the precise body with exploratory prose.
+	# Scope the check to the --labels argument line only; the heading may
+	# reference "needs-explore" in negation context.
+	local block labels_line
 	block=$(awk '/Precise follow-up/,/Vague follow-up/' "$PROCESS_PR_SKILL" 2>/dev/null)
-	[[ "$block" == *"needs-explore"* ]]
+	labels_line=$(printf '%s\n' "$block" | grep -- '--labels' | head -1)
+	[[ "$labels_line" != *"needs-explore"* ]]
 }
 
 @test "process-pr SKILL.md classification table: precise row specifies no needs-explore label" {
