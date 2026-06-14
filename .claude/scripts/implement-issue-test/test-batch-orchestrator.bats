@@ -437,13 +437,14 @@ _simulate_update_progress() {
 }
 
 # =============================================================================
-# TASK 1 (i380): ENRICH_FOLLOWUPS defaults to true; --no-enrich-followups opt-out
+# TASK 1 (i380): --no-enrich-followups opt-out flag
+# TASK 2 (i385): ENRICH_FOLLOWUPS reverted to false (opt-in semantics)
 # =============================================================================
 
-@test "ENRICH_FOLLOWUPS is initialised to true by default" {
-	# The default assignment must be ENRICH_FOLLOWUPS=true so enrichment runs
-	# without requiring an explicit flag.
-	grep -qE '^ENRICH_FOLLOWUPS=true' "$BATCH_ORCHESTRATOR_SCRIPT"
+@test "ENRICH_FOLLOWUPS defaults to false when no flag is passed" {
+	# The default must be false so the sweep is opt-in.
+	# Callers that want enrichment must pass --enrich-followups explicitly.
+	grep -qE '^ENRICH_FOLLOWUPS=false' "$BATCH_ORCHESTRATOR_SCRIPT"
 }
 
 @test "--no-enrich-followups flag is recognised in argument parsing" {
