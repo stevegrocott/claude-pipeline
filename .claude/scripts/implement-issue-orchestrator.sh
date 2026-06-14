@@ -2915,8 +2915,8 @@ _select_deploy_cmd() {
     local has_migration=false
     if [[ -n "${MIGRATION_PATH_PATTERNS:-}" ]]; then
         local file
+        local IFS='|'
         while IFS= read -r file; do
-            local IFS='|'
             local pattern
             for pattern in $MIGRATION_PATH_PATTERNS; do
                 # shellcheck disable=SC2254
