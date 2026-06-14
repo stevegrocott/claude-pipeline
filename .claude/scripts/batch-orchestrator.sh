@@ -227,7 +227,16 @@ release_lock() {
     fi
 }
 
-trap release_lock EXIT
+# cleanup — kill the active per-issue orchestrator process group (if any) and
+# release the lock file.  Called from both the TERM and EXIT traps so that a
+# single signal to the batch always terminates the full orchestrator subtree.
+cleanup() {
+    [[ -n "$ACTIVE_ORCH_PGID" ]] && kill -- -"$ACTIVE_ORCH_PGID" 2>/dev/null
+    release_lock
+}
+
+trap 'cleanup; exit 143' TERM
+trap cleanup EXIT
 acquire_lock
 
 # =============================================================================
