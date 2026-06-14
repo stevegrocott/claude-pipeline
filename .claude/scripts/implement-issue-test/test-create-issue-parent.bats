@@ -251,3 +251,75 @@ MOCK
 
     [[ "$output" == "99" ]]
 }
+
+# =============================================================================
+# Defensive guards (issue_num and URL prefix) — unreachable via normal gh
+# output but tested here via a sed-patched copy with URL validation stripped.
+# =============================================================================
+
+@test "issue_num non-numeric guard: emits WARNING and skips sub-issue POST" {
+    # The outer URL regex (^https://github.com/.+/issues/[0-9]+$) normally
+    # prevents a non-numeric issue_num. Strip that block to reach the guard.
+    local scripts_dir="$TEST_TMP/scripts/platform"
+    local config_dir="$TEST_TMP/config"
+    mkdir -p "$scripts_dir" "$config_dir"
+    printf '%s\n' 'TRACKER="${TRACKER:-github}"' > "$config_dir/platform.sh"
+    sed '/=~ ^https:\/\/github/{ N; N; d; }' \
+        "$CREATE_ISSUE_SH" > "$scripts_dir/create-issue.sh"
+    chmod +x "$scripts_dir/create-issue.sh"
+
+    cat > "$TEST_TMP/bin/gh" << 'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${GH_CALLS:-/dev/null}"
+case "$1" in
+    issue) [[ "$2" == "create" ]] && echo "https://github.com/test/issues/abc" ;;
+    api)
+        printf '%s\n' "$*" >> "${GH_API_ARGS:-/dev/null}"
+        echo "12345"
+        ;;
+esac
+exit 0
+MOCK
+    chmod +x "$TEST_TMP/bin/gh"
+
+    run --separate-stderr bash "$scripts_dir/create-issue.sh" \
+        --title "Test" --body "body" --parent "42"
+
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"WARNING"*"not numeric"* ]]
+    [ ! -f "$GH_API_ARGS" ] || ! grep -q 'sub_issues' "$GH_API_ARGS"
+}
+
+@test "issue_url prefix guard: emits WARNING and skips sub-issue POST" {
+    local scripts_dir="$TEST_TMP/scripts/platform"
+    local config_dir="$TEST_TMP/config"
+    mkdir -p "$scripts_dir" "$config_dir"
+    printf '%s\n' 'TRACKER="${TRACKER:-github}"' > "$config_dir/platform.sh"
+    sed '/=~ ^https:\/\/github/{ N; N; d; }' \
+        "$CREATE_ISSUE_SH" > "$scripts_dir/create-issue.sh"
+    chmod +x "$scripts_dir/create-issue.sh"
+
+    cat > "$TEST_TMP/bin/gh" << 'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${GH_CALLS:-/dev/null}"
+case "$1" in
+    issue)
+        [[ "$2" == "create" ]] && \
+            echo "https://notgithub.com/test/issues/99"
+        ;;
+    api)
+        printf '%s\n' "$*" >> "${GH_API_ARGS:-/dev/null}"
+        echo "12345"
+        ;;
+esac
+exit 0
+MOCK
+    chmod +x "$TEST_TMP/bin/gh"
+
+    run --separate-stderr bash "$scripts_dir/create-issue.sh" \
+        --title "Test" --body "body" --parent "42"
+
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"WARNING"*"github.com"* ]]
+    [ ! -f "$GH_API_ARGS" ] || ! grep -q 'sub_issues' "$GH_API_ARGS"
+}

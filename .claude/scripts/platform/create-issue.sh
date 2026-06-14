@@ -35,6 +35,13 @@ case "$TRACKER" in
       if [[ ! "$parent_num" =~ ^[0-9]+$ ]]; then
         printf 'WARNING: --parent %s is not numeric; skipping sub-issue link\n' \
           "$PARENT" >&2
+      elif [[ ! "$issue_num" =~ ^[0-9]+$ ]]; then
+        printf 'WARNING: issue_num %s is not numeric; skipping link\n' \
+          "$issue_num" >&2
+      elif [[ "$issue_url" != https://github.com/* ]]; then
+        printf \
+          'WARNING: issue_url %s lacks github.com/ prefix; skipping link\n' \
+          "$issue_url" >&2
       else
         repo_part="${issue_url#https://github.com/}"
         repo="${repo_part%/issues/*}"
