@@ -4325,6 +4325,20 @@ execute_batch_parallel() {
 			continue
 		fi
 
+		# Silent no-op guard: a subagent can self-report
+		# {"status":"success"} yet commit nothing to its worktree. Merging an
+		# empty branch is a git no-op ("Already up to date", rc 0), so without
+		# this check the task is counted "completed" and the issue sails to a
+		# false-green PR with the intended changes never landed. Treat an empty
+		# worktree branch as a failed task so it surfaces in the task summary.
+		if [[ -z "$(git rev-list "${feature_branch}..${wb}" 2>/dev/null)" ]]; then
+			log_error "Task $tid reported success but produced no commits" \
+				"— marking failed (silent no-op guard)"
+			failed+=("$tid")
+			cleanup_worktree "$wp" "$wb"
+			continue
+		fi
+
 		# Attempt merge
 		if merge_worktree_branch \
 			"$feature_branch" "$wb" "$tid"; then
@@ -7048,23 +7062,29 @@ $impl_summary" "$tagent"
             "$branch_scope" "$max_task_size" "$pipeline_profile"
 
         # ---------------------------------------------------------------------
-        # NON-BLOCKING FULL-SCOPE CHECK (informational only)
-        # After PR tests pass, run jest --changedSince once to surface any
-        # pre-existing failures pulled in by the dependency graph.  This does
-        # NOT block the pipeline — failures are posted as an informational
-        # issue comment so maintainers are aware.
+        # NON-BLOCKING FULL-SUITE CHECK (informational + degraded-stage signal)
+        # The smart-targeted test_loop only runs tests related to the changed
+        # files, so a suite broken without a related change — e.g. a task that
+        # should have fixed it but produced nothing (see #468) — can pass the
+        # loop yet leave `npm test` red. Run the FULL suite ($TEST_UNIT_CMD)
+        # once here to surface that; --changedSince shares the same dependency-
+        # graph blind spot and would miss it. Kept NON-BLOCKING because the base
+        # branch itself may legitimately be red; failures are posted as a comment
+        # AND recorded in DEGRADED_STAGES so they show up in the pipeline summary
+        # instead of being silently reported green.
         # ---------------------------------------------------------------------
         if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" || "$branch_scope" == "ts-frontend" ]]; then
-            log "Running informational full-scope check (non-blocking)..."
+            log "Running informational full-suite check (non-blocking)..."
             local full_scope_output full_scope_rc
-            full_scope_output=$(cd "." && npx jest --passWithNoTests --changedSince="$BASE_BRANCH" 2>&1) || true
+            full_scope_output=$(cd "." && eval "${TEST_UNIT_CMD:-npm test}" 2>&1) || true
             full_scope_rc=$?
 
             if (( full_scope_rc != 0 )); then
                 local full_scope_failures
                 full_scope_failures=$(printf '%s' "$full_scope_output" | tail -40)
-                comment_issue "Full-Scope Check: Pre-existing Failures (informational)" \
-                    "ℹ️ A full \`jest --changedSince=$BASE_BRANCH\` run found additional failures outside the PR-changed test files. These are **pre-existing** and do **not** block this pipeline.
+                DEGRADED_STAGES+=("test:full_suite_red")
+                comment_issue "Full-Suite Check: test suite is RED (non-blocking)" \
+                    "⚠️ The full \`${TEST_UNIT_CMD:-npm test}\` run failed on this branch. The smart-targeted test loop only runs tests related to the changed files, so these failures were not caught there. They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
 
 <details>
 <summary>Failure details (last 40 lines)</summary>
@@ -7073,9 +7093,9 @@ $impl_summary" "$tagent"
 $full_scope_failures
 \`\`\`
 </details>" "default"
-                log "INFO: Full-scope check found pre-existing failures (non-blocking)"
+                log "WARN: Full-suite check found failures (non-blocking, recorded as degraded)"
             else
-                log "Full-scope check passed — no additional failures"
+                log "Full-suite check passed — $TEST_UNIT_CMD is green on this branch"
             fi
         fi
 

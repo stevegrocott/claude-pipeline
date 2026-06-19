@@ -864,6 +864,68 @@ _setup_parallel_stage_mocks() {
 	git branch -D wt-task-11 2>/dev/null || true
 }
 
+@test "execute_batch_parallel: success-reported task with no commit lands in failed (no-op guard)" {
+	cd "$TEST_TMP/repo" || exit 1
+	# Clean slate: drop any residue from a prior run so the result is deterministic.
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/noop-guard 2>/dev/null || true
+	git branch -D wt-task-20 2>/dev/null || true
+	git checkout -q -b feature/noop-guard main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'base\n' > base.ts
+	git add base.ts
+	git commit -q -m "add base"
+
+	# A subagent that claims success but commits NOTHING to its worktree.
+	# Without the no-op guard the empty branch merges as "Already up to date"
+	# and the task is wrongly counted completed.
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		# Intentionally no git commit — branch stays at the feature base.
+		printf '{"status":"success","review_attempts":1,"commit":"none","summary":"claimed done but changed nothing"}' \
+			> "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":20,"description":"Should change something","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/noop-guard" "main" \
+		2>/dev/null) || true
+
+	local failed_count completed_count
+	failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+
+	# Clean up BEFORE asserting so the assertions are the test's last commands
+	# (bats only fails a test on its final command's exit code — trailing
+	# cleanup would otherwise mask an assertion failure).
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/noop-guard 2>/dev/null || true
+	git branch -D wt-task-20 2>/dev/null || true
+
+	# The no-op task must be classified failed, NOT completed.
+	[[ "$failed_count" -eq 1 ]]
+	[[ "$completed_count" -eq 0 ]]
+}
+
 @test "conflicted tasks from parallel can be re-run serially with same outcome" {
 	cd "$TEST_TMP/repo" || exit 1
 	git checkout -q -b feature/conf-retry main
