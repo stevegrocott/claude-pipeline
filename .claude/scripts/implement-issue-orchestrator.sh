@@ -4225,7 +4225,21 @@ guard_commit_path_allowlist() {
 			*.sh | *.bats | *.py | *.go | *.rb | *.java | *.rs)
 				continue ;;
 			*.c | *.cpp | *.h | *.hpp) continue ;;
-			*) bad+=("$path") ;;
+			*)
+				if [[ -n "${EXTRA_COMMIT_PATHS:-}" ]]; then
+					local -a _extra
+					local ep
+					IFS='|' read -ra _extra \
+						<<< "$EXTRA_COMMIT_PATHS"
+					for ep in "${_extra[@]}"; do
+						[[ -n "$ep" ]] || continue
+						# shellcheck disable=SC2254
+						case "$path" in
+							$ep) continue 2 ;;
+						esac
+					done
+				fi
+				bad+=("$path") ;;
 		esac
 	done < <(
 		git -C "$git_dir" show --name-only --pretty=format: \
