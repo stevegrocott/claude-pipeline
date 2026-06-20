@@ -99,6 +99,8 @@ _post_commit_path_allowlist_check() {
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
 		case "$path" in
+			# Hard denylist — not overridable by EXTRA_COMMIT_PATHS.
+			.github/workflows/**) bad+=("$path") ;;
 			tests/*) continue ;;
 			prisma/**) continue ;;
 			docker-compose*.yml) continue ;;
@@ -351,6 +353,40 @@ _orchestrator_guard_function_name() {
 	}
 }
 
+@test "(4f) reference allowlist: accepts package.json and lock file when EXTRA_COMMIT_PATHS opts them in" {
+	local repo
+	repo="$(_make_repo guard-pkg-json)"
+
+	printf '{"name":"app","version":"1.0.0"}\n' \
+		> "$repo/package.json"
+	printf '# auto-generated lockfile\n' \
+		> "$repo/package-lock.json"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "feat: install sanitize-html"
+
+	# Rejected when EXTRA_COMMIT_PATHS is unset.
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -ne 0 ] \
+		|| fail "expected rejection without EXTRA_COMMIT_PATHS"
+	[[ "$output" == *"package.json"* \
+		|| "$output" == *"package-lock.json"* ]] || {
+		printf \
+			'FAIL: expected error to name package.json/lock, got:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+
+	# Accepted when EXTRA_COMMIT_PATHS opts them in.
+	EXTRA_COMMIT_PATHS="package.json|package-lock.json"
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf \
+			'FAIL: expected acceptance with package.json in EXTRA_COMMIT_PATHS:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
 @test "(5a) reference allowlist check rejects a commit that includes .github/workflows/ paths" {
 	local repo
 	repo="$(_make_repo guard-github-workflows)"
@@ -367,6 +403,31 @@ _orchestrator_guard_function_name() {
 		|| fail "allowlist check accepted a .github/workflows/ commit"
 	[[ "$output" == *".github/workflows/ci.yml"* ]] || {
 		printf 'FAIL: expected error to name .github/workflows/ci.yml, got:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(5b) reference allowlist: .github/workflows/*.yml stays blocked even with EXTRA_COMMIT_PATHS" {
+	local repo
+	repo="$(_make_repo guard-workflows-nodoor)"
+
+	mkdir -p "$repo/.github/workflows"
+	printf \
+		'name: ci\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n' \
+		> "$repo/.github/workflows/ci.yml"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "chore: add workflow"
+
+	# Stays blocked even when EXTRA_COMMIT_PATHS explicitly targets workflows.
+	EXTRA_COMMIT_PATHS=".github/workflows/**"
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -ne 0 ] || {
+		fail ".github/workflows/ must remain blocked regardless of EXTRA_COMMIT_PATHS"
+	}
+	[[ "$output" == *".github/workflows/ci.yml"* ]] || {
+		printf \
+			'FAIL: expected .github/workflows/ci.yml named in error:\n%s\n' \
 			"$output" >&2
 		return 1
 	}
@@ -447,11 +508,11 @@ _orchestrator_guard_function_name() {
 	local repo
 	repo="$(_make_repo guard-extra-multi)"
 
-	mkdir -p "$repo/config" "$repo/.github/workflows"
+	mkdir -p "$repo/config"
 	printf '{"env": "prod"}\n' > "$repo/config/app.json"
-	printf 'name: ci\n' > "$repo/.github/workflows/ci.yml"
+	printf '{"name":"app","version":"1.0.0"}\n' > "$repo/package.json"
 	git -C "$repo" add -A
-	git -C "$repo" commit -q -m "feat: add config and workflow"
+	git -C "$repo" commit -q -m "feat: add config and package manifest"
 
 	# Both paths blocked without EXTRA_COMMIT_PATHS.
 	run _post_commit_path_allowlist_check "$repo"
@@ -459,7 +520,7 @@ _orchestrator_guard_function_name() {
 		|| fail "expected rejection without EXTRA_COMMIT_PATHS"
 
 	# Both paths allowed with pipe-separated patterns.
-	EXTRA_COMMIT_PATHS="config/**|.github/workflows/**"
+	EXTRA_COMMIT_PATHS="config/**|package.json"
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -eq 0 ] || {
 		printf \

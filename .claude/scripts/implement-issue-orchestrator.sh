@@ -4214,6 +4214,8 @@ guard_commit_path_allowlist() {
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
 		case "$path" in
+			# Hard denylist — not overridable by EXTRA_COMMIT_PATHS.
+			.github/workflows/**) bad+=("$path") ;;
 			tests/*) continue ;;
 			prisma/** | */prisma/**) continue ;;
 			docker-compose*.yml) continue ;;
