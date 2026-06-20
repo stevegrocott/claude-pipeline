@@ -55,6 +55,13 @@ FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 # e.g., "migrations/*|db/migrate/*|prisma/migrations/*"
 MIGRATION_PATH_PATTERNS="${MIGRATION_PATH_PATTERNS:-}"
 
+# Extra commit paths — pipe-separated globs of additional files that agents
+# should stage and commit beyond the files a task explicitly modifies (e.g.,
+# generated lockfiles, build manifests, or config snapshots that must travel
+# with the change).  Empty by default so nothing extra is staged.
+# e.g., "package-lock.json|dist/manifest.json|.claude/config/*.lock"
+EXTRA_COMMIT_PATHS="${EXTRA_COMMIT_PATHS:-}"
+
 # Change-aware deploy tiers — _select_deploy_cmd() selects the deploy command
 # based on which files changed in the merged commit (first match wins):
 #
