@@ -7099,6 +7099,30 @@ $full_scope_failures
             fi
         fi
 
+        # ---------------------------------------------------------------------
+        # E2E-UNVALIDATED GUARD: the test loop above is unit-only when
+        # TEST_E2E_CMD is unset. If this branch changed Playwright e2e infra or
+        # specs, NONE of it was executed here — a runtime-only bug (e.g. #481's
+        # `await import()` of a .ts in globalSetup) passes tsc/lint/jest and
+        # merges broken. Surface it loudly (non-blocking) so a human runs
+        # Playwright before trusting the PR.
+        # ---------------------------------------------------------------------
+        if [[ -z "${TEST_E2E_CMD:-}" ]]; then
+            local e2e_changed
+            e2e_changed=$(git diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null \
+                | grep -E '^(tests/e2e/|playwright\.config\.)' || true)
+            if [[ -n "$e2e_changed" ]]; then
+                DEGRADED_STAGES+=("test:e2e_unvalidated")
+                comment_issue "E2E NOT validated by the test loop" \
+                    "⚠️ This branch changes Playwright e2e files, but \`TEST_E2E_CMD\` is unset so the test loop ran **unit tests only** — the e2e specs/infra here were **not executed**. tsc/lint/jest cannot catch runtime-only e2e bugs (e.g. a dynamic import of a \`.ts\` in globalSetup). **Run Playwright manually before trusting this PR.**
+
+\`\`\`
+$e2e_changed
+\`\`\`" "default"
+                log "WARN: e2e files changed but not validated (TEST_E2E_CMD unset) — recorded as degraded"
+            fi
+        fi
+
         set_stage_completed "test_loop"
         log "Test loop complete."
     fi
