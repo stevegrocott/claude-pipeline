@@ -136,20 +136,40 @@ readonly RATE_LIMIT_EXHAUSTION_THRESHOLD="${RATE_LIMIT_EXHAUSTION_THRESHOLD:-180
 # =============================================================================
 # PORTABLE TIMEOUT (macOS does not ship GNU timeout)
 # =============================================================================
+#
+# Prefer the coreutils timeout binary when present — it exits 124 on timeout,
+# matching the GNU contract.  When absent, fall back to the perl implementation
+# below which provides identical exit-124 semantics.
+#
+# Detection order:
+#   1. timeout  — GNU coreutils (standard on Linux, optional on macOS via Homebrew)
+#   2. gtimeout — GNU coreutils installed with g-prefix (common macOS Homebrew config)
+#   3. perl     — portable fallback; exits 124 via SIGALRM handler
+#
+# The named helper _timeout_perl_fallback is always defined so that BATS tests
+# can call it directly to verify exit-124 semantics independent of host binaries.
 
-if ! command -v timeout &>/dev/null; then
-    timeout() {
-        local duration="$1"; shift
-        perl -e '
-            use POSIX ":sys_wait_h";
-            alarm shift @ARGV;
-            $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
-            $pid = fork // die "fork: $!";
-            if ($pid == 0) { exec @ARGV; die "exec: $!" }
-            waitpid($pid, 0);
-            exit ($? >> 8);
-        ' "$duration" "$@"
-    }
+_timeout_perl_fallback() {
+    local duration="$1"; shift
+    perl -e '
+        use POSIX ":sys_wait_h";
+        alarm shift @ARGV;
+        $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
+        $pid = fork // die "fork: $!";
+        if ($pid == 0) { exec @ARGV; die "exec: $!" }
+        waitpid($pid, 0);
+        exit ($? >> 8);
+    ' "$duration" "$@"
+}
+
+if command -v timeout &>/dev/null; then
+    : # coreutils timeout binary available — use it directly (exits 124 on timeout)
+elif command -v gtimeout &>/dev/null; then
+    # GNU coreutils installed as gtimeout (common on macOS via Homebrew)
+    timeout() { gtimeout "$@"; }
+else
+    # No timeout binary — perl fallback with identical exit-124 semantics
+    timeout() { _timeout_perl_fallback "$@"; }
 fi
 
 # =============================================================================
@@ -1689,25 +1709,81 @@ run_stage() {
     local output
     local exit_code=0
 
-    # Capture via a temp FILE, not $(...). The CLI can leave a backgrounded
-    # child (e.g. an MCP server) holding the stdout pipe after it exits; command
-    # substitution then blocks forever waiting for that pipe to close — the
-    # orchestrator "wedge" (no claude child, idle wait). A file redirect returns
-    # as soon as the CLI process exits, regardless of lingering writers; `cat`
-    # then reads the complete result at EOF without blocking.
-    local _stage_raw
-    _stage_raw=$(mktemp)
-    timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
-        ${agent_args[@]+"${agent_args[@]}"} \
-        --model "$model" \
-        ${fallback_args[@]+"${fallback_args[@]}"} \
-        ${turns_args[@]+"${turns_args[@]}"} \
-        --dangerously-skip-permissions \
-        --output-format json \
-        --json-schema "$schema" \
-        > "$_stage_raw" 2>&1 || exit_code=$?
-    output=$(cat "$_stage_raw")
-    rm -f "$_stage_raw"
+    # Capture stage output to a temp file so we can install a
+    # parent-side watchdog that enforces stage_timeout independently
+    # of the inner timeout(1) wrapper.  If the wrapper dies while the
+    # CLI is still running the parent would otherwise block forever on
+    # the command-substitution pipe; the file + background approach
+    # eliminates that stall and lets the watchdog cancel the run.
+    local _stage_out_tmp
+    _stage_out_tmp=$(mktemp 2>/dev/null) \
+        || _stage_out_tmp="${TMPDIR:-/tmp}/stage-out-$$.tmp"
+
+    (
+        trap - TERM
+        timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+            -p "$prompt" \
+            ${agent_args[@]+"${agent_args[@]}"} \
+            --model "$model" \
+            ${fallback_args[@]+"${fallback_args[@]}"} \
+            ${turns_args[@]+"${turns_args[@]}"} \
+            --dangerously-skip-permissions \
+            --output-format json \
+            --json-schema "$schema" \
+            2>&1
+    ) > "$_stage_out_tmp" 3>&- &
+    local _stage_pid=$!
+
+    # Parent-side watchdog: SIGTERM the stage subshell if it outlives
+    # stage_timeout, even if the inner timeout(1) wrapper has already
+    # died without propagating the signal to the CLI.
+    #
+    # Poll in 1s steps instead of one long `sleep $stage_timeout`.  A
+    # single long sleep gets orphaned whenever the parent cancels the
+    # watchdog between spawning it and the sleep being reaped, leaving a
+    # multi-minute process behind; polling means a cancel can strand at
+    # most a sub-second sleep.  The loop also self-terminates the moment
+    # the stage exits (kill -0 fails), so a normal completion leaves
+    # nothing running.
+    #
+    # Redirect all std fds to /dev/null and close fd 3 so neither the
+    # watchdog nor its sleep child inherits run_stage's stdout (the
+    # capture pipe under $(run_stage ...)) or the fd 3 BATS uses to
+    # detect lingering background processes — either would stall the
+    # caller until the watchdog exited.
+    (
+        local _waited=0
+        while (( _waited < stage_timeout )); do
+            kill -0 "$_stage_pid" 2>/dev/null || exit 0
+            sleep 1
+            _waited=$(( _waited + 1 ))
+        done
+        kill "$_stage_pid" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 3>&- &
+    local _stage_watchdog_pid=$!
+
+    # Guard the wait with `|| exit_code=$?` so a non-zero stage status
+    # (e.g. 124 on timeout) is captured rather than tripping errexit in
+    # any caller that runs with `set -e` — without the guard the
+    # function would abort here and never reach the timeout-recovery
+    # path below.  exit_code is pre-initialised to 0 above.
+    wait "$_stage_pid" 2>/dev/null || exit_code=$?
+
+    # Cancel the watchdog; a no-op if it already fired or self-exited.
+    # Because it only ever sleeps in 1s steps, this can strand at most a
+    # sub-second sleep — never a multi-minute one.
+    kill "$_stage_watchdog_pid" 2>/dev/null || true
+    wait "$_stage_watchdog_pid" 2>/dev/null || true
+
+    # The watchdog kills with SIGTERM (exit 143 = 128 + 15); map to
+    # the standard timeout exit code (124) so the handling below
+    # works unchanged.
+    if (( exit_code == 143 )); then
+        exit_code=124
+    fi
+
+    output=$(< "$_stage_out_tmp")
+    rm -f "$_stage_out_tmp"
 
     printf '%s\n' "=== $stage_name output ===" >> "$stage_log"
     printf '%s\n' "$output" >> "$stage_log"
@@ -1774,20 +1850,52 @@ run_stage() {
             "stage_attempt:=2"
 
         exit_code=0
-        # Temp-file capture (see the primary launch above) — avoids the
-        # command-substitution pipe-wedge when the CLI leaves a lingering child.
-        _stage_raw=$(mktemp)
-        timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
-            ${agent_args[@]+"${agent_args[@]}"} \
-            --model "$model" \
-            ${fallback_args[@]+"${fallback_args[@]}"} \
-            ${turns_args[@]+"${turns_args[@]}"} \
-            --dangerously-skip-permissions \
-            --output-format json \
-            --json-schema "$schema" \
-            > "$_stage_raw" 2>&1 || exit_code=$?
-        output=$(cat "$_stage_raw")
-        rm -f "$_stage_raw"
+        local _retry_out_tmp
+        _retry_out_tmp=$(mktemp 2>/dev/null) \
+            || _retry_out_tmp="${TMPDIR:-/tmp}/stage-retry-out-$$.tmp"
+
+        # Use the same background-subshell + temp-file + polling-watchdog
+        # pattern as the initial invocation: if timeout(1) fires but the
+        # CLI ignores SIGTERM, the pipe in a plain $(timeout ...) would
+        # stay open and block run_stage indefinitely.  The watchdog
+        # enforces retry_timeout independently and kills the subshell.
+        (
+            trap - TERM
+            timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+                -p "$prompt" \
+                ${agent_args[@]+"${agent_args[@]}"} \
+                --model "$model" \
+                ${fallback_args[@]+"${fallback_args[@]}"} \
+                ${turns_args[@]+"${turns_args[@]}"} \
+                --dangerously-skip-permissions \
+                --output-format json \
+                --json-schema "$schema" \
+                2>&1
+        ) > "$_retry_out_tmp" 3>&- &
+        local _retry_pid=$!
+
+        (
+            local _waited=0
+            while (( _waited < retry_timeout )); do
+                kill -0 "$_retry_pid" 2>/dev/null || exit 0
+                sleep 1
+                _waited=$(( _waited + 1 ))
+            done
+            kill "$_retry_pid" 2>/dev/null
+        ) </dev/null >/dev/null 2>&1 3>&- &
+        local _retry_watchdog_pid=$!
+
+        wait "$_retry_pid" 2>/dev/null || exit_code=$?
+
+        kill "$_retry_watchdog_pid" 2>/dev/null || true
+        wait "$_retry_watchdog_pid" 2>/dev/null || true
+
+        if (( exit_code == 143 )); then
+            exit_code=124
+        fi
+
+        output=$(< "$_retry_out_tmp")
+        rm -f "$_retry_out_tmp"
 
         printf '%s\n' "$output" >> "$stage_log"
         printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"

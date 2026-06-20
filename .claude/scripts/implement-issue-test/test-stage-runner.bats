@@ -43,6 +43,29 @@ teardown() {
 }
 
 # =============================================================================
+# PORTABLE TIMEOUT — EXIT-124 SEMANTICS
+#
+# _timeout_perl_fallback is always defined in the orchestrator (regardless of
+# host binaries) so BATS can call it directly to verify that the perl path
+# exits 124 on timeout and passes through command exit codes on success.
+# =============================================================================
+
+@test "perl fallback exits 124 when command times out" {
+    run _timeout_perl_fallback 1 sleep 5
+    [ "$status" -eq 124 ]
+}
+
+@test "perl fallback exits 0 when command completes within timeout" {
+    run _timeout_perl_fallback 5 true
+    [ "$status" -eq 0 ]
+}
+
+@test "perl fallback passes through non-zero exit code on success" {
+    run _timeout_perl_fallback 5 bash -c "exit 42"
+    [ "$status" -eq 42 ]
+}
+
+# =============================================================================
 # SCHEMA VALIDATION
 # =============================================================================
 
@@ -283,7 +306,8 @@ teardown() {
 
     run run_stage "test" "prompt" "test-schema.json"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"timeout"* ]]
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected output to contain 'timeout'; got: $output"
 }
 
 @test "run_stage retries with 20% longer timeout after initial timeout" {
@@ -317,6 +341,69 @@ teardown() {
     expected_retry=$(( first_timeout + first_timeout / 5 ))
     (( second_timeout == expected_retry )) || \
         fail "Expected retry timeout ${expected_retry}s, got ${second_timeout}s"
+}
+
+@test "parent watchdog fires when inner timeout wrapper hangs" {
+    # Simulate an inner timeout(1) wrapper that never exits — the
+    # parent-side watchdog must enforce stage_timeout independently
+    # and return a stage failure.  A FIFO is used to block the first
+    # call without spawning orphan sleep processes; a counter file
+    # ensures the retry path returns 124 immediately (no infinite block).
+    local hang_fifo="$TEST_TMP/hang.fifo"
+    mkfifo "$hang_fifo"
+    local wd_calls_file="$TEST_TMP/wd-calls.txt"
+    export wd_calls_file
+    timeout() {
+        local _n
+        _n=$(wc -l < "$wd_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$wd_calls_file"
+        if (( _n == 0 )); then
+            # First call: block on FIFO until killed by the watchdog
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            # Subsequent calls (retry): simulate timeout immediately
+            return 124
+        fi
+    }
+    export -f timeout
+    export hang_fifo
+
+    # Pass 1s as timeout_override (arg 6) so the test completes quickly
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected output to contain 'timeout'; got: $output"
+}
+
+@test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
+    # Reproduce the original bug: perl alarm() wrapper and claude child are
+    # both dead, leaving a childless subshell that blocks indefinitely.
+    # Because timeout() is a bash function (not a subprocess), the stage
+    # subshell has NO child processes from the moment it starts — it is
+    # childless.  Unlike the "inner timeout wrapper hangs" test (which has
+    # the retry return 124 immediately), here BOTH the initial attempt and
+    # the retry block childlessly, exercising the retry-path watchdog too.
+    # run_stage must return a failure within the wall-limit on both passes.
+    local hang_fifo="$TEST_TMP/childless-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+
+    timeout() {
+        # bash function: no child processes exist — the stage subshell is
+        # childless.  Block on a FIFO with no writer; only the parent
+        # watchdog's SIGTERM can interrupt this read.  No output is emitted
+        # so run_stage cannot recover structured data from either attempt.
+        read -r _ < "$hang_fifo" 2>/dev/null || true
+    }
+    export -f timeout
+
+    # 1s timeout_override keeps wall-time short (~2 s total: 1 s initial +
+    # 1 s retry) while exercising both the initial and retry watchdogs.
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [ "$status" -eq 1 ] \
+        || fail "Expected run_stage to fail (childless subshell wedge); status=$status output=$output"
+    [[ "$output" == *"timeout"* ]] \
+        || fail "Expected 'timeout' in output (childless subshell wedge); got: $output"
 }
 
 # =============================================================================
