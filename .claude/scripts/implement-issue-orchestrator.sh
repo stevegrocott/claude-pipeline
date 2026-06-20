@@ -1689,7 +1689,15 @@ run_stage() {
     local output
     local exit_code=0
 
-    output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+    # Capture via a temp FILE, not $(...). The CLI can leave a backgrounded
+    # child (e.g. an MCP server) holding the stdout pipe after it exits; command
+    # substitution then blocks forever waiting for that pipe to close — the
+    # orchestrator "wedge" (no claude child, idle wait). A file redirect returns
+    # as soon as the CLI process exits, regardless of lingering writers; `cat`
+    # then reads the complete result at EOF without blocking.
+    local _stage_raw
+    _stage_raw=$(mktemp)
+    timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
         ${agent_args[@]+"${agent_args[@]}"} \
         --model "$model" \
         ${fallback_args[@]+"${fallback_args[@]}"} \
@@ -1697,7 +1705,9 @@ run_stage() {
         --dangerously-skip-permissions \
         --output-format json \
         --json-schema "$schema" \
-        2>&1) || exit_code=$?
+        > "$_stage_raw" 2>&1 || exit_code=$?
+    output=$(cat "$_stage_raw")
+    rm -f "$_stage_raw"
 
     printf '%s\n' "=== $stage_name output ===" >> "$stage_log"
     printf '%s\n' "$output" >> "$stage_log"
@@ -1764,7 +1774,10 @@ run_stage() {
             "stage_attempt:=2"
 
         exit_code=0
-        output=$(timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
+        # Temp-file capture (see the primary launch above) — avoids the
+        # command-substitution pipe-wedge when the CLI leaves a lingering child.
+        _stage_raw=$(mktemp)
+        timeout "$retry_timeout" env -u CLAUDECODE "$CLAUDE_CLI" -p "$prompt" \
             ${agent_args[@]+"${agent_args[@]}"} \
             --model "$model" \
             ${fallback_args[@]+"${fallback_args[@]}"} \
@@ -1772,7 +1785,9 @@ run_stage() {
             --dangerously-skip-permissions \
             --output-format json \
             --json-schema "$schema" \
-            2>&1) || exit_code=$?
+            > "$_stage_raw" 2>&1 || exit_code=$?
+        output=$(cat "$_stage_raw")
+        rm -f "$_stage_raw"
 
         printf '%s\n' "$output" >> "$stage_log"
         printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"
@@ -2031,7 +2046,10 @@ for m in re.finditer(r'\[\s*\{', t):
             # the stage log.  Flow control is handled via structured output
             # extraction below, not via this value.
             local _esc_exit_code=0
-            output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+            # Temp-file capture (see run_stage's primary launch) — avoids the
+            # command-substitution pipe-wedge when the CLI leaves a lingering child.
+            local _esc_raw; _esc_raw=$(mktemp)
+            timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
                 -p "$prompt" \
                 ${agent_args[@]+"${agent_args[@]}"} \
                 --model "$_esc_model" \
@@ -2040,7 +2058,8 @@ for m in re.finditer(r'\[\s*\{', t):
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$schema" \
-                2>&1) || _esc_exit_code=$?
+                > "$_esc_raw" 2>&1 || _esc_exit_code=$?
+            output=$(cat "$_esc_raw"); rm -f "$_esc_raw"
 
             result_model="$_esc_model"
             printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
@@ -2106,7 +2125,10 @@ for m in re.finditer(r'\[\s*\{', t):
                 "stage_attempt:=2"
 
             local _retry_exit_code=0
-            output=$(timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+            # Temp-file capture (see run_stage's primary launch) — avoids the
+            # command-substitution pipe-wedge when the CLI leaves a lingering child.
+            local _retry_raw; _retry_raw=$(mktemp)
+            timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
                 -p "$prompt" \
                 ${agent_args[@]+"${agent_args[@]}"} \
                 --model "$model" \
@@ -2115,7 +2137,8 @@ for m in re.finditer(r'\[\s*\{', t):
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$schema" \
-                2>&1) || _retry_exit_code=$?
+                > "$_retry_raw" 2>&1 || _retry_exit_code=$?
+            output=$(cat "$_retry_raw"); rm -f "$_retry_raw"
 
             printf '%s\n' "=== $stage_name retry output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
