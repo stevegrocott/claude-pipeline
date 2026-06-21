@@ -13,6 +13,8 @@
 #   5. Optional checkbox ([ ]) in task line regex is matched (bracket is optional)
 #
 
+bats_require_minimum_version 1.5.0
+
 load 'helpers/test-helper.bash'
 
 setup() {
@@ -26,6 +28,15 @@ setup() {
 	mkdir -p "$LOG_BASE"
 
 	source_orchestrator_functions
+
+	# source_orchestrator_functions() sources the extracted func_file from
+	# TEST_TMP, which causes the embedded SCRIPT_DIR= line to evaluate
+	# BASH_SOURCE[0] as TEST_TMP/orchestrator_functions.bash — pointing
+	# SCRIPT_DIR at TEST_TMP instead of the real .claude/scripts directory.
+	# Restore it so _normalize_agent_name() can resolve agent .md files.
+	# TEST_DIR (from test-helper.bash) is the implement-issue-test directory;
+	# its parent is the real .claude/scripts directory.
+	SCRIPT_DIR="${TEST_DIR}/.."
 }
 
 teardown() {
@@ -167,4 +178,138 @@ teardown() {
 	local ac_count
 	ac_count=$(printf '%s' "$output" | grep -c '## Acceptance Criteria' || true)
 	[ "$ac_count" -eq 1 ]
+}
+
+# =============================================================================
+# Case 9: synthesised task carries a path suffix when body references a file
+# =============================================================================
+
+@test "_build_adj_body: synthesised task has path suffix when body references a file" {
+	local body
+	body=$(printf 'Fix the handler.\n\nSee \`src/handlers/auth.sh\` for context.\n')
+	run _build_adj_body "$body" "Fix auth handler"
+	[ "$status" -eq 0 ] || return 1
+	# Task line must carry the path suffix
+	[[ "$output" == *'— `src/handlers/auth.sh`'* ]] || return 1
+	# Title must also appear in the task description
+	[[ "$output" == *'Fix auth handler'* ]] || return 1
+}
+
+@test "_build_adj_body: synthesised task has no path suffix when body has no file reference" {
+	local body="Just a plain description with no file references."
+	run _build_adj_body "$body" "Add retry logic"
+	[ "$status" -eq 0 ] || return 1
+	# No fabricated path suffix (the em-dash + backtick pattern)
+	[[ "$output" != *'— `'* ]] || return 1
+	# Standard task line is still present
+	[[ "$output" == *'Add retry logic'* ]] || return 1
+}
+
+# =============================================================================
+# Case 10: _infer_agent_from_path extension→agent mapping
+# =============================================================================
+
+@test "_infer_agent_from_path: .sh maps to bash-script-craftsman" {
+	run _infer_agent_from_path "scripts/deploy.sh"
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "bash-script-craftsman" ]
+}
+
+@test "_infer_agent_from_path: .bats maps to bash-script-craftsman" {
+	run _infer_agent_from_path "test/unit/feature.bats"
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "bash-script-craftsman" ]
+}
+
+@test "_infer_agent_from_path: empty path returns default" {
+	run _infer_agent_from_path ""
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "default" ]
+}
+
+@test "_infer_agent_from_path: unknown extension returns default" {
+	run _infer_agent_from_path "readme.pdf"
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "default" ]
+}
+
+@test "_infer_agent_from_path: JS/TS with no FRONTEND_PATH_PATTERNS returns default" {
+	unset FRONTEND_PATH_PATTERNS
+	run _infer_agent_from_path "src/app.ts"
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "default" ]
+}
+
+@test "_infer_agent_from_path: .ts matching FRONTEND_PATH_PATTERNS maps to react-frontend-developer" {
+	export FRONTEND_PATH_PATTERNS="src/components/*|src/pages/*"
+	run _infer_agent_from_path "src/components/Button.tsx"
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "react-frontend-developer" ]
+}
+
+@test "_infer_agent_from_path: .ts not matching FRONTEND_PATH_PATTERNS maps to fastify-backend-developer" {
+	export FRONTEND_PATH_PATTERNS="src/components/*|src/pages/*"
+	run _infer_agent_from_path "src/services/user.ts"
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "fastify-backend-developer" ]
+}
+
+@test "_infer_agent_from_path: unknown extension returns default via case fallback" {
+	run _infer_agent_from_path "some/config.nonexistent"
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "default" ]
+}
+
+@test "_infer_agent_from_path: absent agent .md file falls back to default" {
+	# _normalize_agent_name() checks ${SCRIPT_DIR}/../agents/<name>.md.
+	# Build a mock root: mock_root/scripts (SCRIPT_DIR) + mock_root/agents
+	# (empty — no bash-script-craftsman.md).  With .sh inferring
+	# bash-script-craftsman but no .md present, fallback must be "default".
+	# Use --separate-stderr so that log_warn's diagnostic (stderr) does not
+	# contaminate $output (stdout-only agent name returned by the function).
+	local mock_root
+	mock_root="$TEST_TMP/mock_root"
+	mkdir -p "$mock_root/scripts" "$mock_root/agents"
+	SCRIPT_DIR="$mock_root/scripts"
+	run --separate-stderr _infer_agent_from_path "scripts/deploy.sh"
+	SCRIPT_DIR="${TEST_DIR}/.."
+	[ "$status" -eq 0 ] || return 1
+	[ "$output" = "default" ]
+}
+
+# =============================================================================
+# Case 11: synthesised task uses inferred agent from file path
+# =============================================================================
+
+@test "_build_adj_body: synthesised task uses bash-script-craftsman for .sh file in title" {
+	local body="No tasks here."
+	run _build_adj_body "$body" "Fix deploy.sh script"
+	[ "$status" -eq 0 ] || return 1
+	[[ "$output" == *'`[bash-script-craftsman]`'* ]] || return 1
+}
+
+# =============================================================================
+# Case 12: measurable ACs reference path when file is recoverable
+# =============================================================================
+
+@test "_build_adj_body: synthesised ACs reference file path when file is recoverable" {
+	local body
+	body=$(printf 'Update the handler.\n\nSee \`src/api/handler.sh\`.\n')
+	run _build_adj_body "$body" "Fix handler"
+	[ "$status" -eq 0 ] || return 1
+	[[ "$output" == *'## Acceptance Criteria'* ]] || return 1
+	# ACs must reference the concrete file, not generic boilerplate
+	[[ "$output" == *'src/api/handler.sh'* ]] || return 1
+	# Generic boilerplate must not appear
+	[[ "$output" != *'is implemented'$'\n'* ]] || return 1
+}
+
+@test "_build_adj_body: synthesised ACs are non-generic when no file is recoverable" {
+	local body="A plain description with no file references."
+	run _build_adj_body "$body" "Add logging"
+	[ "$status" -eq 0 ] || return 1
+	[[ "$output" == *'## Acceptance Criteria'* ]] || return 1
+	# Must not contain the exact generic boilerplate from the old synthesis
+	[[ "$output" != *'Add logging is implemented'$'\n'* ]] || return 1
+	[[ "$output" != *'Change is verified by tests'* ]] || return 1
 }
