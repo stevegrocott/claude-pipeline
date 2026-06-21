@@ -388,6 +388,10 @@ $EXTRACTED_DESCRIPTION
 ## Implementation Tasks
 - [ ] `[default]` **(S)** $INFERRED_TASK_DESCRIPTION
 
+## Acceptance Criteria
+- [ ] $INFERRED_TASK_DESCRIPTION is implemented
+- [ ] Change is verified by tests
+
 ## References
 - Parent Issue: #$ISSUE_NUMBER
 - PR/MR: #$PR_NUMBER
@@ -412,6 +416,10 @@ $EXTRACTED_DESCRIPTION
 
 > **Note:** This item was classified as vague and needs further research before implementation.
 > A human or automated explore sweep should flesh out the implementation tasks.
+
+## Acceptance Criteria
+- [ ] $ISSUE_TITLE is implemented
+- [ ] Change is verified by tests
 
 ## References
 - Parent Issue: #$ISSUE_NUMBER
