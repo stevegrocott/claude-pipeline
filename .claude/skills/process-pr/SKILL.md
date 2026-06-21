@@ -372,8 +372,8 @@ Before building either template, extract these two values from the review commen
 
    | File pattern | `$AGENT` |
    |---|---|
-   | `*.sh`, `*.bash` | `bash-script-craftsman` |
-   | `*.bats`, `*.test.*`, `*.spec.*` | `test-engineer` |
+   | `*.sh`, `*.bash`, `*.bats` | `bash-script-craftsman` |
+   | `*.test.*`, `*.spec.*` | `test-engineer` |
    | `.claude/skills/**/*.md` | `default` |
    | `src/routes/**`, `src/api/**` | `api-design-specialist` |
    | Fallback (any other) | `default` |

@@ -3405,6 +3405,66 @@ _normalize_agent_name() {
 }
 
 #
+# Infers an agent name from a file extension or path.
+# Maps common extensions to specialist agents, disambiguating JS/TS
+# frontend vs backend via FRONTEND_PATH_PATTERNS (pipe-separated globs
+# from config/platform.sh, used by _matches_frontend_pattern()).
+#
+# All candidates are validated through _normalize_agent_name(), which
+# falls back to "default" when the inferred agent has no local .md
+# definition — guaranteeing graceful degradation on any consumer project.
+#
+# Arguments:
+#   $1 - file path (empty string → returns "default")
+# Outputs:
+#   Validated agent name on stdout (always a defined agent or "default")
+#
+_infer_agent_from_path() {
+	local file_path="${1:-}"
+	local candidate
+
+	if [[ -z "$file_path" ]]; then
+		printf '%s' "default"
+		return
+	fi
+
+	# Strip the longest prefix up to the last dot to get the extension.
+	local ext="${file_path##*.}"
+
+	case "$ext" in
+		sh|bats|bash)
+			candidate="bash-script-craftsman"
+			;;
+		ts|tsx|js|jsx|mjs|cjs)
+			# Disambiguate frontend vs backend via FRONTEND_PATH_PATTERNS.
+			#   Patterns set + path matches  → frontend specialist
+			#   Patterns set + no match      → backend specialist
+			#   Patterns unset               → ambiguous → default
+			if _matches_frontend_pattern "$file_path"; then
+				candidate="react-frontend-developer"
+			elif [[ -n "${FRONTEND_PATH_PATTERNS:-}" ]]; then
+				candidate="fastify-backend-developer"
+			else
+				candidate="default"
+			fi
+			;;
+		*)
+			candidate="default"
+			;;
+	esac
+
+	# "default" is the terminal fallback — no .md definition exists for it
+	# and passing it through _normalize_agent_name() would emit a spurious
+	# log_warn.  Specialist candidates are validated so they degrade cleanly
+	# on consumer projects that lack a particular agent definition.
+	if [[ "$candidate" == "default" ]]; then
+		printf '%s' "default"
+	else
+		_normalize_agent_name "$candidate"
+	fi
+}
+
+#
 # Parses task lines from a tasks section string into a JSON array.
 #
 # Handles the canonical format plus common malformations:
@@ -3581,14 +3641,43 @@ _build_adj_body() {
 		| awk '/^## Implementation Tasks/{exit} {print}' \
 		| sed 's/[[:space:]]*$//')
 
-	printf '%s\n\n## Implementation Tasks\n\n- [ ] `[default]` **(M)** %s\n' \
-		"$body_prefix" "$adj_title"
+	# Extract file paths from title + body; take the first hit as the
+	# primary path for the task suffix and ACs.  Never fabricate a path —
+	# if nothing is recoverable, emit no suffix.
+	local primary_file=""
+	local file_candidates
+	file_candidates=$(_extract_task_files_from_desc "${adj_title} ${body_prefix}")
+	if [[ -n "$file_candidates" ]]; then
+		primary_file=$(printf '%s' "$file_candidates" | head -1)
+	fi
 
-	# Append a minimal Acceptance Criteria section with stub criteria derived
-	# from the title — but only when the body does not already provide one.
+	# Infer specialist agent from the primary file path; degrade to
+	# "default" when no path is recoverable or the inferred agent has no
+	# local .md definition.
+	local inferred_agent
+	inferred_agent=$(_infer_agent_from_path "$primary_file")
+
+	# Build the task description, appending a path suffix when a file is
+	# recoverable (never fabricate one when nothing is found).
+	local task_desc="**(M)** ${adj_title}"
+	if [[ -n "$primary_file" ]]; then
+		task_desc="${task_desc} — \`${primary_file}\`"
+	fi
+
+	printf '%s\n\n## Implementation Tasks\n\n- [ ] `[%s]` %s\n' \
+		"$body_prefix" "$inferred_agent" "$task_desc"
+
+	# Append measurable Acceptance Criteria — only when the body does not
+	# already provide an AC section.  Criteria reference the concrete
+	# path/change rather than generic boilerplate.
 	if [[ "$body_prefix" != *'## Acceptance Criteria'* ]]; then
-		printf '\n## Acceptance Criteria\n\n- [ ] %s is implemented\n- [ ] Change is verified by tests\n' \
-			"$adj_title"
+		if [[ -n "$primary_file" ]]; then
+			printf '\n## Acceptance Criteria\n\n- [ ] %s is implemented in `%s`\n- [ ] `%s` has test coverage verifying the change\n' \
+				"$adj_title" "$primary_file" "$primary_file"
+		else
+			printf '\n## Acceptance Criteria\n\n- [ ] %s is implemented as described\n- [ ] Implementation is covered by tests\n' \
+				"$adj_title"
+		fi
 	fi
 }
 
