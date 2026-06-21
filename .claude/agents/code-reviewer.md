@@ -100,6 +100,24 @@ If there are no follow-up items, write: `_None._`
 
 > **Rule:** Any issue that does not appear in `## Blocking Issues` MUST appear in `## Follow-up Only`, or be explicitly omitted with a reason. Do NOT mix blocking and non-blocking items in the same section.
 
+## Follow-up Issue Format
+
+When `process-pr` creates issues from your `## Follow-up Only` items, the `## Implementation Tasks` section is **machine-parsed by the implement-issue orchestrator**. Wrong agent names or missing file paths cause tasks to be silently skipped or routed to the wrong specialist.
+
+**Valid pipeline agents — use ONLY these names:**
+
+| Agent | Use for |
+|-------|---------|
+| `[fastify-backend-developer]` | API routes, services, backend logic |
+| `[react-frontend-developer]` | React components, pages, CSS, hooks |
+| `[bash-script-craftsman]` | Shell scripts, CI scripts |
+| `[playwright-test-developer]` | Playwright E2E tests ONLY |
+| `[default]` | Unit tests, config, documentation |
+
+**NEVER write:** `[fullstack-engineer]` (not a pipeline agent — silently demoted to `[default]`), `[test-engineer]` (legacy alias — use `[playwright-test-developer]` for E2E or `[default]` for unit tests).
+
+Your `## Follow-up Only` item format (file and line) maps directly to the `$FILE_PATH` and `$AGENT` in the created issue. The more precise your file reference, the better the auto-created issue will be routed.
+
 <!-- STACK-SPECIFIC: Add technology-specific review checklists below for your project's stack.
 Example checklist format:
 

@@ -373,10 +373,16 @@ Before building either template, extract these two values from the review commen
    | File pattern | `$AGENT` |
    |---|---|
    | `*.sh`, `*.bash`, `*.bats` | `bash-script-craftsman` |
-   | `*.test.*`, `*.spec.*` | `test-engineer` |
-   | `.claude/skills/**/*.md` | `default` |
-   | `src/routes/**`, `src/api/**` | `api-design-specialist` |
+   | `apps/frontend/**`, `src/components/**`, `*.tsx` (non-test) | `react-frontend-developer` |
+   | `apps/backend/**`, `src/routes/**`, `src/services/**`, `src/api/**` | `fastify-backend-developer` |
+   | `*.test.*`, `*.spec.*` (Playwright/E2E) | `playwright-test-developer` |
+   | `*.test.*`, `*.spec.*` (Jest/unit) | `default` |
+   | `.claude/skills/**/*.md`, `.claude/scripts/**` | `default` |
    | Fallback (any other) | `default` |
+
+   **NEVER write these agent names** — they are invalid and will silently downgrade tasks to `[default]`, losing specialist routing:
+   - `[fullstack-engineer]` — not a pipeline agent; split into `[fastify-backend-developer]` (data layer) + `[react-frontend-developer]` (UI layer)
+   - `[test-engineer]` — legacy alias; use `[playwright-test-developer]` for E2E tests, `[default]` for unit tests
 
 3. **Measurable ACs** — replace generic placeholders with specific, observable outcomes:
    - Name the exact function or behaviour: prefer `$FUNCTION_NAME in $FILE_PATH handles $EDGE_CASE` over `$ISSUE_TITLE is implemented`
@@ -402,6 +408,9 @@ For each extracted issue (after deduplication check passes), route by classifica
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
+# Read DEPLOY_VERIFY_CMD so the issue body includes the correct verification command
+DEPLOY_VERIFY_CMD=$(bash -c 'source .claude/config/platform.sh 2>/dev/null; echo "${DEPLOY_VERIFY_CMD:-}"')
+
 "$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
 <!-- pipeline-autocreated -->
 ## Context
@@ -412,6 +421,10 @@ $EXTRACTED_DESCRIPTION
 
 ## Implementation Tasks
 - [ ] `[$AGENT]` **(S)** $INFERRED_TASK_DESCRIPTION — `$FILE_PATH`
+
+## Deploy Verification
+
+**Verification command:** $DEPLOY_VERIFY_CMD
 
 ## Acceptance Criteria
 - [ ] `$FILE_PATH`: $INFERRED_TASK_DESCRIPTION produces the expected behaviour (specify the exact output or observable state change)
@@ -424,6 +437,10 @@ $EXTRACTED_DESCRIPTION
 EOF
 )" --labels "${LABELS}"
 ```
+
+Where `$AGENT` is selected from the agent table above based on what `$FILE_PATH` touches, and `$FILE_PATH` includes the line number from the review comment (e.g. `apps/backend/src/routes/scenarios.ts:L4948`).
+
+If `$DEPLOY_VERIFY_CMD` is empty, omit the `## Deploy Verification` section entirely.
 
 Log each: `Created follow-up issue #XXX: "$TITLE"`
 
