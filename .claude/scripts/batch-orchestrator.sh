@@ -77,6 +77,10 @@ LOCK_FILE="logs/.batch-orchestrator.lock"
 # The batch-level TERM/EXIT cleanup trap uses this to kill the subtree.
 ACTIVE_ORCH_PGID=""
 
+# Skip reason set by validate_issue_for_processing(); read by process_issue()
+# to log and record why an issue was skipped in status.json.
+_SKIP_REASON=""
+
 # Timeouts and limits
 readonly ISSUE_TIMEOUT=10800  # 180 minutes per issue
 readonly MAX_CONSECUTIVE_FAILURES=3
@@ -419,6 +423,7 @@ init_status() {
                 total: $total,
                 completed: $completed,
                 failed: 0,
+                skipped: 0,
                 merge_blocked: 0,
                 pending: ($total - $completed),
                 in_progress: 0
@@ -463,11 +468,19 @@ update_issue_field() {
 }
 
 update_progress() {
-    jq '.progress.completed = ([.issues[] | select(.status == "completed" or .status == "already_done")] | length) |
-        .progress.failed = ([.issues[] | select(.status == "failed" or .status == "skipped")] | length) |
-        .progress.merge_blocked = ([.issues[] | select(.status == "merge_blocked")] | length) |
-        .progress.in_progress = ([.issues[] | select(.status == "in_progress")] | length) |
-        .progress.pending = ([.issues[] | select(.status == "pending")] | length) |
+    jq '.progress.completed =
+            ([.issues[] | select(.status == "completed"
+                or .status == "already_done")] | length) |
+        .progress.failed =
+            ([.issues[] | select(.status == "failed")] | length) |
+        .progress.skipped =
+            ([.issues[] | select(.status == "skipped")] | length) |
+        .progress.merge_blocked =
+            ([.issues[] | select(.status == "merge_blocked")] | length) |
+        .progress.in_progress =
+            ([.issues[] | select(.status == "in_progress")] | length) |
+        .progress.pending =
+            ([.issues[] | select(.status == "pending")] | length) |
         .last_update = (now | todate)' \
         "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
@@ -704,6 +717,103 @@ run_composition_standard() {
 # ISSUE PROCESSING
 # =============================================================================
 
+# validate_issue_for_processing <issue_num>
+#
+# Preflight check: verify the issue has a parseable "## Implementation Tasks"
+# section and no blocking "needs-explore" label before spinning up the
+# implement-issue orchestrator.
+#
+# Returns:
+#   0 — issue is valid (or was enriched inline); proceed with processing
+#   1 — issue must be skipped; sets _SKIP_REASON with a human-readable reason
+#
+# When ENRICH_FOLLOWUPS=true and a skip condition is detected, the function
+# calls /enrich-issue <num> inline instead of returning 1. If enrichment
+# fails, it falls back to returning 1 (skip).
+#
+# A gh failure (network/auth error) is treated as non-fatal: the function
+# returns 0 so the orchestrator's own issue-validation logic acts as the
+# safety net.
+
+validate_issue_for_processing() {
+	local issue_num="$1"
+	_SKIP_REASON=""
+
+	local issue_json
+	issue_json=$(gh issue view "$issue_num" --json body,labels \
+		2>/dev/null) || return 0
+	[[ -z "$issue_json" ]] && return 0
+
+	# -----------------------------------------------------------------
+	# Check 1: blocking needs-explore label
+	# -----------------------------------------------------------------
+	local has_needs_explore
+	has_needs_explore=$(printf '%s' "$issue_json" \
+		| jq -r '[.labels[].name] | any(. == "needs-explore")' \
+		2>/dev/null) || has_needs_explore="false"
+
+	if [[ "$has_needs_explore" == "true" ]]; then
+		if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
+			log "Preflight #$issue_num: needs-explore label" \
+				"— enriching inline"
+			local enrich_out enrich_rc
+			enrich_out=$(dispatch_composition \
+				"/enrich-issue $issue_num" false 2>&1)
+			enrich_rc=$?
+			if (( enrich_rc != 0 )); then
+				log_warn \
+					"Preflight #$issue_num: enrich-issue" \
+					"failed (rc=$enrich_rc) — skipping"
+				[[ -n "$enrich_out" ]] && \
+					log_warn \
+						"Preflight #$issue_num:" \
+						"enrich output: $enrich_out"
+				_SKIP_REASON="needs-explore label (enrich-issue failed)"
+				return 1
+			fi
+			log "Preflight #$issue_num: enriched inline — proceeding"
+			return 0
+		fi
+		_SKIP_REASON="needs-explore label"
+		return 1
+	fi
+
+	# -----------------------------------------------------------------
+	# Check 2: missing or unparseable ## Implementation Tasks section
+	# -----------------------------------------------------------------
+	local body
+	body=$(printf '%s' "$issue_json" \
+		| jq -r '.body // ""' 2>/dev/null) || body=""
+
+	if ! printf '%s' "$body" | grep -q '## Implementation Tasks'; then
+		if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
+			log "Preflight #$issue_num: missing ## Implementation Tasks" \
+				"— enriching inline"
+			local enrich_out enrich_rc
+			enrich_out=$(dispatch_composition \
+				"/enrich-issue $issue_num" false 2>&1)
+			enrich_rc=$?
+			if (( enrich_rc != 0 )); then
+				log_warn \
+					"Preflight #$issue_num: enrich-issue" \
+					"failed (rc=$enrich_rc) — skipping"
+				[[ -n "$enrich_out" ]] && \
+					log_warn \
+						"Preflight #$issue_num:" \
+						"enrich output: $enrich_out"
+				_SKIP_REASON="missing ## Implementation Tasks (enrich-issue failed)"
+				return 1
+			fi
+			log "Preflight #$issue_num: enriched inline — proceeding"
+			return 0
+		fi
+		_SKIP_REASON="missing ## Implementation Tasks"
+		return 1
+	fi
+
+	return 0
+}
+
 process_issue() {
     local issue_num="$1"
     local issue_log="$LOG_BASE/issue-$issue_num.log"
@@ -712,6 +822,26 @@ process_issue() {
     log "Starting issue #$issue_num"
     log "=========================================="
     emit_event "issue_start" "issue_num=$issue_num"
+
+    # ---------------------------------------------------------------
+    # Preflight: validate issue has parseable tasks and no blocking
+    # labels before spinning up the implement-issue orchestrator.
+    # A validation failure is non-fatal (returns 0 to the caller) so
+    # it does NOT increment consecutive_failures or trigger the
+    # circuit breaker. When ENRICH_FOLLOWUPS=true the issue is
+    # enriched inline rather than skipped.
+    # ---------------------------------------------------------------
+    if ! validate_issue_for_processing "$issue_num"; then
+        log_warn \
+            "Skipping issue #$issue_num:" \
+            "${_SKIP_REASON:-preflight validation failed}"
+        update_issue_field "$issue_num" "status" "skipped"
+        update_issue_field \
+            "$issue_num" "error" \
+            "${_SKIP_REASON:-preflight validation failed}"
+        update_progress
+        return 0
+    fi
 
     set_current_issue "$issue_num"
     update_issue_field "$issue_num" "status" "in_progress"
@@ -1259,18 +1389,41 @@ if ((_dv_failed_count > 0)); then
         "$STATUS_FILE" 2>/dev/null)
 fi
 
+# Surface preflight-skipped issues so operators can see which issues
+# were skipped and why (missing tasks or needs-explore label).
+# Skipped issues are non-fatal and excluded from consecutive_failures,
+# but they must be visible in the post-run summary for triage.
+_skipped_count=$(jq \
+    '[.issues[] | select(.status == "skipped")] | length' \
+    "$STATUS_FILE" 2>/dev/null) || _skipped_count=0
+if ((_skipped_count > 0)); then
+    log_warn "=========================================="
+    log_warn "PREFLIGHT SKIPPED: $_skipped_count issue(s)"
+    log_warn "(missing ## Implementation Tasks or needs-explore label)"
+    log_warn "=========================================="
+    while IFS= read -r _skip_entry; do
+        log_warn "  $_skip_entry"
+    done < <(jq -r \
+        '.issues[]
+         | select(.status == "skipped")
+         | "Issue #\(.number): \(.error // "unknown reason")"' \
+        "$STATUS_FILE" 2>/dev/null)
+fi
+
 _batch_outcome=$(jq -r '.state' "$STATUS_FILE" 2>/dev/null)
 [[ -z "$_batch_outcome" || "$_batch_outcome" == "null" ]] && _batch_outcome="failed"
 emit_event "batch_end" "outcome=$_batch_outcome"
 
-# Write summary — include deploy_verify_failed per issue and a
-# deploy_verify_failed count in .progress so consumers can query it.
+# Write summary — include deploy_verify_failed and skipped counts in
+# .progress so consumers can query them without iterating .issues[].
 jq '{
     state: .state,
     base_branch: .base_branch,
     progress: (.progress + {
         deploy_verify_failed:
-            ([.issues[] | select(.deploy_verify_failed == true)] | length)
+            ([.issues[] | select(.deploy_verify_failed == true)] | length),
+        skipped:
+            ([.issues[] | select(.status == "skipped")] | length)
     }),
     issues: [.issues[] | {
         number, status, pr, follow_ups, error, deploy_verify_failed

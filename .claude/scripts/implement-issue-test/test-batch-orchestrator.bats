@@ -772,3 +772,218 @@ _simulate_dv_failed_count() {
 	count=$(printf '%s' "$result" | jq '.deploy_verify_failed')
 	[[ "$count" == "2" ]]
 }
+
+# =============================================================================
+# ISSUE #418 TASK 2: validate_issue_for_processing() preflight
+# =============================================================================
+
+# --- Static analysis: function definition ---
+
+@test "validate_issue_for_processing function is defined in the script" {
+	grep -qE '^validate_issue_for_processing\(\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "validate_issue_for_processing is called inside process_issue" {
+	local body
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'validate_issue_for_processing'* ]]
+}
+
+# --- Static analysis: skip detection conditions ---
+
+@test "validate_issue_for_processing checks for needs-explore label" {
+	local body
+	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'needs-explore'* ]]
+}
+
+@test "validate_issue_for_processing checks for missing Implementation Tasks" {
+	local body
+	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'Implementation Tasks'* ]]
+}
+
+# --- Static analysis: enrich-inline path ---
+
+@test "validate_issue_for_processing enriches inline when ENRICH_FOLLOWUPS is set" {
+	local body
+	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'ENRICH_FOLLOWUPS'* ]]
+	[[ "$body" == *'enrich-issue'* ]]
+}
+
+# --- Static analysis: gh failure safety ---
+
+@test "validate_issue_for_processing gh failure is non-fatal" {
+	# A gh failure (network/auth error) must not cause the function to return
+	# 1 — it must use || return 0 or || true so the orchestrator's own
+	# issue-validation logic remains the safety net.
+	local body
+	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'|| return 0'* ]] || [[ "$body" == *'|| true'* ]]
+}
+
+# --- Static analysis: skipped status set in process_issue ---
+
+@test "process_issue sets status to skipped on preflight failure" {
+	local body
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'"skipped"'* ]]
+}
+
+@test "process_issue logs skip reason on preflight failure" {
+	local body
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'_SKIP_REASON'* ]]
+}
+
+@test "process_issue returns 0 on preflight skip (non-fatal)" {
+	# The skip path inside process_issue must return 0 so that
+	# consecutive_failures is not incremented and the circuit breaker
+	# is not triggered for preflight-skipped issues.
+	local body skip_block
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	skip_block=$(printf '%s\n' "$body" \
+		| awk '/validate_issue_for_processing/,/return 0/' \
+		| head -15)
+	[[ "$skip_block" == *'return 0'* ]]
+}
+
+# --- Static analysis: progress.skipped counter ---
+
+@test "update_progress includes a progress.skipped field" {
+	local body
+	body=$(awk '/^update_progress\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'progress.skipped'* ]]
+}
+
+@test "update_progress does not count skipped under failed" {
+	local body failed_line
+	body=$(awk '/^update_progress\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	failed_line=$(printf '%s\n' "$body" | grep 'progress\.failed')
+	[[ "$failed_line" != *'skipped'* ]]
+}
+
+@test "init_status progress object includes skipped field" {
+	local body
+	body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'skipped'* ]]
+}
+
+@test "summary.json jq filter includes skipped in progress" {
+	# The Write summary section must emit a skipped count so consumers
+	# can query preflight-skipped issues without iterating .issues[].
+	local body
+	body=$(awk '/Write summary/,/log.*Summary written/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'skipped'* ]]
+}
+
+@test "batch post-run section warns about preflight-skipped issues" {
+	# The batch post-run log must surface skipped issues so operators can
+	# see at a glance that issues were skipped and why.
+	grep -qE 'PREFLIGHT SKIPPED|preflight.skipped' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "batch post-run skipped warning tracks count via _skipped_count" {
+	grep -q '_skipped_count' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "batch post-run skipped warning appears after Batch Complete header" {
+	local bc_line sk_line
+	bc_line=$(grep -n 'Batch Complete' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| tail -1 | cut -d: -f1)
+	sk_line=$(grep -n '_skipped_count' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| tail -1 | cut -d: -f1)
+	[[ -n "$bc_line" ]]
+	[[ -n "$sk_line" ]]
+	(( sk_line > bc_line ))
+}
+
+# --- Functional simulation: skipped counted separately from failed ---
+
+_make_skipped_preflight_status_json() {
+	local file="$1"
+	jq -n '{
+		state: "running",
+		progress: {
+			total: 5,
+			completed: 0,
+			failed: 0,
+			skipped: 0,
+			pending: 0,
+			in_progress: 0,
+			merge_blocked: 0
+		},
+		issues: [
+			{number: "1", status: "completed"},
+			{number: "2", status: "skipped"},
+			{number: "3", status: "failed"},
+			{number: "4", status: "skipped"},
+			{number: "5", status: "pending"}
+		],
+		last_update: "2024-01-01T00:00:00Z"
+	}' > "$file"
+}
+
+_simulate_update_progress_v2() {
+	local status_file="$1"
+	jq '.progress.completed =
+			([.issues[] | select(.status == "completed"
+				or .status == "already_done")] | length) |
+		.progress.failed =
+			([.issues[] | select(.status == "failed")] | length) |
+		.progress.skipped =
+			([.issues[] | select(.status == "skipped")] | length) |
+		.progress.merge_blocked =
+			([.issues[] | select(.status == "merge_blocked")] | length) |
+		.progress.in_progress =
+			([.issues[] | select(.status == "in_progress")] | length) |
+		.progress.pending =
+			([.issues[] | select(.status == "pending")] | length)' \
+		"$status_file"
+}
+
+@test "progress simulation v2: skipped issues counted in skipped field" {
+	local status_file="$TEST_TMP/preflight-skipped-status.json"
+	_make_skipped_preflight_status_json "$status_file"
+	local result count
+	result=$(_simulate_update_progress_v2 "$status_file")
+	count=$(printf '%s' "$result" | jq '.progress.skipped')
+	[[ "$count" == "2" ]]
+}
+
+@test "progress simulation v2: skipped issues NOT counted under failed" {
+	local status_file="$TEST_TMP/preflight-skipped-status.json"
+	_make_skipped_preflight_status_json "$status_file"
+	local result count
+	result=$(_simulate_update_progress_v2 "$status_file")
+	count=$(printf '%s' "$result" | jq '.progress.failed')
+	[[ "$count" == "1" ]]
+}
+
+@test "progress simulation v2: final_failed excludes skipped" {
+	# When there are only skipped issues and no true failures,
+	# progress.failed must be 0 so the batch state is 'completed'
+	# not 'completed_with_errors'.
+	local status_file="$TEST_TMP/all-skipped-status.json"
+	jq -n '{
+		state: "running",
+		progress: {total: 3, completed: 0, failed: 0, skipped: 0,
+		           pending: 0, in_progress: 0, merge_blocked: 0},
+		issues: [
+			{number: "1", status: "skipped"},
+			{number: "2", status: "completed"},
+			{number: "3", status: "skipped"}
+		],
+		last_update: "2024-01-01T00:00:00Z"
+	}' > "$status_file"
+	local result final_failed
+	result=$(_simulate_update_progress_v2 "$status_file")
+	final_failed=$(printf '%s' "$result" | jq '.progress.failed')
+	[[ "$final_failed" == "0" ]]
+}
