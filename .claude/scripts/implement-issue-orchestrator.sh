@@ -3583,6 +3583,13 @@ _build_adj_body() {
 
 	printf '%s\n\n## Implementation Tasks\n\n- [ ] `[default]` **(M)** %s\n' \
 		"$body_prefix" "$adj_title"
+
+	# Append a minimal Acceptance Criteria section with stub criteria derived
+	# from the title — but only when the body does not already provide one.
+	if [[ "$body_prefix" != *'## Acceptance Criteria'* ]]; then
+		printf '\n## Acceptance Criteria\n\n- [ ] %s is implemented\n- [ ] Change is verified by tests\n' \
+			"$adj_title"
+	fi
 }
 
 

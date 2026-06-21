@@ -107,3 +107,64 @@ teardown() {
 	section_count=$(printf '%s' "$output" | grep -c '## Implementation Tasks' || true)
 	[ "$section_count" -eq 1 ]
 }
+
+# =============================================================================
+# Case 6: synthesised body gains a stub Acceptance Criteria section
+# =============================================================================
+# NOTE: this bats setup only fails the test on the LAST command's status, so
+# each assertion below is guarded with an explicit `|| return 1` to fail loudly.
+
+@test "_build_adj_body: synthesised body includes Acceptance Criteria section" {
+	local body="Just a description with no tasks section."
+	run _build_adj_body "$body" "Add retry logic"
+	[ "$status" -eq 0 ] || return 1
+	# AC heading is appended
+	[[ "$output" == *'## Acceptance Criteria'* ]] || return 1
+	# At least one stub criterion checkbox is present
+	[[ "$output" == *'- [ ]'* ]] || return 1
+	# Criteria are derived from the title
+	[[ "$output" == *'Add retry logic'* ]] || return 1
+}
+
+@test "_build_adj_body: empty body synthesises both sections with criteria" {
+	run _build_adj_body "" "Create the widget"
+	[ "$status" -eq 0 ] || return 1
+	[[ "$output" == *'## Implementation Tasks'* ]] || return 1
+	[[ "$output" == *'## Acceptance Criteria'* ]] || return 1
+	[[ "$output" == *'Create the widget'* ]] || return 1
+	# Implementation Tasks must come before Acceptance Criteria
+	local tasks_line ac_line
+	tasks_line=$(printf '%s\n' "$output" | grep -n '## Implementation Tasks' | head -1 | cut -d: -f1)
+	ac_line=$(printf '%s\n' "$output" | grep -n '## Acceptance Criteria' | head -1 | cut -d: -f1)
+	[[ -n "$tasks_line" && -n "$ac_line" ]] || return 1
+	[ "$tasks_line" -lt "$ac_line" ]
+}
+
+# =============================================================================
+# Case 7: pass-through (valid task) does NOT gain an Acceptance Criteria stub
+# =============================================================================
+
+@test "_build_adj_body: valid task body is not given a synthesised AC section" {
+	local body
+	body=$(printf 'Fix the bug.\n\n## Implementation Tasks\n\n- [ ] `[default]` **(M)** Patch the handler\n')
+	run _build_adj_body "$body" "Fix the bug"
+	[ "$status" -eq 0 ] || return 1
+	# Body had no AC section and is returned unchanged — none added
+	[[ "$output" != *'## Acceptance Criteria'* ]]
+}
+
+# =============================================================================
+# Case 8: existing Acceptance Criteria section is not duplicated
+# =============================================================================
+
+@test "_build_adj_body: existing AC section is preserved, not duplicated" {
+	local body
+	body=$(printf 'Context.\n\n## Acceptance Criteria\n\n- [ ] Custom criterion\n\n## Implementation Tasks\n\nprose only\n')
+	run _build_adj_body "$body" "Improve the feature"
+	[ "$status" -eq 0 ] || return 1
+	[[ "$output" == *'Custom criterion'* ]] || return 1
+	# Only one Acceptance Criteria heading must exist
+	local ac_count
+	ac_count=$(printf '%s' "$output" | grep -c '## Acceptance Criteria' || true)
+	[ "$ac_count" -eq 1 ]
+}
