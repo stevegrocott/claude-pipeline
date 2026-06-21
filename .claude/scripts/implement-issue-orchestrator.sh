@@ -3701,8 +3701,13 @@ readonly KNOWN_FILE_EXTENSIONS='sh|bats|bash|ts|tsx|js|jsx|mjs|cjs|py|go|rb|rs|j
 _extract_task_files_from_desc() {
 	local desc="$1"
 	local grep_pat
-	grep_pat='`[a-zA-Z0-9_./-]+`'
+	# Backtick tokens: only qualify when they contain '/' (path-like)
+	# or end in a known file extension — bare words are excluded.
+	grep_pat='`[a-zA-Z0-9_.-]*/[a-zA-Z0-9_./-]+`'
+	grep_pat+='|`[a-zA-Z0-9_.-]+\.'"($KNOWN_FILE_EXTENSIONS)"'`'
+	# Bare slash-separated tokens (no backticks required)
 	grep_pat+='|[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+'
+	# Bare extension-bearing names (no backticks required)
 	grep_pat+="|[a-zA-Z0-9_-]+\\.($KNOWN_FILE_EXTENSIONS)"
 	printf '%s' "$desc" \
 		| grep -oE "$grep_pat" \
@@ -3827,7 +3832,7 @@ compute_task_batches() {
 				while IFS= read -r f; do
 					[[ -z "$f" ]] && continue
 					if printf '%s\n' "${batch_used_files[$b]}" \
-						| grep -qxF "$f"; then
+						| grep -qxF -- "$f"; then
 						conflict=1
 						break
 					fi

@@ -127,6 +127,22 @@ teardown() {
 	[[ -z "$output" ]]
 }
 
+@test "_extract_task_files_from_desc: does NOT match plain word in backticks" {
+	# A bare symbol like \`config\` has no slash and no known extension;
+	# it must not be extracted as a file path after the tightening fix.
+	run _extract_task_files_from_desc "Set the \`config\` option to true"
+	[ "$status" -eq 0 ]
+	[[ -z "$output" ]]
+}
+
+@test "_extract_task_files_from_desc: matches backtick token with known extension" {
+	# A backtick token ending in a known extension qualifies as a file
+	# even when it has no directory component.
+	run _extract_task_files_from_desc "Edit \`handler.sh\` directly"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"handler.sh"* ]]
+}
+
 # =============================================================================
 # compute_task_batches
 # =============================================================================
@@ -168,6 +184,26 @@ teardown() {
 	tasks='[
 		{"id":1,"description":"Update src/shared.ts","agent":"default"},
 		{"id":2,"description":"Also update src/shared.ts","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	[ "$b1" -eq 1 ]
+	[ "$b2" -eq 2 ]
+}
+
+@test "compute_task_batches: conflict grep handles leading-hyphen filename" {
+	cd "$TEST_TMP/repo" || exit 1
+	# A backtick-quoted name ending in a known extension and starting with '-'
+	# gets extracted.  Without a '--' end-of-options guard, grep misinterprets
+	# the name as option flags and the conflict is silently missed — both tasks
+	# end up in batch 1.  With '--', grep finds the literal match and puts the
+	# second task in batch 2.
+	local tasks result b1 b2
+	# Use actual backticks (valid JSON); bash single-quotes pass them literally
+	tasks='[
+		{"id":1,"description":"Update `-build.sh`","agent":"default"},
+		{"id":2,"description":"Also update `-build.sh`","agent":"default"}
 	]'
 	result=$(compute_task_batches "$tasks" main)
 	b1=$(printf '%s' "$result" | jq '.[0].batch')
