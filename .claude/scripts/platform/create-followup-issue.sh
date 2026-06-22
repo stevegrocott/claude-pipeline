@@ -3,8 +3,16 @@
 #          --task-description TASK_DESC --file-path FILE_PATH
 #          --pr-number PR_NUM --issue-number ISSUE_NUM --reviewer REVIEWER
 #          [--labels LABELS] [--type precise|vague]
-# Infers $AGENT from $FILE_PATH, deduplicates, builds body template, creates issue.
-# Returns: created issue number on stdout; exits 1 on duplicate found.
+#
+# Delegates body construction (agent inference + fail-closed validation) to the
+# shared generator at ../create-followup-issue.sh — the single source of truth
+# for agent inference and assert_issue_valid — then deduplicates and creates the
+# issue via create-issue.sh (which establishes the parent link through the
+# GitHub sub-issues REST API).
+#
+# Returns: created issue number on stdout.
+# Exits 1 on duplicate found or on a body that fails validation; 3 on a missing
+# required argument or an unknown option.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -22,6 +30,10 @@ while [[ $# -gt 0 ]]; do
     --reviewer)         REVIEWER="$2"; shift 2 ;;
     --labels)           LABELS="$2"; shift 2 ;;
     --type)             TYPE="$2"; shift 2 ;;
+    --) shift; break ;;
+    # Reject mistyped flags loudly instead of swallowing them (and their
+    # value) — a swallowed flag surfaces later as a confusing "required" error.
+    -*) echo "ERROR: unknown option: $1" >&2; exit 3 ;;
     *) shift ;;
   esac
 done
@@ -29,26 +41,6 @@ done
 for required in TITLE DESCRIPTION FILE_PATH PR_NUMBER ISSUE_NUMBER REVIEWER; do
   [[ -z "${!required}" ]] && { echo "ERROR: --$(echo "$required" | tr '[:upper:]' '[:lower:]' | tr '_' '-') is required" >&2; exit 3; }
 done
-
-# Derive $AGENT from $FILE_PATH
-# | File pattern                      | $AGENT                   |
-# |-----------------------------------|--------------------------|
-# | *.sh, *.bash, *.bats              | bash-script-craftsman    |
-# | *.test.*, *.spec.*                | test-engineer            |
-# | .claude/skills/**/*.md            | default                  |
-# | src/routes/**, src/api/**         | api-design-specialist    |
-# | Fallback                          | default                  |
-if [[ "$FILE_PATH" == *.sh || "$FILE_PATH" == *.bash || "$FILE_PATH" == *.bats ]]; then
-  AGENT="bash-script-craftsman"
-elif [[ "$FILE_PATH" == *.test.* || "$FILE_PATH" == *.spec.* ]]; then
-  AGENT="test-engineer"
-elif [[ "$FILE_PATH" == .claude/skills/* && "$FILE_PATH" == *.md ]]; then
-  AGENT="default"
-elif [[ "$FILE_PATH" == src/routes/* || "$FILE_PATH" == src/api/* ]]; then
-  AGENT="api-design-specialist"
-else
-  AGENT="default"
-fi
 
 # Deduplication check — skip if a similar open issue already exists
 TITLE_LOWER=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]')
@@ -61,51 +53,32 @@ if [[ -n "$EXISTING" ]]; then
   exit 1
 fi
 
-# Build body and resolve labels based on type
+# Delegate body construction to the shared generator — the single source of
+# agent inference and the home of assert_issue_valid.  It exits non-zero
+# (printing nothing) when the body fails validation, so a bad body never
+# reaches issue creation.
+GENERATOR="$SCRIPT_DIR/../create-followup-issue.sh"
+GEN_ARGS=(
+  --title "$TITLE"
+  --description "$DESCRIPTION"
+  --file-path "$FILE_PATH"
+  --pr-number "$PR_NUMBER"
+  --issue-number "$ISSUE_NUMBER"
+  --reviewer "$REVIEWER"
+  --type "$TYPE"
+)
+[[ -n "$TASK_DESCRIPTION" ]] && GEN_ARGS+=(--task-description "$TASK_DESCRIPTION")
+
+if ! BODY=$("$GENERATOR" "${GEN_ARGS[@]}"); then
+  echo "ERROR: follow-up body failed validation; issue not created" >&2
+  exit 1
+fi
+
+# Labels are applied at creation time, not in the body — vague items get the
+# needs-explore label so an explore sweep picks them up.
 if [[ "$TYPE" == "vague" ]]; then
-  TASK_LINE="Explore and implement: ${TITLE} — \`${FILE_PATH}\`"
-  BODY="<!-- pipeline-autocreated -->
-## Context
-Created from code review of PR/MR #${PR_NUMBER} (Issue #${ISSUE_NUMBER})
-
-## Description
-${DESCRIPTION}
-
-> **Note:** This item was classified as vague and needs further research before implementation.
-> A human or automated explore sweep should flesh out the implementation tasks.
-
-## Implementation Tasks
-- [ ] \`[${AGENT}]\` **(S)** ${TASK_LINE}
-
-## Acceptance Criteria
-- [ ] The behaviour described in \"${TITLE}\" is observable and testable (to be made precise during the explore phase)
-- [ ] Tests covering the implemented change pass
-
-## References
-- Parent Issue: #${ISSUE_NUMBER}
-- PR/MR: #${PR_NUMBER}
-- Reviewer: @${REVIEWER}"
   FINAL_LABELS="${LABELS:+$LABELS,}needs-explore"
 else
-  TASK_DESC="${TASK_DESCRIPTION:-$TITLE}"
-  BODY="<!-- pipeline-autocreated -->
-## Context
-Created from code review of PR/MR #${PR_NUMBER} (Issue #${ISSUE_NUMBER})
-
-## Description
-${DESCRIPTION}
-
-## Implementation Tasks
-- [ ] \`[${AGENT}]\` **(S)** ${TASK_DESC} — \`${FILE_PATH}\`
-
-## Acceptance Criteria
-- [ ] \`${FILE_PATH}\`: ${TASK_DESC} produces the expected behaviour (specify the exact output or observable state change)
-- [ ] Tests covering the change in \`${FILE_PATH}\` pass
-
-## References
-- Parent Issue: #${ISSUE_NUMBER}
-- PR/MR: #${PR_NUMBER}
-- Reviewer: @${REVIEWER}"
   FINAL_LABELS="$LABELS"
 fi
 

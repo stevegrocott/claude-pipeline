@@ -95,15 +95,16 @@ _issue_body_remap_agent() {
 _issue_body_extract_paths() {
 	local desc="$1"
 	local grep_pat
-	# Backtick paths: qualify only when path-like ('/') or extension-bearing.
+	# Only backtick-quoted tokens are treated as paths.  Bare tokens are
+	# deliberately NOT matched: free-text like "fix input/output handling"
+	# would otherwise be read as the path "input/output", fail validation,
+	# and silently drop a legitimate follow-up.  Real follow-up bodies always
+	# wrap file paths in backticks, so this loses no genuine paths.
+	# Qualify only when path-like ('/') or extension-bearing.
 	# Literal backticks below are markdown delimiters, not substitution.
 	# shellcheck disable=SC2016
 	grep_pat='`[a-zA-Z0-9_.-]*/[a-zA-Z0-9_./-]+`'
 	grep_pat+='|`[a-zA-Z0-9_.-]+\.'"($ISSUE_BODY_KNOWN_EXTS)"'`'
-	# Bare slash-separated tokens (no backticks required).
-	grep_pat+='|[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+'
-	# Bare extension-bearing names (no backticks required).
-	grep_pat+="|[a-zA-Z0-9_-]+\\.($ISSUE_BODY_KNOWN_EXTS)"
 	printf '%s' "$desc" \
 		| grep -oE "$grep_pat" \
 		| sed 's/`//g' \
