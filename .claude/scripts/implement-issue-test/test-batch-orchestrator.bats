@@ -52,7 +52,9 @@ teardown() {
 @test "merge_blocked case arm does NOT set impl_status to error" {
 	# Extract the merge_blocked case arm and assert it sets a non-error status.
 	local arm
-	arm=$(awk '/merge_blocked\)/,/^\s+;;/' "$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null)
+	# Use [[:space:]] instead of \s for POSIX awk compatibility (BSD awk on macOS
+	# does not recognise \s in regex patterns).
+	arm=$(awk '/merge_blocked\)/,/^[[:space:]]+;;/' "$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null)
 	# The arm must not contain impl_status="error"
 	[[ "$arm" != *'impl_status="error"'* ]]
 }
@@ -986,4 +988,108 @@ _simulate_update_progress_v2() {
 	result=$(_simulate_update_progress_v2 "$status_file")
 	final_failed=$(printf '%s' "$result" | jq '.progress.failed')
 	[[ "$final_failed" == "0" ]]
+}
+
+# =============================================================================
+# TASK 4: PR-recovery WARN names the stuck stage (current_stage from status.json)
+# =============================================================================
+
+# --- Static analysis: recovery block reads current_stage ---
+
+@test "recovery block reads .current_stage from issue status file" {
+	# The recovery block must parse current_stage so the WARN is informative.
+	# Extract the recovery comment block and check for current_stage usage.
+	local recovery_block
+	recovery_block=$(awk \
+		'/Recovery: if the orchestrator exited/,/^        fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null | head -25 || true)
+	[[ "$recovery_block" == *'current_stage'* ]]
+}
+
+@test "recovery WARN log_warn message references the stuck stage variable" {
+	# The log_warn call inside the recovery block must name the stage —
+	# either via a stuck_stage variable or by embedding current_stage directly.
+	local recovery_block
+	recovery_block=$(awk \
+		'/Recovery: if the orchestrator exited/,/^        fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null | head -25 || true)
+	# Must contain a log_warn that references stage information
+	[[ "$recovery_block" == *'stuck'* ]] || \
+		[[ "$recovery_block" == *'current_stage'* && \
+		   "$recovery_block" == *'log_warn'* ]]
+}
+
+# --- Functional simulation: stuck stage appears in warn message ---
+
+# Build an issue status JSON that simulates a crash mid-stage with a PR written.
+_simulate_recovery_with_stage() {
+	local crash_state="$1"
+	local pr_num="$2"
+	local current_stage="${3:-unknown}"
+
+	local issue_status="$TEST_TMP/sim-issue-status-staged.json"
+	jq -n \
+		--arg s "$crash_state" \
+		--argjson pr "$pr_num" \
+		--arg cs "$current_stage" \
+		'{state: $s, current_stage: $cs, stages: {pr: {pr_number: $pr}}}' \
+		> "$issue_status"
+
+	sim_recovering=false
+	sim_warn_msg=""
+	sim_impl_status="error"
+	sim_pr_number=""
+
+	local st
+	st=$(jq -r '.state' "$issue_status")
+
+	# The stuck stage is what the new code must parse from current_stage
+	local stuck_stage
+	stuck_stage=$(jq -r '.current_stage // "unknown"' \
+		"$issue_status" 2>/dev/null)
+	[[ -n "$stuck_stage" ]] || stuck_stage="unknown"
+
+	# Recovery block (replicates the post-task-4 implementation)
+	local recovered_pr
+	recovered_pr=$(jq -r '.stages.pr.pr_number // empty' \
+		"$issue_status" 2>/dev/null)
+	if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
+		sim_recovering=true
+		sim_warn_msg="Orchestrator exited with state='$st'"
+		sim_warn_msg+=" (stuck at: $stuck_stage)"
+		sim_warn_msg+=" but PR #$recovered_pr exists — recovering as success"
+		sim_impl_status="success"
+		sim_pr_number="$recovered_pr"
+	fi
+}
+
+@test "recovery simulation: warn names the stuck stage when current_stage is set" {
+	_simulate_recovery_with_stage "error" 99 "merge_pr_timeout"
+	[[ "$sim_recovering" == "true" ]]
+	[[ "$sim_warn_msg" == *"merge_pr_timeout"* ]]
+}
+
+@test "recovery simulation: warn names stuck stage for any error state with PR" {
+	_simulate_recovery_with_stage "interrupted_during_quality" 55 "run_tests"
+	[[ "$sim_recovering" == "true" ]]
+	[[ "$sim_warn_msg" == *"run_tests"* ]]
+}
+
+@test "recovery simulation: warn falls back to 'unknown' when current_stage absent" {
+	# Simulate a status file with no current_stage field
+	local issue_status="$TEST_TMP/sim-no-stage.json"
+	jq -n --argjson pr 77 \
+		'{state: "error", stages: {pr: {pr_number: $pr}}}' \
+		> "$issue_status"
+
+	local stuck_stage
+	stuck_stage=$(jq -r '.current_stage // "unknown"' \
+		"$issue_status" 2>/dev/null)
+	[[ "$stuck_stage" == "unknown" ]]
+}
+
+@test "recovery simulation: still recovers as success when current_stage is set" {
+	_simulate_recovery_with_stage "error" 42 "merge_pr_timeout"
+	[[ "$sim_impl_status" == "success" ]]
+	[[ "$sim_pr_number" == "42" ]]
 }

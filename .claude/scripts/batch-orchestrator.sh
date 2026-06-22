@@ -974,10 +974,14 @@ process_issue() {
         # treat it as recoverable success. Handles the case where the script is
         # killed or crashes after PR creation but before set_final_state("completed").
         if [[ "$impl_status" == "error" ]]; then
-            local recovered_pr
+            local recovered_pr stuck_stage
             recovered_pr=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
+            # Name the stage the orchestrator was on when it exited so a masked
+            # hang is visibly diagnosed instead of silently absorbed.
+            stuck_stage=$(jq -r '.current_stage // "unknown"' "$issue_status_file" 2>/dev/null)
+            [[ -n "$stuck_stage" ]] || stuck_stage="unknown"
             if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
-                log_warn "Orchestrator exited with state='$state' but PR #$recovered_pr exists — recovering as success"
+                log_warn "Orchestrator exited with state='$state' (stuck at: $stuck_stage) but PR #$recovered_pr exists — recovering as success"
                 impl_status="success"
                 pr_number="$recovered_pr"
                 impl_error=""
