@@ -63,6 +63,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 source "$SCRIPT_DIR/../config/platform.sh"
+source "$SCRIPT_DIR/issue-body-lib.sh"
 # claude-usage.sh provides is_model_exhausted / model_reset_at for the
 # pre-flight log line. Sourcing is no-op when CLAUDE_USAGE_SESSION_KEY is
 # unset (graceful fallback — see claude-usage.sh).
@@ -809,6 +810,18 @@ validate_issue_for_processing() {
 		fi
 		_SKIP_REASON="missing ## Implementation Tasks"
 		return 1
+	fi
+
+	# -----------------------------------------------------------------
+	# Check 3: structural validation for pipeline-autocreated bodies.
+	# Non-pipeline issues are not subject to assert_issue_valid — they
+	# may lack Acceptance Criteria or use prose task formats.
+	# -----------------------------------------------------------------
+	if printf '%s' "$body" | grep -q '<!-- pipeline-autocreated -->'; then
+		if ! assert_issue_valid "$body" 2>/dev/null; then
+			_SKIP_REASON="pipeline-autocreated body failed structural validation"
+			return 1
+		fi
 	fi
 
 	return 0

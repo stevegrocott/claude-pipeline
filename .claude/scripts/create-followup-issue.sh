@@ -45,73 +45,7 @@ die() {
 	exit 3
 }
 
-# Mirrors implement-issue-orchestrator.sh:_infer_agent_from_path (L3422).
-# Maps common file extensions to specialist agents; validates the candidate
-# against ISSUE_BODY_AGENTS_DIR and degrades to "default" when no .md
-# definition exists — guaranteeing graceful degradation on any consumer project.
-#
-# Arguments:
-#   $1 - file path (empty string → returns "default")
-# Outputs:
-#   Validated agent name on stdout (always a defined agent or "default")
-_infer_agent_from_path() {
-	local file_path="${1:-}"
-
-	if [[ -z "$file_path" ]]; then
-		printf '%s' "default"
-		return
-	fi
-
-	local ext="${file_path##*.}"
-	local candidate
-
-	case "$ext" in
-		sh|bats|bash)
-			candidate="bash-script-craftsman"
-			;;
-		ts|tsx|js|jsx|mjs|cjs)
-			# Disambiguate frontend vs backend via FRONTEND_PATH_PATTERNS
-			# (pipe-separated globs from platform.sh).
-			#   Patterns set + path matches → react-frontend-developer
-			#   Patterns set + no match     → fastify-backend-developer
-			#   Patterns unset              → ambiguous → default
-			if [[ -n "${FRONTEND_PATH_PATTERNS:-}" ]]; then
-				local pattern
-				local IFS='|'
-				for pattern in ${FRONTEND_PATH_PATTERNS}; do
-					# shellcheck disable=SC2254
-					case "$file_path" in
-						$pattern)
-							candidate="react-frontend-developer"
-							break
-							;;
-					esac
-				done
-				candidate="${candidate:-fastify-backend-developer}"
-			else
-				candidate="default"
-			fi
-			;;
-		*)
-			candidate="default"
-			;;
-	esac
-
-	# "default" is always valid — no .md definition required.
-	if [[ "$candidate" == "default" ]]; then
-		printf '%s' "default"
-		return
-	fi
-
-	# Degrade to "default" when the inferred agent has no local .md definition.
-	local agents_dir
-	agents_dir="${ISSUE_BODY_AGENTS_DIR:-$(_issue_body_lib_dir)/../agents}"
-	if [[ ! -f "${agents_dir}/${candidate}.md" ]]; then
-		candidate="default"
-	fi
-
-	printf '%s' "$candidate"
-}
+# _infer_agent_from_path is provided by issue-body-lib.sh (sourced above).
 
 # Appends the ## References block to the body being assembled.
 # Writes to stdout.
@@ -182,11 +116,13 @@ while [[ $# -gt 0 ]]; do
 			shift 2
 			;;
 		--labels)
-			# Accepted for CLI parity with the platform creator, but
-			# labels are applied at issue-creation time — never in the
-			# body — so this body generator deliberately ignores it.
+			# Labels are applied at issue-creation time — never in the body.
+			# Accepted here for CLI parity with the platform creator.
 			# shellcheck disable=SC2034
 			labels="$2"
+			printf '%s: note: --labels is not embedded in the body; ' \
+				"$SCRIPT_NAME" >&2
+			printf 'pass --labels to create-issue.sh at issue-creation time\n' >&2
 			shift 2
 			;;
 		--type)
@@ -213,6 +149,11 @@ done
 [[ -n "$pr_number" ]]    || die "--pr-number is required"
 [[ -n "$issue_number" ]] || die "--issue-number is required"
 [[ -n "$reviewer" ]]     || die "--reviewer is required"
+
+case "$type" in
+	precise|vague) ;;
+	*) die "--type must be 'precise' or 'vague' (got: ${type})" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Agent inference

@@ -345,8 +345,7 @@ Examples:
 For each extracted issue, invoke `create-followup-issue.sh` — it handles deduplication, `$AGENT` inference from `$FILE_PATH`, body templating, and issue creation:
 
 ```bash
-PLATFORM_DIR=".claude/scripts/platform"
-"$PLATFORM_DIR/create-followup-issue.sh" \
+".claude/scripts/create-followup-issue.sh" \
   --title "$ISSUE_TITLE" \
   --description "$EXTRACTED_DESCRIPTION" \
   --task-description "$INFERRED_TASK_DESCRIPTION" \

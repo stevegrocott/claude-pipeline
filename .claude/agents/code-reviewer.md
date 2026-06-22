@@ -100,7 +100,7 @@ If there are no follow-up items, write: `_None._`
 
 > **Rule:** Any issue that does not appear in `## Blocking Issues` MUST appear in `## Follow-up Only`, or be explicitly omitted with a reason. Do NOT mix blocking and non-blocking items in the same section.
 
-> **Issue creation:** `process-pr` converts each item here into a follow-up issue via `.claude/scripts/platform/create-followup-issue.sh`, which infers the correct specialist agent from the file path. Always include a file path reference (`File:Line`) so agent inference works.
+> **Issue creation:** `process-pr` converts each item here into a follow-up issue via `.claude/scripts/create-followup-issue.sh`, which infers the correct specialist agent from the file path. Always include a file path reference (`File:Line`) so agent inference works.
 
 <!-- STACK-SPECIFIC: Add technology-specific review checklists below for your project's stack.
 Example checklist format:

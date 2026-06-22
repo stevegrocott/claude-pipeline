@@ -50,6 +50,75 @@ _issue_body_lib_dir() {
 }
 
 #
+# Maps a file path to the specialist agent best suited for that file type.
+# Validates the candidate against ISSUE_BODY_AGENTS_DIR and degrades to
+# "default" when no .md definition exists.
+#
+# Arguments:
+#   $1 - file path (empty string → returns "default")
+# Outputs:
+#   Validated agent name on stdout (always a defined agent or "default")
+#
+_infer_agent_from_path() {
+	local file_path="${1:-}"
+
+	if [[ -z "$file_path" ]]; then
+		printf '%s' "default"
+		return
+	fi
+
+	local ext="${file_path##*.}"
+	local candidate
+
+	case "$ext" in
+		sh|bats|bash)
+			candidate="bash-script-craftsman"
+			;;
+		ts|tsx|js|jsx|mjs|cjs)
+			# Disambiguate frontend vs backend via FRONTEND_PATH_PATTERNS
+			# (pipe-separated globs from platform.sh).
+			#   Patterns set + path matches → react-frontend-developer
+			#   Patterns set + no match     → fastify-backend-developer
+			#   Patterns unset              → ambiguous → default
+			if [[ -n "${FRONTEND_PATH_PATTERNS:-}" ]]; then
+				local pattern
+				local IFS='|'
+				for pattern in ${FRONTEND_PATH_PATTERNS}; do
+					# shellcheck disable=SC2254
+					case "$file_path" in
+						$pattern)
+							candidate="react-frontend-developer"
+							break
+							;;
+					esac
+				done
+				candidate="${candidate:-fastify-backend-developer}"
+			else
+				candidate="default"
+			fi
+			;;
+		*)
+			candidate="default"
+			;;
+	esac
+
+	# "default" is always valid — no .md definition required.
+	if [[ "$candidate" == "default" ]]; then
+		printf '%s' "default"
+		return
+	fi
+
+	# Degrade to "default" when the inferred agent has no local .md definition.
+	local agents_dir
+	agents_dir="${ISSUE_BODY_AGENTS_DIR:-$(_issue_body_lib_dir)/../agents}"
+	if [[ ! -f "${agents_dir}/${candidate}.md" ]]; then
+		candidate="default"
+	fi
+
+	printf '%s' "$candidate"
+}
+
+#
 # Prints the known agent names — one per line, sorted-unique — derived from
 # the .claude/agents/*.md definitions.
 #
