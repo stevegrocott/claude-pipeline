@@ -382,3 +382,74 @@ _call_vague() {
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"## Deploy Verification"* ]]
 }
+
+# =============================================================================
+# 13. Platform delegation wiring — FRONTEND_PATH_PATTERNS routes TS/JS files
+# =============================================================================
+
+@test "platform delegation: ts file + FRONTEND_PATH_PATTERNS set → react-frontend-developer" {
+	# Set a frontend pattern that matches src/components/*.
+	export FRONTEND_PATH_PATTERNS="src/components/*"
+	mkdir -p "${ISSUE_BODY_REPO_ROOT}/src/components"
+
+	run "$GENERATOR" \
+		--title "Fix component" \
+		--description "Fix a React component." \
+		--file-path "src/components/Button.tsx" \
+		--pr-number "7" \
+		--issue-number "20" \
+		--reviewer "carol"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"\`[react-frontend-developer]\`"* ]]
+}
+
+@test "platform delegation: ts file + FRONTEND_PATH_PATTERNS set but non-matching → fastify-backend-developer" {
+	export FRONTEND_PATH_PATTERNS="src/components/*"
+	mkdir -p "${ISSUE_BODY_REPO_ROOT}/src/services"
+
+	run "$GENERATOR" \
+		--title "Fix service" \
+		--description "Fix a backend service." \
+		--file-path "src/services/auth.ts" \
+		--pr-number "7" \
+		--issue-number "20" \
+		--reviewer "carol"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"\`[fastify-backend-developer]\`"* ]]
+}
+
+@test "platform delegation: ts file + FRONTEND_PATH_PATTERNS unset → default" {
+	unset FRONTEND_PATH_PATTERNS
+	mkdir -p "${ISSUE_BODY_REPO_ROOT}/src/services"
+
+	run "$GENERATOR" \
+		--title "Fix service" \
+		--description "Fix something." \
+		--file-path "src/services/auth.ts" \
+		--pr-number "7" \
+		--issue-number "20" \
+		--reviewer "carol"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"\`[default]\`"* ]]
+}
+
+# =============================================================================
+# 14. Unknown option → exit 3 (the -* branch)
+# =============================================================================
+
+@test "unknown option: --bogus-flag → exit 3" {
+	run "$GENERATOR" --bogus-flag "value" \
+		--title "t" --description "d" \
+		--file-path ".claude/scripts/x.sh" \
+		--pr-number "1" --issue-number "2" --reviewer "r"
+	[ "$status" -eq 3 ]
+}
+
+@test "unknown option: error message names the unknown flag" {
+	run "$GENERATOR" --no-such-option \
+		--title "t" --description "d" \
+		--file-path ".claude/scripts/x.sh" \
+		--pr-number "1" --issue-number "2" --reviewer "r"
+	[[ "$output" == *"unknown option"* || "$output" == *"no-such-option"* ]] \
+		|| [[ "$stderr" == *"unknown option"* || "$stderr" == *"no-such-option"* ]]
+}

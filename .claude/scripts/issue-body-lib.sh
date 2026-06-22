@@ -67,7 +67,10 @@ _infer_agent_from_path() {
 		return
 	fi
 
-	local ext="${file_path##*.}"
+	# Strip :line/:function suffix (e.g. "file.sh:330-334" → "file.sh") before
+	# extracting the extension — callers commonly pass File:Line references.
+	local bare_path="${file_path%%:*}"
+	local ext="${bare_path##*.}"
 	local candidate
 
 	case "$ext" in

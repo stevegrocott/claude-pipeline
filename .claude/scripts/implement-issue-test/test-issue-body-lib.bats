@@ -384,6 +384,28 @@ Some prose but no task checkboxes.
 	[ "$line_count" -eq 1 ]
 }
 
+@test "_infer_agent_from_path: strips :line suffix before extension lookup (.sh:330-334 → bash-script-craftsman)" {
+	: > "$ISSUE_BODY_AGENTS_DIR/bash-script-craftsman.md"
+	run _infer_agent_from_path ".claude/scripts/handler.sh:330-334"
+	[ "$status" -eq 0 ]
+	[ "$output" = "bash-script-craftsman" ]
+}
+
+@test "_infer_agent_from_path: strips :function suffix before extension lookup (.sh:my_func → bash-script-craftsman)" {
+	run _infer_agent_from_path ".claude/scripts/deploy.sh:deploy_app"
+	[ "$status" -eq 0 ]
+	[ "$output" = "bash-script-craftsman" ]
+}
+
+@test "_issue_body_extract_paths: backtick-only function name is not treated as path" {
+	# Backtick-quoted names like \`_infer_agent_from_path\` have no slash and
+	# no known extension — they must not be matched as file paths.
+	run _issue_body_extract_paths \
+		"Strip suffix in \`_infer_agent_from_path\` before extension lookup"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
 # =============================================================================
 # _issue_body_parse_tasks()
 # =============================================================================
