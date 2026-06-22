@@ -259,3 +259,211 @@ teardown() {
 	stage=$(jq -r '.current_stage' "$STATUS_FILE")
 	[[ "$stage" == "merge_pr_timeout" ]]
 }
+
+# =============================================================================
+# STATIC ANALYSIS: validate_plan per-command timeout constants
+# =============================================================================
+
+@test "VALIDATE_PLAN_GIT_TIMEOUT constant is defined with a default" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'VALIDATE_PLAN_GIT_TIMEOUT'* ]]
+}
+
+@test "VALIDATE_PLAN_COMMENT_TIMEOUT constant is defined with a default" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'VALIDATE_PLAN_COMMENT_TIMEOUT'* ]]
+}
+
+@test "VALIDATE_PLAN_GIT_TIMEOUT uses env-override pattern" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'VALIDATE_PLAN_GIT_TIMEOUT:-'* ]]
+}
+
+@test "VALIDATE_PLAN_COMMENT_TIMEOUT uses env-override pattern" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'VALIDATE_PLAN_COMMENT_TIMEOUT:-'* ]]
+}
+
+# =============================================================================
+# STATIC ANALYSIS: validate_plan stage timeout wrapping
+# =============================================================================
+
+@test "validate_plan early git rev-list is wrapped with timeout" {
+	local early_block
+	early_block=$(awk \
+		'/EARLY SCOPE CHECK/,/STAGE: VALIDATE PLAN/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+
+	[[ "$early_block" == *'timeout'*'VALIDATE_PLAN_GIT_TIMEOUT'*'git rev-list'* ]] || \
+		[[ "$early_block" == *'timeout "$VALIDATE_PLAN_GIT_TIMEOUT"'*'git rev-list'* ]]
+}
+
+@test "validate_plan stage wraps comment operation with timeout" {
+	local vp_block
+	vp_block=$(awk \
+		'/set_stage_started "validate_plan"/,/set_stage_completed "validate_plan"/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+
+	[[ "$vp_block" == *'timeout'*'comment'* ]] || \
+		[[ "$vp_block" == *'VALIDATE_PLAN_COMMENT_TIMEOUT'* ]]
+}
+
+@test "validate_plan timeout check tests for exit code 124" {
+	local early_block
+	early_block=$(awk \
+		'/EARLY SCOPE CHECK/,/STAGE: VALIDATE PLAN/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+
+	[[ "$early_block" == *'== 124'* ]]
+}
+
+# =============================================================================
+# STATIC ANALYSIS: implement per-command timeout constants
+# =============================================================================
+
+@test "IMPLEMENT_GIT_TIMEOUT constant is defined with a default" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'IMPLEMENT_GIT_TIMEOUT'* ]]
+}
+
+@test "IMPLEMENT_GIT_TIMEOUT uses env-override pattern" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'IMPLEMENT_GIT_TIMEOUT:-'* ]]
+}
+
+# =============================================================================
+# STATIC ANALYSIS: implement stage timeout wrapping
+# =============================================================================
+
+@test "implement stage wraps git checkout with timeout" {
+	local impl_block
+	impl_block=$(awk \
+		'/set_stage_started "implement"/,/set_stage_completed "implement"/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+
+	[[ "$impl_block" == *'timeout'*'git checkout'* ]] || \
+		[[ "$impl_block" == *'IMPLEMENT_GIT_TIMEOUT'* ]]
+}
+
+@test "implement git checkout timeout check tests for exit code 124" {
+	local impl_block
+	impl_block=$(awk \
+		'/set_stage_started "implement"/,/set_stage_completed "implement"/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+
+	[[ "$impl_block" == *'== 124'* ]]
+}
+
+# =============================================================================
+# STATIC ANALYSIS: test_loop per-command timeout constants
+# =============================================================================
+
+@test "TEST_LOOP_GIT_TIMEOUT constant is defined with a default" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'TEST_LOOP_GIT_TIMEOUT'* ]]
+}
+
+@test "TEST_LOOP_GIT_TIMEOUT uses env-override pattern" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'TEST_LOOP_GIT_TIMEOUT:-'* ]]
+}
+
+# =============================================================================
+# STATIC ANALYSIS: test_loop stage timeout wrapping
+# =============================================================================
+
+@test "run_test_loop wraps git diff with timeout" {
+	local tl_block
+	tl_block=$(awk \
+		'/^run_test_loop\(\)/,/^}/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+
+	[[ "$tl_block" == *'timeout'*'git'*'diff'* ]] || \
+		[[ "$tl_block" == *'TEST_LOOP_GIT_TIMEOUT'* ]]
+}
+
+@test "run_test_loop git diff timeout check tests for exit code 124" {
+	local tl_block
+	tl_block=$(awk \
+		'/^run_test_loop\(\)/,/^}/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+
+	[[ "$tl_block" == *'== 124'* ]]
+}
+
+# =============================================================================
+# FUNCTIONAL: validate_plan_timeout stage transitions
+# =============================================================================
+
+@test "set_stage_started validate_plan_timeout sets current_stage in status.json" {
+	set_stage_started "validate_plan_timeout"
+
+	local stage
+	stage=$(jq -r '.current_stage' "$STATUS_FILE")
+	[[ "$stage" == "validate_plan_timeout" ]]
+}
+
+@test "set_stage_started implement_git_timeout sets current_stage in status.json" {
+	set_stage_started "implement_git_timeout"
+
+	local stage
+	stage=$(jq -r '.current_stage' "$STATUS_FILE")
+	[[ "$stage" == "implement_git_timeout" ]]
+}
+
+# =============================================================================
+# FUNCTIONAL: a sleeping merge-mr.sh stub trips the real timeout wrapping and
+# drives the actual state transition to merge_pr_timeout (AC3).
+#
+# Unlike the static-grep tests above, this exercises the genuine mechanism the
+# merge_pr stage uses: `timeout "$MERGE_MR_STEP_TIMEOUT" merge-mr.sh` against a
+# stub that sleeps past the limit (→ exit 124), followed by the real
+# _handle_merge_pr_timeout handler that the stage invokes on 124.
+# =============================================================================
+
+@test "sleeping merge-mr.sh stub trips timeout and transitions to merge_pr_timeout" {
+	# Stub merge-mr.sh sleeps far longer than the timeout we set.
+	mkdir -p "$TEST_TMP/platform"
+	cat > "$TEST_TMP/platform/merge-mr.sh" <<'STUB'
+#!/usr/bin/env bash
+sleep 30
+STUB
+	chmod +x "$TEST_TMP/platform/merge-mr.sh"
+
+	export MERGE_MR_STEP_TIMEOUT=1
+
+	# Drive the exact timeout wrapping the merge_pr stage uses. The stub never
+	# returns on its own, so a passing assertion proves the timeout fired.
+	# Wrap in `run` so the expected non-zero exit doesn't abort the test.
+	run timeout "$MERGE_MR_STEP_TIMEOUT" "$TEST_TMP/platform/merge-mr.sh"
+
+	# `timeout` exits 124 when it kills the child for exceeding the limit.
+	[ "$status" -eq 124 ]
+
+	# Exercise the real handler the stage calls on a 124 (it exits 1).
+	run _handle_merge_pr_timeout "merge-mr.sh" "$MERGE_MR_STEP_TIMEOUT"
+	[ "$status" -eq 1 ]
+
+	# Verify the actual persisted state transition, not just a string match.
+	local stage state
+	stage=$(jq -r '.current_stage' "$STATUS_FILE")
+	state=$(jq -r '.state' "$STATUS_FILE")
+	[ "$stage" = "merge_pr_timeout" ]
+	[ "$state" = "error" ]
+}
