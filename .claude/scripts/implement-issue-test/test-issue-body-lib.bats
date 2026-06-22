@@ -309,3 +309,136 @@ Some prose but no task checkboxes.
 	[[ "$output" == *"bad/dir/file.sh"* ]]
 	[[ "$output" == *"Acceptance Criteria"* ]]
 }
+
+# =============================================================================
+# _issue_body_remap_agent()
+# =============================================================================
+
+@test "_issue_body_remap_agent: test-engineer remaps to playwright-test-developer" {
+	run _issue_body_remap_agent "test-engineer"
+	[ "$status" -eq 0 ]
+	[ "$output" = "playwright-test-developer" ]
+}
+
+@test "_issue_body_remap_agent: bash-script-craftsman passes through unchanged" {
+	run _issue_body_remap_agent "bash-script-craftsman"
+	[ "$status" -eq 0 ]
+	[ "$output" = "bash-script-craftsman" ]
+}
+
+@test "_issue_body_remap_agent: default passes through unchanged" {
+	run _issue_body_remap_agent "default"
+	[ "$status" -eq 0 ]
+	[ "$output" = "default" ]
+}
+
+@test "_issue_body_remap_agent: unknown agent name passes through unchanged" {
+	run _issue_body_remap_agent "some-future-agent"
+	[ "$status" -eq 0 ]
+	[ "$output" = "some-future-agent" ]
+}
+
+# =============================================================================
+# _issue_body_extract_paths()
+# =============================================================================
+
+@test "_issue_body_extract_paths: extracts backtick-quoted path with slash" {
+	run _issue_body_extract_paths "Fix the bug — \`.claude/scripts/handler.sh\`"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *".claude/scripts/handler.sh"* ]]
+}
+
+@test "_issue_body_extract_paths: extracts bare extension-bearing backtick token" {
+	run _issue_body_extract_paths "Update \`config.yaml\` for the service"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"config.yaml"* ]]
+}
+
+@test "_issue_body_extract_paths: does not extract bare text without backticks" {
+	run _issue_body_extract_paths "Fix input/output handling in the pipeline"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "_issue_body_extract_paths: returns empty for desc with no file reference" {
+	run _issue_body_extract_paths "Add retry logic to improve reliability"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "_issue_body_extract_paths: extracts multiple paths from one desc" {
+	run _issue_body_extract_paths \
+		"Update \`.claude/scripts/a.sh\` and \`.claude/scripts/b.sh\`"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *".claude/scripts/a.sh"* ]]
+	[[ "$output" == *".claude/scripts/b.sh"* ]]
+}
+
+@test "_issue_body_extract_paths: output is sorted and unique" {
+	# Same path twice → only one entry in output.
+	run _issue_body_extract_paths \
+		"See \`.claude/scripts/x.sh\` and also \`.claude/scripts/x.sh\`"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c '.' || true)
+	[ "$line_count" -eq 1 ]
+}
+
+# =============================================================================
+# _issue_body_parse_tasks()
+# =============================================================================
+
+@test "_issue_body_parse_tasks: parses canonical task line with checkbox" {
+	local body
+	body="- [ ] \`[bash-script-craftsman]\` **(M)** Build the lib — \`.claude/scripts/x.sh\`"
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+	[[ "$output" == *"Build the lib"* ]]
+}
+
+@test "_issue_body_parse_tasks: skips completed [x] tasks" {
+	local body="- [x] \`[bash-script-craftsman]\` **(M)** Already done"
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "_issue_body_parse_tasks: parses task line without checkbox bracket" {
+	local body="- \`[default]\` **(S)** Some task description"
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"default"* ]]
+	[[ "$output" == *"Some task description"* ]]
+}
+
+@test "_issue_body_parse_tasks: output is tab-separated agent<TAB>description records" {
+	local body
+	body="- [ ] \`[bash-script-craftsman]\` **(M)** Fix the handler — \`.claude/scripts/x.sh\`"
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	# Record must contain a tab separating agent from description.
+	[[ "$output" == *$'\t'* ]]
+}
+
+@test "_issue_body_parse_tasks: parses multiple open task lines" {
+	local body
+	body="- [ ] \`[bash-script-craftsman]\` **(M)** First task"$'\n'"- [ ] \`[code-reviewer]\` **(S)** Second task"
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 2 ]
+}
+
+@test "_issue_body_parse_tasks: empty body yields no output" {
+	run _issue_body_parse_tasks ""
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "_issue_body_parse_tasks: prose-only body yields no output" {
+	run _issue_body_parse_tasks "This is just a description with no task lines."
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}

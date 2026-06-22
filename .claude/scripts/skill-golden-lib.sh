@@ -448,3 +448,36 @@ sg_print_summary() {
 	printf '%s\n' "$(sg_green "PASS")"
 	return 0
 }
+
+# =============================================================================
+# BODY-GENERATOR GOLDEN TESTS — validate deterministic body-generator output
+# (e.g. create-followup-issue.sh) against the structural criteria from
+# issue-body-lib.sh.  Does NOT invoke Claude.
+#
+# Pre-conditions for callers:
+#   1. source issue-body-lib.sh before calling sg_validate_body.
+#   2. Export ISSUE_BODY_AGENTS_DIR, ISSUE_BODY_REPO_ROOT, and optionally
+#      DEPLOY_VERIFY_CMD to configure the validation sandbox.
+# =============================================================================
+
+# sg_validate_body BODY [LABEL]
+#   Calls assert_issue_valid on BODY and prints one PASS/FAIL line.
+#   Errors from assert_issue_valid are captured from stderr and indented
+#   under the FAIL line so the caller's stdout is clean to parse.
+#   Returns 0 when BODY passes all criteria, 1 otherwise.
+sg_validate_body() {
+	local body="$1"
+	local label="${2:-body}"
+	local errors rc=0
+
+	errors=$(assert_issue_valid "$body" 2>&1) || rc=1
+
+	if ((rc == 0)); then
+		printf '  %s %s\n' "$(sg_green "PASS")" "$label"
+	else
+		printf '  %s %s\n' "$(sg_red "FAIL")" "$label"
+		printf '%s\n' "$errors" | sed 's/^/      /'
+	fi
+
+	return "$rc"
+}

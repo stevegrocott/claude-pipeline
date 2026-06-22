@@ -313,3 +313,188 @@ teardown() {
 	[[ "$output" != *'Add logging is implemented'$'\n'* ]] || return 1
 	[[ "$output" != *'Change is verified by tests'* ]] || return 1
 }
+
+# =============================================================================
+# GOLDEN TESTS — run create-followup-issue.sh over canonical fixtures and
+# validate every body end-to-end via skill-golden-lib.sh + assert_issue_valid.
+# Each test covers all five structural criteria simultaneously:
+#   1. >= 1 parseable open task
+#   2. every agent tag resolves to a real .md in ISSUE_BODY_AGENTS_DIR
+#   3. every path suffix resolves (file exists or parent directory exists)
+#   4. Acceptance Criteria section present
+#   5. Deploy Verification section iff DEPLOY_VERIFY_CMD set
+# =============================================================================
+
+# Stable reference to the body generator regardless of SCRIPT_DIR changes.
+_FOLLOWUP_GENERATOR="${TEST_DIR}/../create-followup-issue.sh"
+
+# _golden_sandbox_setup — initialises the agents/repo sandbox and sources the
+# two validation libraries.  Deliberately uses different sandbox paths
+# (golden_agents, golden_repo) so the orchestrator-function tests above are
+# not disturbed.
+_golden_sandbox_setup() {
+	export ISSUE_BODY_AGENTS_DIR="${TEST_TMP}/golden_agents"
+	mkdir -p "${ISSUE_BODY_AGENTS_DIR}"
+	: > "${ISSUE_BODY_AGENTS_DIR}/bash-script-craftsman.md"
+	: > "${ISSUE_BODY_AGENTS_DIR}/code-reviewer.md"
+
+	export ISSUE_BODY_REPO_ROOT="${TEST_TMP}/golden_repo"
+	mkdir -p "${ISSUE_BODY_REPO_ROOT}/.claude/scripts"
+
+	# Source libraries; their idempotency guards make repeated sourcing safe.
+	# shellcheck source=../skill-golden-lib.sh
+	source "${TEST_DIR}/../skill-golden-lib.sh"
+	# shellcheck source=../issue-body-lib.sh
+	source "${TEST_DIR}/../issue-body-lib.sh"
+
+	unset DEPLOY_VERIFY_CMD
+	unset FRONTEND_PATH_PATTERNS
+}
+
+# ---------------------------------------------------------------------------
+# Golden fixture 1: precise body
+# ---------------------------------------------------------------------------
+
+@test "golden: precise body — all five assert_issue_valid criteria pass" {
+	_golden_sandbox_setup
+
+	local body
+	body=$("$_FOLLOWUP_GENERATOR" \
+		--title "Fix connection pool leak" \
+		--description "Memory leak observed under load." \
+		--file-path ".claude/scripts/issue-body-lib.sh" \
+		--pr-number "42" \
+		--issue-number "100" \
+		--reviewer "alice") || return 1
+
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "golden: precise body — sg_validate_body reports PASS" {
+	_golden_sandbox_setup
+
+	local body
+	body=$("$_FOLLOWUP_GENERATOR" \
+		--title "Fix connection pool leak" \
+		--description "Memory leak observed under load." \
+		--file-path ".claude/scripts/issue-body-lib.sh" \
+		--pr-number "42" \
+		--issue-number "100" \
+		--reviewer "alice") || return 1
+
+	run sg_validate_body "$body" "precise-fixture"
+	[ "$status" -eq 0 ] || return 1
+	[[ "$output" == *"PASS"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Golden fixture 2: vague body
+# ---------------------------------------------------------------------------
+
+@test "golden: vague body — all five assert_issue_valid criteria pass" {
+	_golden_sandbox_setup
+
+	local body
+	body=$("$_FOLLOWUP_GENERATOR" \
+		--title "Investigate slow queries" \
+		--description "Queries slow in production." \
+		--file-path ".claude/scripts/batch-orchestrator.sh" \
+		--pr-number "55" \
+		--issue-number "200" \
+		--reviewer "bob" \
+		--type vague) || return 1
+
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Golden fixture 3: agent .md resolution
+# ---------------------------------------------------------------------------
+
+@test "golden: every agent tag in precise body resolves to a real .md" {
+	_golden_sandbox_setup
+
+	local body
+	body=$("$_FOLLOWUP_GENERATOR" \
+		--title "Fix auth handler" \
+		--description "Auth handler misbehaves." \
+		--file-path ".claude/scripts/issue-body-lib.sh" \
+		--pr-number "7" \
+		--issue-number "8" \
+		--reviewer "carol") || return 1
+
+	# Extract every `[agent]` tag from task lines and assert its .md exists.
+	local agent missing=0
+	while IFS= read -r agent; do
+		[[ "$agent" == "default" ]] && continue
+		if [[ ! -f "${ISSUE_BODY_AGENTS_DIR}/${agent}.md" ]]; then
+			printf 'Missing agent .md: %s\n' "$agent" >&2
+			missing=1
+		fi
+	done < <(printf '%s\n' "$body" \
+		| grep -oE '`\[[^]]+\]`' \
+		| sed 's/`\[//;s/\]`//')
+
+	[ "$missing" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Golden fixture 4: Acceptance Criteria always present
+# ---------------------------------------------------------------------------
+
+@test "golden: Acceptance Criteria section is always present in body" {
+	_golden_sandbox_setup
+
+	local body
+	body=$("$_FOLLOWUP_GENERATOR" \
+		--title "Refactor service layer" \
+		--description "Improve service layer architecture." \
+		--file-path ".claude/scripts/issue-body-lib.sh" \
+		--pr-number "10" \
+		--issue-number "11" \
+		--reviewer "eve") || return 1
+
+	[[ "$body" == *"## Acceptance Criteria"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Golden fixture 5: Deploy Verification gated on DEPLOY_VERIFY_CMD
+# ---------------------------------------------------------------------------
+
+@test "golden: Deploy Verification present when DEPLOY_VERIFY_CMD set" {
+	_golden_sandbox_setup
+	export DEPLOY_VERIFY_CMD="curl -fs https://example.com/health"
+
+	local body
+	body=$("$_FOLLOWUP_GENERATOR" \
+		--title "Fix endpoint" \
+		--description "Endpoint returns 500." \
+		--file-path ".claude/scripts/issue-body-lib.sh" \
+		--pr-number "3" \
+		--issue-number "4" \
+		--reviewer "dave") || return 1
+
+	[[ "$body" == *"## Deploy Verification"* ]] || return 1
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "golden: Deploy Verification absent when DEPLOY_VERIFY_CMD unset" {
+	_golden_sandbox_setup
+	unset DEPLOY_VERIFY_CMD
+
+	local body
+	body=$("$_FOLLOWUP_GENERATOR" \
+		--title "Fix endpoint" \
+		--description "Endpoint returns 500." \
+		--file-path ".claude/scripts/issue-body-lib.sh" \
+		--pr-number "3" \
+		--issue-number "4" \
+		--reviewer "dave") || return 1
+
+	[[ "$body" != *"## Deploy Verification"* ]] || return 1
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
