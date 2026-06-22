@@ -520,6 +520,7 @@ invoke_fast_path_script() {
     export MOCK_GIT_DIRTY=1
     export MOCK_GH_MERGE_STATE=CLEAN
     export MOCK_GH_PR_NUMBER=99
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -554,6 +555,7 @@ invoke_fast_path_script() {
 
 @test "14 fast-path bails on hook failure → captures stderr to triage.json.hook_failure_output" {
     export MOCK_GIT_HOOK_FAILURE=1
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
     # triage.json must already exist from a prior triage stage call
     mkdir -p "$LOG_BASE"
     echo '{"route":"fast-path"}' > "$LOG_BASE/triage.json"
@@ -569,6 +571,7 @@ invoke_fast_path_script() {
 
 @test "15 fast-path bails cleanly on push rejection → state=failed, error=push_rejected" {
     export MOCK_GIT_PUSH_EXIT_CODE=1
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -595,6 +598,7 @@ invoke_fast_path_script() {
 @test "17 fast-path happy path → branch + PR + merge succeed, state=completed" {
     export MOCK_GH_MERGE_STATE=CLEAN
     export MOCK_GH_PR_NUMBER=99
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -711,6 +715,7 @@ JSON
     export MOCK_GH_PR_NUMBER=42
     export FAST_PATH_MERGE_CHECK_ATTEMPTS=5
     export FAST_PATH_MERGE_CHECK_DELAY=0
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 

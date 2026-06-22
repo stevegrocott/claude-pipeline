@@ -207,8 +207,10 @@ fi
 
 _pre_impl_porcelain=""
 _changed_paths=()
+_impl_resume=false
 
 if is_stage_completed fast_path_implement; then
+    _impl_resume=true
     log "fast_path_implement already completed — skipping (resume)"
 else
     set_stage_in_progress fast_path_implement
@@ -329,9 +331,13 @@ else
 
     if [[ ${#_changed_paths[@]} -gt 0 ]]; then
         git add -- "${_changed_paths[@]}" 2>>"$LOG_FILE"
-    else
+    elif [[ "$_impl_resume" == "true" ]]; then
         # Resume: implement ran in a prior invocation; stage current state.
         git add -A 2>>"$LOG_FILE"
+    else
+        log "WARNING: _changed_paths is empty and this is not a resume" \
+            "— implement made no changes"
+        bail "empty_changed_paths"
     fi
 
     hook_stderr="$LOG_BASE/stages/fast-path-commit.stderr"
