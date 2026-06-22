@@ -186,3 +186,71 @@ WRAPPER
     final_state=$(jq -r '.state' "$STATUS_FILE")
     [ "$final_state" = "completed" ]
 }
+
+# =============================================================================
+# END-TO-END: the REAL orchestrator process under SIGTERM
+# =============================================================================
+#
+# The integration test above exercises a wrapper that re-registers the EXIT/TERM
+# traps by hand, so it proves the helper works but NOT that the shipped
+# implement-issue-orchestrator.sh actually wires the traps up.  This test runs
+# the real script end-to-end: it blocks mid parse_issue stage (state=running),
+# receives SIGTERM, and must leave status.json at interrupted_during_parse_issue
+# — never "running".  If the `trap ... EXIT` or `trap 'exit 143' TERM` lines are
+# ever dropped from the orchestrator, only this test catches it.
+
+@test "real orchestrator: SIGTERM mid-stage leaves status.json interrupted_during_<stage>, not running" {
+    # Mock gh so the first external call of the parse_issue stage
+    # (read-issue.sh -> `gh issue view`) blocks indefinitely, pinning the
+    # orchestrator at state=running mid-stage until we signal it.
+    local mock_bin="$TEST_TMP/mockbin"
+    mkdir -p "$mock_bin"
+    cat > "$mock_bin/gh" << 'GH'
+#!/usr/bin/env bash
+# Block so the orchestrator stays inside the parse_issue stage. The sleep is a
+# safety bound only — the process-group SIGTERM below kills it immediately.
+exec sleep 60
+GH
+    chmod +x "$mock_bin/gh"
+    export PATH="$mock_bin:$PATH"
+
+    local status_file="$TEST_TMP/real_status.json"
+
+    # Launch the REAL orchestrator in its own process group (monitor mode) so a
+    # single process-group SIGTERM takes down the blocking child at once and the
+    # orchestrator's own TERM/EXIT traps fire without waiting on that child.
+    # (--quiet suppresses issue comments so no `gh` call happens before the
+    # parse_issue stage.)
+    set -m
+    "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --quiet \
+        --status-file "$status_file" > "$TEST_TMP/orch.out" 2>&1 &
+    local pid=$!
+    set +m
+
+    # Wait until the orchestrator has reached state=running mid parse_issue.
+    local i=0 state=""
+    while ((i++ < 100)); do
+        if [[ -f "$status_file" ]]; then
+            state=$(jq -r '.state // empty' "$status_file" 2>/dev/null || true)
+            [[ "$state" == "running" ]] && break
+        fi
+        sleep 0.1
+    done
+
+    # Precondition: genuinely mid-stage with state=running (not initializing).
+    [ "$state" = "running" ]
+    local pre_stage
+    pre_stage=$(jq -r '.current_stage' "$status_file")
+    [ "$pre_stage" = "parse_issue" ]
+
+    # SIGTERM the whole process group; the orchestrator's traps must rewrite the
+    # running state before the process exits.
+    kill -TERM -"$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+
+    # The EXIT trap must have rewritten running -> interrupted_during_parse_issue.
+    local final_state
+    final_state=$(jq -r '.state' "$status_file")
+    [ "$final_state" = "interrupted_during_parse_issue" ]
+    [ "$final_state" != "running" ]
+}
