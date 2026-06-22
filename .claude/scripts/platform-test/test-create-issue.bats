@@ -234,6 +234,6 @@ GH_EOF
         --title "Guard test" --body "body" --parent "42"
 
     [ "$status" -eq 0 ]
-    [[ "$stderr" == *"WARNING"*"github.com"* ]]
+    [[ "$stderr" == *"lacks required https://github.com/ prefix"* ]]
     [ ! -s "$GH_API_ARGS" ]
 }
