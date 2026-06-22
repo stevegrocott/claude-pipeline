@@ -170,7 +170,10 @@ GH_EOF
 # block does not break the deletion.
 _patch_create_issue_no_url_guard() {
 	local target="$TEST_TMP/scripts/platform/create-issue.sh"
-	sed '/if \[\[.*=~.*\^https/,/^[[:space:]]*fi[[:space:]]*$/d' \
+	sed \
+		-e '/if \[\[.*=~.*\^https/,/^[[:space:]]*issue_num=/{' \
+		-e '/^[[:space:]]*issue_num=/!d' \
+		-e '}' \
 		"$target" > "${target}.patched"
 	mv "${target}.patched" "$target"
 }

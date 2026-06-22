@@ -264,7 +264,10 @@ MOCK
     local config_dir="$TEST_TMP/config"
     mkdir -p "$scripts_dir" "$config_dir"
     printf '%s\n' 'TRACKER="${TRACKER:-github}"' > "$config_dir/platform.sh"
-    sed '/=~ ^https:\/\/github/{ N; N; d; }' \
+    sed \
+        -e '/if \[\[.*=~.*\^https/,/^[[:space:]]*issue_num=/{' \
+        -e '/^[[:space:]]*issue_num=/!d' \
+        -e '}' \
         "$CREATE_ISSUE_SH" > "$scripts_dir/create-issue.sh"
     chmod +x "$scripts_dir/create-issue.sh"
 
@@ -295,7 +298,10 @@ MOCK
     local config_dir="$TEST_TMP/config"
     mkdir -p "$scripts_dir" "$config_dir"
     printf '%s\n' 'TRACKER="${TRACKER:-github}"' > "$config_dir/platform.sh"
-    sed '/=~ ^https:\/\/github/{ N; N; d; }' \
+    sed \
+        -e '/if \[\[.*=~.*\^https/,/^[[:space:]]*issue_num=/{' \
+        -e '/^[[:space:]]*issue_num=/!d' \
+        -e '}' \
         "$CREATE_ISSUE_SH" > "$scripts_dir/create-issue.sh"
     chmod +x "$scripts_dir/create-issue.sh"
 
