@@ -342,122 +342,23 @@ Examples:
 
 ### Step 4g: Create Follow-up Issues
 
-**Before creating each issue, run a deduplication check:**
-
-```bash
-TITLE_LOWER=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]')
-EXISTING=$(gh issue list --search "$ISSUE_TITLE" --state open \
-  --json number,title \
-  | jq -r --arg t "$TITLE_LOWER" '.[] | select(.title | ascii_downcase | contains($t)) | .number' \
-  | head -1)
-if [ -n "$EXISTING" ]; then
-  echo "Skipping duplicate: similar open issue already exists (#$EXISTING for \"$ISSUE_TITLE\")"
-  # continue to next extracted issue
-fi
-```
-
-Only proceed to create the issue when no duplicate is found.
-
-**Deriving `$FILE_PATH` and `$AGENT` from the review comment:**
-
-Before building either template, extract these two values from the review comment:
-
-1. **`$FILE_PATH`** — the file the comment references:
-   - Precise comments include patterns like `path/to/file.ext:function_name` or `path/to/file.ext:42`.
-   - Strip the function/line qualifier — keep only the file path: `path/to/file.ext`.
-   - If no file is named in the comment text, use the file the review comment is attached to in the PR diff (available as the comment's `path` field in the GitHub API response).
-   - For vague follow-ups with no identifiable file, substitute `$FILE_PATH` with the most relevant module or directory identified in the comment.
-
-2. **`$AGENT`** — the specialist agent inferred from `$FILE_PATH` extension and location:
-
-   | File pattern | `$AGENT` |
-   |---|---|
-   | `*.sh`, `*.bash`, `*.bats` | `bash-script-craftsman` |
-   | `*.test.*`, `*.spec.*` | `test-engineer` |
-   | `.claude/skills/**/*.md` | `default` |
-   | `src/routes/**`, `src/api/**` | `api-design-specialist` |
-   | Fallback (any other) | `default` |
-
-3. **Measurable ACs** — replace generic placeholders with specific, observable outcomes:
-   - Name the exact function or behaviour: prefer `$FUNCTION_NAME in $FILE_PATH handles $EDGE_CASE` over `$ISSUE_TITLE is implemented`
-   - State the verifiable result: `returns X on Y` / `exits non-zero when Z` / `emits a log line matching /pattern/`
-   - Add a test criterion for every functional change: `Tests for $FUNCTION_NAME in $FILE_PATH pass`
-
-**Implementation Tasks format — REQUIRED format:**
-
-Every task line in the `## Implementation Tasks` block MUST use the checkbox + agent-prefix format. The task parser silently skips prose-style `Task N:` lines — this is the failure mode that caused production incidents.
-
-```
-# CORRECT — task parser picks this up (include $FILE_PATH in suffix, use $AGENT not "default"):
-- [ ] `[$AGENT]` **(S)** $INFERRED_TASK_DESCRIPTION — `$FILE_PATH`
-
-# ANTI-PATTERN — task parser silently skips these:
-Task 1: $INFERRED_TASK_DESCRIPTION
-Task 2: $INFERRED_TASK_DESCRIPTION
-```
-
-For each extracted issue (after deduplication check passes), route by classification:
-
-**Precise follow-up** — create issue immediately — no `needs-explore` label; context is already specific enough:
+For each extracted issue, invoke `create-followup-issue.sh` — it handles deduplication, `$AGENT` inference from `$FILE_PATH`, body templating, and issue creation:
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
-"$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
-<!-- pipeline-autocreated -->
-## Context
-Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
-
-## Description
-$EXTRACTED_DESCRIPTION
-
-## Implementation Tasks
-- [ ] `[$AGENT]` **(S)** $INFERRED_TASK_DESCRIPTION — `$FILE_PATH`
-
-## Acceptance Criteria
-- [ ] `$FILE_PATH`: $INFERRED_TASK_DESCRIPTION produces the expected behaviour (specify the exact output or observable state change)
-- [ ] Tests covering the change in `$FILE_PATH` pass
-
-## References
-- Parent Issue: #$ISSUE_NUMBER
-- PR/MR: #$PR_NUMBER
-- Reviewer: @$REVIEWER
-EOF
-)" --labels "${LABELS}"
+"$PLATFORM_DIR/create-followup-issue.sh" \
+  --title "$ISSUE_TITLE" \
+  --description "$EXTRACTED_DESCRIPTION" \
+  --task-description "$INFERRED_TASK_DESCRIPTION" \
+  --file-path "$FILE_PATH" \
+  --pr-number "$PR_NUMBER" \
+  --issue-number "$ISSUE_NUMBER" \
+  --reviewer "$REVIEWER" \
+  --labels "${LABELS}" \
+  --type precise   # or: --type vague (adds needs-explore label)
 ```
 
-Log each: `Created follow-up issue #XXX: "$TITLE"`
-
-**Vague follow-up** — create issue immediately with `needs-explore` label; a later explore sweep will flesh it out:
-
-```bash
-PLATFORM_DIR=".claude/scripts/platform"
-"$PLATFORM_DIR/create-issue.sh" --title "$ISSUE_TITLE" --body "$(cat <<'EOF'
-<!-- pipeline-autocreated -->
-## Context
-Created from code review of PR/MR #$PR_NUMBER (Issue #$ISSUE_NUMBER)
-
-## Description
-$EXTRACTED_DESCRIPTION
-
-> **Note:** This item was classified as vague and needs further research before implementation.
-> A human or automated explore sweep should flesh out the implementation tasks.
-
-## Implementation Tasks
-- [ ] `[$AGENT]` **(S)** Explore and implement: $ISSUE_TITLE — `$FILE_PATH`
-
-## Acceptance Criteria
-- [ ] The behaviour described in "$ISSUE_TITLE" is observable and testable (to be made precise during the explore phase)
-- [ ] Tests covering the implemented change pass
-
-## References
-- Parent Issue: #$ISSUE_NUMBER
-- PR/MR: #$PR_NUMBER
-- Reviewer: @$REVIEWER
-EOF
-)" --labels "${LABELS:+$LABELS,}needs-explore"
-```
-
-Log each: `Created vague follow-up issue #XXX: "$TITLE" (needs-explore)`
+Log each: `Created follow-up issue #XXX: "$TITLE"` (or `"$TITLE" (needs-explore)` for vague items).
 
 ---
 
