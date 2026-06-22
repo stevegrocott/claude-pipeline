@@ -50,7 +50,7 @@ case "$TRACKER" in
           "$issue_num" >&2
       elif [[ "$issue_url" != https://github.com/* ]]; then
         printf \
-          'WARNING: issue_url %s lacks github.com/ prefix; skipping link\n' \
+          'WARNING: issue_url %s lacks required https://github.com/ prefix; skipping link\n' \
           "$issue_url" >&2
       else
         repo_part="${issue_url#https://github.com/}"
