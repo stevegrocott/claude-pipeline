@@ -26,7 +26,7 @@
 #   3 — missing required argument
 #
 
-set -o pipefail
+set -eo pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
