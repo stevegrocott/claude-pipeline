@@ -542,6 +542,54 @@ Some prose but no task checkboxes.
 	[ -z "$output" ]
 }
 
+@test "_issue_body_parse_tasks: recognizes ### Implementation Tasks heading (level-3)" {
+	local body
+	body=$(printf '%s\n' \
+		"### Implementation Tasks" \
+		"" \
+		"- [ ] \`[bash-script-craftsman]\` **(M)** Level-three task")
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+	[[ "$output" == *"Level-three task"* ]]
+}
+
+@test "_issue_body_parse_tasks: stops at ### heading after Implementation Tasks" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** In-section task
+
+	### Notes
+
+	- [ ] `[default]` **(S)** Post-section task — must not appear
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 1 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "assert_issue_valid: accepts body with ### Implementation Tasks heading" {
+	local body
+	body=$(cat <<-'EOF'
+	### Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] done
+	EOF
+	)
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # REGRESSION: inline-code bullets in Research Findings / Acceptance Criteria
 # =============================================================================

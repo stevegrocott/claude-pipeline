@@ -189,8 +189,10 @@ _issue_body_extract_paths() {
 # fallback patterns of the orchestrator's _parse_task_lines).  Checked [x]
 # tasks are treated as complete and skipped.
 #
-# Only lines inside the "## Implementation Tasks" section are matched —
-# see the in-function section-extraction loop below.
+# Only lines inside an "Implementation Tasks" heading section are matched
+# (any heading level: ##, ###, etc.) — see the in-function
+# section-extraction loop below.  The section ends at the next heading of
+# any level (## or deeper).
 #
 # Caller audit (confirmed no dependency on whole-body parsing):
 #   assert_issue_valid() [issue-body-lib.sh:292]
@@ -198,7 +200,7 @@ _issue_body_extract_paths() {
 #       output.  It never relied on task lines from other sections.
 #   BATS tests [implement-issue-test/test-issue-body-lib.bats]
 #       All invocations either supply a body that contains an
-#       "## Implementation Tasks" heading, or explicitly assert that
+#       "Implementation Tasks" heading, or explicitly assert that
 #       section-less / out-of-section lines yield no output.  None
 #       depend on the pre-scoping, whole-body-parsing behaviour.
 #
@@ -212,8 +214,9 @@ _issue_body_parse_tasks() {
 	# Normalize gh API's backslash-escaped backticks.
 	body="${body//\\\`/\`}"
 
-	# Extract only the lines under "## Implementation Tasks", stopping at
-	# the next "##" heading (or end of body).  Lines from other sections
+	# Extract only the lines under "Implementation Tasks" (any heading
+	# level: ##, ###, etc.), stopping at the next ## or deeper heading (or
+	# end of body).  Lines from other sections
 	# (Acceptance Criteria, Notes, Deploy Verification, etc.) are never
 	# matched as tasks, preventing false positives from prose that happens
 	# to resemble a task line.
@@ -221,13 +224,13 @@ _issue_body_parse_tasks() {
 	local section=""
 	local line
 	while IFS= read -r line; do
-		if [[ "$line" == "## Implementation Tasks" ]]; then
+		if [[ "$line" =~ ^##+[[:space:]]+Implementation\ Tasks$ ]]; then
 			in_section=true
 			continue
 		fi
 		if $in_section; then
-			# Any new level-2 heading ends the section.
-			if [[ "$line" =~ ^##([[:space:]]|$) ]]; then
+			# Any new ## or deeper heading ends the section.
+			if [[ "$line" =~ ^##+[[:space:]] ]]; then
 				break
 			fi
 			section+="${line}"$'\n'
