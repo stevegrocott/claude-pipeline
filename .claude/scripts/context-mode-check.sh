@@ -25,6 +25,8 @@
 #   0  all enabled checks passed (or gracefully skipped)
 #   1  ctx health check failed
 #   2  BATS parsing-assertion suite failed
+#      When BOTH ctx and BATS fail, 2 is returned (bats-failure takes
+#      precedence over ctx-failure); both FAIL lines are printed to stderr.
 #   3  usage / configuration error
 #
 
@@ -78,6 +80,14 @@ Environment:
     CONTEXT_MODE_ENABLED  1 = ctx must be present (exit 1 when absent).
                           0 (default) = skip ctx gracefully when not
                           installed.
+
+Exit codes:
+    0  all enabled checks passed (or gracefully skipped)
+    1  ctx health check failed
+    2  BATS parsing-assertion suite failed
+       When BOTH ctx and BATS fail, 2 is returned (bats-failure takes
+       precedence over ctx-failure); both FAIL lines are printed to stderr.
+    3  usage / configuration error
 EOF
 }
 
