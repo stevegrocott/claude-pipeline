@@ -54,6 +54,9 @@ mkdir -p "$LOG_BASE/stages"
 log() {
     local ts
     ts=$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)
+    # "$*" joins all arguments into one string separated by the first
+    # character of IFS (a space by default), so multi-word calls like
+    # log "step" "$n" "done" produce a single readable log line.
     printf '[%s] %s\n' "$ts" "$*" | tee -a "$LOG_FILE"
 }
 
