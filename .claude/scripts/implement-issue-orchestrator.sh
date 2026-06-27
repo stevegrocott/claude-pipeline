@@ -1676,7 +1676,7 @@ run_stage() {
         "stage_attempt:=1"
 
     local -a agent_args=()
-    if [[ -n "$agent" ]]; then
+    if [[ -n "$agent" && "$agent" != "default" ]]; then
         agent_args=(--agent "$agent")
     fi
 
