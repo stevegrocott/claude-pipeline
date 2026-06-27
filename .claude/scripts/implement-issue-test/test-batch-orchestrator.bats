@@ -1460,3 +1460,51 @@ source_sweep_implement_followups() {
 	# process_issue must have been called for #100 — timeout did NOT skip it.
 	grep -qx '100' "$TEST_TMP/process_issue.calls"
 }
+
+# =============================================================================
+# TASK 1 (i452): behavioral dedup — follow-ups already in ISSUE_ARRAY are
+# skipped; genuinely new follow-ups are passed to process_issue
+# =============================================================================
+
+@test "sweep_implement_followups skips follow-up already in ISSUE_ARRAY and processes genuinely new follow-up" {
+	# Behavioural: exercise the ISSUE_ARRAY dedup path end-to-end.
+	# A follow-up whose number already appears in the original manifest must
+	# not reach process_issue; a follow-up with a new number must.
+	source_sweep_implement_followups \
+		|| skip "sweep_implement_followups() not yet present"
+
+	export MAX_FOLLOWUP_DEPTH=1
+	# ENRICH_FOLLOWUPS=true bypasses the gh label-check so this test
+	# stays focused purely on the ISSUE_ARRAY dedup path.
+	export ENRICH_FOLLOWUPS=true
+	# #200 is already in the original manifest.  A follow-up with the same
+	# number must be deduped and NOT dispatched to process_issue.
+	ISSUE_ARRAY=(1 200)
+
+	# Issue #1 completed and produced two follow-ups:
+	#   #200 — already in ISSUE_ARRAY (must be skipped by dedup)
+	#   #300 — genuinely new (must reach process_issue)
+	cat > "$STATUS_FILE" <<-'JSON'
+	{
+	  "progress": {"total": 2, "pending": 0, "completed": 2, "failed": 0},
+	  "issues": [
+	    {"number": "1",   "status": "completed", "follow_ups": ["200", "300"]},
+	    {"number": "200", "status": "completed", "follow_ups": []}
+	  ]
+	}
+	JSON
+
+	log()      { :; }
+	log_warn() { :; }
+	process_issue() {
+		printf '%s\n' "$1" >> "$TEST_TMP/process_issue.calls"
+		return 0
+	}
+
+	sweep_implement_followups
+
+	# #300 is genuinely new — must have been dispatched to process_issue.
+	grep -qx '300' "$TEST_TMP/process_issue.calls"
+	# #200 was already in the original manifest — must NOT be re-processed.
+	! grep -qx '200' "$TEST_TMP/process_issue.calls"
+}
