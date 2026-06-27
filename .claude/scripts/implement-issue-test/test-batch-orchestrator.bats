@@ -791,18 +791,6 @@ _simulate_dv_failed_count() {
 	[[ "$body" == *'validate_issue_for_processing'* ]]
 }
 
-# Extract the body of a named function from a script file.
-# Usage: _extract_function_body <func_name> <script_file>
-_extract_function_body() {
-	local func_name="$1"
-	local script_file="$2"
-	awk -v fn="$func_name" '
-		$0 ~ "^"fn"\\(\\)" { capture = 1 }
-		capture { print }
-		capture && /^\}$/ { capture = 0 }
-	' "$script_file"
-}
-
 # --- Static analysis: skip detection conditions ---
 
 @test "validate_issue_for_processing checks for needs-explore label" {

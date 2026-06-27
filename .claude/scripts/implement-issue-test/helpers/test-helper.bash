@@ -428,3 +428,21 @@ source_batch_function() {
 
     source "$func_file"
 }
+
+# Extract the body of a named function from a script file.
+# Uses brace counting so nested blocks with closing braces at
+# column 0 do not prematurely end the capture.
+# Usage: _extract_function_body <func_name> <file>
+_extract_function_body() {
+	local func_name="$1"
+	local script_file="$2"
+	awk -v fn="$func_name" '
+		$0 ~ "^"fn"\\(\\) \\{$" { capture = 1; depth = 0 }
+		capture {
+			print
+			depth += split($0, _o, /\{/) - 1
+			depth -= split($0, _c, /\}/) - 1
+			if (depth <= 0) capture = 0
+		}
+	' "$script_file"
+}
