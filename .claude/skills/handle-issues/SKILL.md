@@ -756,10 +756,9 @@ Useful for any sparsely-described issue — whether pipeline-created or filed by
 **Requires:**
 - `.claude/scripts/batch-orchestrator.sh` (orchestration script)
 - `.claude/scripts/schemas/*.json` (JSON schemas)
-- `implement-issue` skill (invoked by orchestrator)
+- `implement-issue` skill (invoked by orchestrator for primary issues and, when `--implement-followups` is set, for enriched follow-ups in the second wave)
 - `process-pr` skill (invoked by orchestrator)
 - `enrich-issue` skill (invoked by orchestrator when `--enrich-followups` or `--implement-followups` is set)
-- `implement-issue` skill (invoked by orchestrator on enriched follow-ups when `--implement-followups` is set)
 - Platform CLI authenticated (gh, glab, or acli — configured in .claude/config/platform.sh)
 - `jq` for JSON parsing
 - Claude Code CLI installed

@@ -1167,12 +1167,95 @@ _simulate_recovery_with_stage() {
 	[[ "$body" == *'ISSUE_ARRAY'* ]]
 }
 
-@test "sweep_implement_followups respects MAX_FOLLOWUP_DEPTH guard" {
-	# Depth-2 follow-ups (follow-ups of follow-ups) must be logged and surfaced
-	# but not auto-implemented.  The guard must reference MAX_FOLLOWUP_DEPTH.
-	local body
-	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
-	[[ "$body" == *'MAX_FOLLOWUP_DEPTH'* ]]
+# Extract and source sweep_implement_followups() from batch-orchestrator.sh so
+# it can be exercised behaviorally with mocked process_issue/log/log_warn.
+# Mirrors the source_batch_dispatch_composition() pattern in
+# test-orchestrator-composition.bats.  Returns 1 (without aborting) when the
+# function is not yet present so callers can skip.
+source_sweep_implement_followups() {
+	local func_file="$TEST_TMP/sweep_implement_followups.bash"
+	awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	grep -q 'sweep_implement_followups()' "$func_file" 2>/dev/null || return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+@test "sweep_implement_followups surfaces depth-2 follow-ups via log_warn but does NOT implement them" {
+	source_sweep_implement_followups || skip "sweep_implement_followups() not yet present"
+
+	export MAX_FOLLOWUP_DEPTH=1
+	export ENRICH_FOLLOWUPS=true
+	ISSUE_ARRAY=(1)
+
+	# Primary issue #1 completed with a depth-1 follow-up #100.
+	cat > "$STATUS_FILE" <<-'JSON'
+	{
+	  "progress": {"total": 1, "pending": 0, "completed": 1, "failed": 0},
+	  "issues": [
+	    {"number": "1", "status": "completed", "follow_ups": ["100"]}
+	  ]
+	}
+	JSON
+
+	# Mocks: capture log_warn output and process_issue call list; simulate
+	# follow-up #100 spawning a depth-2 follow-up #200 when implemented.
+	log()      { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/warn.out"; }
+	process_issue() {
+		printf '%s\n' "$1" >> "$TEST_TMP/process_issue.calls"
+		if [[ "$1" == "100" ]]; then
+			jq '(.issues[] | select(.number == "100") | .follow_ups) = ["200"]' \
+				"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+				&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+		fi
+		return 0
+	}
+
+	sweep_implement_followups
+
+	# Depth-1 follow-up #100 WAS implemented.
+	grep -qx '100' "$TEST_TMP/process_issue.calls"
+	# Depth-2 follow-up #200 was NOT implemented (beyond MAX_FOLLOWUP_DEPTH).
+	! grep -qx '200' "$TEST_TMP/process_issue.calls"
+	# Depth-2 follow-up #200 WAS surfaced as a warning for manual triage.
+	grep -q '200' "$TEST_TMP/warn.out"
+	grep -q 'MAX_FOLLOWUP_DEPTH' "$TEST_TMP/warn.out"
+}
+
+@test "sweep_implement_followups registers a placeholder row and bumps progress totals before implementing" {
+	source_sweep_implement_followups || skip "sweep_implement_followups() not yet present"
+
+	export MAX_FOLLOWUP_DEPTH=1
+	export ENRICH_FOLLOWUPS=true
+	ISSUE_ARRAY=(1)
+
+	cat > "$STATUS_FILE" <<-'JSON'
+	{
+	  "progress": {"total": 1, "pending": 0, "completed": 1, "failed": 0},
+	  "issues": [
+	    {"number": "1", "status": "completed", "follow_ups": ["100"]}
+	  ]
+	}
+	JSON
+
+	log()      { :; }
+	log_warn() { :; }
+	# process_issue records whether the #100 row already existed when it ran —
+	# proving the sweep's placeholder injection (not process_issue) registered it.
+	process_issue() {
+		jq -e --arg n "$1" '.issues[] | select(.number == $n)' "$STATUS_FILE" \
+			> "$TEST_TMP/row_present_$1" 2>/dev/null
+		return 0
+	}
+
+	sweep_implement_followups
+
+	# A placeholder row for #100 existed by the time process_issue ran.
+	[[ -s "$TEST_TMP/row_present_100" ]]
+	# progress.total/pending were bumped to reflect the wave-2 issue.
+	[[ "$(jq '.progress.total' "$STATUS_FILE")" == "2" ]]
+	[[ "$(jq '.progress.pending' "$STATUS_FILE")" == "1" ]]
 }
 
 @test "sweep_implement_followups invokes process_issue for each follow-up" {
