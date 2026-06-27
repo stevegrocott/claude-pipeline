@@ -404,3 +404,52 @@ MOCK
 	_run_create_issue --title "Test" --body "$body"
 	[ "$status" -eq 1 ]
 }
+
+# =============================================================================
+# DEPLOY_VERIFY_CMD interaction with ## Implementation Tasks (issue #437 task 3)
+#
+# When DEPLOY_VERIFY_CMD is set, assert_issue_valid requires a
+# ## Deploy Verification section (criterion 5).  Bodies that carry
+# ## Implementation Tasks trigger validation; bodies that do not carry
+# ## Implementation Tasks bypass it entirely — including its
+# DEPLOY_VERIFY_CMD check.
+# =============================================================================
+
+@test "body with '## Implementation Tasks' but no '## Deploy Verification': exit 1 when DEPLOY_VERIFY_CMD set" {
+	# assert_issue_valid criterion 5 must fire: DEPLOY_VERIFY_CMD is set but
+	# the body omits ## Deploy Verification → validation fails → exit 1.
+	local body
+	body=$(printf '## Implementation Tasks\n\n- [ ] `[default]` **(S)** Fix the thing\n\n## Acceptance Criteria\n\n- [ ] Thing is fixed\n')
+	export DEPLOY_VERIFY_CMD="./scripts/verify.sh"
+	_run_create_issue --title "Test" --body "$body"
+	[ "$status" -eq 1 ]
+}
+
+@test "body with '## Implementation Tasks' but no '## Deploy Verification': gh issue create not called when DEPLOY_VERIFY_CMD set" {
+	# Validation must gate the gh call — when validation fails the issue must
+	# not be created.
+	local body
+	body=$(printf '## Implementation Tasks\n\n- [ ] `[default]` **(S)** Fix the thing\n\n## Acceptance Criteria\n\n- [ ] Thing is fixed\n')
+	export DEPLOY_VERIFY_CMD="./scripts/verify.sh"
+	_run_create_issue --title "Test" --body "$body"
+	[ ! -f "$GH_CALLS" ] || ! grep -q 'issue create' "$GH_CALLS"
+}
+
+@test "body without '## Implementation Tasks': accepted unchanged when DEPLOY_VERIFY_CMD set" {
+	# Without the trigger section, assert_issue_valid is never called, so
+	# DEPLOY_VERIFY_CMD criterion 5 is not reached — the body passes through
+	# unmodified and the issue is created regardless.
+	local body="Plain description with no trigger sections."
+	export DEPLOY_VERIFY_CMD="./scripts/verify.sh"
+	_run_create_issue --title "Test" --body "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "body without '## Implementation Tasks': issue number printed to stdout when DEPLOY_VERIFY_CMD set" {
+	# Confirm the gh issue create call succeeds and the issue number is
+	# written to stdout — validation bypass must not silently swallow output.
+	local body="Plain description with no trigger sections."
+	export DEPLOY_VERIFY_CMD="./scripts/verify.sh"
+	_run_create_issue --title "Test" --body "$body"
+	[[ "$output" == "99" ]]
+}
