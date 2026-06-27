@@ -42,6 +42,41 @@ teardown() {
 }
 
 # =============================================================================
+# AC4: _extract_function_body — nested brace groups
+# =============================================================================
+# Verifies the brace-counting awk implementation captures the full function
+# body even when the function contains a nested {…} group command whose
+# closing brace appears alone on a line.  The old fragile awk range
+# `/^func()/,/^\}$/` would have stopped at the first standalone `}`,
+# silently truncating everything after it.
+
+@test "_extract_function_body returns full body with nested brace groups" {
+	# Synthesise a minimal script containing a function with an inner group
+	# command whose closing brace sits alone on a line — exactly the pattern
+	# that a naïve awk range misidentifies as the function's closing brace.
+	local script_file="$TEST_TMP/nested-braces.sh"
+	cat > "$script_file" << 'EOF'
+#!/usr/bin/env bash
+target_func() {
+	echo "outer start"
+	{
+		echo "inner block"
+	}
+	echo "outer end"
+}
+EOF
+
+	local body
+	body=$(_extract_function_body target_func "$script_file")
+
+	# Lines that appear before the nested closing brace must be present.
+	[[ "$body" == *'echo "outer start"'* ]]
+	[[ "$body" == *'echo "inner block"'* ]]
+	# Lines that appear AFTER the nested closing brace must not be truncated.
+	[[ "$body" == *'echo "outer end"'* ]]
+}
+
+# =============================================================================
 # STATIC ANALYSIS: merge_blocked case arm
 # =============================================================================
 
