@@ -1594,7 +1594,7 @@ run_stage() {
     local stage_name="$1"
     local prompt="$2"
     local schema_file="$3"
-    local agent="${4:-}"
+    local agent="${4:-}"        # empty string or "default" omits --agent flag
     local complexity="${5:-}"
     local timeout_override="${6:-}"   # optional: override stage timeout (seconds)
     local model_override="${7:-}"    # optional: override model (haiku|sonnet|opus)
