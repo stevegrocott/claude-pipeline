@@ -1116,3 +1116,90 @@ _simulate_recovery_with_stage() {
 	[[ "$sim_impl_status" == "success" ]]
 	[[ "$sim_pr_number" == "42" ]]
 }
+
+# =============================================================================
+# TASK 6 (i436): --implement-followups flag and post-batch follow-up wave
+# =============================================================================
+
+@test "--implement-followups flag is recognised in argument parsing" {
+	grep -qE '^\s+--implement-followups\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "IMPLEMENT_FOLLOWUPS variable is initialised before argument parsing" {
+	grep -q 'IMPLEMENT_FOLLOWUPS' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "IMPLEMENT_FOLLOWUPS defaults to false when no flag is passed" {
+	grep -qE '^IMPLEMENT_FOLLOWUPS=false' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "usage documents the --implement-followups flag" {
+	local body
+	body=$(awk '/^usage\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'implement-followups'* ]]
+}
+
+@test "--no-implement-followups flag is recognised in argument parsing" {
+	grep -qE '^\s+--no-implement-followups\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "--no-implement-followups case sets IMPLEMENT_FOLLOWUPS to false" {
+	local body
+	body=$(awk '/--no-implement-followups\)/,/^\s+;;/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null)
+	[[ "$body" == *'IMPLEMENT_FOLLOWUPS=false'* ]]
+}
+
+@test "sweep_implement_followups function is defined in the script" {
+	grep -qE '^sweep_implement_followups\(\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "sweep_implement_followups deduplicates follow-ups against original manifest" {
+	# The function must compare collected follow-up numbers against ISSUE_ARRAY
+	# (the original manifest) to avoid re-processing issues that were already
+	# handled in the primary loop.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'ISSUE_ARRAY'* ]]
+}
+
+@test "sweep_implement_followups respects MAX_FOLLOWUP_DEPTH guard" {
+	# Depth-2 follow-ups (follow-ups of follow-ups) must be logged and surfaced
+	# but not auto-implemented.  The guard must reference MAX_FOLLOWUP_DEPTH.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'MAX_FOLLOWUP_DEPTH'* ]]
+}
+
+@test "sweep_implement_followups invokes process_issue for each follow-up" {
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'process_issue'* ]]
+}
+
+@test "main body calls sweep_implement_followups when IMPLEMENT_FOLLOWUPS is true" {
+	# After the primary issue loop, the script must call the sweep function
+	# conditionally on the flag.  Two independent file-wide greps would pass
+	# even if the guard and call are in unrelated positions (e.g. inside the
+	# function definition vs the call site).  Scope the assertion to the
+	# post-loop section by capturing only the content after the LAST bare
+	# 'done' line (which closes the main issue for-loop), then verifying both
+	# the IMPLEMENT_FOLLOWUPS conditional guard and the
+	# sweep_implement_followups call are present within that scoped block.
+	local post_loop
+	post_loop=$(awk \
+		'BEGIN{n=0} /^done$/{n=NR} {lines[NR]=$0} END{for(i=n+1;i<=NR;i++) print lines[i]}' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$post_loop" == *'sweep_implement_followups'* ]]
+	[[ "$post_loop" == *'IMPLEMENT_FOLLOWUPS'* ]]
+}
+
+@test "--implement-followups sets ENRICH_FOLLOWUPS to true" {
+	# When --implement-followups is passed it must imply --enrich-followups so
+	# that needs-explore issues are enriched before being implemented.
+	# Scope to the case branch only to avoid matching unrelated assignments.
+	local body
+	body=$(awk '/--implement-followups\)/,/^\s+;;/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null)
+	[[ "$body" == *'ENRICH_FOLLOWUPS=true'* ]]
+}
