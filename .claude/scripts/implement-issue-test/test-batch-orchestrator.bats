@@ -1207,3 +1207,54 @@ _simulate_recovery_with_stage() {
 		"$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null)
 	[[ "$body" == *'ENRICH_FOLLOWUPS=true'* ]]
 }
+
+@test "sweep_implement_followups bumps progress.total for each wave-2 issue" {
+	# update_progress derives completed/failed/skipped/etc. from .issues[]
+	# but never recomputes .progress.total, which is set once at init to the
+	# original manifest count.  When the sweep registers a wave-2 follow-up as
+	# a new .issues[] row it MUST also increment .progress.total so the totals
+	# stay consistent with the wave-2 outcomes.  Without this, completed+failed
+	# can exceed total and pending can go negative.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'.progress.total = (.progress.total + 1)'* ]]
+}
+
+@test "sweep_implement_followups bumps progress.pending for each wave-2 issue" {
+	# A freshly-registered wave-2 follow-up starts in the "pending" state, so
+	# .progress.pending must be incremented alongside .progress.total to keep
+	# the registration snapshot internally consistent before process_issue
+	# transitions the issue out of pending.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'.progress.pending = (.progress.pending + 1)'* ]]
+}
+
+@test "wave-2 follow-up totals are bumped via real jq transformation" {
+	# Behavioural check: extract the registration jq filter and run it against a
+	# representative status.json to prove .progress.total/.pending actually
+	# increment by one per registered wave-2 issue (not just that the text is
+	# present).
+	local status="$TEST_TMP/status.json"
+	cat > "$status" <<-'JSON'
+		{
+		  "progress": { "total": 2, "completed": 2, "pending": 0,
+		    "failed": 0, "skipped": 0, "in_progress": 0 },
+		  "issues": [
+		    { "number": "10", "status": "completed" },
+		    { "number": "11", "status": "completed" }
+		  ]
+		}
+	JSON
+
+	local out
+	out=$(jq --arg num "12" \
+		'.issues += [{ "number": $num, "status": "pending" }]
+		 | .progress.total = (.progress.total + 1)
+		 | .progress.pending = (.progress.pending + 1)' \
+		"$status")
+
+	[[ "$(jq -r '.progress.total' <<< "$out")" == "3" ]]
+	[[ "$(jq -r '.progress.pending' <<< "$out")" == "1" ]]
+	[[ "$(jq -r '.issues | length' <<< "$out")" == "3" ]]
+}

@@ -1356,6 +1356,11 @@ sweep_implement_followups() {
 			'.issues[] | select(.number == $num) | .number' \
 			"$STATUS_FILE" 2>/dev/null) || exists=""
 		if [[ -z "$exists" ]]; then
+			# Register the placeholder AND bump progress totals so the
+			# wave-2 issue is reflected in .progress.  total/pending are
+			# not recomputed by update_progress (which only derives
+			# completed/failed/skipped/etc. from .issues[]), so they must
+			# be incremented here to keep the snapshot consistent.
 			jq --arg num "$issue_num" \
 				'.issues += [{
 					"number": $num,
@@ -1369,7 +1374,10 @@ sweep_implement_followups() {
 					"started_at": null,
 					"stage_started_at": null,
 					"completed_at": null
-				}] | .last_update = (now | todate)' \
+				}]
+				| .progress.total = (.progress.total + 1)
+				| .progress.pending = (.progress.pending + 1)
+				| .last_update = (now | todate)' \
 				"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
 				&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 			log "Sweep: registered follow-up #$issue_num in status.json"
