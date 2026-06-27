@@ -326,6 +326,8 @@ FILTER_MOCK
 @test "(s) ctx failing AND bats failing → exit 4 (both-failed code)" {
 	_install_mock_ctx 1 0
 	_install_mock_bats 1
+	# $output contains merged stdout+stderr (BATS default; no --separate-stderr).
+	# bats_require_minimum_version 1.5.0 at L44 covers this merge behaviour.
 	run bash "$SCRIPT_UNDER_TEST" \
 		--bats-dir "$TEST_TMP/bats-dir"
 	[ "$status" -eq 4 ]
