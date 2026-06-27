@@ -257,6 +257,18 @@ MOCK
 # output but tested here via a sed-patched copy with URL validation stripped.
 # =============================================================================
 
+# Produce a patched copy of create-issue.sh inside scripts_dir with the outer
+# URL-validation block removed so the inner numeric/prefix guards are reachable.
+_patch_create_issue_no_url_guard() {
+	local scripts_dir="$1"
+	sed \
+		-e '/if \[\[.*=~.*\^https/,/^[[:space:]]*issue_num=/{' \
+		-e '/^[[:space:]]*issue_num=/!d' \
+		-e '}' \
+		"$CREATE_ISSUE_SH" > "$scripts_dir/create-issue.sh"
+	chmod +x "$scripts_dir/create-issue.sh"
+}
+
 @test "issue_num non-numeric guard: emits WARNING and skips sub-issue POST" {
     # The outer URL regex (^https://github.com/.+/issues/[0-9]+$) normally
     # prevents a non-numeric issue_num. Strip that block to reach the guard.
@@ -264,12 +276,7 @@ MOCK
     local config_dir="$TEST_TMP/config"
     mkdir -p "$scripts_dir" "$config_dir"
     printf '%s\n' 'TRACKER="${TRACKER:-github}"' > "$config_dir/platform.sh"
-    sed \
-        -e '/if \[\[.*=~.*\^https/,/^[[:space:]]*issue_num=/{' \
-        -e '/^[[:space:]]*issue_num=/!d' \
-        -e '}' \
-        "$CREATE_ISSUE_SH" > "$scripts_dir/create-issue.sh"
-    chmod +x "$scripts_dir/create-issue.sh"
+    _patch_create_issue_no_url_guard "$scripts_dir"
 
     cat > "$TEST_TMP/bin/gh" << 'MOCK'
 #!/usr/bin/env bash
@@ -298,12 +305,7 @@ MOCK
     local config_dir="$TEST_TMP/config"
     mkdir -p "$scripts_dir" "$config_dir"
     printf '%s\n' 'TRACKER="${TRACKER:-github}"' > "$config_dir/platform.sh"
-    sed \
-        -e '/if \[\[.*=~.*\^https/,/^[[:space:]]*issue_num=/{' \
-        -e '/^[[:space:]]*issue_num=/!d' \
-        -e '}' \
-        "$CREATE_ISSUE_SH" > "$scripts_dir/create-issue.sh"
-    chmod +x "$scripts_dir/create-issue.sh"
+    _patch_create_issue_no_url_guard "$scripts_dir"
 
     cat > "$TEST_TMP/bin/gh" << 'MOCK'
 #!/usr/bin/env bash
