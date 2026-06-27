@@ -1126,7 +1126,11 @@ _simulate_recovery_with_stage() {
 }
 
 @test "IMPLEMENT_FOLLOWUPS variable is initialised before argument parsing" {
-	grep -q 'IMPLEMENT_FOLLOWUPS' "$BATCH_ORCHESTRATOR_SCRIPT"
+	local decl_block
+	decl_block=$(awk \
+		'/^while \[\[ \$# -gt 0 \]\]; do/{exit} {print}' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$decl_block" == *'IMPLEMENT_FOLLOWUPS=false'* ]]
 }
 
 @test "IMPLEMENT_FOLLOWUPS defaults to false when no flag is passed" {

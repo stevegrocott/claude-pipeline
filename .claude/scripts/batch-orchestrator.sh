@@ -1344,11 +1344,45 @@ sweep_implement_followups() {
 	# and must NOT be auto-implemented.  Surface them as warnings instead.
 	# (Checked again at the end of the sweep, after process_issue() runs.)
 
+	# Register a placeholder row in status.json for each new follow-up so
+	# that update_issue_field calls inside process_issue have a matching
+	# target.  Without this, every jq select(.number == $num) matches
+	# nothing: all field writes silently no-op, and the depth-2 follow_ups
+	# query below yields empty because process_issue never records follow_ups
+	# for unregistered issues.
 	for issue_num in "${new_followups[@]}"; do
-		# Skip needs-explore issues unless ENRICH_FOLLOWUPS is true.
-		# When --implement-followups is passed ENRICH_FOLLOWUPS is set to true
-		# automatically and sweep_enrich_followups already ran, so needs-explore
-		# follow-ups should have been enriched before reaching this point.
+		local exists
+		exists=$(jq -r --arg num "$issue_num" \
+			'.issues[] | select(.number == $num) | .number' \
+			"$STATUS_FILE" 2>/dev/null) || exists=""
+		if [[ -z "$exists" ]]; then
+			jq --arg num "$issue_num" \
+				'.issues += [{
+					"number": $num,
+					"status": "pending",
+					"stage": null,
+					"pr": null,
+					"session_id": null,
+					"error": null,
+					"follow_ups": [],
+					"deploy_verify_failed": false,
+					"started_at": null,
+					"stage_started_at": null,
+					"completed_at": null
+				}] | .last_update = (now | todate)' \
+				"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+				&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+			log "Sweep: registered follow-up #$issue_num in status.json"
+		fi
+	done
+
+	for issue_num in "${new_followups[@]}"; do
+		# When ENRICH_FOLLOWUPS is false, skip any follow-up that still
+		# carries the needs-explore label — it was never enriched and
+		# would likely fail the implement stage.
+		# When ENRICH_FOLLOWUPS is true (implied by --implement-followups),
+		# this check is bypassed entirely: every follow-up is passed to
+		# process_issue regardless of its current labels.
 		if [[ "$ENRICH_FOLLOWUPS" != true ]]; then
 			local labels
 			labels=$(gh issue view "$issue_num" --json labels \

@@ -718,7 +718,7 @@ nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --implement-f
 **Sweep behaviour:**
 - Only processes issues with the `needs-explore` label created since `BATCH_START_TIME` (scoped to this batch — does not touch prior batches' follow-ups)
 - Enrichment failures are logged but do **not** fail the batch or trigger the circuit breaker
-- `--implement-followups` only proceeds to the implement stage for issues whose enrichment succeeded; enrichment failures skip the implement stage for that issue
+- `--implement-followups` passes every follow-up issue to the implement stage unconditionally; because `--implement-followups` implies `ENRICH_FOLLOWUPS=true`, the per-issue `needs-explore` label check is bypassed entirely — all follow-ups proceed to implementation regardless of enrichment outcome
 - Use `--enrich-all-needs-explore` (an explicit operator opt-in on `batch-orchestrator.sh`) to sweep ALL `needs-explore` issues regardless of creation time
 
 ### `/enrich-issue` Skill
