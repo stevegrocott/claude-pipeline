@@ -112,6 +112,8 @@ _scan_self_referential() {
 	ident='[A-Za-z_][A-Za-z0-9_]*'
 	re_grep="expect\(${ident}\.${ident}\)\.to(Be|Equal)\(${ident}\.${ident}\)"
 	re_obj1="s/.*expect\(([A-Za-z_][A-Za-z0-9_]*)\.${ident}\).*/\1/"
+	# greedy .* safe: re_grep guarantees exactly one
+	# expect(OBJ.PROP).to{Be|Equal}(OBJ.PROP) match per input line
 	re_obj2="s/.*\.to(Be|Equal)\(([A-Za-z_][A-Za-z0-9_]*)\.${ident}\).*/\2/"
 	re1="s/.*expect\(${ident}\.([A-Za-z_][A-Za-z0-9_]*)\).*/\1/"
 	re2="s/.*\.to(Be|Equal)\(${ident}\.([A-Za-z_][A-Za-z0-9_]*)\).*/\2/"
