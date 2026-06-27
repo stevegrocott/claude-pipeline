@@ -341,7 +341,7 @@ assert_issue_valid() {
 
 	# Criterion 4: Acceptance Criteria section present.
 	if ! grep -qE '^##+ Acceptance Criteria' <<< "$body"; then
-		errors+=("missing '## Acceptance Criteria' section")
+		errors+=("missing 'Acceptance Criteria' section")
 	fi
 
 	# Criterion 5: Deploy Verification iff DEPLOY_VERIFY_CMD set.
@@ -351,10 +351,10 @@ assert_issue_valid() {
 	fi
 	if [[ -n "${DEPLOY_VERIFY_CMD:-}" ]]; then
 		if [[ "$has_deploy" == false ]]; then
-			errors+=("DEPLOY_VERIFY_CMD set but no '## Deploy Verification' section")
+			errors+=("DEPLOY_VERIFY_CMD set but no 'Deploy Verification' section")
 		fi
 	elif [[ "$has_deploy" == true ]]; then
-		errors+=("'## Deploy Verification' section present but DEPLOY_VERIFY_CMD unset")
+		errors+=("'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset")
 	fi
 
 	if ((${#errors[@]} > 0)); then
