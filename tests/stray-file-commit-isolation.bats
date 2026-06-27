@@ -93,8 +93,20 @@ _head_commit_paths() {
 # `.ts` file and a `tests/*.bats` file are accepted.
 _post_commit_path_allowlist_check() {
 	local dir="$1"
-	local path
-	local -a bad=()
+	local path ep
+	local -a bad=() _extra=() _raw=()
+	# Hoist the EXTRA_COMMIT_PATHS split outside the per-path loop.
+	# Trim whitespace around each pipe-separated entry so values like
+	# 'package.json | package-lock.json' work correctly.
+	if [[ -n "${EXTRA_COMMIT_PATHS:-}" ]]; then
+		IFS='|' read -ra _raw <<< "$EXTRA_COMMIT_PATHS"
+		for ep in "${_raw[@]}"; do
+			ep="${ep#"${ep%%[![:space:]]*}"}"
+			ep="${ep%"${ep##*[![:space:]]}"}"
+			[[ -n "$ep" ]] || continue
+			_extra+=("$ep")
+		done
+	fi
 
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
@@ -111,19 +123,12 @@ _post_commit_path_allowlist_check() {
 				continue
 				;;
 			*)
-				if [[ -n "${EXTRA_COMMIT_PATHS:-}" ]]; then
-					local -a _extra
-					local ep
-					IFS='|' read -ra _extra \
-						<<< "$EXTRA_COMMIT_PATHS"
-					for ep in "${_extra[@]}"; do
-						[[ -n "$ep" ]] || continue
-						# shellcheck disable=SC2254
-						case "$path" in
-							$ep) continue 2 ;;
-						esac
-					done
-				fi
+				for ep in "${_extra[@]}"; do
+					# shellcheck disable=SC2254
+					case "$path" in
+						$ep) continue 2 ;;
+					esac
+				done
 				bad+=("$path") ;;
 		esac
 	done < <(_head_commit_paths "$dir")
@@ -548,6 +553,28 @@ _orchestrator_guard_function_name() {
 	[[ "$output" == *".serena/project.yml"* ]] || {
 		printf \
 			'FAIL: expected .serena/project.yml named in error, got:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(9a) reference allowlist: EXTRA_COMMIT_PATHS pipe patterns work with spaces around separators" {
+	local repo
+	repo="$(_make_repo guard-extra-spaces)"
+
+	mkdir -p "$repo/config"
+	printf '{"env": "prod"}\n' > "$repo/config/app.json"
+	printf '{"name":"app","version":"1.0.0"}\n' > "$repo/package.json"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q \
+		-m "feat: add config and package manifest"
+
+	# Both paths allowed even when spaces surround the pipe separator.
+	EXTRA_COMMIT_PATHS="config/** | package.json"
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf \
+			'FAIL: spaces around pipe in EXTRA_COMMIT_PATHS still rejected commit:\n%s\n' \
 			"$output" >&2
 		return 1
 	}

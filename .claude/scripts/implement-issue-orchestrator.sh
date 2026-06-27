@@ -4346,8 +4346,20 @@ sanitize_worktree_commits() {
 guard_commit_path_allowlist() {
 	local git_dir="${1:-.}"
 	local ref="${2:-HEAD}"
-	local path
-	local -a bad=()
+	local path ep
+	local -a bad=() _extra=() _raw=()
+	# Hoist the EXTRA_COMMIT_PATHS split outside the per-path loop.
+	# Trim whitespace around each pipe-separated entry so values like
+	# 'package.json | package-lock.json' work correctly.
+	if [[ -n "${EXTRA_COMMIT_PATHS:-}" ]]; then
+		IFS='|' read -ra _raw <<< "$EXTRA_COMMIT_PATHS"
+		for ep in "${_raw[@]}"; do
+			ep="${ep#"${ep%%[![:space:]]*}"}"
+			ep="${ep%"${ep##*[![:space:]]}"}"
+			[[ -n "$ep" ]] || continue
+			_extra+=("$ep")
+		done
+	fi
 
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
@@ -4366,19 +4378,12 @@ guard_commit_path_allowlist() {
 				continue ;;
 			*.c | *.cpp | *.h | *.hpp) continue ;;
 			*)
-				if [[ -n "${EXTRA_COMMIT_PATHS:-}" ]]; then
-					local -a _extra
-					local ep
-					IFS='|' read -ra _extra \
-						<<< "$EXTRA_COMMIT_PATHS"
-					for ep in "${_extra[@]}"; do
-						[[ -n "$ep" ]] || continue
-						# shellcheck disable=SC2254
-						case "$path" in
-							$ep) continue 2 ;;
-						esac
-					done
-				fi
+				for ep in "${_extra[@]}"; do
+					# shellcheck disable=SC2254
+					case "$path" in
+						$ep) continue 2 ;;
+					esac
+				done
 				bad+=("$path") ;;
 		esac
 	done < <(
