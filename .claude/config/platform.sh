@@ -30,17 +30,23 @@ if [[ -z "${E2E_TDD_ENABLED:-}" ]]; then
   [[ -n "${TEST_E2E_CMD:-}" ]] && E2E_TDD_ENABLED=true || E2E_TDD_ENABLED=false
 fi
 
-# Context Mode opt-in — https://context.ai (ELv2 license)
+# Context Mode opt-in — https://github.com/mksglu/context-mode (ELv2 license)
+# Claude Code plugin that sandboxes large tool outputs (~98% token reduction),
+# persists session state to SQLite, and provides FTS5/BM25 markdown search.
 # Enables `ctx doctor` / `ctx stats` health checks in context-mode-check.sh.
 # When 0 (default), ctx checks are skipped gracefully when ctx is not installed.
 # When 1, ctx MUST be installed — the health check exits non-zero when absent.
 #
-# Setup:    See https://context.ai/docs/install for install instructions.
-#           Then run: /context-mode:ctx-doctor  to verify the integration.
+# Setup:    Inside a Claude Code session:
+#             /plugin marketplace add mksglu/context-mode
+#             /plugin install context-mode@context-mode
+#             /reload-plugins
+#           Then verify: /context-mode:ctx-doctor
 # Enable:   CONTEXT_MODE_ENABLED=1
 # Rollback: CONTEXT_MODE_ENABLED=0  (or unset CONTEXT_MODE_ENABLED)
-#           Remove any Context Mode SessionStart/PreToolUse entries added to
-#           .claude/settings.local.json (this file is gitignored).
+#           Inside Claude Code: /plugin uninstall context-mode → /reload-plugins
+#           Remove any Context Mode entries added to .claude/settings.local.json
+#           (this file is gitignored).
 CONTEXT_MODE_ENABLED="${CONTEXT_MODE_ENABLED:-0}"
 
 # RTK (Rust Token Killer) opt-in — https://github.com/rtk-ai/rtk

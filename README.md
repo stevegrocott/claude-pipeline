@@ -540,20 +540,30 @@ The hook activates automatically once registered.
 
 ## Context Mode
 
-[Context Mode](https://context.ai) is an opt-in Claude Code plugin that caches and compresses conversation context between sessions. It is licensed under **ELv2 (Elastic License 2.0)** — free to use, but with restrictions on hosting it as a service. Review the license before deploying in a SaaS environment.
+[Context Mode](https://github.com/mksglu/context-mode) is an opt-in Claude Code plugin
+(MCP server + Claude Code plugin) that sandboxes large tool outputs into subprocesses
+(~98% reduction on big snapshots), persists session state to SQLite across compaction,
+and indexes markdown into an FTS5/BM25 search base. It is licensed under
+**ELv2 (Elastic License 2.0)** — free to use, but with restrictions on hosting it as
+a service. Review the license before deploying in a SaaS environment.
 
 ### Install
 
+Context Mode is managed by Claude Code's plugin system — run these slash commands
+**inside an active Claude Code session**:
+
+```
+/plugin marketplace add mksglu/context-mode
+/plugin install context-mode@context-mode
+/reload-plugins
+```
+
+Requires Node ≥ 22.5 or Bun. No cloud account or `ctx login` step is needed —
+all state is stored locally in SQLite.
+
+After installing, enable in this project:
+
 ```bash
-# 1. Install the ctx CLI (see https://context.ai/docs/install)
-brew install context-ai/tap/ctx
-# or
-curl -fsSL https://context.ai/install.sh | sh
-
-# 2. Authenticate
-ctx login
-
-# 3. Enable in this project
 export CONTEXT_MODE_ENABLED=1
 ```
 
@@ -590,15 +600,22 @@ Context Mode registers its own **SessionStart** and **PreToolUse** hooks in `.cl
 ### Rollback
 
 ```bash
-# Immediately disable (no restart required)
+# 1. Immediately disable token/context compression (no restart required)
 export CONTEXT_MODE_ENABLED=0
 
-# Permanently disable — set in platform.sh
+# 2. Permanently disable — set in platform.sh
 CONTEXT_MODE_ENABLED=0
 
-# Remove Context Mode hooks from local settings (if added)
-# Edit .claude/settings.local.json and delete any ctx / Context Mode
-# entries under "hooks".  The file is gitignored so edits are local only.
+# 3. Uninstall the plugin (inside a Claude Code session)
+#    /plugin uninstall context-mode
+#    /reload-plugins
+
+# 4. Optionally purge local SQLite state
+ctx purge
+
+# Remove any Context Mode hooks from local settings (if added manually)
+# Edit .claude/settings.local.json and delete ctx / Context Mode entries
+# under "hooks".  The file is gitignored so edits are local only.
 ```
 
 ### Pipeline-Specific
