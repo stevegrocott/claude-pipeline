@@ -189,6 +189,19 @@ _issue_body_extract_paths() {
 # fallback patterns of the orchestrator's _parse_task_lines).  Checked [x]
 # tasks are treated as complete and skipped.
 #
+# Only lines inside the "## Implementation Tasks" section are matched —
+# see the in-function section-extraction loop below.
+#
+# Caller audit (confirmed no dependency on whole-body parsing):
+#   assert_issue_valid() [issue-body-lib.sh:292]
+#       Passes the full issue body but consumes only the section-scoped
+#       output.  It never relied on task lines from other sections.
+#   BATS tests [implement-issue-test/test-issue-body-lib.bats]
+#       All invocations either supply a body that contains an
+#       "## Implementation Tasks" heading, or explicitly assert that
+#       section-less / out-of-section lines yield no output.  None
+#       depend on the pre-scoping, whole-body-parsing behaviour.
+#
 # Arguments:
 #   $1 - issue body text
 # Outputs:
