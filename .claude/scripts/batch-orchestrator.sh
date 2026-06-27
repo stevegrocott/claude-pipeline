@@ -166,6 +166,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --implement-followups)
             IMPLEMENT_FOLLOWUPS=true
+            ENRICH_FOLLOWUPS=true
             shift
             ;;
         --no-implement-followups)
@@ -1347,12 +1348,16 @@ sweep_implement_followups() {
         return 0
     fi
 
-    # This sweep implements depth-1 follow-ups only — the wave depth is
-    # fixed at 1 and there is no runtime depth recursion here.  Depth-2+
-    # follow-ups created during implementation are logged and surfaced but
-    # not auto-implemented.  MAX_FOLLOWUP_DEPTH documents the intended cap
-    # but is not enforced dynamically, since _depth never advances past 1.
+    # This sweep implements depth-1 follow-ups only.  MAX_FOLLOWUP_DEPTH
+    # enforces the cap at runtime: if the constant is ever raised to support
+    # deeper waves, the guard below will need to become a recursive loop.
+    # Depth-2+ follow-ups created during this sweep are logged and surfaced
+    # but never auto-implemented by this single-wave implementation.
     local _depth=1
+    if (( _depth > MAX_FOLLOWUP_DEPTH )); then
+        log "Sweep: depth $_depth exceeds MAX_FOLLOWUP_DEPTH=$MAX_FOLLOWUP_DEPTH — skipping"
+        return 0
+    fi
 
     log "Sweep: ${#_wave2[@]} follow-up(s) to implement at depth $_depth"
 
