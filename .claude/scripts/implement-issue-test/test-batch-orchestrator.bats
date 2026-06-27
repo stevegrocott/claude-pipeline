@@ -1451,7 +1451,7 @@ source_sweep_implement_followups() {
 	local body
 	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
-	[[ "$body" == *'timeout'*'gh issue view'* ]]
+	[[ "$body" == *'timeout 30 gh issue view'* ]]
 }
 
 @test "sweep_implement_followups: gh timeout falls back to empty labels; issue proceeds" {
