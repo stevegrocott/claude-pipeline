@@ -567,9 +567,12 @@ After installing, enable in this project:
 export CONTEXT_MODE_ENABLED=1
 ```
 
-Set `CONTEXT_MODE_ENABLED=1` in `.claude/config/platform.sh` (or your shell profile) to make it permanent.
+To make this permanent, **do not edit `.claude/config/platform.sh` directly** in consumer repos — `platform.sh` is managed by `sync.sh` and will be overwritten on the next sync. Instead, choose one of:
 
-> **Upstream repo only:** Editing `.claude/config/platform.sh` is only appropriate in this upstream pipeline repository. Consumer repos that sync from this pipeline should persist the variable in their shell profile (e.g. `~/.bashrc`, `~/.zshrc`) instead — `platform.sh` is managed by `sync.sh` and will be overwritten on the next sync.
+- **Shell profile** (e.g. `~/.bashrc`, `~/.zshrc`): add `export CONTEXT_MODE_ENABLED=1` and restart your terminal.
+- **Gitignored local env file** — create `.claude/env.local` (already in `.gitignore`) and add `export CONTEXT_MODE_ENABLED=1`, then source it from your shell profile: `source /path/to/project/.claude/env.local`. This keeps project-specific env vars in the project directory and out of your global shell config.
+
+> **Upstream repo only:** Editing `.claude/config/platform.sh` is appropriate only in this upstream pipeline repository.
 
 ### Verify the integration
 
@@ -605,8 +608,9 @@ Context Mode registers its own **SessionStart** and **PreToolUse** hooks in `.cl
 # 1. Immediately disable token/context compression (no restart required)
 export CONTEXT_MODE_ENABLED=0
 
-# 2. Permanently disable — set in platform.sh (upstream repo only)
-#    Consumer repos: set CONTEXT_MODE_ENABLED=0 in your shell profile instead
+# 2. Permanently disable — upstream repo only: set in platform.sh
+#    Consumer repos: set CONTEXT_MODE_ENABLED=0 in your shell profile
+#    or in a gitignored local env file (.claude/env.local) instead
 CONTEXT_MODE_ENABLED=0
 
 # 3. Uninstall the plugin (inside a Claude Code session)

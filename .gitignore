@@ -9,6 +9,11 @@ status.json
 # These override the generic defaults when synced via apply-local.sh
 .claude/local/
 
+# Local env overrides — consumer repos use this to set env vars (e.g. CONTEXT_MODE_ENABLED=1)
+# without editing platform.sh (which sync.sh overwrites on each sync).
+# Usage: add `export VAR=value` lines here and source from your shell profile or hook.
+.claude/env.local
+
 # macOS Finder metadata
 .DS_Store
 
