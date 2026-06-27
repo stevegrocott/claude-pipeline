@@ -74,6 +74,10 @@ EOF
 	[[ "$body" == *'echo "inner block"'* ]]
 	# Lines that appear AFTER the nested closing brace must not be truncated.
 	[[ "$body" == *'echo "outer end"'* ]]
+	# Structural elements: the function header line and the outer closing brace
+	# must both be captured — not just the inner body lines.
+	[[ "$body" == *'target_func() {'* ]]
+	[[ "$body" == *$'\n}' ]]
 }
 
 # =============================================================================
