@@ -335,8 +335,7 @@ else
         # Resume: implement ran in a prior invocation; stage current state.
         git add -A 2>>"$LOG_FILE"
     else
-        log "WARNING: _changed_paths is empty and this is not a resume" \
-            "— implement made no changes"
+        log "WARNING: _changed_paths is empty and this is not a resume — implement made no changes"
         bail "empty_changed_paths"
     fi
 
