@@ -12,6 +12,24 @@ load 'helpers/test-helper'
 setup() {
     setup_test_env
     install_mocks
+    # Callable gh stub: handles 'gh issue create' and records 'gh api'
+    # invocations to $GH_API_ARGS (when set) for non-vacuous assertions.
+    cat > "$TEST_TMP/bin/gh" << 'GH_EOF'
+#!/usr/bin/env bash
+echo "gh $*" >> "$TEST_TMP/mock_calls.log"
+case "$1" in
+    issue)
+        [[ "$2" == "create" ]] && \
+            echo "https://github.com/owner/repo/issues/42"
+        ;;
+    api)
+        printf '%s\n' "$*" >> "${GH_API_ARGS:-/dev/null}"
+        echo "99999"
+        ;;
+esac
+exit "${MOCK_GH_EXIT_CODE:-0}"
+GH_EOF
+    chmod +x "$TEST_TMP/bin/gh"
 }
 
 teardown() {
@@ -94,27 +112,6 @@ GH_EOF
     export TRACKER="github"
     export GH_API_ARGS="$TEST_TMP/gh_api_args.log"
 
-    # Callable stub: records every 'gh api' invocation to GH_API_ARGS.
-    # Because GH_API_ARGS is a real path (not /dev/null), the assertion
-    # below fails if the stub IS invoked — so the "not called" check is
-    # non-vacuous.
-    cat > "$TEST_TMP/bin/gh" << 'GH_EOF'
-#!/usr/bin/env bash
-echo "gh $*" >> "$TEST_TMP/mock_calls.log"
-case "$1" in
-    issue)
-        [[ "$2" == "create" ]] && \
-            echo "https://github.com/owner/repo/issues/42"
-        ;;
-    api)
-        printf '%s\n' "$*" >> "$GH_API_ARGS"
-        echo "99999"
-        ;;
-esac
-exit "${MOCK_GH_EXIT_CODE:-0}"
-GH_EOF
-    chmod +x "$TEST_TMP/bin/gh"
-
     run run_platform_script create-issue.sh --title "No parent" --body "body"
     [ "$status" -eq 0 ]
     # GH_API_ARGS points to a real file; the stub writes to it if gh api
@@ -128,23 +125,6 @@ GH_EOF
     # non-vacuous — if the stub can write here it would have written there.
     export TRACKER="github"
     export GH_API_ARGS="$TEST_TMP/gh_api_args.log"
-
-    cat > "$TEST_TMP/bin/gh" << 'GH_EOF'
-#!/usr/bin/env bash
-echo "gh $*" >> "$TEST_TMP/mock_calls.log"
-case "$1" in
-    issue)
-        [[ "$2" == "create" ]] && \
-            echo "https://github.com/owner/repo/issues/42"
-        ;;
-    api)
-        printf '%s\n' "$*" >> "$GH_API_ARGS"
-        echo "99999"
-        ;;
-esac
-exit "${MOCK_GH_EXIT_CODE:-0}"
-GH_EOF
-    chmod +x "$TEST_TMP/bin/gh"
 
     run run_platform_script create-issue.sh \
         --title "With parent" --body "body" --parent "7"
