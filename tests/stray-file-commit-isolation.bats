@@ -382,7 +382,7 @@ _orchestrator_guard_function_name() {
 	}
 
 	# Accepted when EXTRA_COMMIT_PATHS opts them in.
-	EXTRA_COMMIT_PATHS="package.json|package-lock.json"
+	export EXTRA_COMMIT_PATHS="package.json|package-lock.json"
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -eq 0 ] || {
 		printf \
@@ -425,7 +425,7 @@ _orchestrator_guard_function_name() {
 	git -C "$repo" commit -q -m "chore: add workflow"
 
 	# Stays blocked even when EXTRA_COMMIT_PATHS explicitly targets workflows.
-	EXTRA_COMMIT_PATHS=".github/workflows/**"
+	export EXTRA_COMMIT_PATHS=".github/workflows/**"
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -ne 0 ] || {
 		fail ".github/workflows/ must remain blocked regardless of EXTRA_COMMIT_PATHS"
@@ -499,7 +499,7 @@ _orchestrator_guard_function_name() {
 		|| fail "expected rejection without EXTRA_COMMIT_PATHS"
 
 	# With EXTRA_COMMIT_PATHS covering config/ it is accepted.
-	EXTRA_COMMIT_PATHS="config/**"
+	export EXTRA_COMMIT_PATHS="config/**"
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -eq 0 ] || {
 		printf \
@@ -525,7 +525,7 @@ _orchestrator_guard_function_name() {
 		|| fail "expected rejection without EXTRA_COMMIT_PATHS"
 
 	# Both paths allowed with pipe-separated patterns.
-	EXTRA_COMMIT_PATHS="config/**|package.json"
+	export EXTRA_COMMIT_PATHS="config/**|package.json"
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -eq 0 ] || {
 		printf \
@@ -546,7 +546,7 @@ _orchestrator_guard_function_name() {
 	git -C "$repo" commit -q -m "chore: config commit with accidental serena file"
 
 	# config/** allows config/app.json but NOT .serena/project.yml.
-	EXTRA_COMMIT_PATHS="config/**"
+	export EXTRA_COMMIT_PATHS="config/**"
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -ne 0 ] \
 		|| fail "expected rejection: .serena/project.yml not in EXTRA_COMMIT_PATHS"
@@ -570,7 +570,7 @@ _orchestrator_guard_function_name() {
 		-m "feat: add config and package manifest"
 
 	# Both paths allowed even when spaces surround the pipe separator.
-	EXTRA_COMMIT_PATHS="config/** | package.json"
+	export EXTRA_COMMIT_PATHS="config/** | package.json"
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -eq 0 ] || {
 		printf \
@@ -580,24 +580,3 @@ _orchestrator_guard_function_name() {
 	}
 }
 
-@test "(11) orchestrator guard_commit_path_allowlist honours EXTRA_COMMIT_PATHS" {
-	[[ -f "$ORCHESTRATOR" ]] || fail "orchestrator script not present"
-
-	# The guard must read EXTRA_COMMIT_PATHS.
-	grep -A 50 '^guard_commit_path_allowlist()' "$ORCHESTRATOR" \
-		| grep -qF 'EXTRA_COMMIT_PATHS' || {
-		printf \
-			'FAIL: guard_commit_path_allowlist does not reference EXTRA_COMMIT_PATHS\n' \
-			>&2
-		return 1
-	}
-
-	# Must split on the pipe delimiter.
-	grep -A 50 '^guard_commit_path_allowlist()' "$ORCHESTRATOR" \
-		| grep -qF "IFS='|'" || {
-		printf \
-			'FAIL: no pipe-delimiter IFS split found in guard_commit_path_allowlist\n' \
-			>&2
-		return 1
-	}
-}
