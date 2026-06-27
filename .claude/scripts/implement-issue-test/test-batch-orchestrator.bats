@@ -1014,6 +1014,70 @@ _simulate_update_progress_v2() {
 }
 
 # =============================================================================
+# FUNCTIONAL: validate_issue_for_processing — Check 3 body-validation skip
+# =============================================================================
+#
+# Extract and source validate_issue_for_processing from batch-orchestrator.sh
+# along with its collaborator assert_issue_valid from issue-body-lib.sh so the
+# function can be exercised end-to-end with a mocked gh CLI.
+# Returns 1 without aborting when either artefact is absent (skip guard).
+
+source_validate_issue_for_processing() {
+	local lib="$SCRIPT_DIR/issue-body-lib.sh"
+	[[ -f "$lib" ]] || return 1
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	local func_file="$TEST_TMP/validate_issue_for_processing.bash"
+	awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	grep -q 'validate_issue_for_processing' "$func_file" 2>/dev/null \
+		|| return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+@test "functional: validate_issue_for_processing returns 1 with body-validation _SKIP_REASON when assert_issue_valid fails" {
+	# Arrange ----------------------------------------------------------------
+	# Mock gh to return a body that has ## Implementation Tasks but no
+	# parseable task lines and no ## Acceptance Criteria.
+	# This satisfies Check 2 (section present) so execution enters Check 3,
+	# where assert_issue_valid returns 1 — triggering the skip path.
+	local mock_bin="$TEST_TMP/mock-bin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+# Return body with ## Implementation Tasks that fails assert_issue_valid:
+# no parseable task lines, no ## Acceptance Criteria section.
+printf '%s\n' '{"body":"## Implementation Tasks\n\nThis is prose, not a task line.\n\n## Background\n\nSome context.","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	source_validate_issue_for_processing \
+		|| skip "validate_issue_for_processing() not yet present"
+
+	# Stub collaborators so no real shell-outs are attempted.
+	log()                  { :; }
+	log_warn()             { :; }
+	dispatch_composition() { return 1; }
+	export ENRICH_FOLLOWUPS=false
+	unset DEPLOY_VERIFY_CMD
+
+	# Act --------------------------------------------------------------------
+	_SKIP_REASON=""
+	local rc=0
+	validate_issue_for_processing 99 || rc=$?
+
+	# Assert -----------------------------------------------------------------
+	# Function must return 1 (skip, not fatal).
+	[[ "$rc" -eq 1 ]]
+	# _SKIP_REASON must be set to a body-validation message.
+	[[ -n "$_SKIP_REASON" ]]
+	[[ "$_SKIP_REASON" == *"body failed structural validation"* ]]
+}
+
+# =============================================================================
 # TASK 4: PR-recovery WARN names the stuck stage (current_stage from status.json)
 # =============================================================================
 
