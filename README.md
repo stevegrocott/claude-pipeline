@@ -538,6 +538,69 @@ The hook activates automatically once registered.
 
 **Rollback:** `unset RTK_ENABLED` or set `RTK_ENABLED=0`. The hook no-ops immediately — no restart required.
 
+## Context Mode
+
+[Context Mode](https://context.ai) is an opt-in Claude Code plugin that caches and compresses conversation context between sessions. It is licensed under **ELv2 (Elastic License 2.0)** — free to use, but with restrictions on hosting it as a service. Review the license before deploying in a SaaS environment.
+
+### Install
+
+```bash
+# 1. Install the ctx CLI (see https://context.ai/docs/install)
+brew install context-ai/tap/ctx
+# or
+curl -fsSL https://context.ai/install.sh | sh
+
+# 2. Authenticate
+ctx login
+
+# 3. Enable in this project
+export CONTEXT_MODE_ENABLED=1
+```
+
+Set `CONTEXT_MODE_ENABLED=1` in `.claude/config/platform.sh` (or your shell profile) to make it permanent.
+
+### Verify the integration
+
+After installing, run the smoke-check script:
+
+```bash
+.claude/scripts/context-mode-check.sh
+```
+
+Or via the Claude Code slash command (if the skill is installed):
+
+```
+/context-mode:ctx-doctor
+```
+
+The script runs `ctx doctor` and `ctx stats`, then runs the orchestrator BATS parsing-assertion suite to confirm Context Mode does not break output parsing. Exit 0 = everything healthy.
+
+### Hook interactions with the pipeline
+
+Context Mode registers its own **SessionStart** and **PreToolUse** hooks in `.claude/settings.local.json`. The pipeline already uses both events:
+
+| Hook event | Pipeline hook | Context Mode hook | Interaction |
+|---|---|---|---|
+| `SessionStart` | `hooks/session-start.sh` — injects `using-skills` | Context Mode session hydration | No conflict — both fire independently. Session-start hooks run in registration order; neither reads output of the other. |
+| `PreToolUse / Edit\|Write` | `pre-commit-skill-validate.sh`, path guard `python3 -c ...` | Context Mode token compression (if enabled) | No conflict — the PreToolUse pipeline hooks guard against destructive edits; Context Mode compresses context before tool execution. They operate on different data. |
+| `PreToolUse / Bash` | `block-destructive-db-commands.sh` | Context Mode (if applicable) | No conflict — pipeline guard rejects dangerous commands; Context Mode does not inspect Bash commands. |
+
+**Verdict:** Context Mode hooks and pipeline hooks are orthogonal. Neither modifies data the other depends on. If you observe unexpected behaviour after enabling Context Mode, run `.claude/scripts/context-mode-check.sh` to confirm the BATS parsing-assertion suite still passes.
+
+### Rollback
+
+```bash
+# Immediately disable (no restart required)
+export CONTEXT_MODE_ENABLED=0
+
+# Permanently disable — set in platform.sh
+CONTEXT_MODE_ENABLED=0
+
+# Remove Context Mode hooks from local settings (if added)
+# Edit .claude/settings.local.json and delete any ctx / Context Mode
+# entries under "hooks".  The file is gitignored so edits are local only.
+```
+
 ### Pipeline-Specific
 
 - **Agent definitions are loaded globally.** Keep `.claude/agents/*.md` files focused on role identity (under 40 lines). Technology checklists belong in `.claude/prompts/` — loaded once per stage, not every invocation.

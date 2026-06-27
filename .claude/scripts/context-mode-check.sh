@@ -235,9 +235,11 @@ main() {
 	# Orchestrator parsing-assertion suite
 	if [[ "$ctx_only" == false && "$skip_bats" == false ]]; then
 		if ! check_bats "$bats_dir" "$bats_filter"; then
-			if [[ "$overall_exit" -eq 0 ]]; then
-				overall_exit=2
-			fi
+			# Always record the bats failure exit code — do NOT skip when
+			# overall_exit is already 1 (ctx failure).  Masking it here would
+			# silently hide a bats failure from callers.  Both FAIL lines are
+			# still printed to stderr so the human sees the full picture.
+			overall_exit=2
 		fi
 	fi
 

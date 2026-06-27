@@ -30,6 +30,19 @@ if [[ -z "${E2E_TDD_ENABLED:-}" ]]; then
   [[ -n "${TEST_E2E_CMD:-}" ]] && E2E_TDD_ENABLED=true || E2E_TDD_ENABLED=false
 fi
 
+# Context Mode opt-in — https://context.ai (ELv2 license)
+# Enables `ctx doctor` / `ctx stats` health checks in context-mode-check.sh.
+# When 0 (default), ctx checks are skipped gracefully when ctx is not installed.
+# When 1, ctx MUST be installed — the health check exits non-zero when absent.
+#
+# Setup:    See https://context.ai/docs/install for install instructions.
+#           Then run: /context-mode:ctx-doctor  to verify the integration.
+# Enable:   CONTEXT_MODE_ENABLED=1
+# Rollback: CONTEXT_MODE_ENABLED=0  (or unset CONTEXT_MODE_ENABLED)
+#           Remove any Context Mode SessionStart/PreToolUse entries added to
+#           .claude/settings.local.json (this file is gitignored).
+CONTEXT_MODE_ENABLED="${CONTEXT_MODE_ENABLED:-0}"
+
 # RTK (Rust Token Killer) opt-in — https://github.com/rtk-ai/rtk
 # Rewrites verbose commands (git status, ls, grep, find, git diff, test
 # runners) and filters/truncates output, cutting LLM token use 60-90%.
