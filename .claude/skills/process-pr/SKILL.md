@@ -342,7 +342,9 @@ Examples:
 
 ### Step 4g: Create Follow-up Issues
 
-For each extracted issue, invoke `create-followup-issue.sh` — it handles deduplication, `$AGENT` inference from `$FILE_PATH`, body templating, and issue creation:
+> **CRITICAL — NEVER use `gh issue create` or `create-issue.sh` directly.** Every follow-up issue MUST go through `create-followup-issue.sh`. It runs `assert_issue_valid` fail-closed before creation, ensuring the body has parseable task lines, a known agent, a resolvable file path, and an `## Acceptance Criteria` section. Writing bodies by hand and bypassing this script produces malformed issues that stall the pipeline and require manual remediation. If `create-followup-issue.sh` exits non-zero for any reason (missing argument, validation failure), log the error and skip that item — do NOT fall back to `gh issue create`.
+
+For each extracted issue, invoke `create-followup-issue.sh`:
 
 ```bash
 ".claude/scripts/create-followup-issue.sh" \
@@ -356,6 +358,8 @@ For each extracted issue, invoke `create-followup-issue.sh` — it handles dedup
   --labels "${LABELS}" \
   --type precise   # or: --type vague (adds needs-explore label)
 ```
+
+**`--file-path` is required** — extract it from the `[File:Line]` reference in the review comment. If the review item mentions a function or concept but no file path, use the primary file changed in the PR/MR diff as the fallback. If no file can be determined at all, pass `"."` (the script will infer agent `"default"` and the issue will be valid). Never omit `--file-path`.
 
 Log each: `Created follow-up issue #XXX: "$TITLE"` (or `"$TITLE" (needs-explore)` for vague items).
 
@@ -462,7 +466,7 @@ Re-running /implement-issue $ISSUE_NUMBER $BASE_BRANCH to address requested chan
 | No review status in comments | Stop, report - need code review comment with Status line first |
 | `merge_blocked_reason` set in `status.json` | Leave PR open, post block comment, return `merge_blocked` — do NOT close issue or delete branch |
 | `quality:convergence_failure` in `degraded_stages` | Same as above (fallback when `merge_blocked_reason` absent) |
-| Issue creation fails | Log warning, continue |
+| Issue creation fails (`create-followup-issue.sh` exits non-zero) | Log warning, skip that item — NEVER fall back to `gh issue create` or `create-issue.sh` |
 | Merge fails | Stop, return failure, do NOT close issue |
 | Issue close fails | Log warning (merge succeeded) |
 | Branch delete fails | Log warning (best-effort) |
@@ -590,3 +594,12 @@ The `batch-orchestrator.sh` uses this JSON schema to extract results:
 ```
 
 **Important:** The final result section must be the last significant output. The `--json-schema` flag asks Claude to summarize the execution according to this schema, so ending with a clear status makes extraction reliable.
+
+## Red Flags
+
+| Temptation | Why It Fails |
+|------------|--------------|
+| Call `gh issue create` directly for a follow-up | Bypasses `assert_issue_valid` — produces bodies with no task lines, no agent, no ACs; stalls the pipeline and requires manual remediation |
+| Call `create-issue.sh` with a hand-written body | Same bypass — `create-issue.sh` only gates bodies that already contain `## Implementation Tasks`; a prose body has no such marker and slips through unvalidated |
+| Omit `--file-path` because no file was mentioned | `create-followup-issue.sh` exits 3 (missing arg); pass `"."` as fallback to get `default` agent inference — never omit the flag |
+| Write the issue body inline before calling the script | The script generates and validates the body deterministically from its arguments; writing a body manually defeats the entire purpose |
