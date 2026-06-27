@@ -290,7 +290,8 @@ _make_mixed_status_json() {
 _simulate_update_progress() {
 	local status_file="$1"
 	jq '.progress.completed = ([.issues[] | select(.status == "completed" or .status == "already_done")] | length) |
-		.progress.failed = ([.issues[] | select(.status == "failed" or .status == "skipped")] | length) |
+		.progress.failed = ([.issues[] | select(.status == "failed")] | length) |
+		.progress.skipped = ([.issues[] | select(.status == "skipped")] | length) |
 		.progress.merge_blocked = ([.issues[] | select(.status == "merge_blocked")] | length) |
 		.progress.in_progress = ([.issues[] | select(.status == "in_progress")] | length) |
 		.progress.pending = ([.issues[] | select(.status == "pending")] | length)' \

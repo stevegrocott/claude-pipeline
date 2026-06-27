@@ -654,56 +654,56 @@ extract_wait_time() {
 #   (unset)    — auto-route based on the isolated argument
 
 dispatch_composition() {
-	local prompt="$1"
-	local isolated="${2:-false}"
-	local -a extra_args=()
-	if (( $# > 2 )); then
-		shift 2
-		extra_args=("$@")
-	fi
+    local prompt="$1"
+    local isolated="${2:-false}"
+    local -a extra_args=()
+    if (( $# > 2 )); then
+        shift 2
+        extra_args=("$@")
+    fi
 
-	local backend
-	if [[ -n "${COMPOSITION_BACKEND:-}" ]]; then
-		case "$COMPOSITION_BACKEND" in
-			subprocess|skill)
-				backend="$COMPOSITION_BACKEND"
-				;;
-			*)
-				printf 'ERROR: unknown COMPOSITION_BACKEND value: %s\n' \
-					"$COMPOSITION_BACKEND" >&2
-				return 1
-				;;
-		esac
-	elif [[ "$isolated" == "true" ]]; then
-		backend="subprocess"
-	else
-		backend="skill"
-	fi
+    local backend
+    if [[ -n "${COMPOSITION_BACKEND:-}" ]]; then
+        case "$COMPOSITION_BACKEND" in
+            subprocess|skill)
+                backend="$COMPOSITION_BACKEND"
+                ;;
+            *)
+                printf 'ERROR: unknown COMPOSITION_BACKEND value: %s\n' \
+                    "$COMPOSITION_BACKEND" >&2
+                return 1
+                ;;
+        esac
+    elif [[ "$isolated" == "true" ]]; then
+        backend="subprocess"
+    else
+        backend="skill"
+    fi
 
-	case "$backend" in
-		subprocess)
-			run_composition_subprocess "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
-			;;
-		# "skill" is the legacy kill-switch value; routes to the standard
-		# (non-sandboxed) subprocess path.  See ARCHITECTURAL CONSTRAINT note
-		# above.
-		skill)
-			run_composition_standard "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
-			;;
-	esac
+    case "$backend" in
+        subprocess)
+            run_composition_subprocess "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+            ;;
+        # "skill" is the legacy kill-switch value; routes to the standard
+        # (non-sandboxed) subprocess path.  See ARCHITECTURAL CONSTRAINT note
+        # above.
+        skill)
+            run_composition_standard "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
+            ;;
+    esac
 }
 
 # run_composition_subprocess — invoke a skill as a worktree-isolated subprocess.
 # Used for skills that require git worktree isolation (e.g. implement-issue).
 run_composition_subprocess() {
-	local prompt="$1"
-	shift
-	log "Composition dispatch → subprocess: $prompt"
-	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
-		--dangerously-skip-permissions \
-		--output-format json \
-		"$@" \
-		2>&1
+    local prompt="$1"
+    shift
+    log "Composition dispatch → subprocess: $prompt"
+    timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+        --dangerously-skip-permissions \
+        --output-format json \
+        "$@" \
+        2>&1
 }
 
 # run_composition_standard — invoke claude as a standard (non-sandboxed) subprocess.
@@ -721,12 +721,12 @@ run_composition_subprocess() {
 # Output format is not forced here — callers that need structured JSON must
 # pass --output-format json (and --json-schema) explicitly.
 run_composition_standard() {
-	local prompt="$1"
-	shift
-	log "Composition dispatch → standard: $prompt"
-	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
-		"$@" \
-		2>&1
+    local prompt="$1"
+    shift
+    log "Composition dispatch → standard: $prompt"
+    timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+        "$@" \
+        2>&1
 }
 
 # =============================================================================
@@ -752,94 +752,94 @@ run_composition_standard() {
 # safety net.
 
 validate_issue_for_processing() {
-	local issue_num="$1"
-	_SKIP_REASON=""
+    local issue_num="$1"
+    _SKIP_REASON=""
 
-	local issue_json
-	issue_json=$(gh issue view "$issue_num" --json body,labels \
-		2>/dev/null) || return 0
-	[[ -z "$issue_json" ]] && return 0
+    local issue_json
+    issue_json=$(gh issue view "$issue_num" --json body,labels \
+        2>/dev/null) || return 0
+    [[ -z "$issue_json" ]] && return 0
 
-	# -----------------------------------------------------------------
-	# Check 1: blocking needs-explore label
-	# -----------------------------------------------------------------
-	local has_needs_explore
-	has_needs_explore=$(printf '%s' "$issue_json" \
-		| jq -r '[.labels[].name] | any(. == "needs-explore")' \
-		2>/dev/null) || has_needs_explore="false"
+    # -----------------------------------------------------------------
+    # Check 1: blocking needs-explore label
+    # -----------------------------------------------------------------
+    local has_needs_explore
+    has_needs_explore=$(printf '%s' "$issue_json" \
+        | jq -r '[.labels[].name] | any(. == "needs-explore")' \
+        2>/dev/null) || has_needs_explore="false"
 
-	if [[ "$has_needs_explore" == "true" ]]; then
-		if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
-			log "Preflight #$issue_num: needs-explore label" \
-				"— enriching inline"
-			local enrich_out enrich_rc
-			enrich_out=$(dispatch_composition \
-				"/enrich-issue $issue_num" false 2>&1)
-			enrich_rc=$?
-			if (( enrich_rc != 0 )); then
-				log_warn \
-					"Preflight #$issue_num: enrich-issue" \
-					"failed (rc=$enrich_rc) — skipping"
-				[[ -n "$enrich_out" ]] && \
-					log_warn \
-						"Preflight #$issue_num:" \
-						"enrich output: $enrich_out"
-				_SKIP_REASON="needs-explore label (enrich-issue failed)"
-				return 1
-			fi
-			log "Preflight #$issue_num: enriched inline — proceeding"
-			return 0
-		fi
-		_SKIP_REASON="needs-explore label"
-		return 1
-	fi
+    if [[ "$has_needs_explore" == "true" ]]; then
+        if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
+            log "Preflight #$issue_num: needs-explore label" \
+                "— enriching inline"
+            local enrich_out enrich_rc
+            enrich_out=$(dispatch_composition \
+                "/enrich-issue $issue_num" false 2>&1)
+            enrich_rc=$?
+            if (( enrich_rc != 0 )); then
+                log_warn \
+                    "Preflight #$issue_num: enrich-issue" \
+                    "failed (rc=$enrich_rc) — skipping"
+                [[ -n "$enrich_out" ]] && \
+                    log_warn \
+                        "Preflight #$issue_num:" \
+                        "enrich output: $enrich_out"
+                _SKIP_REASON="needs-explore label (enrich-issue failed)"
+                return 1
+            fi
+            log "Preflight #$issue_num: enriched inline — proceeding"
+            return 0
+        fi
+        _SKIP_REASON="needs-explore label"
+        return 1
+    fi
 
-	# -----------------------------------------------------------------
-	# Check 2: missing or unparseable ## Implementation Tasks section
-	# -----------------------------------------------------------------
-	local body
-	body=$(printf '%s' "$issue_json" \
-		| jq -r '.body // ""' 2>/dev/null) || body=""
+    # -----------------------------------------------------------------
+    # Check 2: missing or unparseable ## Implementation Tasks section
+    # -----------------------------------------------------------------
+    local body
+    body=$(printf '%s' "$issue_json" \
+        | jq -r '.body // ""' 2>/dev/null) || body=""
 
-	if ! printf '%s' "$body" | grep -q '## Implementation Tasks'; then
-		if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
-			log "Preflight #$issue_num: missing ## Implementation Tasks" \
-				"— enriching inline"
-			local enrich_out enrich_rc
-			enrich_out=$(dispatch_composition \
-				"/enrich-issue $issue_num" false 2>&1)
-			enrich_rc=$?
-			if (( enrich_rc != 0 )); then
-				log_warn \
-					"Preflight #$issue_num: enrich-issue" \
-					"failed (rc=$enrich_rc) — skipping"
-				[[ -n "$enrich_out" ]] && \
-					log_warn \
-						"Preflight #$issue_num:" \
-						"enrich output: $enrich_out"
-				_SKIP_REASON="missing ## Implementation Tasks (enrich-issue failed)"
-				return 1
-			fi
-			log "Preflight #$issue_num: enriched inline — proceeding"
-			return 0
-		fi
-		_SKIP_REASON="missing ## Implementation Tasks"
-		return 1
-	fi
+    if ! printf '%s' "$body" | grep -q '## Implementation Tasks'; then
+        if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
+            log "Preflight #$issue_num: missing ## Implementation Tasks" \
+                "— enriching inline"
+            local enrich_out enrich_rc
+            enrich_out=$(dispatch_composition \
+                "/enrich-issue $issue_num" false 2>&1)
+            enrich_rc=$?
+            if (( enrich_rc != 0 )); then
+                log_warn \
+                    "Preflight #$issue_num: enrich-issue" \
+                    "failed (rc=$enrich_rc) — skipping"
+                [[ -n "$enrich_out" ]] && \
+                    log_warn \
+                        "Preflight #$issue_num:" \
+                        "enrich output: $enrich_out"
+                _SKIP_REASON="missing ## Implementation Tasks (enrich-issue failed)"
+                return 1
+            fi
+            log "Preflight #$issue_num: enriched inline — proceeding"
+            return 0
+        fi
+        _SKIP_REASON="missing ## Implementation Tasks"
+        return 1
+    fi
 
-	# -----------------------------------------------------------------
-	# Check 3: structural validation for pipeline-autocreated bodies.
-	# Non-pipeline issues are not subject to assert_issue_valid — they
-	# may lack Acceptance Criteria or use prose task formats.
-	# -----------------------------------------------------------------
-	if printf '%s' "$body" | grep -q '<!-- pipeline-autocreated -->'; then
-		if ! assert_issue_valid "$body" 2>/dev/null; then
-			_SKIP_REASON="pipeline-autocreated body failed structural validation"
-			return 1
-		fi
-	fi
+    # -----------------------------------------------------------------
+    # Check 3: structural validation for pipeline-autocreated bodies.
+    # Non-pipeline issues are not subject to assert_issue_valid — they
+    # may lack Acceptance Criteria or use prose task formats.
+    # -----------------------------------------------------------------
+    if printf '%s' "$body" | grep -q '<!-- pipeline-autocreated -->'; then
+        if ! assert_issue_valid "$body" 2>/dev/null; then
+            _SKIP_REASON="pipeline-autocreated body failed structural validation"
+            return 1
+        fi
+    fi
 
-	return 0
+    return 0
 }
 
 process_issue() {
@@ -1203,59 +1203,59 @@ process_issue() {
 #     skill can use interactive tools (gh, MCP, etc.) without a worktree.
 
 sweep_enrich_followups() {
-	log "========================================"
-	log "Post-batch sweep: needs-explore issues"
-	log "========================================"
-	log "Batch start time: $BATCH_START_TIME"
+    log "========================================"
+    log "Post-batch sweep: needs-explore issues"
+    log "========================================"
+    log "Batch start time: $BATCH_START_TIME"
 
-	local found_issues
-	if [[ "$ENRICH_ALL_NEEDS_EXPLORE" == true ]]; then
-		log "Sweep: --enrich-all-needs-explore set — including ALL open needs-explore issues"
-		found_issues=$(gh issue list \
-			--label needs-explore \
-			--state open \
-			--limit 1000 \
-			--json number,createdAt \
-			2>/dev/null \
-			| jq -r '.[].number' \
-			2>/dev/null) || found_issues=""
-	else
-		found_issues=$(gh issue list \
-			--label needs-explore \
-			--state open \
-			--limit 1000 \
-			--json number,createdAt \
-			2>/dev/null \
-			| jq -r --arg since "$BATCH_START_TIME" \
-			'[.[] | select(.createdAt >= $since)] | .[].number' \
-			2>/dev/null) || found_issues=""
-	fi
+    local found_issues
+    if [[ "$ENRICH_ALL_NEEDS_EXPLORE" == true ]]; then
+        log "Sweep: --enrich-all-needs-explore set — including ALL open needs-explore issues"
+        found_issues=$(gh issue list \
+            --label needs-explore \
+            --state open \
+            --limit 1000 \
+            --json number,createdAt \
+            2>/dev/null \
+            | jq -r '.[].number' \
+            2>/dev/null) || found_issues=""
+    else
+        found_issues=$(gh issue list \
+            --label needs-explore \
+            --state open \
+            --limit 1000 \
+            --json number,createdAt \
+            2>/dev/null \
+            | jq -r --arg since "$BATCH_START_TIME" \
+            '[.[] | select(.createdAt >= $since)] | .[].number' \
+            2>/dev/null) || found_issues=""
+    fi
 
-	if [[ -z "$found_issues" ]]; then
-		log "Sweep: no needs-explore issues found since $BATCH_START_TIME"
-		return 0
-	fi
+    if [[ -z "$found_issues" ]]; then
+        log "Sweep: no needs-explore issues found since $BATCH_START_TIME"
+        return 0
+    fi
 
-	local issue_num
-	while IFS= read -r issue_num; do
-		[[ -z "$issue_num" ]] && continue
-		log "Sweep: enriching issue #$issue_num"
-		local enrich_output enrich_rc
-		enrich_output=$(dispatch_composition \
-			"/enrich-issue $issue_num" false 2>&1)
-		enrich_rc=$?
-		if (( enrich_rc != 0 )); then
-			log_warn \
-				"Sweep: enrich-issue #$issue_num failed (rc=$enrich_rc)" \
-				"— skipping, batch unaffected"
-			[[ -n "$enrich_output" ]] && \
-				log_warn "Sweep: enrich-issue #$issue_num output: $enrich_output"
-		else
-			log "Sweep: enriched issue #$issue_num successfully"
-		fi
-	done <<< "$found_issues"
+    local issue_num
+    while IFS= read -r issue_num; do
+        [[ -z "$issue_num" ]] && continue
+        log "Sweep: enriching issue #$issue_num"
+        local enrich_output enrich_rc
+        enrich_output=$(dispatch_composition \
+            "/enrich-issue $issue_num" false 2>&1)
+        enrich_rc=$?
+        if (( enrich_rc != 0 )); then
+            log_warn \
+                "Sweep: enrich-issue #$issue_num failed (rc=$enrich_rc)" \
+                "— skipping, batch unaffected"
+            [[ -n "$enrich_output" ]] && \
+                log_warn "Sweep: enrich-issue #$issue_num output: $enrich_output"
+        else
+            log "Sweep: enriched issue #$issue_num successfully"
+        fi
+    done <<< "$found_issues"
 
-	log "Sweep: done"
+    log "Sweep: done"
 }
 
 # =============================================================================
@@ -1277,86 +1277,82 @@ sweep_enrich_followups() {
 #     function must not touch consecutive_failures directly.
 
 sweep_implement_followups() {
-	log "========================================"
-	log "Post-batch sweep: implement follow-up issues"
-	log "========================================"
+    log "========================================"
+    log "Post-batch sweep: implement follow-up issues"
+    log "========================================"
 
-	# Collect all follow-up issue numbers recorded in status.json
-	local all_followups
-	all_followups=$(jq -r \
-		'.issues[].follow_ups[]?' \
-		"$STATUS_FILE" 2>/dev/null) || all_followups=""
+    # Collect all follow-up issue numbers recorded in status.json
+    local all_followups
+    all_followups=$(jq -r \
+        '.issues[].follow_ups[]?' \
+        "$STATUS_FILE" 2>/dev/null) || all_followups=""
 
-	if [[ -z "$all_followups" ]]; then
-		log "Sweep: no follow-up issues found in status.json"
-		return 0
-	fi
+    if [[ -z "$all_followups" ]]; then
+        log "Sweep: no follow-up issues found in status.json"
+        return 0
+    fi
 
-	# Build a lookup set from the original manifest for dedup against ISSUE_ARRAY
-	local -A _manifest_set=()
-	local _orig
-	for _orig in "${ISSUE_ARRAY[@]}"; do
-		_manifest_set["$_orig"]=1
-	done
+    # Build a lookup set from the original manifest for dedup against ISSUE_ARRAY
+    local -A _manifest_set=()
+    local _orig
+    for _orig in "${ISSUE_ARRAY[@]}"; do
+        _manifest_set["$_orig"]=1
+    done
 
-	# Dedup: collect unique follow-ups not already in the original manifest
-	local -A _seen=()
-	local -a _wave2=()
-	local _num
-	while IFS= read -r _num; do
-		[[ -z "$_num" ]] && continue
-		[[ -n "${_manifest_set[$_num]:-}" ]] && continue
-		[[ -n "${_seen[$_num]:-}" ]] && continue
-		_seen["$_num"]=1
-		_wave2+=("$_num")
-	done <<< "$all_followups"
+    # Dedup: collect unique follow-ups not already in the original manifest
+    local -A _seen=()
+    local -a _wave2=()
+    local _num
+    while IFS= read -r _num; do
+        [[ -z "$_num" ]] && continue
+        [[ -n "${_manifest_set[$_num]:-}" ]] && continue
+        [[ -n "${_seen[$_num]:-}" ]] && continue
+        _seen["$_num"]=1
+        _wave2+=("$_num")
+    done <<< "$all_followups"
 
-	if [[ "${#_wave2[@]}" -eq 0 ]]; then
-		log "Sweep: all follow-ups already in manifest — nothing to implement"
-		return 0
-	fi
+    if [[ "${#_wave2[@]}" -eq 0 ]]; then
+        log "Sweep: all follow-ups already in manifest — nothing to implement"
+        return 0
+    fi
 
-	# Depth-limit guard: this sweep implements depth-1 follow-ups only.
-	# Depth-2 follow-ups are logged and surfaced but not auto-implemented.
-	# MAX_FOLLOWUP_DEPTH controls how many waves of follow-ups are permitted.
-	local _depth=1
-	if (( _depth > MAX_FOLLOWUP_DEPTH )); then
-		log_warn \
-			"Sweep: depth $_depth > MAX_FOLLOWUP_DEPTH=$MAX_FOLLOWUP_DEPTH"
-		log_warn "Sweep: depth-2+ follow-ups will not be auto-implemented"
-		return 0
-	fi
+    # This sweep implements depth-1 follow-ups only — the wave depth is
+    # fixed at 1 and there is no runtime depth recursion here.  Depth-2+
+    # follow-ups created during implementation are logged and surfaced but
+    # not auto-implemented.  MAX_FOLLOWUP_DEPTH documents the intended cap
+    # but is not enforced dynamically, since _depth never advances past 1.
+    local _depth=1
 
-	log "Sweep: ${#_wave2[@]} follow-up(s) to implement at depth $_depth"
+    log "Sweep: ${#_wave2[@]} follow-up(s) to implement at depth $_depth"
 
-	local _fi
-	for _fi in "${_wave2[@]}"; do
-		# Skip follow-ups that still carry the needs-explore label unless
-		# ENRICH_FOLLOWUPS is true — those issues need enrichment before
-		# they can be implemented.  gh failure is non-fatal: if the label
-		# query fails we fall through and let process_issue decide.
-		local _has_explore
-		_has_explore=$(gh issue view "$_fi" \
-			--json labels 2>/dev/null \
-			| jq -r \
-				'[.labels[].name] | any(. == "needs-explore")' \
-			2>/dev/null) || _has_explore="false"
-		if [[ "$_has_explore" == "true" ]] \
-			&& [[ "$ENRICH_FOLLOWUPS" != true ]]; then
-			log_warn \
-				"Sweep: follow-up #$_fi has needs-explore label" \
-				"— skipping (pass --enrich-followups to include)"
-			continue
-		fi
-		log "Sweep: implementing follow-up #$_fi (depth=$_depth)"
-		if process_issue "$_fi"; then
-			log "Sweep: follow-up #$_fi implemented successfully"
-		else
-			log_warn "Sweep: follow-up #$_fi failed — batch continues"
-		fi
-	done
+    local _fi
+    for _fi in "${_wave2[@]}"; do
+        # Skip follow-ups that still carry the needs-explore label unless
+        # ENRICH_FOLLOWUPS is true — those issues need enrichment before
+        # they can be implemented.  gh failure is non-fatal: if the label
+        # query fails we fall through and let process_issue decide.
+        local _has_explore
+        _has_explore=$(gh issue view "$_fi" \
+            --json labels 2>/dev/null \
+            | jq -r \
+                '[.labels[].name] | any(. == "needs-explore")' \
+            2>/dev/null) || _has_explore="false"
+        if [[ "$_has_explore" == "true" ]] \
+            && [[ "$ENRICH_FOLLOWUPS" != true ]]; then
+            log_warn \
+                "Sweep: follow-up #$_fi has needs-explore label" \
+                "— skipping (pass --enrich-followups to include)"
+            continue
+        fi
+        log "Sweep: implementing follow-up #$_fi (depth=$_depth)"
+        if process_issue "$_fi"; then
+            log "Sweep: follow-up #$_fi implemented successfully"
+        else
+            log_warn "Sweep: follow-up #$_fi failed — batch continues"
+        fi
+    done
 
-	log "Sweep: follow-up implementation wave done"
+    log "Sweep: follow-up implementation wave done"
 }
 
 # =============================================================================
@@ -1481,7 +1477,7 @@ done
 # Failures inside sweep_enrich_followups are warnings only — they never
 # change exit_code or the batch state.
 if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
-	sweep_enrich_followups
+    sweep_enrich_followups
 fi
 
 # Post-batch wave 2: implement follow-up issues created during this run.
@@ -1489,7 +1485,7 @@ fi
 # enriched before implementation begins (when both flags are set).
 # Failures inside sweep_implement_followups do not change exit_code.
 if [[ "$IMPLEMENT_FOLLOWUPS" == true ]]; then
-	sweep_implement_followups
+    sweep_implement_followups
 fi
 
 # Final state

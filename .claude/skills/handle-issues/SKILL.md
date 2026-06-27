@@ -105,7 +105,6 @@ Claude CLI invocations:
 
   claude -p "/process-pr #PR #issue branch" \
     --agent code-reviewer \
-    --dangerously-skip-permissions \
     --output-format json \
     --json-schema process-pr.json
 ```
