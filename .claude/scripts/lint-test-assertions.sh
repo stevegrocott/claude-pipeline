@@ -140,11 +140,11 @@ _scan_self_referential() {
 		# share a stem — i.e. likely the same source (self-referential).  When
 		# the object stems differ, the assertion compares distinct sources and
 		# has a real reference value, so it is NOT hollow.
-		# KNOWN LIMITATION: single-letter variable names (e.g. a, b) produce an
-		# empty stem after digit-stripping, so the -n "$stem1" guard below will
-		# never match them.  Two distinct single-letter names that actually
-		# reference the same source will therefore NOT be flagged as
-		# self-referential by this check.
+		# KNOWN LIMITATION: single-letter distinct variable names (e.g. a, b)
+		# each yield a different single-character stem after digit-stripping, so
+		# the stem equality check below never fires for them.  Two single-letter
+		# names that actually reference the same source will therefore NOT be
+		# flagged as self-referential by this check.
 		if [[ "$prop1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && \
 		   [[ "$prop2" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && \
 		   [[ "$prop1" == "$prop2" ]] && \
