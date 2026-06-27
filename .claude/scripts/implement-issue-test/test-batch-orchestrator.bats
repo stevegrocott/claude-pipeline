@@ -791,18 +791,30 @@ _simulate_dv_failed_count() {
 	[[ "$body" == *'validate_issue_for_processing'* ]]
 }
 
+# Extract the body of a named function from a script file.
+# Usage: _extract_function_body <func_name> <script_file>
+_extract_function_body() {
+	local func_name="$1"
+	local script_file="$2"
+	awk -v fn="$func_name" '
+		$0 ~ "^"fn"\\(\\)" { capture = 1 }
+		capture { print }
+		capture && /^\}$/ { capture = 0 }
+	' "$script_file"
+}
+
 # --- Static analysis: skip detection conditions ---
 
 @test "validate_issue_for_processing checks for needs-explore label" {
 	local body
-	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'needs-explore'* ]]
 }
 
 @test "validate_issue_for_processing checks for missing Implementation Tasks" {
 	local body
-	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'Implementation Tasks'* ]]
 }
@@ -814,7 +826,7 @@ _simulate_dv_failed_count() {
 	# that any body carrying that section is subject to assert_issue_valid,
 	# not just bodies marked <!-- pipeline-autocreated -->.
 	local fn_body check3_block
-	fn_body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	fn_body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	check3_block=$(printf '%s\n' "$fn_body" \
 		| awk '/Check 3/,/^	fi$/' | head -15)
@@ -823,7 +835,7 @@ _simulate_dv_failed_count() {
 
 @test "Check 3 still fires for bodies with pipeline-autocreated marker" {
 	local fn_body check3_block
-	fn_body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	fn_body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	check3_block=$(printf '%s\n' "$fn_body" \
 		| awk '/Check 3/,/^	fi$/' | head -15)
@@ -834,7 +846,7 @@ _simulate_dv_failed_count() {
 
 @test "validate_issue_for_processing enriches inline when ENRICH_FOLLOWUPS is set" {
 	local body
-	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'ENRICH_FOLLOWUPS'* ]]
 	[[ "$body" == *'enrich-issue'* ]]
@@ -847,7 +859,7 @@ _simulate_dv_failed_count() {
 	# 1 — it must use || return 0 or || true so the orchestrator's own
 	# issue-validation logic remains the safety net.
 	local body
-	body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	body=$(_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'|| return 0'* ]] || [[ "$body" == *'|| true'* ]]
 }
@@ -1029,7 +1041,7 @@ source_validate_issue_for_processing() {
 	source "$lib"
 
 	local func_file="$TEST_TMP/validate_issue_for_processing.bash"
-	awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+	_extract_function_body validate_issue_for_processing \
 		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
 	grep -q 'validate_issue_for_processing' "$func_file" 2>/dev/null \
 		|| return 1
