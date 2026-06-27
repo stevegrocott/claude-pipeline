@@ -20,8 +20,7 @@
 #   Emits [] when no findings or when the linter is disabled.
 #
 # Exit codes:
-#   0  Success (with or without findings)
-#   1  Usage error
+#   0  Success (with or without findings; no-args emits [] and exits 0)
 #
 
 set -u
