@@ -384,6 +384,7 @@ STAGE_COUNTER="${STAGE_COUNTER:-0}"
 _CONSECUTIVE_TIMEOUTS="${_CONSECUTIVE_TIMEOUTS:-0}"
 _TIMED_OUT_STAGE_NAMES="${_TIMED_OUT_STAGE_NAMES:-}"
 QUIET="${QUIET:-false}"
+CLAUDE_CLI="${CLAUDE_CLI:-claude}"
 EOF
 
     # Source model-config.sh first (provides resolve_model, _next_model_up)
