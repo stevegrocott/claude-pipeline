@@ -813,13 +813,15 @@ validate_issue_for_processing() {
 	fi
 
 	# -----------------------------------------------------------------
-	# Check 3: structural validation for pipeline-autocreated bodies.
-	# Non-pipeline issues are not subject to assert_issue_valid — they
-	# may lack Acceptance Criteria or use prose task formats.
+	# Check 3: structural validation for pipeline-autocreated bodies
+	# and any body that already carries ## Implementation Tasks.
+	# Non-pipeline issues without that section are not subject to
+	# assert_issue_valid — they may use prose task formats.
 	# -----------------------------------------------------------------
-	if printf '%s' "$body" | grep -q '<!-- pipeline-autocreated -->'; then
+	if printf '%s' "$body" \
+		| grep -qE '<!-- pipeline-autocreated -->|## Implementation Tasks'; then
 		if ! assert_issue_valid "$body" 2>/dev/null; then
-			_SKIP_REASON="pipeline-autocreated body failed structural validation"
+			_SKIP_REASON="body failed structural validation"
 			return 1
 		fi
 	fi

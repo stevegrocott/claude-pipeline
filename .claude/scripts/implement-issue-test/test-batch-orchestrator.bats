@@ -807,6 +807,29 @@ _simulate_dv_failed_count() {
 	[[ "$body" == *'Implementation Tasks'* ]]
 }
 
+# --- Static analysis: Check 3 structural validation trigger ---
+
+@test "Check 3 fires for bodies with ## Implementation Tasks (not only pipeline-autocreated)" {
+	# The Check 3 grep condition must reference '## Implementation Tasks' so
+	# that any body carrying that section is subject to assert_issue_valid,
+	# not just bodies marked <!-- pipeline-autocreated -->.
+	local fn_body check3_block
+	fn_body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	check3_block=$(printf '%s\n' "$fn_body" \
+		| awk '/Check 3/,/^	fi$/' | head -15)
+	[[ "$check3_block" == *'Implementation Tasks'* ]]
+}
+
+@test "Check 3 still fires for bodies with pipeline-autocreated marker" {
+	local fn_body check3_block
+	fn_body=$(awk '/^validate_issue_for_processing\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	check3_block=$(printf '%s\n' "$fn_body" \
+		| awk '/Check 3/,/^	fi$/' | head -15)
+	[[ "$check3_block" == *'pipeline-autocreated'* ]]
+}
+
 # --- Static analysis: enrich-inline path ---
 
 @test "validate_issue_for_processing enriches inline when ENRICH_FOLLOWUPS is set" {
