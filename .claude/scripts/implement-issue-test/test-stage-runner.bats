@@ -562,7 +562,10 @@ teardown() {
     }
     export -f timeout
 
-    run_stage "test" "prompt" "test-schema.json" "fastify-backend-developer"
+    # Use `run` so the assertion targets the recorded CLI args (written by the
+    # mock before any post-launch action) rather than run_stage's exit status —
+    # mirrors the 'default' sentinel test below.
+    run run_stage "test" "prompt" "test-schema.json" "fastify-backend-developer"
 
     # Verify agent was passed to claude
     [ -f "$claude_calls" ] || fail "Claude was not called"
