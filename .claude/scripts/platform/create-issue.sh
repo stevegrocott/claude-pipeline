@@ -20,7 +20,7 @@ done
 
 # Validate bodies with <!-- pipeline-autocreated --> or ## Implementation Tasks.
 if [[ "$BODY" == *"<!-- pipeline-autocreated -->"* ]] || \
-   [[ "$BODY" == *"## Implementation Tasks"* ]]; then
+  [[ "$BODY" == *"## Implementation Tasks"* ]]; then
   # shellcheck source=../issue-body-lib.sh
   source "$SCRIPT_DIR/../issue-body-lib.sh"
   if ! assert_issue_valid "$BODY"; then
