@@ -432,12 +432,17 @@ source_batch_function() {
 # Extract the body of a named function from a script file.
 # Uses brace counting so nested blocks with closing braces at
 # column 0 do not prematurely end the capture.
+# Brace-style assumption: the function header must appear on a single
+# line matching /^name\(\) *\{$/ — that is, the opening brace must be
+# on the same line as the parameter list (K&R / one-true-brace style),
+# with zero or more spaces between ')' and '{'. Multi-line headers or
+# Allman-style braces (brace on the next line) are NOT supported.
 # Usage: _extract_function_body <func_name> <file>
 _extract_function_body() {
 	local func_name="$1"
 	local script_file="$2"
 	awk -v fn="$func_name" '
-		$0 ~ "^"fn"\\(\\) \\{$" { capture = 1; depth = 0 }
+		$0 ~ "^"fn"\\(\\) *\\{$" { capture = 1; depth = 0 }
 		capture {
 			print
 			depth += split($0, _o, /\{/) - 1
