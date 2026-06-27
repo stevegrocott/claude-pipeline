@@ -237,7 +237,7 @@ Some prose but no task checkboxes.
 - [ ] \`[bash-script-craftsman]\` **(M)** Build — \`.claude/scripts/x.sh\`"
 	run assert_issue_valid "$body"
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"Acceptance Criteria"* ]]
+	[[ "$output" == *"missing 'Acceptance Criteria' section"* ]]
 }
 
 @test "assert_issue_valid: accepts ### Acceptance Criteria (level-3 heading)" {
@@ -303,7 +303,7 @@ Some prose but no task checkboxes.
 	export DEPLOY_VERIFY_CMD="deploy && verify"
 	run assert_issue_valid "$(valid_body)"
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"Deploy Verification"* ]]
+	[[ "$output" == *"no 'Deploy Verification' section"* ]]
 }
 
 @test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + section present fails" {
@@ -322,7 +322,7 @@ Some prose but no task checkboxes.
 **Verification command:** curl -fsS https://example/health"
 	run assert_issue_valid "$body"
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"Deploy Verification"* ]]
+	[[ "$output" == *"'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset"* ]]
 }
 
 @test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + no section passes" {
@@ -344,7 +344,7 @@ Some prose but no task checkboxes.
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"ghost-agent"* ]]
 	[[ "$output" == *"bad/dir/file.sh"* ]]
-	[[ "$output" == *"Acceptance Criteria"* ]]
+	[[ "$output" == *"missing 'Acceptance Criteria' section"* ]]
 }
 
 # =============================================================================
