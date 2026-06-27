@@ -5426,7 +5426,7 @@ run_test_loop() {
 
     if [[ "$change_scope" == "config" ]]; then
         log "Config/markdown-only changes detected — skipping test loop"
-        comment_issue "Test Loop: Skipped" "⏭️ No testable code changes detected (config/markdown only). Skipping test loop." "default"
+        comment_issue "Test Loop: Skipped" "⏭️ No testable code changes detected (config/markdown only). Skipping test loop." ""
         return 0
     fi
 
@@ -5761,7 +5761,7 @@ Output both test results and validation findings in one structured response.
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$test_result"; then
             log_warn "Test stage timed out on iteration $test_iteration — retrying next iteration"
-            comment_issue "Test Loop: Timeout ($test_iteration/$max_test_iter)" "⏱️ Test stage timed out. Retrying on next iteration." "default"
+            comment_issue "Test Loop: Timeout ($test_iteration/$max_test_iter)" "⏱️ Test stage timed out. Retrying on next iteration." ""
             continue
         fi
 
@@ -5829,7 +5829,7 @@ $test_summary" "default"
                 env_body+=" errors, HTTP 500, network timeouts)."
                 env_body+=" These require infrastructure fixes, not code"
                 env_body+=" changes. Skipping fix-agent."
-                comment_issue "$env_title" "$env_body" "default"
+                comment_issue "$env_title" "$env_body" ""
                 loop_complete=true
                 break
             fi
