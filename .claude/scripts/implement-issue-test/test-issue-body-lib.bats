@@ -678,3 +678,128 @@ Some prose but no task checkboxes.
 	run assert_issue_valid "$body"
 	[ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# REGRESSION: ### sub-headings inside ## Implementation Tasks / ## Acceptance Criteria
+# =============================================================================
+
+@test "_issue_body_parse_tasks: ### sub-heading inside Implementation Tasks is skipped" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	### Phase 1
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] done
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 1 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "_issue_body_parse_tasks: ### heading does not end the Implementation Tasks section" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	### Group A
+
+	- [ ] `[bash-script-craftsman]` **(M)** Task A — `.claude/scripts/x.sh`
+
+	### Group B
+
+	- [ ] `[code-reviewer]` **(S)** Task B — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] done
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 2 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+	[[ "$output" == *"code-reviewer"* ]]
+}
+
+@test "_issue_body_parse_tasks: prose under ### heading in non-task section is not parsed as task" {
+	local body
+	body=$(cat <<-'EOF'
+	## Research Findings
+
+	### Approach
+
+	Some prose that looks like prose.
+
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] done
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 1 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "assert_issue_valid: accepts body with ### sub-headings in Implementation Tasks" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	### Phase 1
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	### Phase 2
+
+	- [ ] `[bash-script-craftsman]` **(S)** Test — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] The library exists and is sourceable
+	EOF
+	)
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: accepts body with ### sub-headings in both Implementation Tasks and Acceptance Criteria" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	### Setup
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	### Functional
+
+	- [ ] The lib is sourceable
+
+	### Non-functional
+
+	- [ ] Runs in under one second
+	EOF
+	)
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
