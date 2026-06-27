@@ -745,6 +745,7 @@ nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --implement-f
 - After enrichment succeeds for an issue, the orchestrator appends it to the active manifest and runs it through `implement-issue` → `process-pr` → merge
 - Enrichment failures are logged and that follow-up is skipped for implementation; the skip does **not** trigger the circuit breaker
 - Implementation failures on follow-ups **do** count toward the circuit breaker (same rules as primary issues)
+- Wave-2 follow-ups are registered in `status.json` before they run, so their outcomes are reflected in `.progress` totals (`total`/`completed`/`failed`) and in the final batch state (`completed` vs `completed_with_errors`) — the same as primary issues
 - Use `--enrich-followups` alone when you want research-quality issue bodies without automatically merging code; use `--implement-followups` only when you trust the enriched output is ready to ship
 
 **Order of operations:**

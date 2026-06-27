@@ -484,7 +484,8 @@ update_issue_field() {
 }
 
 update_progress() {
-    jq '.progress.completed =
+    jq '.progress.total = (.issues | length) |
+        .progress.completed =
             ([.issues[] | select(.status == "completed"
                 or .status == "already_done")] | length) |
         .progress.failed =
@@ -499,6 +500,36 @@ update_progress() {
             ([.issues[] | select(.status == "pending")] | length) |
         .last_update = (now | todate)' \
         "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+}
+
+# register_wave2_issue — insert a pending status entry for a wave-2
+# follow-up issue that is NOT in the original manifest.  Without this
+# entry, update_issue_field() silently no-ops (jq select matches nothing)
+# and the wave-2 outcome never appears in progress totals or final state.
+# Idempotent: no-op when the issue number is already present.
+register_wave2_issue() {
+    local issue_num="$1"
+    jq --arg num "$issue_num" '
+        if ([.issues[].number] | index($num)) != null then
+            .
+        else
+            .issues += [{
+                "number": $num,
+                "status": "pending",
+                "stage": null,
+                "pr": null,
+                "session_id": null,
+                "error": null,
+                "follow_ups": [],
+                "deploy_verify_failed": false,
+                "started_at": null,
+                "stage_started_at": null,
+                "completed_at": null
+            }] |
+            .last_update = (now | todate)
+        end' \
+        "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
 
 set_current_issue() {
@@ -1345,6 +1376,7 @@ sweep_implement_followups() {
             continue
         fi
         log "Sweep: implementing follow-up #$_fi (depth=$_depth)"
+        register_wave2_issue "$_fi"
         if process_issue "$_fi"; then
             log "Sweep: follow-up #$_fi implemented successfully"
         else

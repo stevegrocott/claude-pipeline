@@ -1215,3 +1215,60 @@ _simulate_recovery_with_stage() {
 		"$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'ENRICH_FOLLOWUPS'* ]]
 }
+
+# =============================================================================
+# TASK 3: progress totals and final state include wave-2 outcomes
+# =============================================================================
+
+@test "register_wave2_issue function is defined in the script" {
+	grep -qE '^register_wave2_issue\(\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "register_wave2_issue adds issue to status.json issues array" {
+	local body
+	body=$(awk '/^register_wave2_issue\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'.issues +='* ]]
+}
+
+@test "register_wave2_issue is idempotent — no-op when issue already present" {
+	# The function must guard against double-registration so calling it
+	# twice for the same follow-up does not create a duplicate entry.
+	local body
+	body=$(awk '/^register_wave2_issue\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'index($num)'* ]]
+}
+
+@test "sweep_implement_followups calls register_wave2_issue before process_issue" {
+	# Wave-2 follow-ups must be registered in status.json before process_issue
+	# runs so that update_issue_field() can find the entry and update_progress()
+	# counts the outcome in progress totals and final state.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'register_wave2_issue'* ]]
+}
+
+@test "update_progress recalculates progress.total from issues array length" {
+	# progress.total must reflect wave-2 additions — it cannot remain frozen
+	# at the original manifest size.  update_progress() must derive it from
+	# the live issues array so every call stays consistent.
+	local body
+	body=$(awk '/^update_progress\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'progress.total = (.issues | length)'* ]]
+}
+
+@test "final_failed is read after sweep_implement_followups call" {
+	# The final-state determination (completed vs completed_with_errors) must
+	# come after both post-batch sweeps so wave-2 failures are included.
+	local post_loop
+	post_loop=$(awk \
+		'BEGIN{n=0} /^done$/{n=NR} {lines[NR]=$0} \
+		END{for(i=n+1;i<=NR;i++) print lines[i]}' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	# Both the sweep call and the final_failed read must be in the post-loop
+	[[ "$post_loop" == *'sweep_implement_followups'* ]]
+	[[ "$post_loop" == *'final_failed'* ]]
+}
