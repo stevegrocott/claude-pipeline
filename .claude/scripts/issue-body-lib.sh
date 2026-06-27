@@ -340,13 +340,13 @@ assert_issue_valid() {
 	done <<< "$tasks"
 
 	# Criterion 4: Acceptance Criteria section present.
-	if ! grep -q '^## Acceptance Criteria' <<< "$body"; then
+	if ! grep -qE '^##+ Acceptance Criteria' <<< "$body"; then
 		errors+=("missing '## Acceptance Criteria' section")
 	fi
 
 	# Criterion 5: Deploy Verification iff DEPLOY_VERIFY_CMD set.
 	local has_deploy=false
-	if grep -q '^## Deploy Verification' <<< "$body"; then
+	if grep -qE '^##+ Deploy Verification' <<< "$body"; then
 		has_deploy=true
 	fi
 	if [[ -n "${DEPLOY_VERIFY_CMD:-}" ]]; then

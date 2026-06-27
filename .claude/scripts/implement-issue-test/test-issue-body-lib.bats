@@ -240,6 +240,22 @@ Some prose but no task checkboxes.
 	[[ "$output" == *"Acceptance Criteria"* ]]
 }
 
+@test "assert_issue_valid: accepts ### Acceptance Criteria (level-3 heading)" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	### Acceptance Criteria
+
+	- [ ] done
+	EOF
+	)
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # assert_issue_valid() — CRITERION 5: Deploy Verification iff DEPLOY_VERIFY_CMD
 # =============================================================================
@@ -258,6 +274,27 @@ Some prose but no task checkboxes.
 ## Deploy Verification
 
 **Verification command:** curl -fsS https://example/health"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: accepts ### Deploy Verification heading (level-3)" {
+	export DEPLOY_VERIFY_CMD="deploy && verify"
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] done
+
+	### Deploy Verification
+
+	**Verification command:** curl -fsS https://example/health
+	EOF
+	)
 	run assert_issue_valid "$body"
 	[ "$status" -eq 0 ]
 }
