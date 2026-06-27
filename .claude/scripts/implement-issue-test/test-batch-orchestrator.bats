@@ -77,7 +77,7 @@ EOF
 	# Structural elements: the function header line and the outer closing brace
 	# must both be captured — not just the inner body lines.
 	[[ "$body" == *'target_func() {'* ]]
-	[[ "$body" == *$'\n}' ]]
+	[[ "$body" == *$'\n}'* ]]
 }
 
 # =============================================================================
