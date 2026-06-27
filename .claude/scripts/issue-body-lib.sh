@@ -199,12 +199,37 @@ _issue_body_parse_tasks() {
 	# Normalize gh API's backslash-escaped backticks.
 	body="${body//\\\`/\`}"
 
+	# Extract only the lines under "## Implementation Tasks", stopping at
+	# the next "##" heading (or end of body).  Lines from other sections
+	# (Acceptance Criteria, Notes, Deploy Verification, etc.) are never
+	# matched as tasks, preventing false positives from prose that happens
+	# to resemble a task line.
+	local in_section=false
+	local section=""
+	local line
+	while IFS= read -r line; do
+		if [[ "$line" == "## Implementation Tasks" ]]; then
+			in_section=true
+			continue
+		fi
+		if $in_section; then
+			# Any new level-2 heading ends the section.
+			if [[ "$line" =~ ^##([[:space:]]|$) ]]; then
+				break
+			fi
+			section+="${line}"$'\n'
+		fi
+	done <<< "$body"
+
+	# No "## Implementation Tasks" heading found — emit nothing.
+	$in_section || return 0
+
 	# Backtick-bearing regex must live in a variable — bash cannot escape a
 	# backtick inside an inline [[ =~ ]] pattern reliably.
 	local bt='`'
 	local re_bare_agent="^- (\[ \] )?${bt}([^${bt}]+)${bt} (.+)\$"
 
-	local line agent desc
+	local agent desc
 	while IFS= read -r line; do
 		[[ -z "$line" ]] && continue
 		[[ "$line" =~ \[x\] ]] && continue
@@ -242,7 +267,7 @@ _issue_body_parse_tasks() {
 		fi
 
 		printf '%s\t%s\n' "$agent" "$desc"
-	done <<< "$body"
+	done <<< "$section"
 }
 
 #
