@@ -87,6 +87,11 @@ readonly ISSUE_TIMEOUT=10800  # 180 minutes per issue
 readonly MAX_CONSECUTIVE_FAILURES=3
 readonly RATE_LIMIT_BUFFER=60  # Extra seconds to wait after rate limit reset
 readonly RATE_LIMIT_DEFAULT_WAIT=3600  # Default 1 hour if we can't determine wait time
+# Maximum depth for auto-implementing follow-up issues.
+# Depth 1 = direct follow-ups of the primary batch issues.
+# Depth 2 = follow-ups of follow-ups.  Values >= 2 are surfaced as
+# warnings but NOT auto-implemented to prevent unbounded recursion.
+readonly MAX_FOLLOWUP_DEPTH=1
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -1264,6 +1269,144 @@ sweep_enrich_followups() {
 }
 
 # =============================================================================
+# POST-BATCH SWEEP: implement follow-up issues (second wave)
+# =============================================================================
+#
+# sweep_implement_followups — called after the primary issue loop (and after
+# sweep_enrich_followups when ENRICH_FOLLOWUPS=true) when --implement-followups
+# is set.  Collects follow_up issue numbers recorded in status.json during
+# the primary batch, deduplicates them against the original ISSUE_ARRAY, and
+# runs each remaining follow-up through process_issue().
+#
+# Design notes:
+#   - Only depth-1 follow-ups (direct follow-ups of primary-batch issues) are
+#     auto-implemented.  MAX_FOLLOWUP_DEPTH=1 enforces this — depth-2 issues
+#     (follow-ups of follow-ups) are surfaced as warnings only.
+#   - needs-explore follow-ups are skipped unless ENRICH_FOLLOWUPS=true.
+#     --implement-followups implies ENRICH_FOLLOWUPS=true so that
+#     sweep_enrich_followups enriches those issues before this sweep runs.
+#   - Failures for individual follow-ups are logged as warnings only; they
+#     do NOT increment consecutive_failures and do NOT trigger the circuit
+#     breaker — the primary batch result is already finalised.
+#   - The ISSUE_ARRAY check prevents re-processing issues that were already
+#     handled in the primary loop.
+
+sweep_implement_followups() {
+	log "========================================"
+	log "Post-batch sweep: implement follow-up issues"
+	log "========================================"
+	log "Max follow-up depth: $MAX_FOLLOWUP_DEPTH"
+
+	# Collect all follow-up issue numbers across every completed primary issue.
+	# follow_ups is a JSON array of issue-number strings set by process_issue()
+	# in the merged) case arm via update_issue_field.
+	local all_followups
+	all_followups=$(jq -r \
+		'[.issues[].follow_ups[]? | strings] | unique | .[]' \
+		"$STATUS_FILE" 2>/dev/null) || all_followups=""
+
+	if [[ -z "$all_followups" ]]; then
+		log "Sweep: no follow-up issues found in status.json"
+		return 0
+	fi
+
+	# Dedup against the original manifest (ISSUE_ARRAY).  Any follow-up that
+	# was already in the primary batch does not need to be re-processed.
+	local -a new_followups=()
+	local issue_num
+	while IFS= read -r issue_num; do
+		[[ -z "$issue_num" ]] && continue
+
+		local orig already_in_manifest=false
+		for orig in "${ISSUE_ARRAY[@]}"; do
+			if [[ "$orig" == "$issue_num" ]]; then
+				already_in_manifest=true
+				break
+			fi
+		done
+		if $already_in_manifest; then
+			log "Sweep: #$issue_num already in original manifest — skipping"
+			continue
+		fi
+
+		new_followups+=("$issue_num")
+	done <<< "$all_followups"
+
+	if [[ ${#new_followups[@]} -eq 0 ]]; then
+		log "Sweep: all follow-ups were already in the original manifest"
+		return 0
+	fi
+
+	log "Sweep: ${#new_followups[@]} follow-up issue(s) to implement"
+
+	# Depth guard: this sweep handles depth-1 follow-ups.  Any follow-ups
+	# created by this wave would be at depth 2 — beyond MAX_FOLLOWUP_DEPTH —
+	# and must NOT be auto-implemented.  Surface them as warnings instead.
+	# (Checked again at the end of the sweep, after process_issue() runs.)
+
+	for issue_num in "${new_followups[@]}"; do
+		# Skip needs-explore issues unless ENRICH_FOLLOWUPS is true.
+		# When --implement-followups is passed ENRICH_FOLLOWUPS is set to true
+		# automatically and sweep_enrich_followups already ran, so needs-explore
+		# follow-ups should have been enriched before reaching this point.
+		if [[ "$ENRICH_FOLLOWUPS" != true ]]; then
+			local labels
+			labels=$(gh issue view "$issue_num" --json labels \
+				--jq '[.labels[].name] | join(",")' \
+				2>/dev/null) || labels=""
+			if [[ "$labels" == *"needs-explore"* ]]; then
+				log "Sweep: #$issue_num has needs-explore label" \
+					"and ENRICH_FOLLOWUPS is not set — skipping"
+				continue
+			fi
+		fi
+
+		log "Sweep: implementing follow-up #$issue_num"
+		if process_issue "$issue_num"; then
+			log "Sweep: follow-up #$issue_num processed successfully"
+		else
+			log_warn \
+				"Sweep: follow-up #$issue_num failed" \
+				"— skipping, batch unaffected"
+		fi
+	done
+
+	# Surface any depth-2 follow-ups (follow-ups of this sweep's issues) so
+	# operators can triage them.  MAX_FOLLOWUP_DEPTH=1 means we do not
+	# auto-implement beyond depth 1; anything deeper must be handled manually
+	# or by re-running with an explicit --issues list.
+	local depth2_raw=()
+	local d2_issue orig2 already_known=false
+	while IFS= read -r d2_issue; do
+		[[ -z "$d2_issue" ]] && continue
+		already_known=false
+		for orig2 in "${ISSUE_ARRAY[@]}" "${new_followups[@]}"; do
+			if [[ "$orig2" == "$d2_issue" ]]; then
+				already_known=true
+				break
+			fi
+		done
+		$already_known || depth2_raw+=("$d2_issue")
+	done < <(jq -r \
+		'[.issues[].follow_ups[]? | strings] | unique | .[]' \
+		"$STATUS_FILE" 2>/dev/null || true)
+
+	if (( ${#depth2_raw[@]} > 0 )); then
+		log_warn "========================================"
+		log_warn "Depth-$(( MAX_FOLLOWUP_DEPTH + 1 )) follow-ups detected" \
+			"(MAX_FOLLOWUP_DEPTH=$MAX_FOLLOWUP_DEPTH — NOT auto-implemented):"
+		local d2
+		for d2 in "${depth2_raw[@]}"; do
+			log_warn "  #$d2"
+		done
+		log_warn "Run with --issues on these numbers to implement them."
+		log_warn "========================================"
+	fi
+
+	log "Sweep: done"
+}
+
+# =============================================================================
 # MAIN LOOP
 # =============================================================================
 
@@ -1387,6 +1530,15 @@ done
 # change exit_code or the batch state.
 if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
 	sweep_enrich_followups
+fi
+
+# Post-batch sweep: implement follow-up issues created during this run as a
+# second wave.  Runs after sweep_enrich_followups (above) so that any
+# needs-explore follow-ups are enriched before being implemented.
+# Failures inside sweep_implement_followups are warnings only — they never
+# change exit_code or the batch state.
+if [[ "$IMPLEMENT_FOLLOWUPS" == true ]]; then
+	sweep_implement_followups
 fi
 
 # Final state
