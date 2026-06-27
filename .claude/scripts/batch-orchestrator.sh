@@ -1418,7 +1418,7 @@ sweep_implement_followups() {
 	# auto-implement beyond depth 1; anything deeper must be handled manually
 	# or by re-running with an explicit --issues list.
 	local depth2_raw=()
-	local d2_issue orig2 already_known=false
+	local d2_issue orig2 already_known
 	while IFS= read -r d2_issue; do
 		[[ -z "$d2_issue" ]] && continue
 		already_known=false
