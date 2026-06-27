@@ -1093,3 +1093,104 @@ _simulate_recovery_with_stage() {
 	[[ "$sim_impl_status" == "success" ]]
 	[[ "$sim_pr_number" == "42" ]]
 }
+
+# =============================================================================
+# TASK 6: --implement-followups flag and post-batch follow-up implementation wave
+# =============================================================================
+
+@test "--implement-followups flag is recognised in argument parsing" {
+	grep -qE '^\s+--implement-followups\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "IMPLEMENT_FOLLOWUPS variable is initialised before argument parsing" {
+	grep -q 'IMPLEMENT_FOLLOWUPS' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "usage documents the --implement-followups flag" {
+	local body
+	body=$(awk '/^usage\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'implement-followups'* ]]
+}
+
+@test "sweep_implement_followups function is defined in the script" {
+	grep -qE '^sweep_implement_followups\(\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "sweep_implement_followups collects follow_ups from status.json" {
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'follow_ups'* ]]
+}
+
+@test "sweep_implement_followups deduplicates follow-ups against original manifest" {
+	# Issues already in the original manifest (ISSUE_ARRAY) must not be
+	# re-processed even if they appear in a follow_ups list.  Verify the
+	# function body references the manifest for deduplication.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'dedup'* ]] || [[ "$body" == *'ISSUE_ARRAY'* ]]
+}
+
+@test "sweep_implement_followups respects MAX_FOLLOWUP_DEPTH depth-limit guard" {
+	# Depth-2 follow-ups (follow-ups creating their own follow-ups) must be
+	# logged and surfaced but NOT auto-implemented.  The depth guard must
+	# reference MAX_FOLLOWUP_DEPTH to enforce this boundary.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'MAX_FOLLOWUP_DEPTH'* ]]
+}
+
+@test "sweep_implement_followups calls process_issue for each follow-up" {
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'process_issue'* ]]
+}
+
+@test "sweep_implement_followups does not touch consecutive_failures directly" {
+	# Wave-2 circuit-breaker interaction flows through process_issue —
+	# sweep_implement_followups itself must not manipulate consecutive_failures.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" != *'consecutive_failures'* ]]
+}
+
+@test "main body calls sweep_implement_followups when IMPLEMENT_FOLLOWUPS is true" {
+	# After the primary issue loop, the script must call the wave-2 sweep
+	# conditionally on the flag.  Scope the assertion to the post-loop section
+	# (content after the LAST bare 'done' line) so that a stray reference
+	# inside the function definition does not cause a false positive.
+	local post_loop
+	post_loop=$(awk \
+		'BEGIN{n=0} /^done$/{n=NR} {lines[NR]=$0} \
+		END{for(i=n+1;i<=NR;i++) print lines[i]}' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$post_loop" == *'sweep_implement_followups'* ]]
+	[[ "$post_loop" == *'IMPLEMENT_FOLLOWUPS'* ]]
+}
+
+@test "IMPLEMENT_FOLLOWUPS defaults to false when no flag is passed" {
+	# The sweep is opt-in; callers must pass --implement-followups explicitly.
+	grep -qE '^IMPLEMENT_FOLLOWUPS=false' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "--no-implement-followups flag is recognised in argument parsing" {
+	grep -qE '^\s+--no-implement-followups\)' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "--no-implement-followups case sets IMPLEMENT_FOLLOWUPS to false" {
+	local body
+	body=$(awk '/--no-implement-followups\)/,/^\s+;;/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" 2>/dev/null)
+	[[ "$body" == *'IMPLEMENT_FOLLOWUPS=false'* ]]
+}
+
+@test "usage documents the --no-implement-followups flag" {
+	local body
+	body=$(awk '/^usage\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'no-implement-followups'* ]]
+}

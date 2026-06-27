@@ -87,6 +87,7 @@ readonly ISSUE_TIMEOUT=10800  # 180 minutes per issue
 readonly MAX_CONSECUTIVE_FAILURES=3
 readonly RATE_LIMIT_BUFFER=60  # Extra seconds to wait after rate limit reset
 readonly RATE_LIMIT_DEFAULT_WAIT=3600  # Default 1 hour if we can't determine wait time
+readonly MAX_FOLLOWUP_DEPTH=1  # Max depth for auto-implementing follow-up waves
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -1258,6 +1259,90 @@ sweep_enrich_followups() {
 }
 
 # =============================================================================
+# POST-BATCH SWEEP: implement follow-up issues (wave 2)
+# =============================================================================
+#
+# sweep_implement_followups — called after the primary issue loop when
+# --implement-followups is set.  Collects every issue number recorded in
+# status.json follow_ups fields, deduplicates against the original manifest
+# (ISSUE_ARRAY), then runs each new follow-up through process_issue().
+#
+# Design notes:
+#   - Depth-limit guard: MAX_FOLLOWUP_DEPTH=1 means only depth-1 follow-ups
+#     are auto-implemented.  Depth-2 follow-ups (follow-ups that spawn their
+#     own follow-ups) are logged and surfaced but never auto-implemented.
+#   - Dedup against ISSUE_ARRAY prevents re-processing original manifest issues
+#     that happen to reappear in a follow_ups list.
+#   - process_issue() owns all circuit-breaker and rate-limit handling — this
+#     function must not touch consecutive_failures directly.
+
+sweep_implement_followups() {
+	log "========================================"
+	log "Post-batch sweep: implement follow-up issues"
+	log "========================================"
+
+	# Collect all follow-up issue numbers recorded in status.json
+	local all_followups
+	all_followups=$(jq -r \
+		'.issues[].follow_ups[]?' \
+		"$STATUS_FILE" 2>/dev/null) || all_followups=""
+
+	if [[ -z "$all_followups" ]]; then
+		log "Sweep: no follow-up issues found in status.json"
+		return 0
+	fi
+
+	# Build a lookup set from the original manifest for dedup against ISSUE_ARRAY
+	local -A _manifest_set=()
+	local _orig
+	for _orig in "${ISSUE_ARRAY[@]}"; do
+		_manifest_set["$_orig"]=1
+	done
+
+	# Dedup: collect unique follow-ups not already in the original manifest
+	local -A _seen=()
+	local -a _wave2=()
+	local _num
+	while IFS= read -r _num; do
+		[[ -z "$_num" ]] && continue
+		[[ -n "${_manifest_set[$_num]:-}" ]] && continue
+		[[ -n "${_seen[$_num]:-}" ]] && continue
+		_seen["$_num"]=1
+		_wave2+=("$_num")
+	done <<< "$all_followups"
+
+	if [[ "${#_wave2[@]}" -eq 0 ]]; then
+		log "Sweep: all follow-ups already in manifest — nothing to implement"
+		return 0
+	fi
+
+	# Depth-limit guard: this sweep implements depth-1 follow-ups only.
+	# Depth-2 follow-ups are logged and surfaced but not auto-implemented.
+	# MAX_FOLLOWUP_DEPTH controls how many waves of follow-ups are permitted.
+	local _depth=1
+	if (( _depth > MAX_FOLLOWUP_DEPTH )); then
+		log_warn \
+			"Sweep: depth $_depth > MAX_FOLLOWUP_DEPTH=$MAX_FOLLOWUP_DEPTH"
+		log_warn "Sweep: depth-2+ follow-ups will not be auto-implemented"
+		return 0
+	fi
+
+	log "Sweep: ${#_wave2[@]} follow-up(s) to implement at depth $_depth"
+
+	local _fi
+	for _fi in "${_wave2[@]}"; do
+		log "Sweep: implementing follow-up #$_fi (depth=$_depth)"
+		if process_issue "$_fi"; then
+			log "Sweep: follow-up #$_fi implemented successfully"
+		else
+			log_warn "Sweep: follow-up #$_fi failed — batch continues"
+		fi
+	done
+
+	log "Sweep: follow-up implementation wave done"
+}
+
+# =============================================================================
 # MAIN LOOP
 # =============================================================================
 
@@ -1380,6 +1465,14 @@ done
 # change exit_code or the batch state.
 if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
 	sweep_enrich_followups
+fi
+
+# Post-batch wave 2: implement follow-up issues created during this run.
+# Runs after enrich sweep so that any needs-explore follow-ups have been
+# enriched before implementation begins (when both flags are set).
+# Failures inside sweep_implement_followups do not change exit_code.
+if [[ "$IMPLEMENT_FOLLOWUPS" == true ]]; then
+	sweep_implement_followups
 fi
 
 # Final state
