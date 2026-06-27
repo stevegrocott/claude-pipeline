@@ -98,6 +98,7 @@ BRANCH=""
 AGENT=""
 ENRICH_FOLLOWUPS=false
 ENRICH_ALL_NEEDS_EXPLORE=false
+IMPLEMENT_FOLLOWUPS=false
 
 usage() {
     echo "Usage: $0 --manifest <path>"
@@ -117,6 +118,11 @@ usage() {
     echo "  --no-enrich-followups"
     echo "                      Disable auto-enrichment of needs-explore follow-up"
     echo "                      issues (overrides the default-on behaviour)"
+    echo "  --implement-followups"
+    echo "                      After batch, run implement-issue on follow-up issues"
+    echo "                      created during this run"
+    echo "  --no-implement-followups"
+    echo "                      Disable auto-implementation of follow-up issues"
     echo ""
     echo "Available agents:"
     echo "  react-frontend-developer        React, Next.js, shadcn/ui, Tailwind"
@@ -155,6 +161,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-enrich-followups)
             ENRICH_FOLLOWUPS=false
+            shift
+            ;;
+        --implement-followups)
+            IMPLEMENT_FOLLOWUPS=true
+            shift
+            ;;
+        --no-implement-followups)
+            IMPLEMENT_FOLLOWUPS=false
             shift
             ;;
         --enrich-all-needs-explore)
