@@ -10,7 +10,7 @@
 # Detects:
 #   mock-timing-perf    — performance.now() threshold on a mocked function
 #   constant-arithmetic — expect() wraps compile-time constant arithmetic
-#   self-referential    — toBe/toEqual compares same property on two objects
+#   self-referential-matcher — toBe/toEqual compares same property on two objects
 #
 # Environment:
 #   LINT_TEST_ASSERTIONS  Set to 0 to disable; defaults to 1 (enabled)
@@ -42,7 +42,7 @@ Scan test files for hollow assertion patterns; emit JSON findings.
 Patterns:
   mock-timing-perf    performance.now() threshold against a mocked function
   constant-arithmetic expect() argument is compile-time constant arithmetic
-  self-referential    toBe/toEqual compares identical property from two objects
+  self-referential-matcher  toBe/toEqual compares identical property from two objects
 
 Environment:
   LINT_TEST_ASSERTIONS  0 disables the linter (default: 1)
@@ -107,11 +107,13 @@ _scan_constant_arithmetic() {
 # -----------------------------------------------------------------------
 _scan_self_referential() {
 	local file="$1" tmpdir="$2"
-	local rawline lineno snippet prop1 prop2
+	local rawline lineno snippet obj1 obj2 prop1 prop2 stem1 stem2
 	# Regex helpers: expect(OBJ.PROP).toBe/toEqual(OBJ2.PROP)
-	local ident re_grep re1 re2
+	local ident re_grep re_obj1 re_obj2 re1 re2
 	ident='[A-Za-z_][A-Za-z0-9_]*'
 	re_grep="expect\(${ident}\.${ident}\)\.to(Be|Equal)\(${ident}\.${ident}\)"
+	re_obj1="s/.*expect\(([A-Za-z_][A-Za-z0-9_]*)\.${ident}\).*/\1/"
+	re_obj2="s/.*\.to(Be|Equal)\(([A-Za-z_][A-Za-z0-9_]*)\.${ident}\).*/\2/"
 	re1="s/.*expect\(${ident}\.([A-Za-z_][A-Za-z0-9_]*)\).*/\1/"
 	re2="s/.*\.to(Be|Equal)\(${ident}\.([A-Za-z_][A-Za-z0-9_]*)\).*/\2/"
 
@@ -119,18 +121,32 @@ _scan_self_referential() {
 		lineno="${rawline%%:*}"
 		snippet="$(_ltrim "${rawline#*:}")"
 
+		# Extract object identifiers from expect(OBJ.PROP) and .toBe(OBJ.PROP)
+		obj1=$(printf '%s' "$snippet" | sed -E "$re_obj1")
+		obj2=$(printf '%s' "$snippet" | sed -E "$re_obj2")
+
 		# Extract property name from expect(OBJ.PROP)
 		prop1=$(printf '%s' "$snippet" | sed -E "$re1")
 
 		# Extract property from .toBe(OBJ.PROP) or .toEqual(OBJ.PROP)
 		prop2=$(printf '%s' "$snippet" | sed -E "$re2")
 
-		# Guard: both extractions must look like valid identifiers
+		# Object stems: strip a trailing numeric suffix so paired variables
+		# like result1/result2 collapse to the same stem ("result"), while
+		# distinct sources (actual vs expectedSnapshot) keep different stems.
+		stem1=$(printf '%s' "$obj1" | sed -E 's/[0-9]+$//')
+		stem2=$(printf '%s' "$obj2" | sed -E 's/[0-9]+$//')
+
+		# Flag only when the SAME property is compared across two objects that
+		# share a stem — i.e. likely the same source (self-referential).  When
+		# the object stems differ, the assertion compares distinct sources and
+		# has a real reference value, so it is NOT hollow.
 		if [[ "$prop1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && \
 		   [[ "$prop2" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && \
-		   [[ "$prop1" == "$prop2" ]]; then
+		   [[ "$prop1" == "$prop2" ]] && \
+		   [[ -n "$stem1" && "$stem1" == "$stem2" ]]; then
 			_emit_finding "$tmpdir" "$file" "$lineno" \
-				"self-referential" "$snippet" "minor"
+				"self-referential-matcher" "$snippet" "minor"
 		fi
 	done < <(grep -nE "$re_grep" "$file" 2>/dev/null)
 }
@@ -174,8 +190,11 @@ _scan_mock_timing_perf() {
 # -----------------------------------------------------------------------
 main() {
 	if [[ $# -eq 0 ]]; then
-		usage >&2
-		exit 1
+		# No input files is a benign no-op: emit an empty findings array
+		# and exit 0 so callers (and the pipeline) treat "nothing to lint"
+		# as success rather than a usage error.
+		printf '[]\n'
+		return 0
 	fi
 
 	# Env-var disable gate
