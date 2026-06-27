@@ -541,3 +541,92 @@ Some prose but no task checkboxes.
 	[ "$status" -eq 0 ]
 	[ -z "$output" ]
 }
+
+# =============================================================================
+# REGRESSION: inline-code bullets in Research Findings / Acceptance Criteria
+# =============================================================================
+
+@test "assert_issue_valid: validates body with inline-code bullets in Research Findings and AC" {
+	local body
+	body=$(cat <<-'EOF'
+	## Research Findings
+
+	- `parse_tasks` matched any backtick bullet before section scoping
+	- `assert_issue_valid` lacked coverage for non-task sections
+
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Fix the parser — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] `parse_tasks` only parses lines inside Implementation Tasks
+	- [ ] `assert_issue_valid` returns 0 for this body
+	EOF
+	)
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "_issue_body_parse_tasks: inline-code bullets in Research Findings are not parsed as tasks" {
+	local body
+	body=$(cat <<-'EOF'
+	## Research Findings
+
+	- `parse_tasks` finding one
+	- `assert_issue_valid` finding two
+
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Canonical task
+
+	## Acceptance Criteria
+
+	- [ ] criteria item
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 1 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "_issue_body_parse_tasks: inline-code bullets in Acceptance Criteria are not parsed as tasks" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Canonical task
+
+	## Acceptance Criteria
+
+	- [ ] `[code-reviewer]` has reviewed the output
+	- [ ] `parse_tasks` returns only one record
+	EOF
+	)
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
+	[ "$line_count" -eq 1 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "assert_issue_valid: AC bullets beginning with agent-like inline-code spans do not affect validation" {
+	local body
+	body=$(cat <<-'EOF'
+	## Implementation Tasks
+
+	- [ ] `[bash-script-craftsman]` **(M)** Build — `.claude/scripts/x.sh`
+
+	## Acceptance Criteria
+
+	- [ ] `[code-reviewer]` has reviewed the output
+	- [ ] `[bash-script-craftsman]` validates cleanly
+	EOF
+	)
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
