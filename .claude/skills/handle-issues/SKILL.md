@@ -49,9 +49,11 @@ Batch process multiple GitHub issues by launching `batch-orchestrator.sh` which 
 - `/handle-issues "issues in milestone v2.0 by creation date"`
 - `/handle-issues "Tailwind removal issues 306-308"` (frontend work)
 - `/handle-issues "critical bugs" --enrich-followups` — also enriches auto-created follow-up issues after the batch completes
+- `/handle-issues "critical bugs" --implement-followups` — enriches follow-up issues then implements each one (implies `--enrich-followups`)
 
 **Flags:**
 - `--enrich-followups` — after the main batch finishes, sweep every issue tagged `needs-explore` that was created during this batch run and invoke `/enrich-issue` on each one; see [Post-Batch Follow-up Enrichment](#post-batch-follow-up-enrichment) below
+- `--implement-followups` — implies `--enrich-followups`; after enrichment completes, also runs `implement-issue` + `process-pr` on each enriched follow-up issue; see [Post-Batch Follow-up Enrichment](#post-batch-follow-up-enrichment) below
 
 ## Agent Selection
 
@@ -705,9 +707,18 @@ nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --enrich-foll
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 ```
 
+Running `/handle-issues` with `--implement-followups` implies `--enrich-followups`: it first enriches every follow-up issue (same sweep as above), then automatically queues each enriched follow-up into a nested `implement-issue` + `process-pr` cycle:
+
+```bash
+# Launch orchestrator with enrichment + implementation sweep enabled
+nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --implement-followups \
+  > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
+```
+
 **Sweep behaviour:**
 - Only processes issues with the `needs-explore` label created since `BATCH_START_TIME` (scoped to this batch — does not touch prior batches' follow-ups)
 - Enrichment failures are logged but do **not** fail the batch or trigger the circuit breaker
+- `--implement-followups` only proceeds to the implement stage for issues whose enrichment succeeded; enrichment failures skip the implement stage for that issue
 - Use `--enrich-all-needs-explore` (an explicit operator opt-in on `batch-orchestrator.sh`) to sweep ALL `needs-explore` issues regardless of creation time
 
 ### `/enrich-issue` Skill
@@ -732,7 +743,7 @@ Useful for any sparsely-described issue — whether pipeline-created or filed by
 
 | File | Purpose |
 |------|---------|
-| `.claude/scripts/batch-orchestrator.sh` | Main orchestration script (loops through issues); supports `--enrich-followups` flag |
+| `.claude/scripts/batch-orchestrator.sh` | Main orchestration script (loops through issues); supports `--enrich-followups` and `--implement-followups` flags |
 | `.claude/scripts/schemas/implement-issue.json` | JSON schema for implement-issue output |
 | `.claude/scripts/schemas/process-pr.json` | JSON schema for process-pr output |
 | `status.json` | Real-time status (read by this skill, written by orchestrator) |
@@ -747,7 +758,8 @@ Useful for any sparsely-described issue — whether pipeline-created or filed by
 - `.claude/scripts/schemas/*.json` (JSON schemas)
 - `implement-issue` skill (invoked by orchestrator)
 - `process-pr` skill (invoked by orchestrator)
-- `enrich-issue` skill (invoked by orchestrator when `--enrich-followups` is set)
+- `enrich-issue` skill (invoked by orchestrator when `--enrich-followups` or `--implement-followups` is set)
+- `implement-issue` skill (invoked by orchestrator on enriched follow-ups when `--implement-followups` is set)
 - Platform CLI authenticated (gh, glab, or acli — configured in .claude/config/platform.sh)
 - `jq` for JSON parsing
 - Claude Code CLI installed
@@ -756,7 +768,8 @@ Useful for any sparsely-described issue — whether pipeline-created or filed by
 - One PR per issue (via implement-issue)
 - Merged PRs with closed issues (via process-pr)
 - Follow-up issues from review comments (via process-pr), tagged `needs-explore` with `<!-- pipeline-autocreated -->` marker
-- Enriched follow-up issues with full research + planning (when `--enrich-followups` is set, via enrich-issue)
+- Enriched follow-up issues with full research + planning (when `--enrich-followups` or `--implement-followups` is set, via enrich-issue)
+- Implemented + merged follow-up PRs (when `--implement-followups` is set, for each successfully enriched follow-up)
 - status.json with real-time progress
 - Log directory with per-issue logs
 
