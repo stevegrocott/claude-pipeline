@@ -38,7 +38,7 @@
 #     (r) unexpected positional argument → exit 3
 #
 #   DUAL-FAILURE CASE
-#     (s) ctx failing AND bats failing → exit 2 (bats-failure takes precedence)
+#     (s) ctx failing AND bats failing → exit 4 (dedicated both-failed code)
 #
 
 bats_require_minimum_version 1.5.0
@@ -323,12 +323,12 @@ FILTER_MOCK
 # DUAL-FAILURE CASE
 # =============================================================================
 
-@test "(s) ctx failing AND bats failing → exit 2 (bats-failure precedence)" {
+@test "(s) ctx failing AND bats failing → exit 4 (both-failed code)" {
 	_install_mock_ctx 1 0
 	_install_mock_bats 1
 	run bash "$SCRIPT_UNDER_TEST" \
 		--bats-dir "$TEST_TMP/bats-dir"
-	[ "$status" -eq 2 ]
+	[ "$status" -eq 4 ]
 	[[ "$output" == *"FAIL  ctx doctor"* ]]
 	[[ "$output" == *"FAIL  Orchestrator BATS suite"* ]]
 }
