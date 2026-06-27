@@ -18,12 +18,13 @@ done
 
 [[ -z "$TITLE" ]] && { echo "ERROR: --title is required" >&2; exit 3; }
 
-# Validate pipeline-autocreated bodies before creation.
-if [[ "$BODY" == *"<!-- pipeline-autocreated -->"* ]]; then
+# Validate bodies with <!-- pipeline-autocreated --> or ## Implementation Tasks.
+if [[ "$BODY" == *"<!-- pipeline-autocreated -->"* ]] || \
+   [[ "$BODY" == *"## Implementation Tasks"* ]]; then
   # shellcheck source=../issue-body-lib.sh
   source "$SCRIPT_DIR/../issue-body-lib.sh"
   if ! assert_issue_valid "$BODY"; then
-    echo "ERROR: pipeline-autocreated body failed validation — issue not created" >&2
+    echo "ERROR: body failed structural validation — issue not created" >&2
     exit 1
   fi
 fi

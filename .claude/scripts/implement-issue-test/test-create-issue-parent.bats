@@ -329,3 +329,78 @@ MOCK
     [[ "$stderr" == *"WARNING"*"github.com"* ]]
     [ ! -f "$GH_API_ARGS" ] || ! grep -q 'sub_issues' "$GH_API_ARGS"
 }
+
+# =============================================================================
+# Body validation: ## Implementation Tasks trigger widening (issue #437 task 1)
+# =============================================================================
+#
+# The validation trigger in create-issue.sh must fire for any body that
+# contains ## Implementation Tasks — not only bodies marked with
+# <!-- pipeline-autocreated -->.  Regression: the original
+# <!-- pipeline-autocreated --> trigger must continue to work.
+#
+# Static analysis tests will fail until the if-condition is widened;
+# functional tests will fail until assert_issue_valid is called for
+# ## Implementation Tasks bodies.
+
+@test "validation trigger includes '## Implementation Tasks' in the if-condition" {
+	# The BODY comparison inside the if must reference ## Implementation Tasks
+	# so bodies with that section are validated before gh issue create is called.
+	grep -qE '\[\[.*"## Implementation Tasks"' "$CREATE_ISSUE_SH"
+}
+
+@test "validation trigger still includes 'pipeline-autocreated' in the if-condition" {
+	# Original trigger must be preserved — widening must not drop the existing
+	# pipeline-autocreated check.
+	grep -qE '\[\[.*pipeline-autocreated' "$CREATE_ISSUE_SH"
+}
+
+@test "body with ## Implementation Tasks but invalid structure: exit 1 (issue not created)" {
+	# A body that carries ## Implementation Tasks but has only prose (no valid
+	# task lines, no Acceptance Criteria) must fail assert_issue_valid and
+	# prevent issue creation.
+	local body
+	body=$(printf '## Implementation Tasks\n\nJust prose — no valid task format.\n')
+	unset DEPLOY_VERIFY_CMD
+	_run_create_issue --title "Test" --body "$body"
+	[ "$status" -eq 1 ]
+}
+
+@test "body with ## Implementation Tasks but invalid structure: gh issue create not called" {
+	# When assert_issue_valid rejects the body, the gh call must be suppressed.
+	local body
+	body=$(printf '## Implementation Tasks\n\nJust prose — no valid task format.\n')
+	unset DEPLOY_VERIFY_CMD
+	_run_create_issue --title "Test" --body "$body"
+	[ ! -f "$GH_CALLS" ] || ! grep -q 'issue create' "$GH_CALLS"
+}
+
+@test "body with ## Implementation Tasks and valid structure: exit 0 (issue created)" {
+	# A body with ## Implementation Tasks AND proper task format plus Acceptance
+	# Criteria must pass assert_issue_valid and proceed to create the issue.
+	local body
+	body=$(printf 'Context.\n\n## Implementation Tasks\n\n- [ ] `[default]` **(S)** Fix the bug\n\n## Acceptance Criteria\n\n- [ ] Bug is fixed\n')
+	unset DEPLOY_VERIFY_CMD
+	_run_create_issue --title "Test" --body "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "body without trigger sections: validation skipped, issue created (exit 0)" {
+	# Bodies that carry neither <!-- pipeline-autocreated --> nor
+	# ## Implementation Tasks must bypass assert_issue_valid entirely —
+	# they may use prose task formats the validator does not understand.
+	local body="Just a plain description with no special sections."
+	unset DEPLOY_VERIFY_CMD
+	_run_create_issue --title "Test" --body "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "body with pipeline-autocreated but invalid structure: exit 1 (regression guard)" {
+	# The original <!-- pipeline-autocreated --> trigger must still work after
+	# the condition is widened to include ## Implementation Tasks.
+	local body
+	body=$(printf '<!-- pipeline-autocreated -->\nJust prose, no task lines.\n')
+	unset DEPLOY_VERIFY_CMD
+	_run_create_issue --title "Test" --body "$body"
+	[ "$status" -eq 1 ]
+}
