@@ -1194,3 +1194,23 @@ _simulate_recovery_with_stage() {
 	body=$(awk '/^usage\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" == *'no-implement-followups'* ]]
 }
+
+@test "sweep_implement_followups skips needs-explore follow-ups unless ENRICH_FOLLOWUPS is true" {
+	# Follow-ups with the needs-explore label must NOT be auto-implemented when
+	# ENRICH_FOLLOWUPS is false — they need enrichment first.  The function body
+	# must contain both a needs-explore check and a reference to ENRICH_FOLLOWUPS
+	# so the guard is conditional rather than an unconditional skip.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'needs-explore'* ]]
+}
+
+@test "sweep_implement_followups checks ENRICH_FOLLOWUPS before processing needs-explore issues" {
+	# The guard must be conditional on ENRICH_FOLLOWUPS so that callers who
+	# also pass --enrich-followups can still process those issues.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'ENRICH_FOLLOWUPS'* ]]
+}

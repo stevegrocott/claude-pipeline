@@ -1331,6 +1331,23 @@ sweep_implement_followups() {
 
 	local _fi
 	for _fi in "${_wave2[@]}"; do
+		# Skip follow-ups that still carry the needs-explore label unless
+		# ENRICH_FOLLOWUPS is true — those issues need enrichment before
+		# they can be implemented.  gh failure is non-fatal: if the label
+		# query fails we fall through and let process_issue decide.
+		local _has_explore
+		_has_explore=$(gh issue view "$_fi" \
+			--json labels 2>/dev/null \
+			| jq -r \
+				'[.labels[].name] | any(. == "needs-explore")' \
+			2>/dev/null) || _has_explore="false"
+		if [[ "$_has_explore" == "true" ]] \
+			&& [[ "$ENRICH_FOLLOWUPS" != true ]]; then
+			log_warn \
+				"Sweep: follow-up #$_fi has needs-explore label" \
+				"— skipping (pass --enrich-followups to include)"
+			continue
+		fi
 		log "Sweep: implementing follow-up #$_fi (depth=$_depth)"
 		if process_issue "$_fi"; then
 			log "Sweep: follow-up #$_fi implemented successfully"
