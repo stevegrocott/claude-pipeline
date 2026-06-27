@@ -1393,7 +1393,7 @@ sweep_implement_followups() {
 		# process_issue regardless of its current labels.
 		if [[ "$ENRICH_FOLLOWUPS" != true ]]; then
 			local labels
-			labels=$(gh issue view "$issue_num" --json labels \
+			labels=$(timeout 30 gh issue view "$issue_num" --json labels \
 				--jq '[.labels[].name] | join(",")' \
 				2>/dev/null) || labels=""
 			if [[ "$labels" == *"needs-explore"* ]]; then

@@ -1405,3 +1405,58 @@ source_sweep_implement_followups() {
 	[[ "$(jq -r '.progress.pending' <<< "$out")" == "1" ]]
 	[[ "$(jq -r '.issues | length' <<< "$out")" == "3" ]]
 }
+
+# =============================================================================
+# TIMEOUT: gh issue view label-check in sweep_implement_followups
+# =============================================================================
+
+@test "sweep_implement_followups: label-check gh call is wrapped with timeout" {
+	# Static: the timeout command must appear immediately before gh issue view
+	# in the ENRICH_FOLLOWUPS=false label-check block.
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'timeout'*'gh issue view'* ]]
+}
+
+@test "sweep_implement_followups: gh timeout falls back to empty labels; issue proceeds" {
+	# Behavioural: when timeout kills gh (exit 124), the '|| labels=""' fallback
+	# must prevent the issue from being skipped — process_issue should still run.
+	source_sweep_implement_followups \
+		|| skip "sweep_implement_followups() not yet present"
+
+	export MAX_FOLLOWUP_DEPTH=1
+	export ENRICH_FOLLOWUPS=false
+	ISSUE_ARRAY=(1)
+
+	cat > "$STATUS_FILE" <<-'JSON'
+	{
+	  "progress": {"total": 1, "pending": 0, "completed": 1, "failed": 0},
+	  "issues": [
+	    {"number": "1", "status": "completed", "follow_ups": ["100"]}
+	  ]
+	}
+	JSON
+
+	log()      { :; }
+	log_warn() { :; }
+	process_issue() {
+		printf '%s\n' "$1" >> "$TEST_TMP/process_issue.calls"
+		return 0
+	}
+
+	# Stub gh: exit 124 (timeout-alike) so the '|| labels=""' path is taken.
+	local stub_bin="$TEST_TMP/stub-bin"
+	mkdir -p "$stub_bin"
+	printf '#!/usr/bin/env bash\nexit 124\n' > "$stub_bin/gh"
+	chmod +x "$stub_bin/gh"
+	# Stub timeout: pass through to the stub gh without actually waiting.
+	printf '#!/usr/bin/env bash\nshift; "$@"\n' > "$stub_bin/timeout"
+	chmod +x "$stub_bin/timeout"
+	export PATH="$stub_bin:$PATH"
+
+	sweep_implement_followups
+
+	# process_issue must have been called for #100 — timeout did NOT skip it.
+	grep -qx '100' "$TEST_TMP/process_issue.calls"
+}
