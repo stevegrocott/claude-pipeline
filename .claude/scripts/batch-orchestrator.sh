@@ -98,6 +98,7 @@ BRANCH=""
 AGENT=""
 ENRICH_FOLLOWUPS=false
 ENRICH_ALL_NEEDS_EXPLORE=false
+IMPLEMENT_FOLLOWUPS=false
 
 usage() {
     echo "Usage: $0 --manifest <path>"
@@ -117,6 +118,14 @@ usage() {
     echo "  --no-enrich-followups"
     echo "                      Disable auto-enrichment of needs-explore follow-up"
     echo "                      issues (overrides the default-on behaviour)"
+    echo "  --implement-followups"
+    echo "                      After batch, auto-implement follow-up issues created"
+    echo "                      during this run as a second wave (implies"
+    echo "                      --enrich-followups so needs-explore issues are"
+    echo "                      enriched before implementation)"
+    echo "  --no-implement-followups"
+    echo "                      Disable auto-implementation of follow-up issues"
+    echo "                      (overrides --implement-followups)"
     echo ""
     echo "Available agents:"
     echo "  react-frontend-developer        React, Next.js, shadcn/ui, Tailwind"
@@ -160,6 +169,15 @@ while [[ $# -gt 0 ]]; do
         --enrich-all-needs-explore)
             ENRICH_FOLLOWUPS=true
             ENRICH_ALL_NEEDS_EXPLORE=true
+            shift
+            ;;
+        --implement-followups)
+            IMPLEMENT_FOLLOWUPS=true
+            ENRICH_FOLLOWUPS=true
+            shift
+            ;;
+        --no-implement-followups)
+            IMPLEMENT_FOLLOWUPS=false
             shift
             ;;
         --help|-h)
@@ -1260,6 +1278,7 @@ log "Log dir: $LOG_BASE"
 log "Timeout per issue: ${ISSUE_TIMEOUT}s"
 log "Max consecutive failures: $MAX_CONSECUTIVE_FAILURES"
 log "Enrich follow-ups: $ENRICH_FOLLOWUPS"
+log "Implement follow-ups: $IMPLEMENT_FOLLOWUPS"
 emit_event "batch_start" "total_issues:=${#ISSUE_ARRAY[@]}" "branch=$BRANCH"
 
 # Capture batch start time for scoping the post-batch follow-up sweep.
