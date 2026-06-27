@@ -14,8 +14,8 @@
 #         2. every task agent resolves to a known agent (or "default")
 #         3. every file path referenced in a task resolves (file exists or
 #            its parent directory exists)
-#         4. an "## Acceptance Criteria" section is present
-#         5. a "## Deploy Verification" section exists if and only if
+#         4. an "Acceptance Criteria" section is present (any heading depth)
+#         5. a "Deploy Verification" section exists if and only if (any heading depth)
 #            DEPLOY_VERIFY_CMD is set
 #       Returns 0 when valid; prints one diagnostic per failure to stderr
 #       and returns 1 otherwise.
@@ -237,7 +237,7 @@ _issue_body_parse_tasks() {
 		fi
 	done <<< "$body"
 
-	# No "## Implementation Tasks" heading found — emit nothing.
+	# No "Implementation Tasks" heading found (any depth) — emit nothing.
 	$in_section || return 0
 
 	# Backtick-bearing regex must live in a variable — bash cannot escape a
