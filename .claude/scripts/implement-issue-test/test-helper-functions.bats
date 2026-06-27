@@ -351,3 +351,73 @@ teardown() {
     [ "$status" -eq 1 ]
 }
 
+# =============================================================================
+# _build_bash_test_command() — bash_test_command construction
+# =============================================================================
+
+@test "_build_bash_test_command uses run-tests.sh when it exists" {
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bash .claude/scripts/implement-issue-test/run-tests.sh" ]
+}
+
+@test "_build_bash_test_command falls back to bats glob when run-tests.sh absent" {
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bats .claude/scripts/implement-issue-test/*.bats" ]
+}
+
+@test "_build_bash_test_command includes tests/*.bats suffix when tests dir has bats files" {
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/foo.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [[ "$result" == *"&& bats tests/*.bats" ]]
+}
+
+@test "_build_bash_test_command does not include tests/*.bats when tests dir is absent" {
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [[ "$result" != *"&& bats tests/*.bats"* ]]
+}
+
+@test "_build_bash_test_command does not include tests/*.bats when tests dir exists but holds no bats files" {
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/helper.sh"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [[ "$result" != *"&& bats tests/*.bats"* ]]
+}
+
+@test "_build_bash_test_command produces full expected string with run-tests.sh and tests dir" {
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/lint.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bash .claude/scripts/implement-issue-test/run-tests.sh && bats tests/*.bats" ]
+}
+
+@test "_build_bash_test_command produces full expected string with bats glob fallback and tests dir" {
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/lint.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bats .claude/scripts/implement-issue-test/*.bats && bats tests/*.bats" ]
+}
+

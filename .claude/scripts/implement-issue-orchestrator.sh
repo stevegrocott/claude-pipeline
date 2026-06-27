@@ -5352,6 +5352,26 @@ all_failures_environment_related() {
 	(( non_env_count == 0 ))
 }
 
+# Build the bash test command for a given loop directory.
+# Prefers run-tests.sh when it exists; falls back to direct bats glob otherwise.
+# Appends "&& bats tests/*.bats" when at least one *.bats file exists in
+# "$loop_dir/tests/".  Outputs the constructed command string on stdout.
+# Arguments:
+#   $1 - loop_dir: working directory to inspect
+_build_bash_test_command() {
+	local loop_dir="$1"
+	local bash_test_command
+	if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
+		bash_test_command="bash .claude/scripts/implement-issue-test/run-tests.sh"
+	else
+		bash_test_command="bats .claude/scripts/implement-issue-test/*.bats"
+	fi
+	if compgen -G "$loop_dir/tests/*.bats" > /dev/null 2>&1; then
+		bash_test_command="$bash_test_command && bats tests/*.bats"
+	fi
+	printf '%s\n' "$bash_test_command"
+}
+
 # Run the test loop (test+validate -> fix, repeat until pass)
 # Called once after all tasks complete
 # Flow:
@@ -5411,12 +5431,7 @@ run_test_loop() {
 
     # Build the test command based on scope
     local test_command bash_test_command
-    # Determine bash test command: prefer run-tests.sh if it exists, else bats directly
-    if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
-        bash_test_command="bash .claude/scripts/implement-issue-test/run-tests.sh"
-    else
-        bash_test_command="bats .claude/scripts/implement-issue-test/*.bats"
-    fi
+    bash_test_command=$(_build_bash_test_command "$loop_dir")
 
     local safe_dir safe_branch
     safe_dir=$(printf '%q' "$loop_dir")
