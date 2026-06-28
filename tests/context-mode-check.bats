@@ -97,14 +97,14 @@ _install_mock_ctx() {
 	local doctor_exit="${1:-0}"
 	local stats_exit="${2:-0}"
 
-	cat > "$TEST_TMP/mock_config.bash" <<EOF
+	cat > "$TEST_TMP/mock_ctx_config.bash" <<EOF
 MOCK_CTX_DOCTOR_EXIT_CODE=${doctor_exit}
 MOCK_CTX_STATS_EXIT_CODE=${stats_exit}
 EOF
 
 	cat > "$TEST_TMP/bin/ctx" << 'MOCK_EOF'
 #!/usr/bin/env bash
-source "${BASH_SOURCE%/*}/../mock_config.bash"
+source "${BASH_SOURCE%/*}/../mock_ctx_config.bash"
 case "$1" in
     doctor)
         echo "Context Mode: healthy"
@@ -153,20 +153,21 @@ _remove_context_mode() {
 }
 
 # _install_mock_context_mode <doctor_exit> <stats_exit>
-# Creates a `context-mode` mock in $TEST_TMP/bin.  Uses the same
-# mock_config.bash as _install_mock_ctx so exit-code controls are shared.
+# Creates a `context-mode` mock in $TEST_TMP/bin.  Uses its own
+# mock_cm_config.bash so it does not collide with _install_mock_ctx's
+# mock_ctx_config.bash when both mocks are installed simultaneously.
 _install_mock_context_mode() {
 	local doctor_exit="${1:-0}"
 	local stats_exit="${2:-0}"
 
-	cat > "$TEST_TMP/mock_config.bash" <<EOF
+	cat > "$TEST_TMP/mock_cm_config.bash" <<EOF
 MOCK_CTX_DOCTOR_EXIT_CODE=${doctor_exit}
 MOCK_CTX_STATS_EXIT_CODE=${stats_exit}
 EOF
 
 	cat > "$TEST_TMP/bin/context-mode" << 'MOCK_EOF'
 #!/usr/bin/env bash
-source "${BASH_SOURCE%/*}/../mock_config.bash"
+source "${BASH_SOURCE%/*}/../mock_cm_config.bash"
 case "$1" in
     doctor)
         echo "Context Mode: healthy"
@@ -251,8 +252,8 @@ MOCK_EOF
 	run bash "$SCRIPT_UNDER_TEST" \
 		--bats-dir "$TEST_TMP/bats-dir"
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"PASS  ctx doctor"* ]]
-	[[ "$output" == *"PASS  ctx stats"* ]]
+	[[ "$output" == *"PASS  context-mode doctor"* ]]
+	[[ "$output" == *"PASS  context-mode stats"* ]]
 	[[ "$output" == *"PASS  Orchestrator BATS suite"* ]]
 }
 
