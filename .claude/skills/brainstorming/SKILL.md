@@ -1,6 +1,11 @@
 ---
 name: brainstorming
 description: "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation."
+inputs:
+  - name: idea
+    type: string
+    required: false
+    description: The rough idea, feature request, or problem statement to refine into a validated design
 outputs:
   - name: design_document
     type: file_path
@@ -10,6 +15,9 @@ side_effects:
   - commits_to_git
 composes:
   - writing-plans
+failure_modes:
+  - id: premature_implementation
+    mitigation: Do not write code or implementation plans until the design is fully explored and explicitly validated by the user
 ---
 
 # Brainstorming Ideas Into Designs
