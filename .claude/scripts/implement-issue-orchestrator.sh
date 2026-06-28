@@ -5355,20 +5355,33 @@ all_failures_environment_related() {
 
 # Build the bash test command for a given loop directory.
 # Prefers run-tests.sh when it exists; falls back to direct bats glob otherwise.
-# Appends "&& bats tests/*.bats" when at least one *.bats file exists in
-# "$loop_dir/tests/".  Outputs the constructed command string on stdout.
+# Appends "&& bats [--jobs N] tests/*.bats" when at least one *.bats file
+# exists in "$loop_dir/tests/".  Uses parallel execution via --jobs when the
+# installed bats version supports it; falls back to serial otherwise.
+# Outputs the constructed command string on stdout.
 # Arguments:
 #   $1 - loop_dir: working directory to inspect
 _build_bash_test_command() {
 	local loop_dir="$1"
 	local bash_test_command
+	local bats_cmd
+
+	# Detect --jobs support in the installed bats version.
+	# Run tests in parallel across all CPU cores when supported;
+	# fall back to serial execution otherwise.
+	if bats --help 2>&1 | grep -q -- '--jobs'; then
+		bats_cmd='bats --jobs "$(nproc)"'
+	else
+		bats_cmd="bats"
+	fi
+
 	if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
 		bash_test_command="bash .claude/scripts/implement-issue-test/run-tests.sh"
 	else
-		bash_test_command="bats .claude/scripts/implement-issue-test/*.bats"
+		bash_test_command="$bats_cmd .claude/scripts/implement-issue-test/*.bats"
 	fi
 	if compgen -G "$loop_dir/tests/*.bats" > /dev/null 2>&1; then
-		bash_test_command="$bash_test_command && bats tests/*.bats"
+		bash_test_command="$bash_test_command && $bats_cmd tests/*.bats"
 	fi
 	printf '%s\n' "$bash_test_command"
 }

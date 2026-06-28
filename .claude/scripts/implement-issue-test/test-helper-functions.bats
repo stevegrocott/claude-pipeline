@@ -365,12 +365,28 @@ teardown() {
 }
 
 @test "_build_bash_test_command falls back to bats glob when run-tests.sh absent" {
+    # Mock bats without --jobs support to test serial fallback
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
     local result
     result=$(_build_bash_test_command "$TEST_TMP")
     [ "$result" = "bats .claude/scripts/implement-issue-test/*.bats" ]
 }
 
 @test "_build_bash_test_command includes tests/*.bats suffix when tests dir has bats files" {
+    # Mock bats without --jobs support to test serial fallback
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
     mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
     touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
     mkdir -p "$TEST_TMP/tests"
@@ -402,6 +418,14 @@ teardown() {
 }
 
 @test "_build_bash_test_command produces full expected string with run-tests.sh and tests dir" {
+    # Mock bats without --jobs support to test serial fallback
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
     mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
     touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
     mkdir -p "$TEST_TMP/tests"
@@ -413,11 +437,99 @@ teardown() {
 }
 
 @test "_build_bash_test_command produces full expected string with bats glob fallback and tests dir" {
+    # Mock bats without --jobs support to test serial fallback
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
     mkdir -p "$TEST_TMP/tests"
     touch "$TEST_TMP/tests/lint.bats"
 
     local result
     result=$(_build_bash_test_command "$TEST_TMP")
     [ "$result" = "bats .claude/scripts/implement-issue-test/*.bats && bats tests/*.bats" ]
+}
+
+# =============================================================================
+# _build_bash_test_command() — parallel bats (--jobs) support
+# =============================================================================
+
+@test "_build_bash_test_command uses parallel bats when bats supports --jobs" {
+    # Mock bats with --jobs support
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+    printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+        "  -j, --jobs <jobs>  Number of parallel jobs"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [[ "$result" == 'bats --jobs "$(nproc)" .claude/scripts/implement-issue-test/*.bats' ]]
+}
+
+@test "_build_bash_test_command appends parallel bats to tests/*.bats when --jobs supported" {
+    # Mock bats with --jobs support
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+    printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+        "  -j, --jobs <jobs>  Number of parallel jobs"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/foo.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [[ "$result" == *'&& bats --jobs "$(nproc)" tests/*.bats' ]]
+}
+
+@test "_build_bash_test_command uses plain bats when bats does not support --jobs" {
+    # Mock bats without --jobs in help output
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--help" ]] && { printf 'Usage: bats [OPTIONS] <tests>\n'; exit 0; }
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = "bats .claude/scripts/implement-issue-test/*.bats" ]
+}
+
+@test "_build_bash_test_command run-tests.sh used but appended tests use parallel bats when --jobs supported" {
+    # Mock bats with --jobs support
+    cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+    printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+        "  -j, --jobs <jobs>  Number of parallel jobs"
+    exit 0
+fi
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/bats"
+
+    mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+    touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+    mkdir -p "$TEST_TMP/tests"
+    touch "$TEST_TMP/tests/lint.bats"
+
+    local result
+    result=$(_build_bash_test_command "$TEST_TMP")
+    [ "$result" = 'bash .claude/scripts/implement-issue-test/run-tests.sh && bats --jobs "$(nproc)" tests/*.bats' ]
 }
 
