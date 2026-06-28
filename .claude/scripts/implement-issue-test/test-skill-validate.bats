@@ -125,10 +125,25 @@ make_skill() {
 # (a) VALID FRONTMATTER PASSES
 # =============================================================================
 
-@test "(a) minimal valid frontmatter — name and description — exits 0" {
+@test "(a) minimal valid frontmatter — all required fields — exits 0" {
+	# Schema required set was widened in #296 to name, description, inputs,
+	# outputs, side_effects, composes, failure_modes — supply them all.
 	make_skill "my-skill" \
 		"name: my-skill
-description: A minimal test skill"
+description: A minimal test skill
+inputs:
+  - name: target
+    type: string
+outputs:
+  - name: result
+    type: string
+side_effects:
+  - none
+composes:
+  - mcp-tools
+failure_modes:
+  - id: boom
+    mitigation: surface the error"
 
 	run bash "$SKILL_VALIDATE_SCRIPT" --skill my-skill
 	[ "$status" -eq 0 ]
@@ -161,10 +176,28 @@ failure_modes:
 }
 
 @test "(a) --all exits 0 when every skill in SKILLS_DIR has valid frontmatter" {
+	# All seven schema-required fields must be present per #296.
+	local valid_body
+	valid_body="inputs:
+  - name: target
+    type: string
+outputs:
+  - name: result
+    type: string
+side_effects:
+  - none
+composes:
+  - mcp-tools
+failure_modes:
+  - id: boom
+    mitigation: surface the error"
+
 	make_skill "skill-alpha" "name: skill-alpha
-description: First valid skill"
+description: First valid skill
+$valid_body"
 	make_skill "skill-beta" "name: skill-beta
-description: Second valid skill"
+description: Second valid skill
+$valid_body"
 
 	run bash "$SKILL_VALIDATE_SCRIPT" --all
 	[ "$status" -eq 0 ]

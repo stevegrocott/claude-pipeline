@@ -260,14 +260,17 @@ teardown() {
 
 @test "script uses set -uo pipefail" {
     local script_content
-    script_content=$(head -20 "$ORCHESTRATOR_SCRIPT")
+    # The header grew over time; the `set -uo pipefail` line now sits past
+    # line 40, so read a wider window than the original head -20.
+    script_content=$(head -60 "$ORCHESTRATOR_SCRIPT")
 
     [[ "$script_content" == *"set -uo pipefail"* ]]
 }
 
 @test "script does not use set -e (handles errors explicitly)" {
     local script_content
-    script_content=$(head -20 "$ORCHESTRATOR_SCRIPT")
+    # Widened window: the shell-options header now extends past line 40.
+    script_content=$(head -60 "$ORCHESTRATOR_SCRIPT")
 
     # Should NOT have set -e or set -euo (errexit causes unpredictable behavior)
     # The script should use explicit error handling instead

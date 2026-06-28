@@ -344,10 +344,11 @@ run_with_config() {
 	[[ "$output" == "sonnet" ]]
 }
 
-@test "resolve_model matches test prefix in test-iter-1" {
+@test "resolve_model matches test-iter prefix in test-iter-1" {
+	# test-iter is its own standard-tier prefix (judgment: test loop fixes)
 	run_with_config 'resolve_model "test-iter-1"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "haiku" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model matches fix prefix in fix-review-task-1-iter-1" {
@@ -404,10 +405,11 @@ run_with_config() {
 	[[ "$output" == "sonnet" ]]
 }
 
-@test "resolve_model matches test prefix in test-iter-2" {
+@test "resolve_model matches test-iter prefix in test-iter-2" {
+	# test-iter is its own standard-tier prefix (judgment: test loop fixes)
 	run_with_config 'resolve_model "test-iter-2"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "haiku" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 # =============================================================================
@@ -585,10 +587,11 @@ run_with_config() {
 }
 
 @test "resolve_model with composite stage and M complexity" {
-	# test-iter-1 defaults to haiku (light tier), M complexity is ignored
+	# test-iter-1 defaults to sonnet (standard tier); M also maps to
+	# standard, so the result stays sonnet
 	run_with_config 'resolve_model "test-iter-1" "M"'
 	[ "$status" -eq 0 ]
-	[[ "$output" == "haiku" ]]
+	[[ "$output" == "sonnet" ]]
 }
 
 @test "resolve_model unknown composite stage with complexity hint" {

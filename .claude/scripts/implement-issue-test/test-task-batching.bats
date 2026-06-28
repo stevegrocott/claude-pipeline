@@ -412,8 +412,11 @@ teardown() {
 	mkdir -p "$LOG_BASE/stages"
 
 	# Mock run_stage to return success
+	# run_stage nests structured fields under .output (only .status is lifted
+	# to the top level) — execute_batch_serial reads .output.status /
+	# .output.commit / .output.summary, so the mock must match that envelope.
 	run_stage() {
-		printf '%s' '{"status":"success","commit":"abc123","summary":"done"}'
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
 	}
 	# Mock quality-related functions
 	should_run_quality_loop() { return 1; }
@@ -758,8 +761,11 @@ _setup_parallel_stage_mocks() {
 
 	mkdir -p "$LOG_BASE/stages"
 
+	# run_stage nests structured fields under .output (only .status is lifted
+	# to the top level) — execute_batch_serial reads .output.status /
+	# .output.commit / .output.summary, so the mock must match that envelope.
 	run_stage() {
-		printf '%s' '{"status":"success","commit":"abc123","summary":"done"}'
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
 	}
 	should_run_quality_loop() { return 1; }
 	get_max_review_attempts() { printf '%s' "1"; }

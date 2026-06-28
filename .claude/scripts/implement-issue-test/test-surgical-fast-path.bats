@@ -319,9 +319,11 @@ CLAUDE_MOCK
 # CLASSIFICATION + ROUTING CONTROL (post-processing tests, mocked Claude)
 # ============================================================================
 
-@test "01 fast-path response with high confidence + pattern grep ≥3 → route=fast-path" {
+@test "01 fast-path skill verdict (high confidence) → route=fast-path recorded" {
+    # Post-#249 the triage-classify skill owns routing; the orchestrator only
+    # records the skill's verdict (route/confidence/disqualifying_criterion).
+    # No shell-side pattern_grep_count is computed anymore.
     configure_mock_claude_triage make_triage_response fast-path high null 'storageState.*\\.auth/'
-    export MOCK_GIT_GREP_FILE_COUNT=5
     cp "$FIXTURE_DIR/issue-2836.md" "$TEST_TMP/issue-body.md"
 
     run run_triage_stage "$TEST_TMP/issue-body.md"
@@ -330,10 +332,13 @@ CLAUDE_MOCK
     [ -f "$LOG_BASE/triage.json" ]
     assert_json_field "$LOG_BASE/triage.json" '.route' 'fast-path'
     assert_json_field "$LOG_BASE/triage.json" '.confidence' 'high'
-    assert_json_field "$LOG_BASE/triage.json" '.pattern_grep_count' '5'
+    assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'null'
 }
 
 @test "02 full-route response → route=full preserved with disqualifying_criterion" {
+    # The orchestrator records route + disqualifying_criterion from the skill
+    # verdict. Per-criterion detail lives in the skill output, not the
+    # orchestrator's triage.json artifact (which is route/confidence/dq only).
     configure_mock_claude_triage make_triage_response full high test_only_scope null test_only_scope
     cp "$FIXTURE_DIR/issue-2752.md" "$TEST_TMP/issue-body.md"
 
@@ -342,36 +347,42 @@ CLAUDE_MOCK
     [ "$status" -eq 0 ]
     assert_json_field "$LOG_BASE/triage.json" '.route' 'full'
     assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'test_only_scope'
-    assert_json_field "$LOG_BASE/triage.json" '.criteria.test_only_scope.passed' 'false'
+    assert_json_field "$LOG_BASE/triage.json" '.confidence' 'high'
 }
 
-@test "03 fast-path response with confidence=medium → demoted to full" {
-    configure_mock_claude_triage make_triage_response fast-path medium null 'pat'
-    export MOCK_GIT_GREP_FILE_COUNT=5
+@test "03 medium-confidence demotion verdict (route=full, dq=confidence_low) recorded" {
+    # Confidence-based demotion now happens inside the triage-classify skill,
+    # which returns the already-demoted verdict. The orchestrator records it
+    # verbatim. Mock the skill's post-demotion output: route=full + confidence
+    # carried through + disqualifying_criterion=confidence_low.
+    configure_mock_claude_triage make_triage_response full medium confidence_low 'pat'
     cp "$FIXTURE_DIR/issue-2836.md" "$TEST_TMP/issue-body.md"
 
     run run_triage_stage "$TEST_TMP/issue-body.md"
 
     [ "$status" -eq 0 ]
     assert_json_field "$LOG_BASE/triage.json" '.route' 'full'
+    assert_json_field "$LOG_BASE/triage.json" '.confidence' 'medium'
     assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'confidence_low'
 }
 
-@test "04 fast-path response with confidence=low → demoted to full" {
-    configure_mock_claude_triage make_triage_response fast-path low null 'pat'
-    export MOCK_GIT_GREP_FILE_COUNT=5
+@test "04 low-confidence demotion verdict (route=full, dq=confidence_low) recorded" {
+    configure_mock_claude_triage make_triage_response full low confidence_low 'pat'
     cp "$FIXTURE_DIR/issue-2836.md" "$TEST_TMP/issue-body.md"
 
     run run_triage_stage "$TEST_TMP/issue-body.md"
 
     [ "$status" -eq 0 ]
     assert_json_field "$LOG_BASE/triage.json" '.route' 'full'
+    assert_json_field "$LOG_BASE/triage.json" '.confidence' 'low'
     assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'confidence_low'
 }
 
-@test "05 fast-path response with established_pattern_grep=null → demoted to full" {
-    # Claude itself failed criterion 3 by returning null pattern.
-    configure_mock_claude_triage make_triage_response fast-path high established_pattern null established_pattern
+@test "05 established_pattern failure verdict (route=full) recorded" {
+    # The skill failed criterion 3 (no established pattern) and returns the
+    # full-route verdict with disqualifying_criterion=established_pattern. The
+    # orchestrator records that verdict; it no longer runs git grep itself.
+    configure_mock_claude_triage make_triage_response full high established_pattern null established_pattern
     cp "$FIXTURE_DIR/issue-novel-pattern.md" "$TEST_TMP/issue-body.md"
 
     run run_triage_stage "$TEST_TMP/issue-body.md"
@@ -381,9 +392,10 @@ CLAUDE_MOCK
     assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'established_pattern'
 }
 
-@test "06 fast-path response but pattern grep <3 matches → demoted to full" {
-    configure_mock_claude_triage make_triage_response fast-path high null 'rare-pattern'
-    export MOCK_GIT_GREP_FILE_COUNT=2
+@test "06 rare-pattern (skill found too few matches) full verdict recorded" {
+    # Pattern-prevalence demotion is now a skill responsibility; it returns the
+    # full verdict directly. The orchestrator records route + dq only.
+    configure_mock_claude_triage make_triage_response full high established_pattern 'rare-pattern' established_pattern
     cp "$FIXTURE_DIR/issue-novel-pattern.md" "$TEST_TMP/issue-body.md"
 
     run run_triage_stage "$TEST_TMP/issue-body.md"
@@ -391,19 +403,19 @@ CLAUDE_MOCK
     [ "$status" -eq 0 ]
     assert_json_field "$LOG_BASE/triage.json" '.route' 'full'
     assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'established_pattern'
-    assert_json_field "$LOG_BASE/triage.json" '.pattern_grep_count' '2'
 }
 
-@test "07 fast-path response with pattern grep =3 matches (boundary) → preserved fast-path" {
+@test "07 fast-path verdict (skill found pattern established) recorded" {
+    # Boundary case where the skill judged the pattern sufficiently established
+    # and returned fast-path. The orchestrator records it verbatim.
     configure_mock_claude_triage make_triage_response fast-path high null 'edge-pattern'
-    export MOCK_GIT_GREP_FILE_COUNT=3
     cp "$FIXTURE_DIR/issue-2836.md" "$TEST_TMP/issue-body.md"
 
     run run_triage_stage "$TEST_TMP/issue-body.md"
 
     [ "$status" -eq 0 ]
     assert_json_field "$LOG_BASE/triage.json" '.route' 'fast-path'
-    assert_json_field "$LOG_BASE/triage.json" '.pattern_grep_count' '3'
+    assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'null'
 }
 
 @test "08 DISABLE_SURGICAL_FAST_PATH=1 forces full even on fast-path-eligible response" {
@@ -419,7 +431,12 @@ CLAUDE_MOCK
     assert_json_field "$LOG_BASE/triage.json" '.kill_switch_engaged' 'true'
 }
 
-@test "09 triage.json artifact for full route includes all 6 criteria with reasons" {
+@test "09 triage.json artifact for full route records route + dq + confidence + timestamp" {
+    # Post-#249 the orchestrator's triage.json is a thin audit record of the
+    # skill verdict: route, confidence, disqualifying_criterion, timestamp.
+    # Per-criterion detail stays in the skill's structured output (the staged
+    # log), not this artifact. Assert the artifact captures the full-route
+    # verdict and its disqualifying reason.
     configure_mock_claude_triage make_triage_response full high benign_failure_mode null benign_failure_mode
     cp "$FIXTURE_DIR/issue-2754.md" "$TEST_TMP/issue-body.md"
 
@@ -427,26 +444,28 @@ CLAUDE_MOCK
 
     [ "$status" -eq 0 ]
     [ -f "$LOG_BASE/triage.json" ]
-    for c in test_only_scope surgical_size established_pattern precise_specification \
-             benign_failure_mode no_security_concerns; do
-        actual=$(jq -r ".criteria.${c}.passed" "$LOG_BASE/triage.json")
-        [[ "$actual" == "true" || "$actual" == "false" ]]
-        actual=$(jq -r ".criteria.${c}.reason" "$LOG_BASE/triage.json")
-        [[ -n "$actual" && "$actual" != "null" ]]
-    done
+    assert_json_field "$LOG_BASE/triage.json" '.route' 'full'
+    assert_json_field "$LOG_BASE/triage.json" '.confidence' 'high'
+    assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'benign_failure_mode'
+    ts=$(jq -r '.timestamp // ""' "$LOG_BASE/triage.json")
+    [[ -n "$ts" && "$ts" != "null" ]]
 }
 
-@test "10 triage.json artifact for fast-path route includes pattern_grep_count" {
+@test "10 triage.json artifact for fast-path route records route + confidence + timestamp" {
+    # The orchestrator records the skill's fast-path verdict; it no longer
+    # computes pattern_grep_count or echoes established_pattern_grep into the
+    # artifact (that logic moved into the triage-classify skill in #249).
     configure_mock_claude_triage make_triage_response fast-path high null 'storageState'
-    export MOCK_GIT_GREP_FILE_COUNT=7
     cp "$FIXTURE_DIR/issue-2839.md" "$TEST_TMP/issue-body.md"
 
     run run_triage_stage "$TEST_TMP/issue-body.md"
 
     [ "$status" -eq 0 ]
     assert_json_field "$LOG_BASE/triage.json" '.route' 'fast-path'
-    assert_json_field "$LOG_BASE/triage.json" '.pattern_grep_count' '7'
-    assert_json_field "$LOG_BASE/triage.json" '.established_pattern_grep' 'storageState'
+    assert_json_field "$LOG_BASE/triage.json" '.confidence' 'high'
+    assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'null'
+    ts=$(jq -r '.timestamp // ""' "$LOG_BASE/triage.json")
+    [[ -n "$ts" && "$ts" != "null" ]]
 }
 
 # ============================================================================
@@ -633,12 +652,13 @@ invoke_fast_path_script() {
 # Helper: hand-craft a triage response with an arbitrary pattern string so we
 # can inject control characters that make_triage_response's printf would munge.
 write_triage_response_with_pattern() {
-    local route="$1" conf="$2" pattern="$3"
+    local route="$1" conf="$2" pattern="$3" dq="${4:-}"
     local resp_file="$TEST_TMP/triage-resp.json"
     jq -n \
         --arg route "$route" \
         --arg conf "$conf" \
         --arg pattern "$pattern" \
+        --arg dq "$dq" \
         '{is_error:false, result:"triage", structured_output:{
             route:$route,
             criteria:{
@@ -651,7 +671,7 @@ write_triage_response_with_pattern() {
             },
             established_pattern_grep:$pattern,
             confidence:$conf,
-            disqualifying_criterion:null,
+            disqualifying_criterion:(if $dq == "" then null else $dq end),
             summary:"test",
             status:"success"
         }}' > "$resp_file"
@@ -659,15 +679,14 @@ write_triage_response_with_pattern() {
     export MOCK_CLAUDE_EXIT_CODE=0
 }
 
-@test "19 newline-in-pattern is rejected before git grep → demoted to full" {
-    # Fix #1: a pattern containing \n would, if passed to git grep -E, match
-    # files containing EITHER alternation branch. A crafted "real-token\n."
-    # would falsely match arbitrary files. Verify the shell rejects multi-line
-    # patterns up front and never invokes git grep on them.
-    write_triage_response_with_pattern fast-path high $'storageState\n.'
-    # Set grep mock to a high count — if the shell incorrectly ran git grep,
-    # the route would stay fast-path. The bug fix forces full BEFORE grep runs.
-    export MOCK_GIT_GREP_FILE_COUNT=99
+@test "19 newline-in-pattern verdict (skill rejected → full) recorded verbatim" {
+    # Pattern safety (rejecting multi-line patterns before any git grep) is now
+    # owned by the triage-classify skill, which returns the full-route verdict
+    # with disqualifying_criterion=established_pattern. The orchestrator no
+    # longer runs git grep, so it simply records that verdict. Confirm a
+    # control-character pattern in the skill output round-trips without
+    # corrupting the recorded route/dq.
+    write_triage_response_with_pattern full high $'storageState\n.' established_pattern
     cp "$FIXTURE_DIR/issue-2836.md" "$TEST_TMP/issue-body.md"
 
     run run_triage_stage "$TEST_TMP/issue-body.md"
@@ -675,8 +694,6 @@ write_triage_response_with_pattern() {
     [ "$status" -eq 0 ]
     assert_json_field "$LOG_BASE/triage.json" '.route' 'full'
     assert_json_field "$LOG_BASE/triage.json" '.disqualifying_criterion' 'established_pattern'
-    # pattern_grep_count should still be 0 because we short-circuited.
-    assert_json_field "$LOG_BASE/triage.json" '.pattern_grep_count' '0'
 }
 
 @test "20 implement returning status:error → bail implement_returned_error" {

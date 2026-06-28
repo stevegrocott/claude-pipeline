@@ -10,6 +10,7 @@ load 'helpers/test-helper.bash'
 setup() {
     setup_test_env
     install_mocks
+    install_decide_scripts
 
     export ISSUE_NUMBER=123
     export BASE_BRANCH=test
@@ -51,8 +52,8 @@ teardown() {
 # TIMEOUT → MODEL ESCALATION (AC1)
 # =============================================================================
 
-@test "double timeout escalates haiku to sonnet instead of failing" {
-    source "$TEST_TMP/model-config.sh"
+@test "double timeout escalates sonnet to opus instead of failing" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
 
@@ -72,7 +73,7 @@ teardown() {
     export -f timeout
     export counter_file
 
-    # test-iter-1 resolves to haiku
+    # test-iter-1 resolves to sonnet (standard tier)
     local result
     result=$(run_stage "test-iter-1" "prompt" "test-schema.json" "" "" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
@@ -82,30 +83,31 @@ teardown() {
     [ "$status_val" = "success" ] || \
         fail "Expected success after escalation, got: $status_val"
 
-    # Third call must use escalated model (sonnet)
+    # Third call must use escalated model (opus, the sonnet→opus step)
     local third_call_args
     third_call_args=$(cat "$TEST_TMP/call-3-args.txt" 2>/dev/null)
-    [[ "$third_call_args" == *"--model sonnet"* ]] || \
-        fail "Expected --model sonnet in escalated retry. Args: $third_call_args"
+    [[ "$third_call_args" == *"--model opus"* ]] || \
+        fail "Expected --model opus in escalated retry. Args: $third_call_args"
 }
 
 @test "double timeout at opus ceiling still fails (cannot escalate)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         return 124
     }
     export -f timeout
 
-    # implement resolves to opus (ceiling)
-    run run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+    # implement-task-1 with complexity L resolves to opus (ceiling) — at the
+    # opus ceiling decide-action.sh returns bail, so run_stage fails (exit 1).
+    run run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
     [ "$status" -eq 1 ]
     [[ "$output" == *"timeout"* ]] || \
         fail "Expected timeout error. Got: $output"
 }
 
 @test "double timeout records escalation event in status.json" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
 
@@ -133,7 +135,7 @@ teardown() {
 }
 
 @test "double timeout logs escalation message" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
 
@@ -153,7 +155,7 @@ teardown() {
 
     run_stage "test-iter-1" "prompt" "test-schema.json" "" "" >/dev/null 2>/dev/null
 
-    grep -q "timed out twice.*escalating" "$LOG_FILE" || \
+    grep -qE "escalating sonnet . opus" "$LOG_FILE" || \
         fail "Expected escalation log message. Log: $(cat "$LOG_FILE")"
 }
 
@@ -162,7 +164,7 @@ teardown() {
 # =============================================================================
 
 @test "empty output escalates to next model instead of failing" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
 
@@ -184,7 +186,7 @@ teardown() {
     export -f timeout
     export counter_file
 
-    # test-iter-1 resolves to haiku
+    # test-iter-1 resolves to sonnet (standard tier)
     local result
     result=$(run_stage "test-iter-1" "prompt" "test-schema.json" "" "" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
@@ -194,15 +196,15 @@ teardown() {
     [ "$status_val" = "success" ] || \
         fail "Expected success after escalation, got: $status_val"
 
-    # Second call must use escalated model (sonnet)
+    # Second call must use escalated model (opus, the sonnet→opus step)
     local second_call_args
     second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
-    [[ "$second_call_args" == *"--model sonnet"* ]] || \
-        fail "Expected --model sonnet for empty output escalation. Args: $second_call_args"
+    [[ "$second_call_args" == *"--model opus"* ]] || \
+        fail "Expected --model opus for empty output escalation. Args: $second_call_args"
 }
 
-@test "empty output records escalation with reason 'empty_output'" {
-    source "$TEST_TMP/model-config.sh"
+@test "empty output records escalation with reason 'no_structured_output'" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
 
@@ -223,14 +225,17 @@ teardown() {
 
     run_stage "test-iter-1" "prompt" "test-schema.json" "" "" >/dev/null 2>/dev/null
 
+    # The empty-output (is_error, no structured_output) path classifies as
+    # error_kind=no_structured_output; decide-action.sh's default escalate
+    # branch records the reason "no_structured_output: escalating from ...".
     local reason
     reason=$(jq -r '.escalations[0].reason // empty' "$STATUS_FILE")
-    [ "$reason" = "empty_output" ] || \
-        fail "Expected escalation reason 'empty_output', got: $reason"
+    [[ "$reason" == "no_structured_output"* ]] || \
+        fail "Expected escalation reason starting 'no_structured_output', got: $reason"
 }
 
 @test "empty output escalation uses .result fallback when no structured_output" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
 
@@ -265,7 +270,7 @@ teardown() {
 # =============================================================================
 
 @test "PR stage tier is standard (not light)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local tier
     tier=$(_stage_to_tier "pr")
     [ "$tier" = "standard" ] || \
@@ -273,7 +278,7 @@ teardown() {
 }
 
 @test "PR stage resolves to sonnet" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local model
     model=$(resolve_model "pr" "")
     [ "$model" = "sonnet" ] || \

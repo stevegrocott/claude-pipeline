@@ -212,11 +212,19 @@ exit 1
 EOF
     chmod +x "$TEST_TMP/bin/gh"
 
-    # Should not crash the script
+    # comment_issue now propagates the underlying exit code (PR #427, to
+    # support timeout detection). It is still "graceful" in practice: the
+    # orchestrator runs without `set -e` and no caller checks the return
+    # value, so a non-zero return is non-fatal — execution continues and the
+    # failure is logged. Assert that contract rather than the old status==0.
     run comment_issue "Test Title" "Test body"
 
-    # Should not fail (function handles error)
-    [ "$status" -eq 0 ]
+    # Propagates the failure rather than masking it as success
+    [ "$status" -ne 0 ]
+
+    # The failure is logged so it is visible in the run log
+    grep -q "Failed to comment on issue" "$LOG_FILE" \
+        || fail "Expected failure to be logged"
 }
 
 @test "comment_pr handles gh failure gracefully" {

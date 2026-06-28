@@ -629,8 +629,9 @@ EOF
     result=$(run_stage "deploy-verify" "verify prompt" "implement-issue-deploy-verify.json" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
 
+    # Structured fields nest under .output.*; only .status is lifted to top.
     local health_val
-    health_val=$(printf '%s' "$result" | jq -r '.health_status')
+    health_val=$(printf '%s' "$result" | jq -r '.output.health_status')
     [ "$health_val" = "healthy" ] || \
         fail "Expected health_status=healthy, got: $health_val (full output: $result)"
 }
@@ -646,8 +647,9 @@ EOF
     result=$(run_stage "deploy-verify" "verify prompt" "implement-issue-deploy-verify.json" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
 
+    # Structured fields nest under .output.*; only .status is lifted to top.
     local target_val
-    target_val=$(printf '%s' "$result" | jq -r '.deployment_target')
+    target_val=$(printf '%s' "$result" | jq -r '.output.deployment_target')
     [ "$target_val" = "staging" ] || \
         fail "Expected deployment_target=staging, got: $target_val (full output: $result)"
 }
@@ -663,8 +665,10 @@ EOF
     result=$(run_stage "deploy-verify" "verify prompt" "implement-issue-deploy-verify.json" | grep '^{')
     [ -n "$result" ] || fail "run_stage returned no JSON output"
 
+    # Top-level .status is the STAGE status; the deploy-verify status
+    # ("partial") nests under .output.status.
     local status_val
-    status_val=$(printf '%s' "$result" | jq -r '.status')
+    status_val=$(printf '%s' "$result" | jq -r '.output.status')
     [ "$status_val" = "partial" ] || \
         fail "Expected status=partial, got: $status_val (full output: $result)"
 }
@@ -850,7 +854,7 @@ packages/api-client/src/client.ts"
     [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
 }
 
-@test "_select_deploy_cmd: empty MIGRATION_PATH_PATTERNS — no downgrade (require explicit opt-in)" {
+@test "_select_deploy_cmd: empty MIGRATION_PATH_PATTERNS — no migration downgrade (tier 3 local deploy)" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     export MIGRATION_PATH_PATTERNS=""
@@ -859,10 +863,13 @@ packages/api-client/src/client.ts"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
+    # Empty MIGRATION_PATH_PATTERNS means has_migration stays false, so the
+    # backend-logic change does NOT trigger the tier-2 "local && full" combo.
+    # With DEPLOY_LOCAL_CMD set it lands on tier 3 (local deploy only).
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh" ]
 }
 
-@test "_select_deploy_cmd: unset MIGRATION_PATH_PATTERNS — no downgrade (require explicit opt-in)" {
+@test "_select_deploy_cmd: unset MIGRATION_PATH_PATTERNS — no migration downgrade (tier 3 local deploy)" {
     export DEPLOY_VERIFY_CMD="./scripts/deploy-nas.sh"
     export DEPLOY_LOCAL_CMD="./scripts/deploy-local-backend.sh"
     unset MIGRATION_PATH_PATTERNS
@@ -871,7 +878,10 @@ packages/api-client/src/client.ts"
 
     run _select_deploy_cmd "$changed"
     [ "$status" -eq 0 ]
-    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-nas.sh" ]
+    # Unset MIGRATION_PATH_PATTERNS means has_migration stays false, so the
+    # backend-logic change does NOT trigger the tier-2 "local && full" combo.
+    # With DEPLOY_LOCAL_CMD set it lands on tier 3 (local deploy only).
+    [ "${lines[${#lines[@]}-1]}" = "./scripts/deploy-local-backend.sh" ]
 }
 
 # =============================================================================

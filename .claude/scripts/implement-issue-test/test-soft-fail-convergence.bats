@@ -82,7 +82,10 @@ teardown() {
 	[ "$MAX_QUALITY_ITERATIONS" -eq 5 ]
 	[ "$MAX_TEST_ITERATIONS" -eq 7 ]
 	[ "$MAX_PR_REVIEW_ITERATIONS" -eq 2 ]
-	[ "$MAX_ORCHESTRATOR_WALL_TIME" -eq 3600 ]
+	# platform.sh sets MAX_ORCHESTRATOR_WALL_TIME=10800 (3h) before the
+	# orchestrator's own ${VAR:-11040} default runs, so the orchestrator
+	# default is a no-op and the effective runtime value is platform's 10800.
+	[ "$MAX_ORCHESTRATOR_WALL_TIME" -eq 10800 ]
 }
 
 @test "iteration limits are not declared readonly in orchestrator" {
@@ -103,7 +106,7 @@ teardown() {
 	[[ "$script_content" == *'MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"'* ]]
 	[[ "$script_content" == *'MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"'* ]]
 	[[ "$script_content" == *'MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"'* ]]
-	[[ "$script_content" == *'MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-3600}"'* ]]
+	[[ "$script_content" == *'MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-11040}"'* ]]
 }
 
 # =============================================================================

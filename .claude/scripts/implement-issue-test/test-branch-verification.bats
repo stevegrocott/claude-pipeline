@@ -140,16 +140,20 @@ _count_invocations() {
     [ "$count" -ge 4 ]
 }
 
-@test "orchestrator calls verify_on_feature_branch within 5 lines before fix-review stage" {
+@test "orchestrator calls verify_on_feature_branch within 10 lines before fix-review stage" {
     local src="$ORCHESTRATOR_SCRIPT"
 
+    # The fix-review stage name is now built into a variable
+    # (fix_stage_name="fix-review-...") and run via run_stage "$fix_stage_name",
+    # so the literal `run_stage "fix-review` no longer exists. Anchor on the
+    # variable assignment instead; the verify call precedes it by ~9 lines.
     local fix_line
-    fix_line=$(grep -n 'run_stage "fix-review' "$src" | head -1 | cut -d: -f1)
+    fix_line=$(grep -n 'fix_stage_name="fix-review' "$src" | head -1 | cut -d: -f1)
     [ -n "$fix_line" ]
 
-    # Look for an invocation within 5 lines before the fix stage
+    # Look for an invocation within 10 lines before the fix stage
     local found=false
-    local min_line=$(( fix_line - 5 ))
+    local min_line=$(( fix_line - 10 ))
     while IFS=: read -r line_num _; do
         if [ "$line_num" -ge "$min_line" ] && [ "$line_num" -lt "$fix_line" ]; then
             found=true

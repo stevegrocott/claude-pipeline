@@ -307,8 +307,10 @@ EOF
 
 	[ -n "$result" ] || fail "run_stage returned no JSON output"
 
+	# run_stage now nests structured fields under .output (only .status is
+	# lifted to the top level) — see _emit_stage_result envelope.
 	local path_val
-	path_val=$(printf '%s' "$result" | jq -r '.path')
+	path_val=$(printf '%s' "$result" | jq -r '.output.path')
 	[ "$path_val" = 'C:\Users\test\file.ts' ] || fail "Path mangled: $path_val"
 }
 
@@ -542,9 +544,10 @@ EOF
 
 	[ -n "$result" ] || fail "run_stage returned no JSON"
 
-	# Verify the extracted values
+	# Verify the extracted values. run_stage nests structured fields under
+	# .output (only .status is lifted to the top level).
 	local flag
-	flag=$(printf '%s' "$result" | jq -r '.flag')
+	flag=$(printf '%s' "$result" | jq -r '.output.flag')
 	[ "$flag" = "-n" ] || fail "Flag value corrupted: expected '-n', got '$flag'"
 }
 

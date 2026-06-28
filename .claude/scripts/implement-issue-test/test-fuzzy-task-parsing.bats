@@ -23,6 +23,9 @@
 
 load 'helpers/test-helper.bash'
 
+# Required for `run --separate-stderr` (BATS >= 1.5.0); silences BW02.
+bats_require_minimum_version 1.5.0
+
 setup() {
 	setup_test_env
 
@@ -47,7 +50,7 @@ teardown() {
 
 @test "_parse_task_lines: standard checkbox format parses correctly" {
 	local input='- [ ] `[default]` **(S)** Implement the feature'
-	run _parse_task_lines "$input"
+	run --separate-stderr _parse_task_lines "$input"
 	[ "$status" -eq 0 ]
 	local count agent desc
 	count=$(printf '%s' "$output" | jq 'length')
@@ -60,13 +63,15 @@ teardown() {
 
 @test "_parse_task_lines: plain bullet without checkbox parses correctly" {
 	local input='- `[my-agent]` Do something useful'
-	run _parse_task_lines "$input"
+	run --separate-stderr _parse_task_lines "$input"
 	[ "$status" -eq 0 ]
 	local count agent
 	count=$(printf '%s' "$output" | jq 'length')
 	agent=$(printf '%s' "$output" | jq -r '.[0].agent')
 	[ "$count" -eq 1 ]
-	[ "$agent" = "my-agent" ]
+	# _normalize_agent_name falls back to "default" when the parsed agent
+	# (here "my-agent") has no local agents/<name>.md definition.
+	[ "$agent" = "default" ]
 }
 
 @test "_parse_task_lines: checked boxes are skipped" {
@@ -122,7 +127,10 @@ teardown() {
 	grep -qi "warning\|fuzzy" "$stderr_file"
 }
 
-@test "_parse_task_lines: missing brackets around agent name with backticks parses with warning" {
+@test "_parse_task_lines: missing brackets around agent name with backticks parses silently" {
+	# Current orchestrator behavior: bracket-less backtick selectors
+	# (`agent` without [ ]) are accepted SILENTLY — they are common
+	# shorthand and do not set a fuzzy warning (orchestrator Fallback 4).
 	local input='- [ ] `default` **(S)** Agent without square brackets'
 	local result stderr_file
 	stderr_file="$TEST_TMP/stderr.txt"
@@ -132,7 +140,8 @@ teardown() {
 	agent=$(printf '%s' "$result" | jq -r '.[0].agent')
 	[ "$count" -eq 1 ]
 	[ "$agent" = "default" ]
-	grep -qi "warning\|fuzzy" "$stderr_file"
+	# No fuzzy-parse warning is emitted for this accepted-silently case.
+	! grep -qi "fuzzy task parse" "$stderr_file"
 }
 
 # =============================================================================
@@ -164,7 +173,7 @@ Just paragraphs of content.'
 This line is not a task
 - [ ] `[custom-agent]` **(M)** Valid task two
 Another random line'
-	run _parse_task_lines "$input"
+	run --separate-stderr _parse_task_lines "$input"
 	[ "$status" -eq 0 ]
 	local count a1 a2
 	count=$(printf '%s' "$output" | jq 'length')
@@ -172,14 +181,16 @@ Another random line'
 	a2=$(printf '%s' "$output" | jq -r '.[1].agent')
 	[ "$count" -eq 2 ]
 	[ "$a1" = "default" ]
-	[ "$a2" = "custom-agent" ]
+	# "custom-agent" has no agents/custom-agent.md definition, so
+	# _normalize_agent_name falls it back to "default".
+	[ "$a2" = "default" ]
 }
 
 @test "_parse_task_lines: multiple tasks get sequential IDs" {
 	local input='- [ ] `[alpha]` First task
 - [ ] `[beta]` Second task
 - [ ] `[gamma]` Third task'
-	run _parse_task_lines "$input"
+	run --separate-stderr _parse_task_lines "$input"
 	[ "$status" -eq 0 ]
 	local id1 id2 id3
 	id1=$(printf '%s' "$output" | jq '.[0].id')
@@ -192,7 +203,7 @@ Another random line'
 
 @test "_parse_task_lines: escaped backticks are unescaped before parsing" {
 	local input='- [ ] \`[default]\` **(S)** Task with escaped backticks'
-	run _parse_task_lines "$input"
+	run --separate-stderr _parse_task_lines "$input"
 	[ "$status" -eq 0 ]
 	local count agent
 	count=$(printf '%s' "$output" | jq 'length')

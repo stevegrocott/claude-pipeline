@@ -1,13 +1,14 @@
 #!/usr/bin/env bats
 #
 # test-pr-review-config.bats
-# Tests for get_pr_review_config() four-tier diff-size routing.
+# Tests for get_pr_review_config() three-tier diff-size routing.
 #
-# Boundary values under test (from the four-tier specification):
-#   <20  lines  → haiku,  300s,  1 iteration  (tiny)
-#   <50  lines  → haiku,  600s,  1 iteration  (small)
-#   <200 lines  → sonnet, 900s,  2 iterations (medium)
-#   200+ lines  → sonnet, 1800s, 2 iterations (large)
+# Boundary values under test (from the three-tier specification):
+#   <50  lines  → sonnet, 360s,  1 iteration                    (small)
+#   <200 lines  → sonnet, 600s,  MAX_PR_REVIEW_ITERATIONS iters (medium)
+#   200+ lines  → sonnet, 1200s, MAX_PR_REVIEW_ITERATIONS iters (large)
+#
+# MAX_PR_REVIEW_ITERATIONS defaults to 2.
 #
 
 load 'helpers/test-helper.bash'
@@ -56,34 +57,34 @@ teardown() {
 # Boundary values chosen to hit the first value of each tier transition.
 # =============================================================================
 
-@test "get_pr_review_config: tiny diff (<20 lines) returns haiku/300s/1 iter" {
-	# 19 is the highest value still in the <20 tier
-	get_diff_line_count() { printf '%s' "19"; }
+@test "get_pr_review_config: small diff (<50 lines) returns sonnet/360s/1 iter" {
+	# 49 is the highest value still in the <50 tier
+	get_diff_line_count() { printf '%s' "49"; }
 	local result
 	result=$(get_pr_review_config)
-	[[ "$result" == '{"model":"haiku","timeout":300,"max_iterations":1}' ]]
+	[[ "$result" == '{"model":"sonnet","timeout":360,"max_iterations":1}' ]]
 }
 
-@test "get_pr_review_config: small diff (20-49 lines) returns haiku/600s/1 iter" {
-	# 20 is the exact boundary entering the second tier
-	get_diff_line_count() { printf '%s' "20"; }
-	local result
-	result=$(get_pr_review_config)
-	[[ "$result" == '{"model":"haiku","timeout":600,"max_iterations":1}' ]]
-}
-
-@test "get_pr_review_config: medium diff (50-199 lines) returns sonnet/900s/2 iter" {
-	# 50 is the exact boundary entering the third tier
+@test "get_pr_review_config: medium diff (50-199 lines) returns sonnet/600s/2 iter" {
+	# 50 is the exact boundary entering the second tier
 	get_diff_line_count() { printf '%s' "50"; }
 	local result
 	result=$(get_pr_review_config)
-	[[ "$result" == '{"model":"sonnet","timeout":900,"max_iterations":2}' ]]
+	[[ "$result" == '{"model":"sonnet","timeout":600,"max_iterations":2}' ]]
 }
 
-@test "get_pr_review_config: large diff (>=200 lines) returns sonnet/1800s/2 iter" {
-	# 200 is the exact boundary entering the fourth (else) tier
+@test "get_pr_review_config: medium upper bound (199 lines) returns sonnet/600s/2 iter" {
+	# 199 is the highest value still in the <200 tier
+	get_diff_line_count() { printf '%s' "199"; }
+	local result
+	result=$(get_pr_review_config)
+	[[ "$result" == '{"model":"sonnet","timeout":600,"max_iterations":2}' ]]
+}
+
+@test "get_pr_review_config: large diff (>=200 lines) returns sonnet/1200s/2 iter" {
+	# 200 is the exact boundary entering the third (else) tier
 	get_diff_line_count() { printf '%s' "200"; }
 	local result
 	result=$(get_pr_review_config)
-	[[ "$result" == '{"model":"sonnet","timeout":1800,"max_iterations":2}' ]]
+	[[ "$result" == '{"model":"sonnet","timeout":1200,"max_iterations":2}' ]]
 }

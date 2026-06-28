@@ -61,9 +61,9 @@ teardown() {
     run_stage() {
         echo "$1" >> "$stage_log"
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
-            review-*) echo '{"status":"success","result":"approved","summary":"Code looks good"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
+            review-*) echo '{"status":"success","output":{"result":"approved","summary":"Code looks good"}}' ;;
         esac
     }
     export -f run_stage
@@ -90,9 +90,9 @@ teardown() {
 @test "quality loop stage iteration matches counter" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"Simplified"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"Tests passed"}' ;;
-            review-*) echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"Simplified"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"Tests passed"}}' ;;
+            review-*) echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
@@ -122,7 +122,7 @@ teardown() {
         local stage_name="$1"
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 local count
@@ -130,13 +130,13 @@ teardown() {
                 count=$((count + 1))
                 echo "$count" > "$counter_file"
                 if (( count <= 1 )); then
-                    echo '{"status":"error","error":"model_error","summary":"Model error"}'
+                    echo '{"status":"error","error_kind":"model_error","output":{"summary":"Model error"}}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -276,7 +276,7 @@ teardown() {
 
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified code"}'
+                echo '{"status":"success","output":{"summary":"Simplified code"}}'
                 ;;
             review-*)
                 # Read and increment counter
@@ -287,10 +287,10 @@ teardown() {
 
                 if [[ "$count" -le 1 ]]; then
                     # First review requests changes
-                    echo '{"status":"success","result":"changes_requested","comments":"Fix naming conventions","summary":"1 issue found"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","comments":"Fix naming conventions","summary":"1 issue found"}}'
                 else
                     # Second review approves
-                    echo '{"status":"success","result":"approved","summary":"All issues resolved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"All issues resolved"}}'
                 fi
                 ;;
             fix-review-*)
@@ -298,7 +298,7 @@ teardown() {
                 fc=$(cat "$fix_counter")
                 fc=$((fc + 1))
                 echo "$fc" > "$fix_counter"
-                echo '{"status":"success","summary":"Fixed naming conventions"}'
+                echo '{"status":"success","output":{"summary":"Fixed naming conventions"}}'
                 ;;
         esac
     }
@@ -355,7 +355,7 @@ teardown() {
 
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 # Read and increment counter
@@ -365,13 +365,13 @@ teardown() {
                 echo "$count" > "$counter_file"
 
                 if [[ "$count" -lt 2 ]]; then
-                    echo '{"status":"success","result":"changes_requested","comments":"Fix issue","summary":"Changes needed"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","comments":"Fix issue","summary":"Changes needed"}}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -436,15 +436,17 @@ teardown() {
     #       run_quality_loop ...
     # Verify:
     #   1. The if-guard line exists
-    #   2. A run_quality_loop call appears on the immediately following non-blank line (within 5 lines)
+    #   2. A run_quality_loop call appears within the then-body (within 8 lines).
+    #      The then-body now computes get_max_quality_iterations and emits a
+    #      multi-line log before the call, so the window allows for that.
     local guard_line
     guard_line=$(grep -n "if should_run_quality_loop" <<< "$orchestrator_src" | head -1 | cut -d: -f1)
 
     [[ -n "$guard_line" ]]
 
-    # The then-body (within 5 lines after guard) must contain a run_quality_loop call
+    # The then-body (within 8 lines after guard) must contain a run_quality_loop call
     local then_body
-    then_body=$(awk "NR>$guard_line && NR<=$((guard_line+5))" <<< "$orchestrator_src")
+    then_body=$(awk "NR>$guard_line && NR<=$((guard_line+8))" <<< "$orchestrator_src")
     grep -q "run_quality_loop" <<< "$then_body"
 }
 
@@ -524,12 +526,12 @@ HIST_EOF
 
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 # Capture the prompt for assertion
                 printf '%s' "$prompt" > "$prompt_capture"
-                echo '{"status":"success","result":"approved","summary":"Approved"}'
+                echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 ;;
         esac
     }
@@ -551,7 +553,7 @@ HIST_EOF
 
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 local count
@@ -562,13 +564,13 @@ HIST_EOF
                 # Capture prompt on second iteration (when prior context should appear)
                 if (( count >= 2 )); then
                     printf '%s' "$prompt" > "$prompt_capture"
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 else
-                    echo '{"status":"success","result":"changes_requested","comments":"Fix error handling","issues":[{"description":"Missing error handling in parser"}],"summary":"1 issue"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","comments":"Fix error handling","issues":[{"description":"Missing error handling in parser"}],"summary":"1 issue"}}'
                 fi
                 ;;
             fix-review-*)
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -596,10 +598,10 @@ HIST_EOF
     run_stage() {
         case "$1" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
-                echo '{"status":"success","result":"approved","issues":[{"description":"Minor naming issue"}],"summary":"Approved with notes"}'
+                echo '{"status":"success","output":{"result":"approved","issues":[{"description":"Minor naming issue"}],"summary":"Approved with notes"}}'
                 ;;
         esac
     }
@@ -645,7 +647,7 @@ HIST_EOF
     run_stage() {
         case "$1" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 local count
@@ -654,13 +656,13 @@ HIST_EOF
                 echo "$count" > "$counter_file"
 
                 if (( count < 2 )); then
-                    echo '{"status":"success","result":"changes_requested","issues":[{"description":"Issue A"}],"summary":"Fix needed"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","issues":[{"description":"Issue A"}],"summary":"Fix needed"}}'
                 else
-                    echo '{"status":"success","result":"approved","issues":[{"description":"Issue B"}],"summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","issues":[{"description":"Issue B"}],"summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -963,7 +965,7 @@ _setup_git_repo_with_diff() {
 
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 local count
@@ -973,14 +975,14 @@ _setup_git_repo_with_diff() {
 
                 if (( count <= 1 )); then
                     # First review times out
-                    echo '{"status":"error","error":"timeout"}'
+                    echo '{"status":"error","error_kind":"timeout"}'
                 else
                     # Second review approves
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1017,7 +1019,7 @@ _setup_git_repo_with_diff() {
 
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 local count
@@ -1026,14 +1028,14 @@ _setup_git_repo_with_diff() {
                 echo "$count" > "$counter_file"
 
                 if (( count <= 1 )); then
-                    echo '{"status":"error","error":"timeout"}'
+                    echo '{"status":"error","error_kind":"timeout"}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
                 echo "true" > "$fix_called"
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1080,7 +1082,7 @@ HIST_EOF
     run_stage() {
         case "$1" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 local count
@@ -1090,14 +1092,14 @@ HIST_EOF
 
                 # Both iterations return the same 2 repeat issues from the pre-seeded history
                 # At iter 2: loop_iteration > 1 → convergence check fires → 2/2 = 100% repeats > 33
-                echo '{"status":"success","result":"changes_requested","issues":[{"description":"Missing error handling"},{"description":"Unused variable x"}],"summary":"Still issues"}'
+                echo '{"status":"success","output":{"result":"changes_requested","issues":[{"description":"Missing error handling"},{"description":"Unused variable x"}],"summary":"Still issues"}}'
                 ;;
             fix-review-*)
                 local fc
                 fc=$(cat "$fix_count_file")
                 fc=$((fc + 1))
                 echo "$fc" > "$fix_count_file"
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1137,7 +1139,7 @@ HIST_EOF
     run_stage() {
         case "$1" in
             simplify-*)
-                echo '{"status":"success","summary":"Simplified"}'
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
                 ;;
             review-*)
                 local count
@@ -1147,13 +1149,13 @@ HIST_EOF
 
                 if (( count == 1 )); then
                     # 1 new issue + 0 repeats from prior = 0% repeat ratio → should NOT converge
-                    echo '{"status":"success","result":"changes_requested","issues":[{"description":"Completely new issue"}],"summary":"New issue found"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","issues":[{"description":"Completely new issue"}],"summary":"New issue found"}}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1193,7 +1195,7 @@ HIST_EOF
         case "$stage_name" in
             simplify-*)
                 echo "$stage_name" >> "$simplify_log"
-                echo '{"status":"success","summary":"No changes to simplify"}'
+                echo '{"status":"success","output":{"summary":"No changes to simplify"}}'
                 ;;
             review-*)
                 local count
@@ -1203,9 +1205,9 @@ HIST_EOF
 
                 if (( count == 1 )); then
                     # First review: timeout → continue (skip_simplify stays true, fix does NOT run)
-                    echo '{"status":"error","error":"timeout"}'
+                    echo '{"status":"error","error_kind":"timeout"}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
         esac
@@ -1248,10 +1250,10 @@ HIST_EOF
                 num=$(wc -l < "$simplify_log" | tr -d ' ')
                 if (( num == 1 )); then
                     # First call: no changes → triggers skip
-                    echo '{"status":"success","summary":"No changes to simplify"}'
+                    echo '{"status":"success","output":{"summary":"No changes to simplify"}}'
                 else
                     # Third call (after fix reset skip): made changes
-                    echo '{"status":"success","summary":"Simplified 2 files"}'
+                    echo '{"status":"success","output":{"summary":"Simplified 2 files"}}'
                 fi
                 ;;
             review-*)
@@ -1261,13 +1263,13 @@ HIST_EOF
                 echo "$count" > "$review_count_file"
 
                 if (( count <= 2 )); then
-                    echo '{"status":"success","result":"changes_requested","comments":"Fix issue","summary":"Issue found"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","comments":"Fix issue","summary":"Issue found"}}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1275,6 +1277,21 @@ HIST_EOF
 
     comment_issue() { :; }
     export -f comment_issue
+
+    # Stall detection on iter 2 shells out to decide-action.sh via SCRIPT_DIR.
+    # After source_orchestrator_functions, SCRIPT_DIR points at TEST_TMP (the
+    # extracted function file's dir), where decide-action.sh does not exist —
+    # the missing-binary path makes the stall handler abort the loop before it
+    # can reset skip_simplify and re-run simplify. Provide a deterministic
+    # decide-action.sh that returns retry_same so the loop proceeds to iter 3.
+    local fake_script_dir="$TEST_TMP/fake-scripts-reset"
+    mkdir -p "$fake_script_dir"
+    cat > "$fake_script_dir/decide-action.sh" << 'FAKE_EOF'
+#!/usr/bin/env bash
+printf '{"action":"retry_same","reason":"test stub"}\n'
+FAKE_EOF
+    chmod +x "$fake_script_dir/decide-action.sh"
+    SCRIPT_DIR="$fake_script_dir"
 
     run_quality_loop "/tmp/worktree" "test-branch" "test"
 
@@ -1340,7 +1357,7 @@ HIST_EOF
         local prompt="$2"
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"No changes"}'
+                echo '{"status":"success","output":{"summary":"No changes"}}'
                 ;;
             review-*)
                 local count
@@ -1350,15 +1367,15 @@ HIST_EOF
 
                 if (( count == 1 )); then
                     # Third iteration review — requests changes so fix runs
-                    echo '{"status":"success","result":"changes_requested","issues":[{"description":"Current issue iter 3","severity":"minor"}],"comments":"Fix current issue","summary":"1 issue"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","issues":[{"description":"Current issue iter 3","severity":"minor"}],"comments":"Fix current issue","summary":"1 issue"}}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
                 # Capture fix prompt to verify cumulative_findings content
                 printf '%s' "$prompt" > "$fix_prompt_file"
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1398,7 +1415,7 @@ HIST_EOF
         local prompt="$2"
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"No changes"}'
+                echo '{"status":"success","output":{"summary":"No changes"}}'
                 ;;
             review-*)
                 local count
@@ -1407,14 +1424,14 @@ HIST_EOF
                 echo "$count" > "$review_count_file"
 
                 if (( count == 1 )); then
-                    echo '{"status":"success","result":"changes_requested","issues":[{"description":"Use const instead of let","severity":"minor"}],"comments":"Use const instead of let","summary":"1 issue"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","issues":[{"description":"Use const instead of let","severity":"minor"}],"comments":"Use const instead of let","summary":"1 issue"}}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
                 printf '%s' "$prompt" > "$fix_prompt_file"
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1459,7 +1476,7 @@ HIST_EOF
         local prompt="$2"
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"No changes"}'
+                echo '{"status":"success","output":{"summary":"No changes"}}'
                 ;;
             review-*)
                 local count
@@ -1469,14 +1486,14 @@ HIST_EOF
 
                 if (( count == 1 )); then
                     # Approved with mixed severity → major_issue_override kicks in, verdict overridden to changes_requested
-                    echo '{"status":"success","result":"approved","issues":[{"description":"Critical security flaw","severity":"major"},{"description":"Minor style nit","severity":"minor"}],"summary":"Approved with notes"}'
+                    echo '{"status":"success","output":{"result":"approved","issues":[{"description":"Critical security flaw","severity":"major"},{"description":"Minor style nit","severity":"minor"}],"summary":"Approved with notes"}}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"All clear"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"All clear"}}'
                 fi
                 ;;
             fix-review-*)
                 printf '%s' "$prompt" > "$fix_prompt_file"
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1511,7 +1528,7 @@ HIST_EOF
         local prompt="$2"
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"No changes"}'
+                echo '{"status":"success","output":{"summary":"No changes"}}'
                 ;;
             review-*)
                 local count
@@ -1521,14 +1538,14 @@ HIST_EOF
 
                 if (( count == 1 )); then
                     # changes_requested (not approved) → no major_issue_override → use .comments field
-                    echo '{"status":"success","result":"changes_requested","comments":"Fix naming and add tests","issues":[{"description":"Bad naming","severity":"minor"},{"description":"Missing tests","severity":"minor"}],"summary":"2 issues"}'
+                    echo '{"status":"success","output":{"result":"changes_requested","comments":"Fix naming and add tests","issues":[{"description":"Bad naming","severity":"minor"},{"description":"Missing tests","severity":"minor"}],"summary":"2 issues"}}'
                 else
-                    echo '{"status":"success","result":"approved","summary":"Approved"}'
+                    echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}'
                 fi
                 ;;
             fix-review-*)
                 printf '%s' "$prompt" > "$fix_prompt_file"
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }
@@ -1667,15 +1684,15 @@ HIST_EOF
         local stage_name="$1"
         case "$stage_name" in
             simplify-*)
-                echo '{"status":"success","summary":"No changes"}'
+                echo '{"status":"success","output":{"summary":"No changes"}}'
                 ;;
             review-*)
                 # Approved with only minor issues → NO override
-                echo '{"status":"success","result":"approved","issues":[{"description":"Style nit","severity":"minor"}],"summary":"Approved"}'
+                echo '{"status":"success","output":{"result":"approved","issues":[{"description":"Style nit","severity":"minor"}],"summary":"Approved"}}'
                 ;;
             fix-review-*)
                 echo "true" > "$fix_called"
-                echo '{"status":"success","summary":"Fixed"}'
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
                 ;;
         esac
     }

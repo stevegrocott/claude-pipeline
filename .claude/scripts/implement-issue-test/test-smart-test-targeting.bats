@@ -796,9 +796,9 @@ teardown() {
                 count=$((count + 1))
                 echo "$count" > "$call_count_file"
                 if (( count <= 1 )); then
-                    echo '{"result":"failed","failures":[{"test":"failing.test","message":"PR introduced failure"}],"summary":"1 PR failure","validation_result":"skipped"}'
+                    echo '{"status":"success","output":{"result":"failed","failures":[{"test":"failing.test","message":"PR introduced failure"}],"summary":"1 PR failure","validation_result":"skipped"}}'
                 else
-                    echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
+                    echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}}'
                 fi
                 ;;
             fix-tests-*)
@@ -1014,11 +1014,17 @@ teardown() {
         case "$stage_name" in
             test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}'
+                echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}}'
                 ;;
         esac
     }
     export -f run_stage
+
+    # E2E injection now gates on a successful container rebuild — stub it.
+    rebuild_and_health_check() {
+        echo '{"rebuild":"success","health":"healthy","elapsed_secs":1}'
+    }
+    export -f rebuild_and_health_check
 
     comment_issue() { :; }
     export -f comment_issue
@@ -1119,11 +1125,17 @@ teardown() {
         case "$stage_name" in
             test-iter-*)
                 printf '%s' "$prompt" > "$prompt_file"
-                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}'
+                echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}}'
                 ;;
         esac
     }
     export -f run_stage
+
+    # E2E injection now gates on a successful container rebuild — stub it.
+    rebuild_and_health_check() {
+        echo '{"rebuild":"success","health":"healthy","elapsed_secs":1}'
+    }
+    export -f rebuild_and_health_check
 
     comment_issue() { :; }
     export -f comment_issue
@@ -1498,7 +1510,7 @@ teardown() {
         case "$stage_name" in
             test-iter-*)
                 # Return failed with a PR-introduced failure to trigger fix-tests path
-                echo '{"result":"failed","summary":"1 test failed","failures":[{"test":"app.test.ts > x","error":"Expected 2"}],"validation_result":"skipped","validation_summary":""}'
+                echo '{"status":"success","output":{"result":"failed","summary":"1 test failed","failures":[{"test":"app.test.ts > x","error":"Expected 2"}],"validation_result":"skipped","validation_summary":""}}'
                 ;;
             fix-tests-iter-*)
                 # Capture the complexity arg passed to run_stage
@@ -1542,7 +1554,7 @@ teardown() {
         case "$stage_name" in
             test-iter-*)
                 # Tests passed but validation failed — triggers fix-test-quality path
-                echo '{"result":"passed","summary":"Tests passed","validation_result":"failed","validation_summary":"Missing assertions","validation_issues":"Add assertion coverage"}'
+                echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"failed","validation_summary":"Missing assertions","validation_issues":"Add assertion coverage"}}'
                 ;;
             fix-test-quality-iter-*)
                 # Capture the complexity arg passed to run_stage

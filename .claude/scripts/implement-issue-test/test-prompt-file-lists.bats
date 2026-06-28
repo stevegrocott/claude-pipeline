@@ -136,8 +136,8 @@ teardown() {
     run_stage() {
         case "$1" in
             simplify-*) printf '%s' "$2" > "$captured"
-                        echo '{"status":"success","summary":"No changes"}' ;;
-            review-*)   echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+                        echo '{"status":"success","output":{"summary":"No changes"}}' ;;
+            review-*)   echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
@@ -158,8 +158,8 @@ teardown() {
     run_stage() {
         case "$1" in
             simplify-*) printf '%s' "$2" > "$captured"
-                        echo '{"status":"success","summary":"No changes"}' ;;
-            review-*)   echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+                        echo '{"status":"success","output":{"summary":"No changes"}}' ;;
+            review-*)   echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
@@ -182,8 +182,8 @@ teardown() {
     run_stage() {
         case "$1" in
             simplify-*) printf '%s' "$2" > "$captured"
-                        echo '{"status":"success","summary":"No changes"}' ;;
-            review-*)   echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+                        echo '{"status":"success","output":{"summary":"No changes"}}' ;;
+            review-*)   echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
@@ -204,8 +204,8 @@ teardown() {
     run_stage() {
         case "$1" in
             simplify-*) printf '%s' "$2" > "$captured"
-                        echo '{"status":"success","summary":"No changes"}' ;;
-            review-*)   echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+                        echo '{"status":"success","output":{"summary":"No changes"}}' ;;
+            review-*)   echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
@@ -215,8 +215,19 @@ teardown() {
     run_quality_loop "$TEST_TMP/repo" "feature-123" "task-1"
 
     [ -f "$captured" ] || fail "Simplify stage was not called"
-    ! grep -qE 'git (diff|log|show)' "$captured" || \
-        fail "Simplify prompt contains embedded git commands"
+    # Intent: the changed-file list must be PRE-COMPUTED and embedded by the
+    # orchestrator, not discovered by asking the agent to diff against the
+    # base ref.  A base-ref diff (git diff <base>...HEAD / git log / git show)
+    # in the prompt would mean pre-computation was abandoned.
+    #
+    # The current prompt deliberately includes a `git diff --name-only`
+    # staging-discipline instruction (so the agent stages only the files it
+    # touched, never `git add -A`).  That bare, base-less form is a commit
+    # hygiene directive, not file-list discovery, so it is allowed.
+    ! grep -qE 'git diff [^ ]*(\.\.\.|HEAD|'"$BASE_BRANCH"')' "$captured" || \
+        fail "Simplify prompt embeds a base-ref git diff (file list not pre-computed)"
+    ! grep -qE 'git (log|show)' "$captured" || \
+        fail "Simplify prompt contains embedded git log/show commands"
 }
 
 # =============================================================================
@@ -229,9 +240,9 @@ teardown() {
 
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes"}}' ;;
             review-*)   printf '%s' "$2" > "$captured"
-                        echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+                        echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
@@ -251,9 +262,9 @@ teardown() {
 
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes"}}' ;;
             review-*)   printf '%s' "$2" > "$captured"
-                        echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+                        echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
@@ -275,9 +286,9 @@ teardown() {
 
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes"}}' ;;
             review-*)   printf '%s' "$2" > "$captured"
-                        echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+                        echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
@@ -297,9 +308,9 @@ teardown() {
 
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes"}}' ;;
             review-*)   printf '%s' "$2" > "$captured"
-                        echo '{"status":"success","result":"approved","summary":"Approved"}' ;;
+                        echo '{"status":"success","output":{"result":"approved","summary":"Approved"}}' ;;
         esac
     }
     export -f run_stage
