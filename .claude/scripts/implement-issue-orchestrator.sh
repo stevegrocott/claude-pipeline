@@ -7465,6 +7465,45 @@ $full_scope_failures
         fi
 
         # ---------------------------------------------------------------------
+        # NON-BLOCKING FULL-SUITE BATS CHECK (informational + degraded signal)
+        # The smart-targeted test_loop runs BATS only for `bash`-scoped branches.
+        # A typescript/mixed/config branch that touches a `.sh`/`.bats` file (e.g.
+        # this orchestrator itself) runs Jest only, so a broken pipeline BATS
+        # suite can merge unnoticed — the mirror image of the Jest gap above. Run
+        # the FULL BATS suite via run-tests.sh once here for any NON-`bash` scope
+        # to surface that. Kept NON-BLOCKING because the base branch itself may
+        # legitimately be red; failures are posted as a comment AND recorded in
+        # DEGRADED_STAGES so they show up in the pipeline summary instead of being
+        # silently reported green.
+        # ---------------------------------------------------------------------
+        local bats_runner=".claude/scripts/implement-issue-test/run-tests.sh"
+        if [[ "$branch_scope" != "bash" && -f "$bats_runner" ]]; then
+            log "Running informational full-suite BATS check (non-blocking)..."
+            local bats_full_output bats_full_rc
+            bats_full_output=$(cd "." && bash "$bats_runner" 2>&1)
+            bats_full_rc=$?
+
+            if (( bats_full_rc != 0 )); then
+                local bats_full_failures
+                bats_full_failures=$(printf '%s' "$bats_full_output" | tail -40)
+                DEGRADED_STAGES+=("test:bats_full_suite_red")
+                comment_issue "Full-Suite BATS Check: pipeline tests are RED (non-blocking)" \
+                    "⚠️ The full BATS suite (\`bash $bats_runner\`) failed on this branch. The smart-targeted test loop runs BATS only for \`bash\`-scoped branches, so these failures were not caught there (scope: \`$branch_scope\`). They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
+
+<details>
+<summary>Failure details (last 40 lines)</summary>
+
+\`\`\`
+$bats_full_failures
+\`\`\`
+</details>" "default"
+                log "WARN: Full-suite BATS check found failures (non-blocking, recorded as degraded)"
+            else
+                log "Full-suite BATS check passed — pipeline BATS tests are green on this branch"
+            fi
+        fi
+
+        # ---------------------------------------------------------------------
         # E2E-UNVALIDATED GUARD: the test loop above is unit-only when
         # TEST_E2E_CMD is unset. If this branch changed Playwright e2e infra or
         # specs, NONE of it was executed here — a runtime-only bug (e.g. #481's
