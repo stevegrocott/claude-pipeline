@@ -176,6 +176,42 @@ _write_responses() {
 		summary: "Auth test detected; no_security_concerns fails.",
 		error: null
 	}}' > "$resp_dir/disqualify.json"
+
+	jq -cn '{structured_output: {
+		status: "success",
+		route: "full",
+		confidence: "high",
+		disqualifying_criterion: "established_pattern",
+		established_pattern_grep: null,
+		criteria: {
+			test_only_scope: {
+				passed: true,
+				reason: "All paths are .bats test files under .claude/"
+			},
+			surgical_size: {
+				passed: true,
+				reason: "Small diff within pipeline bats files"
+			},
+			established_pattern: {
+				passed: false,
+				reason: "Pipeline bats changes have no established fast-path pattern"
+			},
+			precise_specification: {
+				passed: true,
+				reason: "Specific file paths provided"
+			},
+			benign_failure_mode: {
+				passed: false,
+				reason: "Pipeline test failures affect all downstream jobs"
+			},
+			no_security_concerns: {
+				passed: true,
+				reason: "No auth logic involved"
+			}
+		},
+		summary: "Pipeline bats files lack established pattern; routing to full.",
+		error: null
+	}}' > "$resp_dir/bats-scope.json"
 }
 
 # Install a mock claude binary in $TEST_TMP/bin. The route returned is
@@ -198,6 +234,7 @@ resp_dir="${MOCK_CLAUDE_RESP_DIR:-.}"
 case "${MOCK_CLAUDE_ROUTE:-full}" in
 	fast-path) cat "$resp_dir/fast-path.json" ;;
 	disqualify) cat "$resp_dir/disqualify.json" ;;
+	bats-scope) cat "$resp_dir/bats-scope.json" ;;
 	*) cat "$resp_dir/full.json" ;;
 esac
 exit 0
@@ -269,4 +306,16 @@ _assert_fixture_pass() {
 
 	export MOCK_CLAUDE_ROUTE=disqualify
 	_assert_fixture_pass "issue-auth-test|full|no_security_concerns"
+}
+
+# ===========================================================================
+# full — .claude/**/*.bats only scope must not fast-path (issue #511)
+# ===========================================================================
+
+@test "full: issue-bats-scope routes to full when tasks touch only .claude/**/*.bats" {
+	[[ -f "$FIXTURE_DIR/issue-bats-scope.md" ]] \
+		|| skip "fixture issue-bats-scope.md not found"
+
+	export MOCK_CLAUDE_ROUTE=bats-scope
+	_assert_fixture_pass "issue-bats-scope|full|established_pattern"
 }
