@@ -181,11 +181,11 @@ _write_responses() {
 		status: "success",
 		route: "full",
 		confidence: "high",
-		disqualifying_criterion: "established_pattern",
+		disqualifying_criterion: "test_only_scope",
 		established_pattern_grep: null,
 		criteria: {
 			test_only_scope: {
-				passed: true,
+				passed: false,
 				reason: "All paths are .bats test files under .claude/"
 			},
 			surgical_size: {
@@ -317,5 +317,5 @@ _assert_fixture_pass() {
 		|| skip "fixture issue-bats-scope.md not found"
 
 	export MOCK_CLAUDE_ROUTE=bats-scope
-	_assert_fixture_pass "issue-bats-scope|full|established_pattern"
+	_assert_fixture_pass "issue-bats-scope|full|test_only_scope"
 }
