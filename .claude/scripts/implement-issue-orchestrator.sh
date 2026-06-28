@@ -2152,8 +2152,14 @@ for m in re.finditer(r'\[\s*\{', t):
             return $?
             ;;
         bail)
-            _CONSECUTIVE_TIMEOUTS=0
-            _TIMED_OUT_STAGE_NAMES=""
+            # Preserve the cascade counter on a definitive (double) timeout —
+            # it was just incremented above and must survive across stages so
+            # consecutive timeouts can be detected.  Any other error breaks the
+            # consecutive-timeout streak, so reset it.
+            if [[ "$_error_kind" != "double_timeout" ]]; then
+                _CONSECUTIVE_TIMEOUTS=0
+                _TIMED_OUT_STAGE_NAMES=""
+            fi
             _apply_stage_action "$_sr_interim" "bail" "$_da_reason"
             return $?
             ;;
@@ -2226,8 +2232,13 @@ for m in re.finditer(r'\[\s*\{', t):
                 ' 2>/dev/null)
             fi
 
-            _CONSECUTIVE_TIMEOUTS=0
-            _TIMED_OUT_STAGE_NAMES=""
+            # Preserve the cascade counter on a definitive (double) timeout so
+            # consecutive timeouts accumulate across stages; reset for any other
+            # error that breaks the consecutive-timeout streak.
+            if [[ "$_error_kind" != "double_timeout" ]]; then
+                _CONSECUTIVE_TIMEOUTS=0
+                _TIMED_OUT_STAGE_NAMES=""
+            fi
             local _sr_esc
             if [[ -n "$_esc_structured" ]]; then
                 _sr_esc=$(_emit_stage_result \

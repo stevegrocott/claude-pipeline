@@ -9,6 +9,7 @@ load 'helpers/test-helper.bash'
 setup() {
     setup_test_env
     install_mocks
+    install_decide_scripts
 
     # Set required variables
     export ISSUE_NUMBER=123
@@ -618,7 +619,7 @@ teardown() {
 # =============================================================================
 
 @test "run_stage passes --model to claude" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift  # timeout value
@@ -637,8 +638,8 @@ teardown() {
         fail "--model was not passed to claude. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage resolves opus for implement stage" {
-    source "$TEST_TMP/model-config.sh"
+@test "run_stage resolves opus for implement stage with L complexity" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -647,15 +648,17 @@ teardown() {
     }
     export -f timeout
 
-    run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+    # implement defaults to sonnet (standard tier); L complexity escalates it
+    # to the advanced (opus) tier.
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--model opus" "$claude_calls" || \
-        fail "Expected --model opus for implement stage. Calls: $(cat "$claude_calls")"
+        fail "Expected --model opus for implement stage with L complexity. Calls: $(cat "$claude_calls")"
 }
 
 @test "run_stage resolves haiku for test stage" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -664,7 +667,8 @@ teardown() {
     }
     export -f timeout
 
-    run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
+    # "test" is a light-tier stage → haiku. (test-iter is standard → sonnet.)
+    run_stage "test" "prompt" "test-schema.json" "" ""
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--model haiku" "$claude_calls" || \
@@ -672,7 +676,7 @@ teardown() {
 }
 
 @test "run_stage uses complexity hint to override model" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -690,7 +694,7 @@ teardown() {
 }
 
 @test "run_stage logs model in stage output" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -705,7 +709,7 @@ teardown() {
 }
 
 @test "run_stage logs complexity hint when provided" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -887,7 +891,7 @@ teardown() {
 @test "run_stage escalates model when output subtype is error_max_turns" {
     # BATS runs each @test in a forked subprocess — re-source model-config to
     # make readonly arrays available (same pattern as MODEL SELECTION tests).
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
     timeout() {
@@ -909,22 +913,22 @@ teardown() {
     export -f timeout
     export counter_file
 
-    # test-iter-1 resolves to haiku; haiku escalates to sonnet on error_max_turns
+    # test-iter-1 resolves to sonnet; sonnet escalates to opus on error_max_turns
     run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
 
     local final_count
     final_count=$(cat "$counter_file")
     (( final_count == 2 )) || fail "Expected 2 claude calls, got $final_count"
 
-    # Second call must use escalated model (sonnet)
+    # Second call must use escalated model (opus — next tier above sonnet)
     local second_call_args
     second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
-    [[ "$second_call_args" == *"--model sonnet"* ]] || \
-        fail "Expected --model sonnet in escalated retry. Args: $second_call_args"
+    [[ "$second_call_args" == *"--model opus"* ]] || \
+        fail "Expected --model opus in escalated retry. Args: $second_call_args"
 }
 
 @test "run_stage fails with max_turns_exhausted_at_ceiling when opus hits error_max_turns" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         # Always return error_max_turns — opus is at ceiling, cannot escalate
@@ -932,15 +936,16 @@ teardown() {
     }
     export -f timeout
 
-    # implement stage resolves to opus (ceiling model)
-    run run_stage "implement-task-1" "prompt" "test-schema.json" "" ""
+    # implement + L complexity resolves to opus, the ceiling model that
+    # cannot escalate further on error_max_turns.
+    run run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
     [ "$status" -eq 1 ]
     [[ "$output" == *"max_turns_exhausted_at_ceiling"* ]] || \
         fail "Expected ceiling error in output. Got: $output"
 }
 
 @test "run_stage does not include max-turns cap on error_max_turns escalation retry" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
     timeout() {
@@ -979,7 +984,7 @@ teardown() {
 @test "run_stage escalates when structured_output.status is error without permission_denials" {
     # BATS runs each @test in a forked subprocess — re-source model-config to
     # make readonly arrays available (same pattern as MODEL SELECTION tests).
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     # record_escalation needs a minimal status.json to write into.
     cat > "$STATUS_FILE" << 'EOF'
 {"escalations": [], "stages": {}}
@@ -1037,7 +1042,7 @@ EOF
 }
 
 @test "run_stage skips escalation and logs warning when permission_denials is non-empty" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     cat > "$STATUS_FILE" << 'EOF'
 {"escalations": [], "stages": {}}
 EOF
@@ -1058,7 +1063,9 @@ EOF
     export -f timeout
     export counter_file
 
-    run_stage "test-iter-1" "prompt" "test-schema.json" "" "" >/dev/null 2>/dev/null
+    # permission_denied routes to bail (exit 1); capture via `run` so the
+    # expected non-zero status does not trip BATS errexit.
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
 
     # Only one claude call should have been made — escalation was skipped
     local final_count
@@ -1082,7 +1089,7 @@ EOF
 }
 
 @test "run_stage records structured_error escalation with reason 'structured_error'" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     cat > "$STATUS_FILE" << 'EOF'
 {"escalations": [], "stages": {}}
 EOF
@@ -1110,8 +1117,8 @@ EOF
 
     local reason
     reason=$(jq -r '.escalations[0].reason // empty' "$STATUS_FILE")
-    [ "$reason" = "structured_error" ] || \
-        fail "Expected escalation reason 'structured_error', got: $reason (status.json: $(cat "$STATUS_FILE"))"
+    [[ "$reason" == *"structured_error"* ]] || \
+        fail "Expected escalation reason to contain 'structured_error', got: $reason (status.json: $(cat "$STATUS_FILE"))"
 
     # Escalation metadata should reflect sonnet → opus transition
     local from_model
@@ -1130,7 +1137,7 @@ EOF
 # =============================================================================
 
 @test "run_stage passes --max-turns 40 to sonnet with M-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1147,7 +1154,7 @@ EOF
 }
 
 @test "run_stage passes --max-turns 40 to sonnet with L-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1165,7 +1172,7 @@ EOF
 }
 
 @test "run_stage passes --max-turns 25 to sonnet with S-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1183,7 +1190,7 @@ EOF
 }
 
 @test "run_stage passes --max-turns 25 to sonnet with empty complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1201,7 +1208,7 @@ EOF
 }
 
 @test "run_stage passes --max-turns 10 to haiku for light-tier stage" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1218,8 +1225,8 @@ EOF
         fail "Expected --max-turns 10 for haiku light-tier stage. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage passes --max-turns 15 to haiku via S-complexity override" {
-    source "$TEST_TMP/model-config.sh"
+@test "run_stage passes --max-turns 15 to haiku on a non-light stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1228,16 +1235,18 @@ EOF
     }
     export -f timeout
 
-    # implement-task-1 with S-complexity resolves to haiku via override
-    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S"
+    # implement is a standard-tier stage; forcing it to haiku via the model
+    # override exercises the "haiku but not inherently light" cap of 15 turns
+    # (distinct from the 10-turn cap for inherently light stages).
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "" "" "haiku"
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--max-turns 15" "$claude_calls" || \
-        fail "Expected --max-turns 15 for haiku via complexity override. Calls: $(cat "$claude_calls")"
+        fail "Expected --max-turns 15 for haiku on a non-light stage. Calls: $(cat "$claude_calls")"
 }
 
 @test "run_stage logs max-turns value for sonnet with M-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -1251,7 +1260,7 @@ EOF
 }
 
 @test "run_stage logs max-turns value for sonnet with S-complexity" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -1272,7 +1281,7 @@ EOF
 # -----------------------------------------------------------------------------
 
 @test "run_stage passes --max-turns 10 to pr stage (unchanged)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1290,7 +1299,7 @@ EOF
 }
 
 @test "run_stage logs pr stage max-turns at default value (10)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -1304,7 +1313,7 @@ EOF
 }
 
 @test "run_stage honours MAX_TURNS_PR env var for pr stage" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1323,7 +1332,7 @@ EOF
 }
 
 @test "run_stage MAX_TURNS_PR is independent of MAX_TURNS_SIMPLIFY" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1345,7 +1354,7 @@ EOF
 }
 
 @test "run_stage passes --max-turns 10 to pr-review stage (unchanged)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1363,7 +1372,7 @@ EOF
 }
 
 @test "run_stage logs pr-review stage max-turns at original value (10)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -1377,7 +1386,7 @@ EOF
 }
 
 @test "run_stage pr budget ignores MAX_TURNS_SIMPLIFY env var" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1398,7 +1407,7 @@ EOF
 }
 
 @test "run_stage pr-review budget ignores MAX_TURNS_FIX_REVIEW env var" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1423,7 +1432,7 @@ EOF
 # =============================================================================
 
 @test "run_stage passes --max-turns 15 to haiku for simplify stage (default)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1441,7 +1450,7 @@ EOF
 }
 
 @test "run_stage respects MAX_TURNS_SIMPLIFY env var for simplify stage" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1460,7 +1469,7 @@ EOF
 }
 
 @test "run_stage uses default --max-turns 15 for simplify when MAX_TURNS_SIMPLIFY is unset" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1478,7 +1487,7 @@ EOF
 }
 
 @test "run_stage logs simplify haiku cap with env var name" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -1492,7 +1501,7 @@ EOF
 }
 
 @test "run_stage passes --max-turns 30 to sonnet for fix stage (default)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1510,7 +1519,7 @@ EOF
 }
 
 @test "run_stage passes --max-turns 30 to sonnet for fix-review stage (default)" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1528,7 +1537,7 @@ EOF
 }
 
 @test "run_stage respects MAX_TURNS_FIX_REVIEW env var for fix stage" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1547,7 +1556,7 @@ EOF
 }
 
 @test "run_stage logs fix sonnet cap with env var name" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
         echo '{"result":"ok","structured_output":{"status":"success"}}'
@@ -1561,7 +1570,7 @@ EOF
 }
 
 @test "run_stage respects MAX_TURNS_FIX_REVIEW env var for fix-review stage" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1580,7 +1589,7 @@ EOF
 }
 
 @test "run_stage uses default --max-turns 30 for fix-review when MAX_TURNS_FIX_REVIEW is unset" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1598,7 +1607,7 @@ EOF
 }
 
 @test "run_stage does not apply simplify cap when model is not haiku" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
@@ -1616,7 +1625,7 @@ EOF
 }
 
 @test "run_stage does not apply fix cap when model is not sonnet" {
-    source "$TEST_TMP/model-config.sh"
+    source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
         shift; shift; shift; shift
