@@ -549,6 +549,12 @@ teardown() {
 # AGENT SELECTION
 # =============================================================================
 
+@test "orchestrator declares _AGENT_SENTINEL_DEFAULT as readonly with value 'default'" {
+	grep -qE '^[[:space:]]*readonly[[:space:]]+_AGENT_SENTINEL_DEFAULT="default"[[:space:]]*$' \
+		"$ORCHESTRATOR_SCRIPT" || \
+		fail "ORCHESTRATOR_SCRIPT must declare: readonly _AGENT_SENTINEL_DEFAULT=\"default\""
+}
+
 @test "run_stage passes agent when specified" {
     # Override timeout to intercept and record claude args
     local claude_calls="$TEST_TMP/claude-calls.txt"
