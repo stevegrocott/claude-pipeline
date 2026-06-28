@@ -248,3 +248,84 @@ Another random line'
 
 	[[ "$desc" == "**(M)** Add validation layer" ]]
 }
+
+# =============================================================================
+# SECTION-EXTRACTION AWK (inline awk in main() at L6733)
+# Tests the widened regex: ##+[[:space:]]+Implementation Tasks
+# and the section-end pattern: ##+[[:space:]]
+# These cover the codepath distinct from _issue_body_parse_tasks().
+# =============================================================================
+
+# Helper: runs the section-extraction awk from L6733 against $1 (body text).
+# Keeps the pattern in one place so tests stay in sync with the production code.
+_run_section_awk() {
+	printf '%s' "$1" | awk \
+		'/^##+[[:space:]]+Implementation Tasks/{found=1; next} found && /^##+[[:space:]]/{exit} found{print}'
+}
+
+@test "section-extraction awk: extracts lines under ## Implementation Tasks" {
+	local body
+	body=$(printf '%s\n' \
+		"## Implementation Tasks" \
+		"" \
+		"- [ ] \`[default]\` **(S)** Standard task")
+	local section
+	section=$(_run_section_awk "$body")
+	[[ -n "$section" ]]
+	[[ "$section" == *"Standard task"* ]]
+}
+
+@test "section-extraction awk: recognizes ### Implementation Tasks heading" {
+	local body
+	body=$(printf '%s\n' \
+		"### Implementation Tasks" \
+		"" \
+		"- [ ] \`[default]\` **(S)** Level-three task")
+	local section
+	section=$(_run_section_awk "$body")
+	[[ -n "$section" ]]
+	[[ "$section" == *"Level-three task"* ]]
+}
+
+@test "section-extraction awk: stops at ## heading after section start" {
+	local body
+	body=$(printf '%s\n' \
+		"## Implementation Tasks" \
+		"" \
+		"- [ ] \`[default]\` **(S)** In-section task" \
+		"" \
+		"## Notes" \
+		"" \
+		"- [ ] \`[other]\` **(S)** Out-of-section task")
+	local section
+	section=$(_run_section_awk "$body")
+	[[ "$section" == *"In-section task"* ]]
+	[[ "$section" != *"Out-of-section task"* ]]
+}
+
+@test "section-extraction awk: stops at ### heading after section start" {
+	local body
+	body=$(printf '%s\n' \
+		"## Implementation Tasks" \
+		"" \
+		"- [ ] \`[default]\` **(S)** In-section task" \
+		"" \
+		"### Acceptance Criteria" \
+		"" \
+		"- [ ] \`[other]\` **(S)** Criteria task — must not appear")
+	local section
+	section=$(_run_section_awk "$body")
+	[[ "$section" == *"In-section task"* ]]
+	[[ "$section" != *"Criteria task"* ]]
+}
+
+@test "section-extraction awk: returns empty when no Implementation Tasks heading present" {
+	local body
+	body=$(printf '%s\n' \
+		"## Acceptance Criteria" \
+		"" \
+		"- [ ] \`[default]\` **(S)** Not a task")
+	local section
+	section=$(_run_section_awk "$body")
+	[[ -z "$section" ]]
+}

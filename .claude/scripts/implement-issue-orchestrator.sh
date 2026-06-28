@@ -6730,7 +6730,7 @@ Log directory: \`$LOG_BASE\`"
         # Format: - [ ] `[agent-name]` Task description
         log "Parsing implementation tasks from issue body..."
         local tasks_section
-        tasks_section=$(printf '%s' "$issue_body" | awk '/^## Implementation Tasks/{found=1; next} found && /^## /{exit} found{print}')
+        tasks_section=$(printf '%s' "$issue_body" | awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} found && /^##+[[:space:]]/{exit} found{print}')
 
         if [[ -z "$tasks_section" ]]; then
             log_error "No '## Implementation Tasks' section found in issue #$ISSUE_NUMBER"
