@@ -9,7 +9,7 @@
 #       unique — derived from the .claude/agents/*.md definitions.
 #
 #   assert_issue_valid <body>
-#       Validates an issue body string against six structural criteria:
+#       Validates an issue body string against five structural criteria:
 #         1. at least one parseable (open) task line
 #         2. every task agent resolves to a known agent (or "default")
 #         3. every file path referenced in a task resolves (file exists or
@@ -287,7 +287,7 @@ _issue_body_parse_tasks() {
 }
 
 #
-# Validates an issue body against the six structural criteria.
+# Validates an issue body against the five structural criteria.
 #
 # Arguments:
 #   $1 - issue body text
