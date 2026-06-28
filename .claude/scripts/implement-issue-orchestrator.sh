@@ -5627,9 +5627,20 @@ run_test_loop() {
         changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
         changed_files=$(printf '%s\n' "$changed_files_raw" | filter_implementation_files)
 
-        # Build BATS section for mixed scope (informational only, non-blocking)
+        # Build BATS section.
+        # bash scope (.claude/scripts changes): BLOCKING — failures fail the stage.
+        # mixed scope: informational only — failures are reported but non-blocking.
         local bats_section=""
-        if [[ "$change_scope" == "mixed" || "$change_scope" == "bash" ]]; then
+        if [[ "$change_scope" == "bash" ]]; then
+            bats_section="STEP 1c — PIPELINE BATS TESTS (BLOCKING)
+Run the pipeline BATS tests:
+cd $safe_dir && $bash_test_command
+
+BATS failures ARE a test failure — set result to 'failed' if any BATS test fails.
+Include bats_result ('passed', 'failed', or 'skipped') and bats_summary in output.
+
+"
+        elif [[ "$change_scope" == "mixed" ]]; then
             bats_section="STEP 1c — PIPELINE BATS TESTS (informational only, non-blocking)
 Run the pipeline BATS tests:
 cd $safe_dir && $bash_test_command

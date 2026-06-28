@@ -2165,3 +2165,45 @@ _repro_full_suite_bats_check() {
 	[ "${#DEGRADED_STAGES[@]}" -eq 0 ] || \
 		fail "green full-suite BATS run must not record a degraded signal; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
+
+# =============================================================================
+# BLOCKING BATS GATE — bash scope blocks merge on red suite (issue #535)
+#
+# .claude/scripts/ changes route to bash scope via detect_change_scope.
+# run_test_loop's bats_section must be BLOCKING for bash scope so that a
+# failing implement-issue-test suite prevents the PR from merging.
+#
+# Mixed scope keeps the informational-only label so TS-heavy PRs with
+# unrelated bash failures are not incorrectly blocked.
+#
+# These static tests pin the gate contract against the orchestrator source,
+# using the same pattern as the full-suite BATS check tests above.
+# =============================================================================
+
+@test "bash scope bats_section is labelled BLOCKING in orchestrator" {
+	# Static: run_test_loop must produce a blocking bats_section for bash scope.
+	# The orchestrator must contain the BLOCKING label so a red suite fails
+	# the stage rather than being recorded as informational only.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'PIPELINE BATS TESTS (BLOCKING)'* ]] || \
+		fail "Orchestrator must contain BLOCKING label for bash-scope bats_section"
+}
+
+@test "bash scope bats_section instructs agent to fail stage on BATS failure" {
+	# Static: the bash-scope bats_section must tell the agent that BATS
+	# failures ARE a test failure so the stage does not accept a red suite.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'BATS failures ARE a test failure'* ]] || \
+		fail "Orchestrator must instruct agent that BATS failures ARE a test failure for bash scope"
+}
+
+@test "mixed scope bats_section remains informational only in orchestrator" {
+	# Static: mixed scope must keep its informational label — making it
+	# blocking would break TS-heavy PRs that have unrelated bash failures.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'informational only, non-blocking'* ]] || \
+		fail "Orchestrator must retain informational-only label for mixed-scope bats_section"
+}
