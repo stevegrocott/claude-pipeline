@@ -56,9 +56,9 @@ teardown() {
     # Mock run_stage to return structured output with .result
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
-            review-*) echo '{"status":"success","result":"approved","summary":"Code review complete","issues":[]}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
+            review-*) echo '{"status":"success","output":{"result":"approved","summary":"Code review complete","issues":[]}}' ;;
         esac
     }
     export -f run_stage
@@ -78,11 +78,11 @@ teardown() {
 @test "verdict parsing: structured output with changes_requested in .result field" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # Return changes_requested in structured .result field
-                echo '{"status":"success","result":"changes_requested","summary":"Found issues","issues":[{"description":"Fix formatting"}]}'
+                echo '{"status":"success","output":{"result":"changes_requested","summary":"Found issues","issues":[{"description":"Fix formatting"}]}}'
                 ;;
         esac
     }
@@ -107,12 +107,12 @@ teardown() {
 @test "verdict parsing: fallback with 'approved' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # No .result field, must use fallback parsing
                 # Summary contains "approved"
-                echo '{"status":"success","summary":"Code review approved - no issues found","issues":[]}'
+                echo '{"status":"success","output":{"summary":"Code review approved - no issues found","issues":[]}}'
                 ;;
         esac
     }
@@ -132,11 +132,11 @@ teardown() {
 @test "verdict parsing: fallback with 'LGTM' keyword in summary (case-insensitive)" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # No .result field, LGTM in summary
-                echo '{"status":"success","summary":"LGTM - looks good to merge","issues":[]}'
+                echo '{"status":"success","output":{"summary":"LGTM - looks good to merge","issues":[]}}'
                 ;;
         esac
     }
@@ -156,10 +156,10 @@ teardown() {
 @test "verdict parsing: fallback with 'looks good' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"This looks good to me","issues":[]}'
+                echo '{"status":"success","output":{"summary":"This looks good to me","issues":[]}}'
                 ;;
         esac
     }
@@ -178,10 +178,10 @@ teardown() {
 @test "verdict parsing: fallback with 'no issues' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"No issues found in this code","issues":[]}'
+                echo '{"status":"success","output":{"summary":"No issues found in this code","issues":[]}}'
                 ;;
         esac
     }
@@ -200,11 +200,11 @@ teardown() {
 @test "verdict parsing: fallback with 'changes requested' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # No .result field, "changes requested" in summary
-                echo '{"status":"success","summary":"Changes requested - fix the formatting","issues":[{"description":"Fix formatting"}]}'
+                echo '{"status":"success","output":{"summary":"Changes requested - fix the formatting","issues":[{"description":"Fix formatting"}]}}'
                 ;;
         esac
     }
@@ -223,10 +223,10 @@ teardown() {
 @test "verdict parsing: fallback with 'request changes' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"Please request changes before merging","issues":[{"description":"Needs work"}]}'
+                echo '{"status":"success","output":{"summary":"Please request changes before merging","issues":[{"description":"Needs work"}]}}'
                 ;;
         esac
     }
@@ -244,10 +244,10 @@ teardown() {
 @test "verdict parsing: fallback with 'must fix' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"Must fix critical security issue","issues":[{"severity":"critical"}]}'
+                echo '{"status":"success","output":{"summary":"Must fix critical security issue","issues":[{"severity":"critical"}]}}'
                 ;;
         esac
     }
@@ -265,10 +265,10 @@ teardown() {
 @test "verdict parsing: fallback with 'blocking' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"This is a blocking issue","issues":[{"priority":"blocking"}]}'
+                echo '{"status":"success","output":{"summary":"This is a blocking issue","issues":[{"priority":"blocking"}]}}'
                 ;;
         esac
     }
@@ -286,10 +286,10 @@ teardown() {
 @test "verdict parsing: fallback with 'critical' keyword in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"Critical issues found in the code","issues":[{"severity":"critical"}]}'
+                echo '{"status":"success","output":{"summary":"Critical issues found in the code","issues":[{"severity":"critical"}]}}'
                 ;;
         esac
     }
@@ -311,8 +311,8 @@ teardown() {
 @test "verdict parsing: fallback with ambiguous text defaults to changes_requested" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # No .result field, ambiguous summary (no approval or rejection keywords)
                 echo '{"status":"success","summary":"Review completed","issues":[]}'
@@ -336,8 +336,8 @@ teardown() {
 @test "verdict parsing: fallback with neutral text defaults to changes_requested" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # Neutral text with no verdict keywords
                 echo '{"status":"success","summary":"Code review in progress","issues":[]}'
@@ -358,8 +358,8 @@ teardown() {
 @test "verdict parsing: fallback with empty summary defaults to changes_requested" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
                 # Empty summary field (will use default "Review completed")
                 echo '{"status":"success","summary":"","issues":[]}'
@@ -406,10 +406,10 @@ teardown() {
 @test "verdict parsing: fallback with uppercase APPROVED in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"APPROVED: No issues","issues":[]}'
+                echo '{"status":"success","output":{"summary":"APPROVED: No issues","issues":[]}}'
                 ;;
         esac
     }
@@ -429,10 +429,10 @@ teardown() {
 @test "verdict parsing: fallback with mixed case 'Changes Requested' in summary" {
     run_stage() {
         case "$1" in
-            simplify-*) echo '{"status":"success","summary":"No changes needed"}' ;;
-            test-*) echo '{"status":"success","result":"passed","summary":"All tests passed"}' ;;
+            simplify-*) echo '{"status":"success","output":{"summary":"No changes needed"}}' ;;
+            test-*) echo '{"status":"success","output":{"result":"passed","summary":"All tests passed"}}' ;;
             review-*)
-                echo '{"status":"success","summary":"Changes Requested - please fix","issues":[{"description":"Fix it"}]}'
+                echo '{"status":"success","output":{"summary":"Changes Requested - please fix","issues":[{"description":"Fix it"}]}}'
                 ;;
         esac
     }
