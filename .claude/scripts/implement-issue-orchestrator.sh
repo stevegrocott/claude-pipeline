@@ -6918,7 +6918,7 @@ $excerpt
         # (c) Validate ## Implementation Tasks section exists in saved issue body
         local issue_body_file="$LOG_BASE/context/issue-body.md"
         if [[ -f "$issue_body_file" ]]; then
-            if ! grep -q '^## Implementation Tasks' "$issue_body_file"; then
+            if ! grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file"; then
                 log_error "Issue body missing '## Implementation Tasks' section"
                 set_final_state "error"
                 exit 1
