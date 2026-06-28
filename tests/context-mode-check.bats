@@ -19,6 +19,7 @@
 #     (e) --ctx-only skips BATS suite; only ctx checks run
 #     (f) --bats-dir overrides the default test directory
 #     (g) --bats-filter is forwarded to bats
+#     (t) context-mode binary present (no ctx) + BATS passing → exit 0, PASS lines printed
 #
 #   CTX FAILURE CASES
 #     (h) ctx absent + CONTEXT_MODE_ENABLED=1 → exit 1
@@ -69,7 +70,10 @@ setup() {
 	touch "$TEST_TMP/bats-dir/test-json-parsing.bats"
 	touch "$TEST_TMP/bats-dir/test-verdict-parsing.bats"
 
-	# Install default mocks (both pass by default)
+	# Install default mocks (both pass by default).
+	# Only `ctx` is installed by default so the existing ctx-absent cases
+	# (e.g. (h)) see no CLI binary when they call _remove_ctx.  The (t)
+	# case installs its own context-mode mock to exercise the fallback.
 	_install_mock_ctx 0 0
 	_install_mock_bats 0
 }
@@ -143,6 +147,44 @@ _remove_bats() {
 	rm -f "$TEST_TMP/bin/bats"
 }
 
+# _remove_context_mode removes the context-mode mock so the script sees it as absent.
+_remove_context_mode() {
+	rm -f "$TEST_TMP/bin/context-mode"
+}
+
+# _install_mock_context_mode <doctor_exit> <stats_exit>
+# Creates a `context-mode` mock in $TEST_TMP/bin.  Uses the same
+# mock_config.bash as _install_mock_ctx so exit-code controls are shared.
+_install_mock_context_mode() {
+	local doctor_exit="${1:-0}"
+	local stats_exit="${2:-0}"
+
+	cat > "$TEST_TMP/mock_config.bash" <<EOF
+MOCK_CTX_DOCTOR_EXIT_CODE=${doctor_exit}
+MOCK_CTX_STATS_EXIT_CODE=${stats_exit}
+EOF
+
+	cat > "$TEST_TMP/bin/context-mode" << 'MOCK_EOF'
+#!/usr/bin/env bash
+source "${BASH_SOURCE%/*}/../mock_config.bash"
+case "$1" in
+    doctor)
+        echo "Context Mode: healthy"
+        exit "${MOCK_CTX_DOCTOR_EXIT_CODE:-0}"
+        ;;
+    stats)
+        echo "Sessions: 3  Tokens saved: 4567"
+        exit "${MOCK_CTX_STATS_EXIT_CODE:-0}"
+        ;;
+    *)
+        echo "unknown context-mode subcommand: $1" >&2
+        exit 1
+        ;;
+esac
+MOCK_EOF
+	chmod +x "$TEST_TMP/bin/context-mode"
+}
+
 # =============================================================================
 # HAPPY PATH
 # =============================================================================
@@ -165,7 +207,11 @@ _remove_bats() {
 
 @test "(c) ctx absent + CONTEXT_MODE_ENABLED=0 + BATS passing → exit 0" {
 	_remove_ctx
-	run bash "$SCRIPT_UNDER_TEST" \
+	# Restrict PATH so a real host `context-mode` binary cannot satisfy
+	# the fallback resolution; this exercises the genuine "no CLI present"
+	# skip path rather than accidentally running the installed plugin.
+	run env PATH="$TEST_TMP/bin:/bin:/usr/bin" \
+		bash "$SCRIPT_UNDER_TEST" \
 		--bats-dir "$TEST_TMP/bats-dir"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"PASS  Orchestrator BATS suite"* ]]
@@ -199,6 +245,17 @@ _remove_bats() {
 	[[ "$output" == *"PASS  Orchestrator BATS suite"* ]]
 }
 
+@test "(t) context-mode binary present (no ctx) + BATS passing → exit 0, PASS lines emitted" {
+	_remove_ctx
+	_install_mock_context_mode 0 0
+	run bash "$SCRIPT_UNDER_TEST" \
+		--bats-dir "$TEST_TMP/bats-dir"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"PASS  ctx doctor"* ]]
+	[[ "$output" == *"PASS  ctx stats"* ]]
+	[[ "$output" == *"PASS  Orchestrator BATS suite"* ]]
+}
+
 @test "(g) --bats-filter is forwarded to bats" {
 	# Create a bats mock that records its args
 	cat > "$TEST_TMP/bin/bats" << 'FILTER_MOCK'
@@ -227,8 +284,12 @@ FILTER_MOCK
 
 @test "(h) ctx absent + CONTEXT_MODE_ENABLED=1 → exit 1" {
 	_remove_ctx
-	CONTEXT_MODE_ENABLED=1 \
-		run bash "$SCRIPT_UNDER_TEST" --skip-bats
+	# Restrict PATH so neither a real `ctx` nor a real `context-mode`
+	# binary on the host leaks in via fallback resolution; only the mock
+	# bin (which now has neither CLI) is visible.
+	run env PATH="$TEST_TMP/bin:/bin:/usr/bin" \
+		CONTEXT_MODE_ENABLED=1 \
+		bash "$SCRIPT_UNDER_TEST" --skip-bats
 	[ "$status" -eq 1 ]
 	[[ "$output" == *"FAIL"* ]]
 	[[ "$output" == *"CONTEXT_MODE_ENABLED=1"* ]]
