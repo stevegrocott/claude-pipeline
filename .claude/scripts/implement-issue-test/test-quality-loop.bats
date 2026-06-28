@@ -1140,11 +1140,12 @@ HIST_EOF
         fail "Expected DEGRADED_STAGES to contain quality:convergence_failure entry; got: ${DEGRADED_STAGES[*]:-<empty>}"
 
     # set_final_state must have been called with convergence_failure_quality so
-    # the status file reflects the degraded outcome.
+    # the status file reflects the degraded outcome. set_final_state writes the
+    # value to the `.state` field (not `.final_state`).
     local final_state
-    final_state=$(jq -r '.final_state // empty' "$STATUS_FILE")
+    final_state=$(jq -r '.state // empty' "$STATUS_FILE")
     [[ "$final_state" == "convergence_failure_quality" ]] || \
-        fail "Expected final_state=convergence_failure_quality in status.json, got: $final_state"
+        fail "Expected .state=convergence_failure_quality in status.json, got: $final_state"
 }
 
 @test "convergence detection does NOT exit when <=33% issues are repeats" {
