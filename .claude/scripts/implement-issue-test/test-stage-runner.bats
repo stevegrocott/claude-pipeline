@@ -588,6 +588,7 @@ teardown() {
     export -f timeout
 
     run run_stage "test" "prompt" "test-schema.json" "default"
+    [ "$status" -eq 0 ] || fail "run_stage failed: $output"
 
     # Claude must have been invoked (the mock timeout() wrote the call)
     [ -f "$claude_calls" ] || fail "Claude was not called"
@@ -1803,4 +1804,102 @@ EOF
 	error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
 	[ "$error_kind" = "rate_limit" ] || \
 		fail "Expected error_kind=rate_limit in emitted envelope, got: $error_kind"
+}
+
+# =============================================================================
+# TASK-EXTRACTION AWK — DEPTH-AGNOSTIC HEADING ACCEPTANCE
+#
+# The inline awk in main()'s parse_issue stage must accept any ATX heading
+# depth (## and ###) for the Implementation Tasks section, mirroring the
+# depth-agnostic behaviour of _issue_body_parse_tasks in issue-body-lib.sh.
+# Fixed depth-agnostic pattern: /^##+[[:space:]]+Implementation Tasks/
+# =============================================================================
+
+@test "task-extraction awk: ##-headed body yields non-empty tasks_section" {
+	local body
+	body=$(printf '%s\n' \
+		'## Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one')
+
+	local tasks_section
+	tasks_section=$(printf '%s' "$body" \
+		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
+			found && /^##+[[:space:]]/{exit} found{print}')
+
+	[[ -n "$tasks_section" ]] || \
+		fail "##-headed body must yield non-empty tasks_section"
+}
+
+@test "task-extraction awk: ###-headed body yields non-empty tasks_section" {
+	local body
+	body=$(printf '%s\n' \
+		'### Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one')
+
+	local tasks_section
+	tasks_section=$(printf '%s' "$body" \
+		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
+			found && /^##+[[:space:]]/{exit} found{print}')
+
+	[[ -n "$tasks_section" ]] || \
+		fail "###-headed body must yield non-empty tasks_section"
+}
+
+@test "task-extraction awk: ###-headed section ends at next heading" {
+	# Section extraction must stop at the next ## or deeper heading so that
+	# content from Acceptance Criteria and similar sections is not mistaken
+	# for task lines.
+	local body
+	body=$(printf '%s\n' \
+		'### Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one' \
+		'' \
+		'## Acceptance Criteria' \
+		'' \
+		'- [ ] All tasks complete')
+
+	local tasks_section
+	tasks_section=$(printf '%s' "$body" \
+		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
+			found && /^##+[[:space:]]/{exit} found{print}')
+
+	[[ "$tasks_section" != *"All tasks complete"* ]] || \
+		fail "Section extraction must stop at next heading"
+	[[ "$tasks_section" == *"Task one"* ]] || \
+		fail "tasks_section must contain task lines before the boundary"
+}
+
+# =============================================================================
+# VALIDATE_PLAN GREP — DEPTH-AGNOSTIC HEADING ACCEPTANCE
+#
+# The validate_plan stage grep gate must accept any ATX heading depth
+# (## and ###) for the Implementation Tasks section.
+# Fixed depth-agnostic pattern: grep -qE '^##+[[:space:]]+Implementation Tasks'
+# =============================================================================
+
+@test "validate_plan grep: ##-headed body file passes section check" {
+	local issue_body_file="$TEST_TMP/issue-body.md"
+	printf '%s\n' \
+		'## Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one' \
+		> "$issue_body_file"
+
+	grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file" || \
+		fail "validate_plan grep must accept ##-headed Implementation Tasks"
+}
+
+@test "validate_plan grep: ###-headed body file passes section check" {
+	local issue_body_file="$TEST_TMP/issue-body.md"
+	printf '%s\n' \
+		'### Implementation Tasks' \
+		'' \
+		'- [ ] `[bash-script-craftsman]` Task one' \
+		> "$issue_body_file"
+
+	grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file" || \
+		fail "validate_plan grep must accept ###-headed Implementation Tasks"
 }
