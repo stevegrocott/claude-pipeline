@@ -6733,7 +6733,7 @@ Log directory: \`$LOG_BASE\`"
         tasks_section=$(printf '%s' "$issue_body" | awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} found && /^##+[[:space:]]/{exit} found{print}')
 
         if [[ -z "$tasks_section" ]]; then
-            log_error "No '## Implementation Tasks' section found in issue #$ISSUE_NUMBER"
+            log_error "No 'Implementation Tasks' section found in issue #$ISSUE_NUMBER"
             set_final_state "error"
             exit 1
         fi
@@ -6919,7 +6919,7 @@ $excerpt
         local issue_body_file="$LOG_BASE/context/issue-body.md"
         if [[ -f "$issue_body_file" ]]; then
             if ! grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file"; then
-                log_error "Issue body missing '## Implementation Tasks' section"
+                log_error "Issue body missing 'Implementation Tasks' section"
                 set_final_state "error"
                 exit 1
             fi
