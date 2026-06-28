@@ -84,6 +84,7 @@ teardown() {
     echo '{"result":"ok","structured_output":{"status":"success","result":"done"}}' > "$MOCK_CLAUDE_RESPONSE"
 
     run run_stage "test-stage" "test prompt" "test-schema.json"
+    [ "$status" -eq 0 ] || fail "run_stage failed: $output"
 
     # Check that the stage log was created
     local stage_log

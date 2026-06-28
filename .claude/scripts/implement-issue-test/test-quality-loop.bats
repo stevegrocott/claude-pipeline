@@ -1123,6 +1123,28 @@ HIST_EOF
     local fix_count
     fix_count=$(cat "$fix_count_file")
     [ "$fix_count" -eq 1 ]
+
+    # Verify the soft-fail path was actually taken: DEGRADED_STAGES must contain
+    # a quality:convergence_failure entry — a plain exit 0 without triggering the
+    # convergence branch would pass the exit-code check above while leaving
+    # DEGRADED_STAGES empty, making this the discriminating assertion.
+    local has_convergence_entry=false
+    local _ds
+    for _ds in "${DEGRADED_STAGES[@]:-}"; do
+        if [[ "$_ds" == quality:convergence_failure:* ]]; then
+            has_convergence_entry=true
+            break
+        fi
+    done
+    [ "$has_convergence_entry" = "true" ] || \
+        fail "Expected DEGRADED_STAGES to contain quality:convergence_failure entry; got: ${DEGRADED_STAGES[*]:-<empty>}"
+
+    # set_final_state must have been called with convergence_failure_quality so
+    # the status file reflects the degraded outcome.
+    local final_state
+    final_state=$(jq -r '.final_state // empty' "$STATUS_FILE")
+    [[ "$final_state" == "convergence_failure_quality" ]] || \
+        fail "Expected final_state=convergence_failure_quality in status.json, got: $final_state"
 }
 
 @test "convergence detection does NOT exit when <=33% issues are repeats" {

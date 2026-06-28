@@ -204,10 +204,12 @@ FUNC_EOF
 install_decide_scripts() {
     local script
     for script in decide-action.sh decide-retry.sh decide-model-fallback.sh; do
-        if [[ -f "$SCRIPT_DIR/$script" ]]; then
-            cp "$SCRIPT_DIR/$script" "$TEST_TMP/$script"
-            chmod +x "$TEST_TMP/$script"
-        fi
+        [[ -f "$SCRIPT_DIR/$script" ]] || {
+            echo "FATAL: $script missing from $SCRIPT_DIR" >&2
+            return 1
+        }
+        cp "$SCRIPT_DIR/$script" "$TEST_TMP/$script"
+        chmod +x "$TEST_TMP/$script"
     done
 
     # Pin the bash backend so no decision path reaches for the live CLI.
