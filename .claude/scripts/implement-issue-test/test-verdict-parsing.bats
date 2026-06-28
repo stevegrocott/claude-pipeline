@@ -27,6 +27,16 @@ setup() {
         echo '{"type":"object"}' > "$SCHEMA_DIR/${schema}.json"
     done
 
+    # Create a fake git repo
+    mkdir -p "$TEST_TMP/repo"
+    cd "$TEST_TMP/repo"
+    git init -q
+    git checkout -q -b test
+    echo "initial" > README.md
+    git add README.md
+    git commit -q -m "initial"
+    git checkout -q -b test-branch
+
     # Source the orchestrator functions
     source_orchestrator_functions
 
@@ -57,7 +67,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Verify the quality loop completed successfully (approved verdict)
     local quality_iterations
@@ -83,7 +93,7 @@ teardown() {
 
     # Should continue looping due to changes_requested verdict
     # This will eventually exit due to convergence detection
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     # Verify verdict was extracted correctly from .result field in the logs
     grep -q "Verdict extracted from structured output: changes_requested" "$LOG_FILE" || \
@@ -111,7 +121,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Should complete after one iteration (approved)
     local quality_iterations
@@ -135,7 +145,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Should complete after one iteration (LGTM parsed as approved)
     local quality_iterations
@@ -158,7 +168,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     local quality_iterations
     quality_iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
@@ -180,7 +190,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     local quality_iterations
     quality_iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
@@ -203,7 +213,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     # Verify verdict was parsed correctly from fallback text
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
@@ -225,7 +235,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Should parse 'request changes' as changes_requested from fallback text"
@@ -246,7 +256,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Should parse 'must fix' as changes_requested from fallback text"
@@ -267,7 +277,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Should parse 'blocking' as changes_requested from fallback text"
@@ -288,7 +298,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Should parse 'critical' as changes_requested from fallback text"
@@ -316,7 +326,7 @@ teardown() {
 
     # Run quality loop - ambiguous verdict should be treated as changes_requested
     # Use BATS 'run' to capture exit code without failing on max-iterations exit
-    run run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Verify ambiguous text defaults to changes_requested (regardless of loop exit code)
     grep -q "Verdict parsed from fallback text: changes_requested (ambiguous/default)" "$LOG_FILE" || \
@@ -339,7 +349,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     grep -q "Verdict parsed from fallback text: changes_requested (ambiguous/default)" "$LOG_FILE" || \
         fail "Neutral text should default to changes_requested"
@@ -361,7 +371,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     grep -q "Verdict parsed from fallback text: changes_requested (ambiguous/default)" "$LOG_FILE" || \
         fail "Empty summary should default to changes_requested"
@@ -383,7 +393,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     grep -q "Verdict parsed from fallback text: changes_requested (ambiguous/default)" "$LOG_FILE" || \
         fail "Missing summary field should default to changes_requested"
@@ -408,7 +418,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test"
 
     # Should complete after one iteration (case-insensitive approved)
     local quality_iterations
@@ -431,7 +441,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test" || true
+    run_quality_loop "$TEST_TMP/repo" "test-branch" "test" || true
 
     grep -q "Verdict parsed from fallback text: changes_requested (matched rejection keywords)" "$LOG_FILE" || \
         fail "Mixed case 'Changes Requested' should match rejection keywords (case-insensitive)"
