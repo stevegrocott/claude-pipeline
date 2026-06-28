@@ -89,7 +89,9 @@
       "Write(.claude/**)",
       "Edit(logs/**)",
       "Write(logs/**)",
-      "Bash(gh *)"
+      "Bash(gh *)",
+      "Bash(.claude/scripts/platform/*.sh *)",
+      "Bash(.claude/scripts/create-followup-issue.sh *)"
     ]
   }
 }
