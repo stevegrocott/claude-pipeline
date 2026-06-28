@@ -45,8 +45,8 @@ CRITERIA:
 
 1. test_only_scope — All file paths in the issue's Implementation Tasks
    section match: tests/**, playwright/**, **/*.spec.ts, **/*.test.ts,
-   **/*.e2e.ts. Any reference to apps/, packages/, src/, or migration files
-   disqualifies.
+   **/*.e2e.ts. Any reference to apps/, packages/, src/, .claude/, or
+   migration files disqualifies.
 
 2. surgical_size — Estimated diff under 30 lines net, across no more than
    3 files.
