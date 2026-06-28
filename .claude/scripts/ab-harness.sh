@@ -37,6 +37,9 @@
 #   3  Configuration / argument error
 #
 
+# -e (errexit) is intentionally omitted: every command that may fail is
+# checked explicitly (|| die / if !), so failure paths stay visible and
+# controllable rather than silently aborting on any non-zero exit.
 set -uo pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
@@ -142,7 +145,9 @@ if [[ -n "$MANIFEST" ]]; then
 	fi
 	if [[ -z "$AGENT" ]]; then
 		AGENT=$(jq -r '.agent // empty' "$MANIFEST" \
-			2>/dev/null) || true
+			2>/dev/null) \
+			|| printf '%s: warn: jq failed parsing .agent in %s\n' \
+				"$SCRIPT_NAME" "$MANIFEST" >&2
 	fi
 fi
 
