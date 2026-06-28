@@ -393,9 +393,24 @@ resolve_log_dir() {
 	local arm_name="$2"
 	local status_file="$wt_path/status.json"
 
+	# batch-orchestrator.sh may write status.json into a LOG_BASE
+	# subdirectory rather than the worktree root. Search up to 3
+	# levels deep so the harness finds it without assuming a fixed
+	# layout, and emit a clear diagnostic showing both the expected
+	# path and where the file was actually found.
 	if [[ ! -f "$status_file" ]]; then
-		log_warn "$arm_name: status.json not found: $status_file"
-		return
+		local found
+		found=$(find "$wt_path" -maxdepth 3 \
+			-name "status.json" -print -quit 2>/dev/null)
+		if [[ -n "$found" ]]; then
+			log_warn "$arm_name: status.json not at worktree" \
+				"root; using $found"
+			status_file="$found"
+		else
+			log_warn "$arm_name: status.json not found" \
+				"(checked $status_file and subdirs)"
+			return
+		fi
 	fi
 
 	local log_dir

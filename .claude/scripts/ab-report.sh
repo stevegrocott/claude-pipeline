@@ -210,7 +210,7 @@ resolve_impl_log_dir() {
 # Outputs JSON: {"cost_usd": N, "turns": N}
 collect_stage_costs() {
 	local impl_log_dir="$1"
-	local empty='{"cost_usd":0,"turns":0}'
+	local empty='{"cost_usd":0,"turns":0,"input_tokens":0,"output_tokens":0,"cache_creation_tokens":0,"cache_read_tokens":0}'
 
 	if [[ -z "$impl_log_dir" \
 			|| ! -d "$impl_log_dir/stages" ]]; then
@@ -221,18 +221,48 @@ collect_stage_costs() {
 	local stages_dir="$impl_log_dir/stages"
 	local result
 
-	# Collect every line that starts with '{' from all stage logs.
-	# Claude CLI emits one result JSON object per stage invocation.
+	# Collect result lines from stage logs.
+	# Requiring "total_cost_usd" in the grep pre-filter avoids passing
+	# non-result JSON objects (e.g. intermediate progress lines) to jq,
+	# guarding against lines that start with '{' but are not CLI results.
 	result=$(
 		for f in "$stages_dir"/*.log; do
 			[[ -f "$f" ]] || continue
-			grep '^{' "$f" 2>/dev/null || true
+			grep '^{.*"total_cost_usd"' "$f" 2>/dev/null || true
 		done \
 		| jq -cs '
 			[.[] | select(.total_cost_usd != null)] |
 			{
 				cost_usd: (map(.total_cost_usd) | add // 0),
-				turns:    (map(.num_turns // 0)  | add // 0)
+				turns:    (map(.num_turns // 0)  | add // 0),
+				input_tokens: (
+					map(
+						(.usage.input_tokens
+						 // .input_tokens // 0)
+					) | add // 0
+				),
+				output_tokens: (
+					map(
+						(.usage.output_tokens
+						 // .output_tokens // 0)
+					) | add // 0
+				),
+				cache_creation_tokens: (
+					map(
+						(.usage.cache_creation_input_tokens
+						 // .usage.cache_creation_tokens
+						 // .cache_creation_input_tokens
+						 // .cache_creation_tokens // 0)
+					) | add // 0
+				),
+				cache_read_tokens: (
+					map(
+						(.usage.cache_read_input_tokens
+						 // .usage.cache_read_tokens
+						 // .cache_read_input_tokens
+						 // .cache_read_tokens // 0)
+					) | add // 0
+				)
 			}
 		' 2>/dev/null
 	)
@@ -339,9 +369,13 @@ collect_arm_data() {
 					pr_review: $p,
 					total:     $tot
 				},
-				escalations: $esc,
-				cost_usd:    $costs.cost_usd,
-				turns:       $costs.turns
+				escalations:           $esc,
+				cost_usd:              $costs.cost_usd,
+				turns:                 $costs.turns,
+				input_tokens:          $costs.input_tokens,
+				output_tokens:         $costs.output_tokens,
+				cache_creation_tokens: $costs.cache_creation_tokens,
+				cache_read_tokens:     $costs.cache_read_tokens
 			}]' <<< "$issues_json" 2>/dev/null)
 
 		if [[ -n "$updated" ]]; then
@@ -377,7 +411,19 @@ aggregate_arm() {
 		total_pr_iterations:      ([.[].iterations.pr_review] | add // 0),
 		total_escalations:        ([.[].escalations]          | add // 0),
 		total_cost_usd:           ([.[].cost_usd]             | add // 0),
-		total_turns:              ([.[].turns]                | add // 0)
+		total_turns:              ([.[].turns]                | add // 0),
+		total_input_tokens: (
+			[.[].input_tokens]          | add // 0
+		),
+		total_output_tokens: (
+			[.[].output_tokens]         | add // 0
+		),
+		total_cache_creation_tokens: (
+			[.[].cache_creation_tokens] | add // 0
+		),
+		total_cache_read_tokens: (
+			[.[].cache_read_tokens]     | add // 0
+		)
 	}' <<< "$issues_json"
 }
 
@@ -420,6 +466,22 @@ compute_deltas() {
 						),
 						cost_usd: ($t.cost_usd - $c.cost_usd),
 						turns:    ($t.turns    - $c.turns),
+						input_tokens: (
+							$t.input_tokens
+							- $c.input_tokens
+						),
+						output_tokens: (
+							$t.output_tokens
+							- $c.output_tokens
+						),
+						cache_creation_tokens: (
+							$t.cache_creation_tokens
+							- $c.cache_creation_tokens
+						),
+						cache_read_tokens: (
+							$t.cache_read_tokens
+							- $c.cache_read_tokens
+						),
 						state_changed: ($t.state != $c.state)
 					} else null end
 				)
@@ -459,7 +521,23 @@ compute_agg_delta() {
 			total_cost_usd: (
 				$t.total_cost_usd - $c.total_cost_usd
 			),
-			total_turns: ($t.total_turns - $c.total_turns)
+			total_turns: ($t.total_turns - $c.total_turns),
+			total_input_tokens: (
+				$t.total_input_tokens
+				- $c.total_input_tokens
+			),
+			total_output_tokens: (
+				$t.total_output_tokens
+				- $c.total_output_tokens
+			),
+			total_cache_creation_tokens: (
+				$t.total_cache_creation_tokens
+				- $c.total_cache_creation_tokens
+			),
+			total_cache_read_tokens: (
+				$t.total_cache_read_tokens
+				- $c.total_cache_read_tokens
+			)
 		}'
 }
 
@@ -500,6 +578,10 @@ write_report() {
 		local ca_cost ta_cost da_cost
 		local ca_turns ta_turns da_turns
 		local ca_comp ta_comp da_comp
+		local ca_inp ta_inp da_inp
+		local ca_out ta_out da_out
+		local ca_cc ta_cc da_cc
+		local ca_cr ta_cr da_cr
 
 		ca_dur=$(jq -r '.total_duration_seconds // "null"' \
 			<<< "$ctrl_agg")
@@ -528,6 +610,28 @@ write_report() {
 		ta_comp=$(jq -r '.completed_count' <<< "$treat_agg")
 		da_comp=$(jq -r '.completed_count' <<< "$agg_delta")
 
+		ca_inp=$(jq -r '.total_input_tokens' <<< "$ctrl_agg")
+		ta_inp=$(jq -r '.total_input_tokens' <<< "$treat_agg")
+		da_inp=$(jq -r '.total_input_tokens' <<< "$agg_delta")
+
+		ca_out=$(jq -r '.total_output_tokens' <<< "$ctrl_agg")
+		ta_out=$(jq -r '.total_output_tokens' <<< "$treat_agg")
+		da_out=$(jq -r '.total_output_tokens' <<< "$agg_delta")
+
+		ca_cc=$(jq -r \
+			'.total_cache_creation_tokens' <<< "$ctrl_agg")
+		ta_cc=$(jq -r \
+			'.total_cache_creation_tokens' <<< "$treat_agg")
+		da_cc=$(jq -r \
+			'.total_cache_creation_tokens' <<< "$agg_delta")
+
+		ca_cr=$(jq -r \
+			'.total_cache_read_tokens' <<< "$ctrl_agg")
+		ta_cr=$(jq -r \
+			'.total_cache_read_tokens' <<< "$treat_agg")
+		da_cr=$(jq -r \
+			'.total_cache_read_tokens' <<< "$agg_delta")
+
 		printf '| Duration (s)   | %s | %s | %s |\n' \
 			"$(fmt_float "$ca_dur" 1)" \
 			"$(fmt_float "$ta_dur" 1)" \
@@ -545,9 +649,21 @@ write_report() {
 		printf '| Turns          | %s | %s | %s |\n' \
 			"$ca_turns" "$ta_turns" \
 			"$(fmt_delta "$da_turns" 0)"
-		printf '| Completed      | %s | %s | %s |\n\n' \
+		printf '| Completed      | %s | %s | %s |\n' \
 			"$ca_comp" "$ta_comp" \
 			"$(fmt_delta "$da_comp" 0)"
+		printf '| Input tokens   | %s | %s | %s |\n' \
+			"$ca_inp" "$ta_inp" \
+			"$(fmt_delta "$da_inp" 0)"
+		printf '| Output tokens  | %s | %s | %s |\n' \
+			"$ca_out" "$ta_out" \
+			"$(fmt_delta "$da_out" 0)"
+		printf '| Cache-create   | %s | %s | %s |\n' \
+			"$ca_cc" "$ta_cc" \
+			"$(fmt_delta "$da_cc" 0)"
+		printf '| Cache-read     | %s | %s | %s |\n\n' \
+			"$ca_cr" "$ta_cr" \
+			"$(fmt_delta "$da_cr" 0)"
 
 		# ------------------------------------------------------------------
 		# Per-issue table
