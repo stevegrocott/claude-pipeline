@@ -212,7 +212,7 @@ get_stage_timeout() {
     local complexity="${2:-}"
 
     case "$stage_name" in
-        test-iter*)     printf '%s' 900 ;;
+        test-iter*)     printf '%s' 1500 ;;
         pr-review*)     printf '%s' 1800 ;;
         deploy-verify*) printf '%s' 900 ;;
         e2e-verify*)    printf '%s' 600 ;;

@@ -35,10 +35,10 @@ teardown() {
     [ "$(type -t get_stage_timeout)" = "function" ]
 }
 
-@test "get_stage_timeout returns 900 for test-iter stages" {
+@test "get_stage_timeout returns 1500 for test-iter stages" {
     local result
     result=$(get_stage_timeout "test-iter-1")
-    [ "$result" -eq 900 ]
+    [ "$result" -eq 1500 ]
 }
 
 @test "get_stage_timeout returns 600 for docs stage" {
@@ -93,7 +93,7 @@ teardown() {
     local combined_timeout generic_timeout
     combined_timeout=$(get_stage_timeout "test-iter-1")
     generic_timeout=$(get_stage_timeout "test-something")
-    [ "$combined_timeout" -eq 900 ]
+    [ "$combined_timeout" -eq 1500 ]
     [ "$generic_timeout" -eq 600 ]
 }
 

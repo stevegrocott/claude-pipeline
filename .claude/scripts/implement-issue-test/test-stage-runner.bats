@@ -1903,3 +1903,107 @@ EOF
 	grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file" || \
 		fail "validate_plan grep must accept ###-headed Implementation Tasks"
 }
+
+# =============================================================================
+# GET_STAGE_TIMEOUT — test-iter
+# =============================================================================
+
+@test "get_stage_timeout returns 1500 for 'test-iter'" {
+	local result
+	result=$(get_stage_timeout "test-iter")
+	[ "$result" -eq 1500 ] || \
+		fail "Expected 1500 for test-iter, got: $result"
+}
+
+@test "get_stage_timeout returns 1500 for 'test-iter-1' (glob match)" {
+	local result
+	result=$(get_stage_timeout "test-iter-1")
+	[ "$result" -eq 1500 ] || \
+		fail "Expected 1500 for test-iter-1, got: $result"
+}
+
+@test "get_stage_timeout returns 1500 for 'test-iter-2' (glob match)" {
+	local result
+	result=$(get_stage_timeout "test-iter-2")
+	[ "$result" -eq 1500 ] || \
+		fail "Expected 1500 for test-iter-2, got: $result"
+}
+
+@test "calc_test_loop_budget derives from the raised test-iter timeout" {
+	# Budget = get_stage_timeout("test-iter") × max(planned,1) + slack.
+	# With the raised 1500s timeout the budget must widen accordingly.
+	local result
+	TEST_LOOP_WALL_BUDGET="" \
+		TEST_LOOP_PLANNED_ITERATIONS=2 \
+		TEST_ITER_WALL_TIME_SLACK=300 \
+		result=$(calc_test_loop_budget)
+	[ "$result" -eq 3300 ] || \
+		fail "Expected 1500*2+300=3300, got: $result"
+}
+
+# =============================================================================
+# _BUILD_BASH_TEST_COMMAND — parallelized bats with tests/*.bats
+# =============================================================================
+
+@test "_build_bash_test_command emits --jobs in tests/*.bats suffix when parallel available" {
+	# Mock bats with --jobs support
+	cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+	printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+		"  -j, --jobs <jobs>  Number of parallel jobs"
+	exit 0
+fi
+exit 0
+EOF
+	chmod +x "$TEST_TMP/bin/bats"
+
+	# Mock parallel backend so the --jobs guard passes
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/parallel"
+	chmod +x "$TEST_TMP/bin/parallel"
+
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/foo.bats"
+
+	local result
+	result=$(_build_bash_test_command "$TEST_TMP")
+	[[ "$result" == *" --jobs "* ]] || \
+		fail "Expected '--jobs' in tests/*.bats suffix. Got: $result"
+	[[ "$result" == *" tests/"*".bats" ]] || \
+		fail "Expected 'tests/*.bats' in command. Got: $result"
+}
+
+@test "_build_bash_test_command tests/*.bats suffix omits --jobs when parallel unavailable" {
+	# This test asserts the serial fallback when no parallel backend
+	# exists. A host-installed parallel/rush (outside the mock bin)
+	# would satisfy the guard and invalidate the assertion, so skip.
+	if command -v parallel > /dev/null 2>&1 \
+		|| command -v rush > /dev/null 2>&1; then
+		skip "host has a parallel backend; serial fallback untestable"
+	fi
+
+	# Mock bats with --jobs support but no parallel/rush binary
+	cat > "$TEST_TMP/bin/bats" << 'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--help" ]]; then
+	printf '%s\n' "Usage: bats [OPTIONS] <tests>" \
+		"  -j, --jobs <jobs>  Number of parallel jobs"
+	exit 0
+fi
+exit 0
+EOF
+	chmod +x "$TEST_TMP/bin/bats"
+
+	# Ensure parallel and rush are absent from PATH
+	rm -f "$TEST_TMP/bin/parallel" "$TEST_TMP/bin/rush"
+
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/foo.bats"
+
+	local result
+	result=$(_build_bash_test_command "$TEST_TMP")
+	[[ "$result" != *" --jobs "* ]] || \
+		fail "Should not include --jobs when no parallel backend. Got: $result"
+	[[ "$result" == *" tests/"*".bats" ]] || \
+		fail "Expected 'tests/*.bats' in command. Got: $result"
+}

@@ -470,9 +470,17 @@ exit 0
 EOF
     chmod +x "$TEST_TMP/bin/bats"
 
+    # Mock parallel so the --jobs backend guard passes
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/parallel"
+    chmod +x "$TEST_TMP/bin/parallel"
+
     local result
     result=$(_build_bash_test_command "$TEST_TMP")
-    [[ "$result" == 'bats --jobs "$(nproc)" .claude/scripts/implement-issue-test/*.bats' ]]
+    # cpu_count is evaluated at runtime (nproc / sysctl / 4 fallback)
+    [[ "$result" == *" --jobs "* ]] || \
+        fail "Expected '--jobs' in command. Got: $result"
+    [[ "$result" == *".claude/scripts/implement-issue-test/"*".bats" ]] || \
+        fail "Expected pipeline bats suite in command. Got: $result"
 }
 
 @test "_build_bash_test_command appends parallel bats to tests/*.bats when --jobs supported" {
@@ -488,12 +496,20 @@ exit 0
 EOF
     chmod +x "$TEST_TMP/bin/bats"
 
+    # Mock parallel so the --jobs backend guard passes
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/parallel"
+    chmod +x "$TEST_TMP/bin/parallel"
+
     mkdir -p "$TEST_TMP/tests"
     touch "$TEST_TMP/tests/foo.bats"
 
     local result
     result=$(_build_bash_test_command "$TEST_TMP")
-    [[ "$result" == *'&& bats --jobs "$(nproc)" tests/*.bats' ]]
+    # cpu_count is evaluated at runtime; just confirm --jobs precedes tests/*.bats
+    [[ "$result" == *"&& bats --jobs "* ]] || \
+        fail "Expected '&& bats --jobs' suffix. Got: $result"
+    [[ "$result" == *" tests/"*".bats" ]] || \
+        fail "Expected 'tests/*.bats' in command. Got: $result"
 }
 
 @test "_build_bash_test_command uses plain bats when bats does not support --jobs" {
@@ -523,6 +539,10 @@ exit 0
 EOF
     chmod +x "$TEST_TMP/bin/bats"
 
+    # Mock parallel so the --jobs backend guard passes
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/bin/parallel"
+    chmod +x "$TEST_TMP/bin/parallel"
+
     mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
     touch "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
     mkdir -p "$TEST_TMP/tests"
@@ -530,6 +550,10 @@ EOF
 
     local result
     result=$(_build_bash_test_command "$TEST_TMP")
-    [ "$result" = 'bash .claude/scripts/implement-issue-test/run-tests.sh && bats --jobs "$(nproc)" tests/*.bats' ]
+    # run-tests.sh prefix is unchanged; cpu_count is runtime-evaluated
+    [[ "$result" == "bash .claude/scripts/implement-issue-test/run-tests.sh && bats --jobs "* ]] || \
+        fail "Expected run-tests.sh prefix with parallel bats. Got: $result"
+    [[ "$result" == *" tests/"*".bats" ]] || \
+        fail "Expected 'tests/*.bats' in command. Got: $result"
 }
 
