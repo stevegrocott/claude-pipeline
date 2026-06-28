@@ -3,9 +3,9 @@
 # context-mode-check.sh
 # Smoke check for Context Mode integration health.
 #
-# Wraps `ctx doctor`/`ctx stats` and runs the orchestrator BATS
-# parsing-assertion suite to confirm output-parsing is unaffected
-# when Context Mode is active.
+# Wraps `ctx doctor`/`ctx stats` (or `context-mode doctor`/`context-mode stats`)
+# and runs the orchestrator BATS parsing-assertion suite to confirm
+# output-parsing is unaffected when Context Mode is active.
 #
 # Usage: context-mode-check.sh [options]
 #
@@ -96,36 +96,46 @@ EOF
 check_ctx() {
 	local ctx_enabled="${CONTEXT_MODE_ENABLED:-0}"
 
-	if ! command -v ctx &>/dev/null; then
+	# Resolve the CLI binary once — prefer ctx, fall back to context-mode
+	local cli_bin=""
+	if command -v ctx &>/dev/null; then
+		cli_bin="ctx"
+	elif command -v context-mode &>/dev/null; then
+		cli_bin="context-mode"
+	fi
+
+	if [[ -z "$cli_bin" ]]; then
 		if [[ "$ctx_enabled" == "1" ]]; then
 			result_fail \
-				"ctx not installed; CONTEXT_MODE_ENABLED=1 requires it"
+				"ctx (or context-mode) not installed;" \
+				"CONTEXT_MODE_ENABLED=1 requires it"
 			return 1
 		fi
-		log "ctx not in PATH; skipping (install plugin to enable)"
+		log "ctx / context-mode not in PATH;" \
+			"skipping (install plugin to enable)"
 		return 0
 	fi
 
-	# --- ctx doctor ---
-	log "Running: ctx doctor"
+	# --- doctor ---
+	log "Running: $cli_bin doctor"
 	local doctor_out
-	if ! doctor_out=$(ctx doctor 2>&1); then
-		result_fail "ctx doctor"
+	if ! doctor_out=$("$cli_bin" doctor 2>&1); then
+		result_fail "$cli_bin doctor"
 		printf '%s\n' "$doctor_out" >&2
 		return 1
 	fi
-	result_pass "ctx doctor"
+	result_pass "$cli_bin doctor"
 	printf '%s\n' "$doctor_out"
 
-	# --- ctx stats ---
-	log "Running: ctx stats"
+	# --- stats ---
+	log "Running: $cli_bin stats"
 	local stats_out
-	if ! stats_out=$(ctx stats 2>&1); then
-		result_fail "ctx stats"
+	if ! stats_out=$("$cli_bin" stats 2>&1); then
+		result_fail "$cli_bin stats"
 		printf '%s\n' "$stats_out" >&2
 		return 1
 	fi
-	result_pass "ctx stats"
+	result_pass "$cli_bin stats"
 	printf '%s\n' "$stats_out"
 
 	return 0
