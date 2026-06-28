@@ -592,15 +592,17 @@ The script runs `ctx doctor` and `ctx stats`, then runs the orchestrator BATS pa
 
 ### Hook interactions with the pipeline
 
-Context Mode registers its own **SessionStart** and **PreToolUse** hooks in `.claude/settings.local.json`. The pipeline already uses both events:
+Context Mode registers its hooks via the **plugin** (cached under `~/.claude/plugins/cache/context-mode/`), not via `settings.local.json`. Empirically (`/context-mode:ctx-doctor`, v1.0.168) it registers **six** hook scripts: `SessionStart`, `PreToolUse`, `PostToolUse`, `PreCompact`, `UserPromptSubmit`, and `Stop`. The pipeline uses `SessionStart`, `PreToolUse`, `PostToolUse`, and `UserPromptSubmit`:
 
-| Hook event | Pipeline hook | Context Mode hook | Interaction |
+| Hook event | Pipeline hook | Context Mode hook | Interaction (empirically verified) |
 |---|---|---|---|
-| `SessionStart` | `hooks/session-start.sh` — injects `using-skills` | Context Mode session hydration | No conflict — both fire independently. Session-start hooks run in registration order; neither reads output of the other. |
-| `PreToolUse / Edit\|Write` | `pre-commit-skill-validate.sh`, path guard `python3 -c ...` | Context Mode token compression (if enabled) | No conflict — the PreToolUse pipeline hooks guard against destructive edits; Context Mode compresses context before tool execution. They operate on different data. |
-| `PreToolUse / Bash` | `block-destructive-db-commands.sh` | Context Mode (if applicable) | No conflict — pipeline guard rejects dangerous commands; Context Mode does not inspect Bash commands. |
+| `SessionStart` | `hooks/session-start.sh` — injects `using-skills` | session hydration (capture/restore) | No conflict — both fire in registration order; neither consumes the other's output. |
+| `PreToolUse / Edit\|Write` | `pre-commit-skill-validate.sh`, path guard `python3 -c ...` | output sandboxing (capture) | No conflict — pipeline hooks gate destructive edits; Context Mode captures/compresses. Different data. |
+| `PreToolUse / Bash` | `block-destructive-db-commands.sh`, `block-gh-issue-create.sh` | **advisory** `context_guidance` (suggests `ctx_execute` for output-heavy commands) | No conflict — Context Mode's Bash hook DOES inspect the command but only **adds advisory context** (non-blocking, exit 0); the pipeline's **blocking** guards (exit 2) still fire and win. Both observed firing this session without interference. |
+| `UserPromptSubmit` | `pipeline-status-inject.sh` | session-memory injection | No conflict — both append context; additive, not mutually exclusive. |
+| `PostToolUse` | `sync-reminder.sh`, `post-pr-simplify.sh` | output capture/index | No conflict — both observe completed tool calls; neither mutates the result. |
 
-**Verdict:** Context Mode hooks and pipeline hooks are orthogonal. Neither modifies data the other depends on. If you observe unexpected behaviour after enabling Context Mode, run `.claude/scripts/context-mode-check.sh` to confirm the BATS parsing-assertion suite still passes.
+**Verdict (empirically validated 2026-06-28, v1.0.168):** Context Mode hooks and pipeline hooks are orthogonal. Context Mode's hooks are **advisory/capture** (they add context or index output, exit 0); the pipeline's are **blocking guards** (exit 2 to reject). Both classes fired together this session with no suppression — `ctx doctor`/`ctx stats` pass via the `context-mode` CLI, and the pipeline's `block-gh-issue-create` guard still blocked correctly while Context Mode's Bash guidance appeared as an advisory tip. If you observe unexpected behaviour after enabling Context Mode, run `.claude/scripts/context-mode-check.sh` to confirm the parsing-assertion checks still pass.
 
 ### Rollback
 
