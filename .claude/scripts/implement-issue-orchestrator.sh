@@ -5369,8 +5369,20 @@ _build_bash_test_command() {
 	# Detect --jobs support in the installed bats version.
 	# Run tests in parallel across all CPU cores when supported;
 	# fall back to serial execution otherwise.
-	if bats --help 2>&1 | grep -q -- '--jobs'; then
-		bats_cmd='bats --jobs "$(nproc)"'
+	# Two conditions must both be true before enabling --jobs:
+	#   1. The installed bats advertises --jobs in its help output.
+	#   2. A parallel backend (GNU parallel or rush) is available,
+	#      since bats --jobs delegates to one of these at runtime.
+	# Also evaluate the CPU count portably at detection time:
+	#   nproc is Linux-only; macOS uses sysctl -n hw.logicalcpu.
+	local cpu_count
+	cpu_count=$(nproc 2>/dev/null \
+		|| sysctl -n hw.logicalcpu 2>/dev/null \
+		|| echo 4)
+	if bats --help 2>&1 | grep -q -- '--jobs' \
+		&& { command -v parallel > /dev/null 2>&1 \
+			|| command -v rush > /dev/null 2>&1; }; then
+		bats_cmd="bats --jobs $cpu_count"
 	else
 		bats_cmd="bats"
 	fi
