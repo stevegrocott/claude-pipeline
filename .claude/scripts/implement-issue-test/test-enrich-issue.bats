@@ -125,3 +125,78 @@ teardown() {
 @test "enrich-issue SKILL.md integration section references batch-orchestrator" {
 	grep -qiE 'batch-orchestrator|enrich-followups' "$SKILL_FILE"
 }
+
+# =============================================================================
+# Group 6: preflight skip when enrich-issue no-ops on non-pipeline-autocreated
+# =============================================================================
+#
+# Regression test for issue #554:
+# validate_issue_for_processing() used to return 0 (proceed) after an
+# enrich-issue dispatch that exited 0 as a no-op (pipeline-autocreated marker
+# absent).  The fix must re-validate the body after a successful enrich call
+# and skip (return 1) when it is still structurally invalid.
+
+# Extract and source validate_issue_for_processing from batch-orchestrator.sh
+# and assert_issue_valid from issue-body-lib.sh so the function can be tested
+# end-to-end.  Returns 1 (which BATS converts to a skip) when either
+# artefact is missing or the function is not yet defined.
+_source_validate_for_enrich_test() {
+	local lib="$PROJECT_DIR/.claude/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || return 1
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	local batch="$PROJECT_DIR/.claude/scripts/batch-orchestrator.sh"
+	[[ -f "$batch" ]] || return 1
+
+	local func_file="$TEST_TMP/validate_issue_for_processing.bash"
+	_extract_function_body validate_issue_for_processing "$batch" \
+		> "$func_file"
+	grep -q 'validate_issue_for_processing' "$func_file" 2>/dev/null \
+		|| return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+@test "functional: non-pipeline-autocreated issue with needs-explore label causes preflight to skip after enrich-issue no-op" {
+	# Arrange ----------------------------------------------------------------
+	# Mock gh returns a body that has the needs-explore label but lacks the
+	# <!-- pipeline-autocreated --> marker.  enrich-issue treats the absent
+	# marker as a no-op and exits 0 without modifying the issue.  The fixed
+	# validate_issue_for_processing must re-validate and skip (rc=1) rather
+	# than proceeding with the unchanged, structurally invalid body.
+	local mock_bin="$TEST_TMP/mock-bin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+# Non-pipeline-autocreated body: no marker, no parseable task lines, no AC.
+printf '%s\n' \
+  '{"body":"This is a human-authored issue.\n\nNo pipeline marker here.","labels":[{"name":"needs-explore"}]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	_source_validate_for_enrich_test \
+		|| skip "validate_issue_for_processing() not yet present"
+
+	# Stub collaborators.
+	# dispatch_composition simulates enrich-issue exiting 0 as a no-op
+	# (marker absent → it logs the no-op message and exits 0 unchanged).
+	log()                  { :; }
+	log_warn()             { :; }
+	dispatch_composition() { return 0; }
+	export ENRICH_FOLLOWUPS=true
+	unset DEPLOY_VERIFY_CMD
+
+	# Act --------------------------------------------------------------------
+	_SKIP_REASON=""
+	local rc=0
+	validate_issue_for_processing 99 || rc=$?
+
+	# Assert -----------------------------------------------------------------
+	# Must skip — body is still invalid after the enrich no-op.
+	[[ "$rc" -eq 1 ]]
+	# _SKIP_REASON must be non-empty (exact wording validated in
+	# test-batch-orchestrator.bats functional suite).
+	[[ -n "$_SKIP_REASON" ]]
+}
