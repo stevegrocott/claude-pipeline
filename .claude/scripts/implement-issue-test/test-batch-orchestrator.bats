@@ -1682,6 +1682,108 @@ GHEOF
 }
 
 # =============================================================================
+# TASK 2 (i555): Check 3 enrich-inline gate
+# =============================================================================
+#
+# When Check 3 fails (body carries ## Implementation Tasks and/or the
+# pipeline-autocreated marker but fails assert_issue_valid) AND
+# ENRICH_FOLLOWUPS=true AND the body has the <!-- pipeline-autocreated -->
+# marker, validate_issue_for_processing must dispatch /enrich-issue inline,
+# re-fetch, and re-run assert_issue_valid before returning. Without the marker
+# the enrich gate must NOT fire.
+
+@test "functional: Check 3 fail + pipeline-autocreated + enrich → valid → return 0" {
+	# Initial body satisfies Check 2 (## Implementation Tasks present) and
+	# carries the pipeline-autocreated marker, but is prose-only so
+	# assert_issue_valid fails — entering the Check 3 enrich gate. The
+	# post-enrich re-fetch returns a structurally valid body → proceed.
+	_install_gh_two_phase_mock \
+		'{"body":"<!-- pipeline-autocreated -->\n## Implementation Tasks\n\nProse only, no task lines.","labels":[]}' \
+		'{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+
+	source_revalidate_functions \
+		|| skip "revalidate_issue_after_enrich() not yet present"
+
+	log()      { :; }
+	log_warn() { :; }
+	# dispatch_composition is invoked in a command substitution (subshell),
+	# so record calls to a file rather than an in-memory array.
+	local enrich_log="$TEST_TMP/enrich-calls.log"
+	dispatch_composition() { printf '%s\n' "$1" >> "$enrich_log"; return 0; }
+	export ENRICH_FOLLOWUPS=true
+	unset DEPLOY_VERIFY_CMD
+
+	_SKIP_REASON=""
+	local rc=0
+	validate_issue_for_processing 99 || rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ -z "$_SKIP_REASON" ]]
+	# /enrich-issue must have been dispatched for the issue.
+	[[ -f "$enrich_log" ]]
+	grep -q '/enrich-issue 99' "$enrich_log"
+}
+
+@test "functional: Check 3 fail + pipeline-autocreated + enrich still invalid → return 1" {
+	# Re-fetch after enrich is still prose-only → assert_issue_valid fails
+	# again → skip with the structural-validation reason.
+	_install_gh_two_phase_mock \
+		'{"body":"<!-- pipeline-autocreated -->\n## Implementation Tasks\n\nProse only.","labels":[]}' \
+		'{"body":"<!-- pipeline-autocreated -->\n## Implementation Tasks\n\nStill prose after enrich.","labels":[]}'
+
+	source_revalidate_functions \
+		|| skip "revalidate_issue_after_enrich() not yet present"
+
+	log()                  { :; }
+	log_warn()             { :; }
+	dispatch_composition() { return 0; }
+	export ENRICH_FOLLOWUPS=true
+	unset DEPLOY_VERIFY_CMD
+
+	_SKIP_REASON=""
+	local rc=0
+	validate_issue_for_processing 99 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ "$_SKIP_REASON" == *"body failed structural validation"* ]]
+	[[ "$_SKIP_REASON" == *"still invalid after enrich"* ]]
+}
+
+@test "functional: Check 3 fail without pipeline-autocreated marker does NOT enrich" {
+	# Body fails assert_issue_valid but lacks the pipeline-autocreated marker.
+	# Even with ENRICH_FOLLOWUPS=true the enrich gate must NOT fire — the
+	# function skips with the plain structural-validation reason.
+	local mock_bin="$TEST_TMP/mock-bin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"body":"## Implementation Tasks\n\nProse only, no marker.","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	source_validate_issue_for_processing \
+		|| skip "validate_issue_for_processing() not yet present"
+
+	log()      { :; }
+	log_warn() { :; }
+	# Record any dispatch to a file (call happens in a subshell, so an
+	# in-memory flag would not survive). The file must NOT be created.
+	local enrich_log="$TEST_TMP/enrich-calls.log"
+	dispatch_composition() { printf '%s\n' "$1" >> "$enrich_log"; return 0; }
+	export ENRICH_FOLLOWUPS=true
+	unset DEPLOY_VERIFY_CMD
+
+	_SKIP_REASON=""
+	local rc=0
+	validate_issue_for_processing 99 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ ! -f "$enrich_log" ]]
+	[[ "$_SKIP_REASON" == "body failed structural validation" ]]
+}
+
+# =============================================================================
 # TASK 1 (i555): Check 3 emits assert_issue_valid diagnostics via log_warn
 # =============================================================================
 #
