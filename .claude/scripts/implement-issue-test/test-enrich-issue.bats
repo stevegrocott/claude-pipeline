@@ -364,3 +364,48 @@ GHEOF
 	[[ "$rc" -eq 1 ]]
 	[[ ! -s "$dc_log" ]]
 }
+
+# =============================================================================
+# Group 8: Step 5 Deploy Verification section — DEPLOY_VERIFY_CMD guidance
+#           and scope rules (issue #556)
+# =============================================================================
+#
+# Step 5 of the enrich-issue skill governs whether the rewritten issue body
+# includes a "## Deploy Verification" section and, if so, which command
+# variant to use. These tests assert that SKILL.md documents:
+#   a) DEPLOY_VERIFY_CMD as the gate variable (omit section when unset/empty)
+#   b) The three scope rules:
+#      - empty/unset  → omit section entirely
+#      - set + frontend-only changes → DEPLOY_VERIFY_CMD --health-only
+#      - set + any backend/shared file → DEPLOY_VERIFY_CMD (no flag)
+#   c) The "## Deploy Verification" section heading and its mandatory
+#      "**Verification command:**" body line required by the orchestrator.
+
+@test "Step 5: SKILL.md documents DEPLOY_VERIFY_CMD as the deploy-section gate" {
+	grep -q 'DEPLOY_VERIFY_CMD' "$SKILL_FILE"
+}
+
+@test "Step 5: SKILL.md documents omitting Deploy Verification section when DEPLOY_VERIFY_CMD is unset or empty" {
+	grep -qiE 'DEPLOY_VERIFY_CMD.*(empty|unset)|Omit.*section|omit.*entirely' "$SKILL_FILE"
+}
+
+@test "Step 5: SKILL.md documents the FRONTEND_PATH_PATTERNS scope variable" {
+	grep -q 'FRONTEND_PATH_PATTERNS' "$SKILL_FILE"
+}
+
+@test "Step 5: SKILL.md documents --health-only flag for frontend-only changes" {
+	grep -q '\-\-health-only' "$SKILL_FILE"
+}
+
+@test "Step 5: SKILL.md documents full DEPLOY_VERIFY_CMD (no flag) for backend/shared changes" {
+	# Must document using the command without --health-only for non-frontend files.
+	grep -qiE 'backend|shared.changes|any changed file|does not match' "$SKILL_FILE"
+}
+
+@test "Step 5: SKILL.md includes the Deploy Verification section heading" {
+	grep -q '## Deploy Verification' "$SKILL_FILE"
+}
+
+@test "Step 5: SKILL.md requires a Verification command line in the Deploy Verification section body" {
+	grep -q '\*\*Verification command:\*\*' "$SKILL_FILE"
+}
