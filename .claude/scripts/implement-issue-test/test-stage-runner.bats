@@ -606,6 +606,36 @@ teardown() {
     fi
 }
 
+@test "run_stage bails with agent_not_found when claude reports agent not found" {
+    # Simulate the claude CLI exiting non-zero with the agent-not-found message
+    # it emits when --agent names an unknown subtype.  run_stage must classify
+    # this as agent_not_found and bail immediately without retrying.
+    local calls_file="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        printf -- "--agent 'bad-agent' not found\n"
+        echo "called" >> "$calls_file"
+        return 1
+    }
+    export -f timeout
+
+    run run_stage "stage-1" "prompt" "test-schema.json" "bad-agent"
+
+    # run_stage must bail (non-zero exit)
+    [ "$status" -ne 0 ] || \
+        fail "Expected non-zero exit when agent not found, got: status=$status"
+
+    # Stage result envelope must report error_kind=agent_not_found
+    [[ "$output" == *'"agent_not_found"'* ]] || \
+        fail "Expected agent_not_found in stage result, got: $output"
+
+    # Must not retry — exactly one invocation of the claude CLI
+    local call_count=0
+    [[ -f "$calls_file" ]] && \
+        call_count=$(wc -l < "$calls_file" | tr -d '[:space:]')
+    [ "$call_count" -eq 1 ] || \
+        fail "Expected exactly 1 claude invocation (no retry), got: $call_count"
+}
+
 # =============================================================================
 # MODEL SELECTION
 #
