@@ -670,14 +670,19 @@ write_report() {
 		# ------------------------------------------------------------------
 		printf '## Per-Issue Comparison\n\n'
 		printf '| Issue | Arm | State | Duration (s)'
-		printf ' | Iters | Escl | Cost (USD) | Turns |\n'
+		printf ' | Iters | Escl | Cost (USD) | Turns'
+		printf ' | Inp Tok | Out Tok | CCreate | CRead |\n'
 		printf '|-------|-----|-------|-------------'
-		printf '|-------|------|-----------|-------|\n'
+		printf '|-------|------|-----------|-------'
+		printf '|---------|---------|---------|-------|\n'
 
 		local entry iss_num c_entry t_entry d_entry
 		local c_state c_dur c_iters c_esc c_cost c_turns
+		local c_inp c_out c_cc c_cr
 		local t_state t_dur t_iters t_esc t_cost t_turns
+		local t_inp t_out t_cc t_cr
 		local d_dur d_iters d_esc d_cost d_turns
+		local d_inp d_out d_cc d_cr
 
 		while IFS= read -r entry; do
 			[[ -n "$entry" ]] || continue
@@ -695,13 +700,24 @@ write_report() {
 			c_esc=$(jq -r '.escalations // "—"' <<< "$c_entry")
 			c_cost=$(jq -r '.cost_usd // "null"' <<< "$c_entry")
 			c_turns=$(jq -r '.turns // "—"' <<< "$c_entry")
+			c_inp=$(jq -r '.input_tokens // "—"' \
+				<<< "$c_entry")
+			c_out=$(jq -r '.output_tokens // "—"' \
+				<<< "$c_entry")
+			c_cc=$(jq -r \
+				'.cache_creation_tokens // "—"' \
+				<<< "$c_entry")
+			c_cr=$(jq -r '.cache_read_tokens // "—"' \
+				<<< "$c_entry")
 
-			printf '| #%s | control | %s | %s | %s | %s | %s | %s |\n' \
+			printf \
+				'| #%s | control | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
 				"$iss_num" "$c_state" \
 				"$(fmt_float "$c_dur" 1)" \
 				"$c_iters" "$c_esc" \
 				"$(fmt_float "$c_cost" 4)" \
-				"$c_turns"
+				"$c_turns" \
+				"$c_inp" "$c_out" "$c_cc" "$c_cr"
 
 			t_state=$(jq -r '.state // "—"' <<< "$t_entry")
 			t_dur=$(jq -r '.duration_seconds // "null"' \
@@ -711,13 +727,24 @@ write_report() {
 			t_esc=$(jq -r '.escalations // "—"' <<< "$t_entry")
 			t_cost=$(jq -r '.cost_usd // "null"' <<< "$t_entry")
 			t_turns=$(jq -r '.turns // "—"' <<< "$t_entry")
+			t_inp=$(jq -r '.input_tokens // "—"' \
+				<<< "$t_entry")
+			t_out=$(jq -r '.output_tokens // "—"' \
+				<<< "$t_entry")
+			t_cc=$(jq -r \
+				'.cache_creation_tokens // "—"' \
+				<<< "$t_entry")
+			t_cr=$(jq -r '.cache_read_tokens // "—"' \
+				<<< "$t_entry")
 
-			printf '| #%s | treatment | %s | %s | %s | %s | %s | %s |\n' \
+			printf \
+				'| #%s | treatment | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
 				"$iss_num" "$t_state" \
 				"$(fmt_float "$t_dur" 1)" \
 				"$t_iters" "$t_esc" \
 				"$(fmt_float "$t_cost" 4)" \
-				"$t_turns"
+				"$t_turns" \
+				"$t_inp" "$t_out" "$t_cc" "$t_cr"
 
 			if [[ "$d_entry" != '"null"' \
 					&& "$d_entry" != "null" ]]; then
@@ -734,13 +761,30 @@ write_report() {
 					'.cost_usd // "null"' <<< "$d_entry")
 				d_turns=$(jq -r \
 					'.turns // "null"' <<< "$d_entry")
+				d_inp=$(jq -r \
+					'.input_tokens // "null"' \
+					<<< "$d_entry")
+				d_out=$(jq -r \
+					'.output_tokens // "null"' \
+					<<< "$d_entry")
+				d_cc=$(jq -r \
+					'.cache_creation_tokens // "null"' \
+					<<< "$d_entry")
+				d_cr=$(jq -r \
+					'.cache_read_tokens // "null"' \
+					<<< "$d_entry")
 
-				printf '| | **delta** | | %s | %s | %s | %s | %s |\n' \
+				printf \
+					'| | **delta** | | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
 					"$(fmt_delta "$d_dur" 1)" \
 					"$(fmt_delta "$d_iters" 0)" \
 					"$(fmt_delta "$d_esc" 0)" \
 					"$(fmt_delta "$d_cost" 4)" \
-					"$(fmt_delta "$d_turns" 0)"
+					"$(fmt_delta "$d_turns" 0)" \
+					"$(fmt_delta "$d_inp" 0)" \
+					"$(fmt_delta "$d_out" 0)" \
+					"$(fmt_delta "$d_cc" 0)" \
+					"$(fmt_delta "$d_cr" 0)"
 			fi
 
 		done < <(jq -c '.[]' <<< "$per_issue_json")
