@@ -507,6 +507,15 @@ source_batch_function() {
 # Extract the body of a named function from a script file.
 # Uses brace counting so nested blocks with closing braces at
 # column 0 do not prematurely end the capture.
+#
+# OUTPUT INCLUDES THE FUNCTION DECLARATION LINE: awk evaluates all
+# matching rules in order for each input line.  Rule 1 matches the
+# declaration (e.g. `foo() {`) and sets capture=1; rule 2 then fires
+# for that same line (capture is now true) and prints it.  Consequently
+# the output starts with `func_name() {` — not just the body lines.
+# Callers that grep the output for the function name (e.g.
+# source_validate_issue_for_processing) rely on this guarantee.
+#
 # Brace-style assumption: the function header must appear on a single
 # line matching /^name\(\) *\{$/ — that is, the opening brace must be
 # on the same line as the parameter list (K&R / one-true-brace style),
