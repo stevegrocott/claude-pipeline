@@ -602,19 +602,25 @@ write_report() {
 		] | @tsv'
 
 		local ctrl_tsv treat_tsv delta_tsv
-		ctrl_tsv=$(jq -r "$agg_filter" <<< "$ctrl_agg")
-		treat_tsv=$(jq -r "$agg_filter" <<< "$treat_agg")
-		delta_tsv=$(jq -r "$agg_filter" <<< "$agg_delta")
+		ctrl_tsv=$(jq -r "$agg_filter" <<< "$ctrl_agg" 2>/dev/null)
+		treat_tsv=$(jq -r "$agg_filter" <<< "$treat_agg" 2>/dev/null)
+		delta_tsv=$(jq -r "$agg_filter" <<< "$agg_delta" 2>/dev/null)
 
-		IFS=$'\t' read -r ca_dur ca_iters ca_esc ca_cost \
-			ca_turns ca_comp ca_inp ca_out ca_cc ca_cr \
-			<<< "$ctrl_tsv"
-		IFS=$'\t' read -r ta_dur ta_iters ta_esc ta_cost \
-			ta_turns ta_comp ta_inp ta_out ta_cc ta_cr \
-			<<< "$treat_tsv"
-		IFS=$'\t' read -r da_dur da_iters da_esc da_cost \
-			da_turns da_comp da_inp da_out da_cc da_cr \
-			<<< "$delta_tsv"
+		if [[ -n "$ctrl_tsv" ]]; then
+			IFS=$'\t' read -r ca_dur ca_iters ca_esc ca_cost \
+				ca_turns ca_comp ca_inp ca_out ca_cc ca_cr \
+				<<< "$ctrl_tsv"
+		fi
+		if [[ -n "$treat_tsv" ]]; then
+			IFS=$'\t' read -r ta_dur ta_iters ta_esc ta_cost \
+				ta_turns ta_comp ta_inp ta_out ta_cc ta_cr \
+				<<< "$treat_tsv"
+		fi
+		if [[ -n "$delta_tsv" ]]; then
+			IFS=$'\t' read -r da_dur da_iters da_esc da_cost \
+				da_turns da_comp da_inp da_out da_cc da_cr \
+				<<< "$delta_tsv"
+		fi
 
 		printf '| Duration (s)   | %s | %s | %s |\n' \
 			"$(fmt_float "$ca_dur" 1)" \
