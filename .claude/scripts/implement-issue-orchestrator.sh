@@ -2063,6 +2063,14 @@ for m in re.finditer(r'\[\s*\{', t):
         else
             _error_kind="max_turns_exhausted"
         fi
+    elif printf '%s' "$output" \
+        | grep -qE -- "--agent '[^']+' not found"; then
+        local _agent_name
+        _agent_name=$(printf '%s' "$output" \
+            | sed -n "s/.*--agent '\\([^']*\\)' not found.*/\\1/p" \
+            | head -1)
+        log_error "Stage $stage_name — agent not found: ${_agent_name:-unknown}"
+        _error_kind="agent_not_found"
     elif detect_rate_limit "$output"; then
         handle_rate_limit "$output" "$model"
         _error_kind="rate_limit"

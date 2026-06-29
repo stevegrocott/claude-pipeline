@@ -76,7 +76,8 @@ _bash_decide() {
 
 	# unrecoverable configuration or permission error → bail
 	if [[ "$error_kind" == "permission_denied" || \
-	      "$error_kind" == "schema_not_found" ]]; then
+	      "$error_kind" == "schema_not_found" || \
+	      "$error_kind" == "agent_not_found" ]]; then
 		printf \
 			'{"action":"bail","reason":"%s: unrecoverable error"}\n' \
 			"$error_kind"
