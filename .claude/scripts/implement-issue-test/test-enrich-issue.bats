@@ -210,3 +210,157 @@ GHEOF
 	# test-batch-orchestrator.bats functional suite).
 	[[ -n "$_SKIP_REASON" ]]
 }
+
+# =============================================================================
+# Group 7: Check 3 stderr surfacing + enrich-issue fallback (issue #555)
+# =============================================================================
+#
+# Issue #555 hardens validate_issue_for_processing()'s Check 3 (structural
+# validation of pipeline-autocreated / ## Implementation Tasks bodies) in two
+# ways:
+#   1. assert_issue_valid stderr (one diagnostic line per failed criterion) is
+#      captured and re-emitted via log_warn instead of being discarded with
+#      `2>/dev/null`, so the operator sees WHICH criterion failed without a
+#      manual re-run.
+#   2. When Check 3 fails AND ENRICH_FOLLOWUPS=true AND the body carries the
+#      <!-- pipeline-autocreated --> marker, enrich-issue is dispatched as an
+#      auto-repair fallback (mirroring Checks 1 and 2) before the skip. Bodies
+#      without the marker (human-authored) are still skipped, no enrich attempt.
+#
+# These tests exercise the real validate_issue_for_processing extracted from
+# batch-orchestrator.sh. Each gates on a signal of its target fix so the suite
+# skips cleanly on a branch carrying only this test, and runs for real once the
+# orchestrator changes land.
+
+# Extract assert_issue_valid (issue-body-lib.sh) and
+# validate_issue_for_processing (batch-orchestrator.sh) so Check 3 can be
+# exercised end-to-end. Sets _CHECK3_FUNC_FILE to the extracted function-body
+# file. Returns 1 (which BATS converts to a skip) when an artefact is missing
+# or the function is undefined.
+_source_validate_for_check3_test() {
+	local lib="$PROJECT_DIR/.claude/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || return 1
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	local batch="$PROJECT_DIR/.claude/scripts/batch-orchestrator.sh"
+	[[ -f "$batch" ]] || return 1
+
+	_CHECK3_FUNC_FILE="$TEST_TMP/validate_issue_for_processing.bash"
+	_extract_function_body validate_issue_for_processing "$batch" \
+		> "$_CHECK3_FUNC_FILE"
+	grep -q 'validate_issue_for_processing' "$_CHECK3_FUNC_FILE" 2>/dev/null \
+		|| return 1
+	# shellcheck disable=SC1090
+	source "$_CHECK3_FUNC_FILE"
+}
+
+# Install a mock `gh` whose `issue view` returns a fixed issue JSON with no
+# labels (so Check 1's needs-explore guard passes). $1 is the JSON string body
+# with newlines pre-escaped as \n; it must contain no single quotes, double
+# quotes, or $ so it survives the single-quoted JSON wrapper.
+_install_mock_gh_body() {
+	local body_json="$1"
+	local mock_bin="$TEST_TMP/mock-bin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << GHEOF
+#!/usr/bin/env bash
+printf '%s\n' '{"body":"$body_json","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "Check 3: assert_issue_valid stderr diagnostics are surfaced via log_warn (issue #555)" {
+	_source_validate_for_check3_test \
+		|| skip "validate_issue_for_processing() not extractable"
+	# Gate on the task 1 fix: while the Check 3 assert_issue_valid call still
+	# discards stderr with 2>/dev/null, the surfacing behaviour does not exist
+	# yet, so skip cleanly in isolation and run for real once it lands.
+	if grep -qF 'assert_issue_valid "$body" 2>/dev/null' "$_CHECK3_FUNC_FILE"; then
+		skip "Check 3 stderr-surfacing fix not present (stderr still discarded)"
+	fi
+
+	# Pipeline-autocreated body: has the marker and ## Implementation Tasks
+	# (passes Checks 1 and 2) but non-canonical tasks and no Acceptance Criteria,
+	# so assert_issue_valid fails Criterion 1 ("no parseable task lines found").
+	_install_mock_gh_body 'Pipeline-generated issue.\n\n<!-- pipeline-autocreated -->\n\n## Implementation Tasks\n\nsteps:\n  - do the thing in src/foo.ts\n  - do another thing\n'
+
+	local warn_log="$TEST_TMP/warn.log"
+	: > "$warn_log"
+	log()                           { :; }
+	log_warn()                      { printf '%s\n' "$*" >> "$warn_log"; }
+	dispatch_composition()          { return 0; }
+	revalidate_issue_after_enrich() { return 0; }
+	# ENRICH_FOLLOWUPS=false isolates the stderr-surfacing path from the
+	# enrich fallback — surfacing happens regardless of enrichment.
+	export ENRICH_FOLLOWUPS=false
+	unset DEPLOY_VERIFY_CMD
+
+	local rc=0
+	validate_issue_for_processing 98 || rc=$?
+
+	# Body is structurally invalid → must skip.
+	[[ "$rc" -eq 1 ]]
+	# The specific assert_issue_valid diagnostic line must have reached log_warn.
+	grep -q 'no parseable task lines found' "$warn_log"
+}
+
+@test "Check 3: pipeline-autocreated body failing validation triggers enrich-issue fallback (issue #555)" {
+	_source_validate_for_check3_test \
+		|| skip "validate_issue_for_processing() not extractable"
+	# Gate on the task 2 fix: the Check 3 enrich fallback adds a third
+	# dispatch_composition call (Checks 1 and 2 already have one each).
+	local dc_count
+	dc_count=$(grep -c 'dispatch_composition' "$_CHECK3_FUNC_FILE")
+	(( dc_count >= 3 )) \
+		|| skip "Check 3 enrich-issue fallback not present"
+
+	_install_mock_gh_body 'Pipeline-generated issue.\n\n<!-- pipeline-autocreated -->\n\n## Implementation Tasks\n\nsteps:\n  - do the thing in src/foo.ts\n  - do another thing\n'
+
+	local dc_log="$TEST_TMP/dispatch.log"
+	: > "$dc_log"
+	log()                           { :; }
+	log_warn()                      { :; }
+	dispatch_composition()          { printf '%s\n' "$*" >> "$dc_log"; return 0; }
+	# Simulate enrich repairing the body so the function may proceed.
+	revalidate_issue_after_enrich() { return 0; }
+	export ENRICH_FOLLOWUPS=true
+	unset DEPLOY_VERIFY_CMD
+
+	validate_issue_for_processing 98 || true
+
+	# The fallback must have dispatched enrich-issue for this issue number.
+	grep -q 'enrich-issue' "$dc_log"
+	grep -q '98' "$dc_log"
+}
+
+@test "Check 3: non-pipeline-autocreated body is skipped with no enrich-issue attempt (issue #555)" {
+	_source_validate_for_check3_test \
+		|| skip "validate_issue_for_processing() not extractable"
+	local dc_count
+	dc_count=$(grep -c 'dispatch_composition' "$_CHECK3_FUNC_FILE")
+	(( dc_count >= 3 )) \
+		|| skip "Check 3 enrich-issue fallback not present"
+
+	# No <!-- pipeline-autocreated --> marker. The body still carries
+	# ## Implementation Tasks so it reaches Check 3 and fails validation, but
+	# the missing marker must prevent any enrich-issue attempt.
+	_install_mock_gh_body 'Human-authored issue.\n\n## Implementation Tasks\n\nsteps:\n  - do the thing in src/foo.ts\n'
+
+	local dc_log="$TEST_TMP/dispatch.log"
+	: > "$dc_log"
+	log()                           { :; }
+	log_warn()                      { :; }
+	dispatch_composition()          { printf '%s\n' "$*" >> "$dc_log"; return 0; }
+	revalidate_issue_after_enrich() { return 0; }
+	export ENRICH_FOLLOWUPS=true
+	unset DEPLOY_VERIFY_CMD
+
+	local rc=0
+	validate_issue_for_processing 98 || rc=$?
+
+	# Must skip, and must NOT have attempted enrich-issue (no marker).
+	[[ "$rc" -eq 1 ]]
+	[[ ! -s "$dc_log" ]]
+}
