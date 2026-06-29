@@ -924,7 +924,14 @@ validate_issue_for_processing() {
 	# -----------------------------------------------------------------
 	if printf '%s' "$body" \
 		| grep -qE '<!-- pipeline-autocreated -->|## Implementation Tasks'; then
-		if ! assert_issue_valid "$body" 2>/dev/null; then
+		local valid_errs valid_rc
+		valid_errs=$(assert_issue_valid "$body" 2>&1 >/dev/null)
+		valid_rc=$?
+		if (( valid_rc != 0 )); then
+			while IFS= read -r diag_line; do
+				[[ -n "$diag_line" ]] && \
+					log_warn "Preflight #$issue_num: $diag_line"
+			done <<< "$valid_errs"
 			_SKIP_REASON="body failed structural validation"
 			return 1
 		fi

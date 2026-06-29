@@ -1680,3 +1680,53 @@ GHEOF
 	[[ "$rc" -eq 0 ]]
 	[[ -z "$_SKIP_REASON" ]]
 }
+
+# =============================================================================
+# TASK 1 (i555): Check 3 emits assert_issue_valid diagnostics via log_warn
+# =============================================================================
+#
+# When assert_issue_valid fails in Check 3, each diagnostic line from its
+# stderr must be forwarded through log_warn "Preflight #N: <line>" instead
+# of being silently discarded to /dev/null.
+
+@test "functional: Check 3 failure emits diagnostics via log_warn" {
+	# Arrange: body has ## Implementation Tasks (satisfies Check 2) but fails
+	# assert_issue_valid — no parseable task lines, no ## Acceptance Criteria.
+	local mock_bin="$TEST_TMP/mock-bin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"body":"## Implementation Tasks\n\nProse only, no task lines.\n\n## Background\n\nContext.","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	source_validate_issue_for_processing \
+		|| skip "validate_issue_for_processing() not yet present"
+
+	log() { :; }
+	local -a warn_calls=()
+	log_warn() { warn_calls+=("$*"); }
+	dispatch_composition() { return 1; }
+	export ENRICH_FOLLOWUPS=false
+	unset DEPLOY_VERIFY_CMD
+
+	_SKIP_REASON=""
+	local rc=0
+	validate_issue_for_processing 99 || rc=$?
+
+	# Must still return 1 and set _SKIP_REASON
+	[[ "$rc" -eq 1 ]]
+	[[ "$_SKIP_REASON" == *"body failed structural validation"* ]]
+
+	# At least one log_warn call must carry the Preflight #N prefix.
+	local found=false
+	local call
+	for call in "${warn_calls[@]}"; do
+		if [[ "$call" == *"Preflight #99:"* ]]; then
+			found=true
+			break
+		fi
+	done
+	[[ "$found" == "true" ]]
+}
