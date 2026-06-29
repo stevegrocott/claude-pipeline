@@ -524,6 +524,71 @@ EOF
 	assert_file_contains "$out/report.md" "Cache-read"
 }
 
+# =============================================================================
+# ab-report.sh — PER-ISSUE TOKEN COLUMNS (task 1 / issue #543)
+# =============================================================================
+
+@test "ab-report: per-issue comparison table has token column headers" {
+	local ctrl="$TEST_TMP/ctrl/batch-20260101"
+	local treat="$TEST_TMP/treat/batch-20260101"
+	mkdir -p "$ctrl" "$treat"
+	#                 root  iss st        dur q t p cost turns in  out  cc  cr
+	make_arm_log_dir "$ctrl"  1 completed 10  1 1 0 1.0  5     100 50  200 300 \
+		>/dev/null
+	make_arm_log_dir "$treat" 1 completed  7  1 0 0 0.6  3     80  40  150 500 \
+		>/dev/null
+
+	local out="$TEST_TMP/out"
+	run bash "$AB_REPORT" \
+		--control-log-dir "$ctrl" \
+		--treatment-log-dir "$treat" \
+		--output-dir "$out"
+	assert_exit_code "$status" 0
+
+	# The Per-Issue Comparison table header must include token columns.
+	assert_file_contains "$out/report.md" "Inp Tok"
+	assert_file_contains "$out/report.md" "Out Tok"
+	assert_file_contains "$out/report.md" "CCreate"
+	assert_file_contains "$out/report.md" "CRead"
+}
+
+@test "ab-report: per-issue delta row includes token deltas" {
+	local ctrl="$TEST_TMP/ctrl/batch-20260101"
+	local treat="$TEST_TMP/treat/batch-20260101"
+	mkdir -p "$ctrl" "$treat"
+	#                 root  iss st        dur q t p cost turns in  out  cc   cr
+	make_arm_log_dir "$ctrl"  1 completed 10  1 1 0 1.0  5     100 50  200  300 \
+		>/dev/null
+	make_arm_log_dir "$treat" 1 completed  7  1 0 0 0.6  3     80  40  150  500 \
+		>/dev/null
+	# input delta:        80 - 100 = -20
+	# output delta:       40 -  50 = -10
+	# cache_create delta: 150 - 200 = -50
+	# cache_read delta:  500 - 300 = +200
+
+	local out="$TEST_TMP/out"
+	run bash "$AB_REPORT" \
+		--control-log-dir "$ctrl" \
+		--treatment-log-dir "$treat" \
+		--output-dir "$out"
+	assert_exit_code "$status" 0
+
+	local report="$out/report.md"
+	# Per-issue control row must include its raw token count (100 inp tokens).
+	# Use a grep-based check so the column position is not significant.
+	local ctrl_row
+	ctrl_row=$(grep '| #1 | control' "$report")
+	assert_contains "$ctrl_row" "100"
+
+	# Per-issue delta row must carry the four token deltas.
+	local delta_row
+	delta_row=$(grep '\*\*delta\*\*' "$report")
+	assert_contains "$delta_row" "-20"
+	assert_contains "$delta_row" "-10"
+	assert_contains "$delta_row" "-50"
+	assert_contains "$delta_row" "+200"
+}
+
 @test "ab-report: ab-results.json carries the per-issue token breakdown" {
 	local ctrl="$TEST_TMP/ctrl/batch-20260101"
 	local treat="$TEST_TMP/treat/batch-20260101"
