@@ -311,23 +311,25 @@ collect_arm_data() {
 				&& -f "$impl_log_dir/metrics.json" ]]; then
 			local mf="$impl_log_dir/metrics.json"
 
-			state=$(jq -r '.state // "unknown"' "$mf" \
-				2>/dev/null || printf 'unknown')
-			duration=$(jq -r \
-				'.total_duration_seconds // "null"' "$mf" \
-				2>/dev/null || printf 'null')
-			quality_iters=$(jq -r \
-				'.iteration_summary.quality_iterations // 0' \
-				"$mf" 2>/dev/null || printf '0')
-			test_iters=$(jq -r \
-				'.iteration_summary.test_iterations // 0' \
-				"$mf" 2>/dev/null || printf '0')
-			pr_iters=$(jq -r \
-				'.iteration_summary.pr_review_iterations // 0' \
-				"$mf" 2>/dev/null || printf '0')
-			escalation_count=$(jq -r \
-				'.escalations | length' "$mf" \
-				2>/dev/null || printf '0')
+			# Extract all metrics.json fields in a single jq call
+			# with tab-separated output, then split into named
+			# variables (avoids forking jq once per field).
+			local metrics_tsv
+			metrics_tsv=$(jq -r '[
+				(.state // "unknown"),
+				(.total_duration_seconds // "null"),
+				(.iteration_summary.quality_iterations // 0),
+				(.iteration_summary.test_iterations // 0),
+				(.iteration_summary.pr_review_iterations // 0),
+				(.escalations | length)
+			] | @tsv' "$mf" 2>/dev/null || printf '')
+
+			if [[ -n "$metrics_tsv" ]]; then
+				IFS=$'\t' read -r state duration \
+					quality_iters test_iters \
+					pr_iters escalation_count \
+					<<< "$metrics_tsv"
+			fi
 		else
 			state=$(jq -r '.state // "unknown"' \
 				"$status_file" 2>/dev/null \
@@ -583,54 +585,36 @@ write_report() {
 		local ca_cc ta_cc da_cc
 		local ca_cr ta_cr da_cr
 
-		ca_dur=$(jq -r '.total_duration_seconds // "null"' \
-			<<< "$ctrl_agg")
-		ta_dur=$(jq -r '.total_duration_seconds // "null"' \
-			<<< "$treat_agg")
-		da_dur=$(jq -r '.total_duration_seconds // "null"' \
-			<<< "$agg_delta")
+		# Batch all field extractions for each arm into a single
+		# jq call per arm (control / treatment / delta), emitting
+		# tab-separated values split into named variables below.
+		local agg_filter='[
+			(.total_duration_seconds // "null"),
+			.total_iterations,
+			.total_escalations,
+			.total_cost_usd,
+			.total_turns,
+			.completed_count,
+			.total_input_tokens,
+			.total_output_tokens,
+			.total_cache_creation_tokens,
+			.total_cache_read_tokens
+		] | @tsv'
 
-		ca_iters=$(jq -r '.total_iterations' <<< "$ctrl_agg")
-		ta_iters=$(jq -r '.total_iterations' <<< "$treat_agg")
-		da_iters=$(jq -r '.total_iterations' <<< "$agg_delta")
+		local ctrl_tsv treat_tsv delta_tsv
+		ctrl_tsv=$(jq -r "$agg_filter" <<< "$ctrl_agg")
+		treat_tsv=$(jq -r "$agg_filter" <<< "$treat_agg")
+		delta_tsv=$(jq -r "$agg_filter" <<< "$agg_delta")
 
-		ca_esc=$(jq -r '.total_escalations' <<< "$ctrl_agg")
-		ta_esc=$(jq -r '.total_escalations' <<< "$treat_agg")
-		da_esc=$(jq -r '.total_escalations' <<< "$agg_delta")
-
-		ca_cost=$(jq -r '.total_cost_usd' <<< "$ctrl_agg")
-		ta_cost=$(jq -r '.total_cost_usd' <<< "$treat_agg")
-		da_cost=$(jq -r '.total_cost_usd' <<< "$agg_delta")
-
-		ca_turns=$(jq -r '.total_turns' <<< "$ctrl_agg")
-		ta_turns=$(jq -r '.total_turns' <<< "$treat_agg")
-		da_turns=$(jq -r '.total_turns' <<< "$agg_delta")
-
-		ca_comp=$(jq -r '.completed_count' <<< "$ctrl_agg")
-		ta_comp=$(jq -r '.completed_count' <<< "$treat_agg")
-		da_comp=$(jq -r '.completed_count' <<< "$agg_delta")
-
-		ca_inp=$(jq -r '.total_input_tokens' <<< "$ctrl_agg")
-		ta_inp=$(jq -r '.total_input_tokens' <<< "$treat_agg")
-		da_inp=$(jq -r '.total_input_tokens' <<< "$agg_delta")
-
-		ca_out=$(jq -r '.total_output_tokens' <<< "$ctrl_agg")
-		ta_out=$(jq -r '.total_output_tokens' <<< "$treat_agg")
-		da_out=$(jq -r '.total_output_tokens' <<< "$agg_delta")
-
-		ca_cc=$(jq -r \
-			'.total_cache_creation_tokens' <<< "$ctrl_agg")
-		ta_cc=$(jq -r \
-			'.total_cache_creation_tokens' <<< "$treat_agg")
-		da_cc=$(jq -r \
-			'.total_cache_creation_tokens' <<< "$agg_delta")
-
-		ca_cr=$(jq -r \
-			'.total_cache_read_tokens' <<< "$ctrl_agg")
-		ta_cr=$(jq -r \
-			'.total_cache_read_tokens' <<< "$treat_agg")
-		da_cr=$(jq -r \
-			'.total_cache_read_tokens' <<< "$agg_delta")
+		IFS=$'\t' read -r ca_dur ca_iters ca_esc ca_cost \
+			ca_turns ca_comp ca_inp ca_out ca_cc ca_cr \
+			<<< "$ctrl_tsv"
+		IFS=$'\t' read -r ta_dur ta_iters ta_esc ta_cost \
+			ta_turns ta_comp ta_inp ta_out ta_cc ta_cr \
+			<<< "$treat_tsv"
+		IFS=$'\t' read -r da_dur da_iters da_esc da_cost \
+			da_turns da_comp da_inp da_out da_cc da_cr \
+			<<< "$delta_tsv"
 
 		printf '| Duration (s)   | %s | %s | %s |\n' \
 			"$(fmt_float "$ca_dur" 1)" \
