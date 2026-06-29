@@ -7463,7 +7463,7 @@ $impl_summary" "$tagent"
         if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" || "$branch_scope" == "ts-frontend" ]]; then
             log "Running informational full-suite check (non-blocking)..."
             local full_scope_output full_scope_rc
-            full_scope_output=$(cd "." && eval "${TEST_UNIT_CMD:-npm test}" 2>&1) || true
+            full_scope_output=$(eval "${TEST_UNIT_CMD:-npm test}" 2>&1) || true
             full_scope_rc=$?
 
             if (( full_scope_rc != 0 )); then
@@ -7502,7 +7502,7 @@ $full_scope_failures
         if [[ "$branch_scope" != "bash" && -f "$bats_runner" ]]; then
             log "Running informational full-suite BATS check (non-blocking)..."
             local bats_full_output bats_full_rc
-            bats_full_output=$(cd "." && bash "$bats_runner" 2>&1)
+            bats_full_output=$(bash "$bats_runner" 2>&1)
             bats_full_rc=$?
 
             if (( bats_full_rc != 0 )); then
