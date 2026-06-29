@@ -779,6 +779,35 @@ run_composition_standard() {
 # ISSUE PROCESSING
 # =============================================================================
 
+# revalidate_issue_after_enrich <issue_num>
+#
+# Re-fetch the issue body after an inline /enrich-issue run and re-check it
+# against assert_issue_valid. Enrichment can return rc=0 while still leaving a
+# body that fails structural validation; without this gate the orchestrator
+# would proceed to spin up implement-issue on an unparseable issue.
+#
+# Returns:
+#   0 — body now passes assert_issue_valid (proceed)
+#   1 — body was successfully re-fetched but is still invalid (skip)
+#
+# A gh re-fetch failure (network/auth error) is treated as non-fatal: the
+# function returns 0 so the orchestrator's own validation acts as the safety
+# net — mirroring validate_issue_for_processing's gh-failure policy.
+revalidate_issue_after_enrich() {
+	local issue_num="$1"
+
+	local issue_json
+	issue_json=$(gh issue view "$issue_num" --json body \
+		2>/dev/null) || return 0
+	[[ -z "$issue_json" ]] && return 0
+
+	local body
+	body=$(printf '%s' "$issue_json" \
+		| jq -r '.body // ""' 2>/dev/null) || return 0
+
+	assert_issue_valid "$body" 2>/dev/null
+}
+
 # validate_issue_for_processing <issue_num>
 #
 # Preflight check: verify the issue has a parseable "## Implementation Tasks"
@@ -833,6 +862,13 @@ validate_issue_for_processing() {
 				_SKIP_REASON="needs-explore label (enrich-issue failed)"
 				return 1
 			fi
+			if ! revalidate_issue_after_enrich "$issue_num"; then
+				log_warn \
+					"Preflight #$issue_num: enriched but" \
+					"body still invalid — skipping"
+				_SKIP_REASON="needs-explore label (still invalid after enrich)"
+				return 1
+			fi
 			log "Preflight #$issue_num: enriched inline — proceeding"
 			return 0
 		fi
@@ -864,6 +900,13 @@ validate_issue_for_processing() {
 						"Preflight #$issue_num:" \
 						"enrich output: $enrich_out"
 				_SKIP_REASON="missing ## Implementation Tasks (enrich-issue failed)"
+				return 1
+			fi
+			if ! revalidate_issue_after_enrich "$issue_num"; then
+				log_warn \
+					"Preflight #$issue_num: enriched but" \
+					"body still invalid — skipping"
+				_SKIP_REASON="missing ## Implementation Tasks (still invalid after enrich)"
 				return 1
 			fi
 			log "Preflight #$issue_num: enriched inline — proceeding"

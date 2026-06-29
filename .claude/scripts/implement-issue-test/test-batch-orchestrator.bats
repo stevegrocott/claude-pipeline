@@ -1547,3 +1547,136 @@ source_sweep_implement_followups() {
 	# #200 was already in the original manifest — must NOT be re-processed.
 	! grep -qx '200' "$TEST_TMP/process_issue.calls"
 }
+
+# =============================================================================
+# TASK 1 (i554): post-enrich re-validation
+# After an inline /enrich-issue dispatch_composition call returns rc=0,
+# validate_issue_for_processing must re-fetch the body via gh issue view and
+# re-run assert_issue_valid. If the body is still invalid the function sets
+# _SKIP_REASON and returns 1 instead of proceeding.
+# =============================================================================
+
+# --- Static analysis ---
+
+@test "revalidate_issue_after_enrich helper function is defined" {
+	grep -qE '^revalidate_issue_after_enrich\(\)' \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "revalidate_issue_after_enrich re-fetches body via gh issue view" {
+	local body
+	body=$(_extract_function_body revalidate_issue_after_enrich \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'gh issue view'* ]]
+}
+
+@test "revalidate_issue_after_enrich runs assert_issue_valid" {
+	local body
+	body=$(_extract_function_body revalidate_issue_after_enrich \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'assert_issue_valid'* ]]
+}
+
+@test "validate_issue_for_processing re-validates after a successful enrich" {
+	# Both enrich-success paths must gate on revalidate_issue_after_enrich
+	# before returning 0. Expect at least two call sites (needs-explore +
+	# missing Implementation Tasks).
+	local body count
+	body=$(_extract_function_body validate_issue_for_processing \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	count=$(grep -c 'revalidate_issue_after_enrich' <<< "$body")
+	(( count >= 2 ))
+}
+
+# --- Functional: source both functions with a mocked gh CLI ---
+
+source_revalidate_functions() {
+	local lib="$SCRIPT_DIR/issue-body-lib.sh"
+	[[ -f "$lib" ]] || return 1
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	local f_helper="$TEST_TMP/revalidate_issue_after_enrich.bash"
+	local f_main="$TEST_TMP/validate_issue_for_processing.bash"
+	_extract_function_body revalidate_issue_after_enrich \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$f_helper"
+	_extract_function_body validate_issue_for_processing \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$f_main"
+	grep -q 'revalidate_issue_after_enrich' "$f_helper" || return 1
+	grep -q 'validate_issue_for_processing' "$f_main" || return 1
+	# shellcheck disable=SC1090
+	source "$f_helper"
+	# shellcheck disable=SC1090
+	source "$f_main"
+}
+
+# Install a gh mock that returns one body on the initial --json body,labels
+# fetch and a second body on the re-fetch (--json body).
+_install_gh_two_phase_mock() {
+	local initial="$1"
+	local refetch="$2"
+	local mock_bin="$TEST_TMP/mock-bin"
+	mkdir -p "$mock_bin"
+	export MOCK_INITIAL_JSON="$initial"
+	export MOCK_REFETCH_JSON="$refetch"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+# Initial validate fetch passes "--json body,labels"; the post-enrich
+# re-fetch passes "--json body". Branch on the presence of "labels".
+if printf '%s ' "$@" | grep -q 'labels'; then
+	printf '%s\n' "$MOCK_INITIAL_JSON"
+else
+	printf '%s\n' "$MOCK_REFETCH_JSON"
+fi
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "functional: enrich rc=0 but body still invalid → return 1 with skip reason" {
+	# Initial body lacks ## Implementation Tasks → enters Check 2 enrich path.
+	# Re-fetch after enrich still lacks tasks → assert_issue_valid fails.
+	_install_gh_two_phase_mock \
+		'{"body":"## Background\n\nNo tasks here.","labels":[]}' \
+		'{"body":"## Background\n\nStill no tasks after enrich.","labels":[]}'
+
+	source_revalidate_functions \
+		|| skip "revalidate_issue_after_enrich() not yet present"
+
+	log()                  { :; }
+	log_warn()             { :; }
+	dispatch_composition() { return 0; }
+	export ENRICH_FOLLOWUPS=true
+	unset DEPLOY_VERIFY_CMD
+
+	_SKIP_REASON=""
+	local rc=0
+	validate_issue_for_processing 99 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ -n "$_SKIP_REASON" ]]
+	[[ "$_SKIP_REASON" == *"still invalid after enrich"* ]]
+}
+
+@test "functional: enrich rc=0 and body now valid → return 0" {
+	# Re-fetch after enrich returns a structurally valid body → proceed.
+	_install_gh_two_phase_mock \
+		'{"body":"## Background\n\nNo tasks here.","labels":[]}' \
+		'{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+
+	source_revalidate_functions \
+		|| skip "revalidate_issue_after_enrich() not yet present"
+
+	log()                  { :; }
+	log_warn()             { :; }
+	dispatch_composition() { return 0; }
+	export ENRICH_FOLLOWUPS=true
+	unset DEPLOY_VERIFY_CMD
+
+	_SKIP_REASON=""
+	local rc=0
+	validate_issue_for_processing 99 || rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ -z "$_SKIP_REASON" ]]
+}
