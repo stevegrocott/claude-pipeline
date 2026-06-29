@@ -138,8 +138,15 @@ teardown() {
 
 # Extract and source validate_issue_for_processing from batch-orchestrator.sh
 # and assert_issue_valid from issue-body-lib.sh so the function can be tested
-# end-to-end.  Returns 1 (which BATS converts to a skip) when either
-# artefact is missing or the function is not yet defined.
+# end-to-end.  Returns 1 (which BATS converts to a skip) when an artefact is
+# missing, the function is undefined, or the issue #554 fix is not yet present.
+#
+# The fix re-validates the issue body after a successful (rc=0) enrich dispatch
+# and can skip.  Without it the no-op path proceeds unconditionally, so the
+# assertion below would exercise behaviour that does not exist yet (e.g. on a
+# branch carrying only the test and not the orchestrator change).  Gate on a
+# signal of that re-validation so the test skips cleanly in isolation and runs
+# for real once the orchestrator fix lands.
 _source_validate_for_enrich_test() {
 	local lib="$PROJECT_DIR/.claude/scripts/issue-body-lib.sh"
 	[[ -f "$lib" ]] || return 1
@@ -153,6 +160,9 @@ _source_validate_for_enrich_test() {
 	_extract_function_body validate_issue_for_processing "$batch" \
 		> "$func_file"
 	grep -q 'validate_issue_for_processing' "$func_file" 2>/dev/null \
+		|| return 1
+	# Require evidence of the post-enrich re-validation fix (issue #554).
+	grep -qiE 'revalidat|invalid after enrich' "$func_file" 2>/dev/null \
 		|| return 1
 	# shellcheck disable=SC1090
 	source "$func_file"
@@ -177,7 +187,7 @@ GHEOF
 	export PATH="$mock_bin:$PATH"
 
 	_source_validate_for_enrich_test \
-		|| skip "validate_issue_for_processing() not yet present"
+		|| skip "validate_issue_for_processing() post-enrich re-validation fix not present"
 
 	# Stub collaborators.
 	# dispatch_composition simulates enrich-issue exiting 0 as a no-op
