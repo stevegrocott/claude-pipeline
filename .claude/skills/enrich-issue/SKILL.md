@@ -53,6 +53,7 @@ Read the issue body and title:
 
 ```bash
 PLATFORM_DIR=".claude/scripts/platform"
+[[ -f .claude/config/platform.sh ]] && source .claude/config/platform.sh
 ISSUE_BODY=$(gh issue view "$ISSUE_NUMBER" --json body,title,labels \
   --jq '{title: .title, body: .body, labels: [.labels[].name]}')
 
@@ -127,6 +128,22 @@ Break the chosen approach into implementable tasks following the same convention
 - **Every task MUST include at least one file path**
 
 ### Step 5: Rewrite Issue Body In Place
+
+**Deploy Verification section (scope-dependent):** Before deciding whether to include a `## Deploy Verification` section, check `DEPLOY_VERIFY_CMD` and `FRONTEND_PATH_PATTERNS` (sourced from `.claude/config/platform.sh` in Step 1):
+
+- **`DEPLOY_VERIFY_CMD` is empty or unset:** **Omit the section entirely.** The orchestrator skips the deploy-verify stage when no command is configured — do not add the section even if files changed.
+- **`DEPLOY_VERIFY_CMD` is set and all changed files match `FRONTEND_PATH_PATTERNS`:** Include the section; use `$DEPLOY_VERIFY_CMD --health-only` as the Verification command. Frontend-only changes do not require a full redeploy.
+- **`DEPLOY_VERIFY_CMD` is set and any changed file does not match `FRONTEND_PATH_PATTERNS`:** Include the section; use `$DEPLOY_VERIFY_CMD` (no flag) as the Verification command. Backend or shared changes require a full redeploy.
+
+The `## Deploy Verification` section body **must** include a `**Verification command:**` line (the orchestrator's body-scan gate requires it):
+
+```
+## Deploy Verification
+
+**Verification command:** <DEPLOY_VERIFY_CMD or DEPLOY_VERIFY_CMD --health-only>
+
+<optional notes about what the deploy does>
+```
 
 Construct the enriched issue body and update via `gh issue edit`:
 
