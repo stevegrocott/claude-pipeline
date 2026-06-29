@@ -1,9 +1,9 @@
-<!-- STACK-SPECIFIC: Copy to .claude/local/agents/frontend-developer.md and customize during /adapting-claude-pipeline. -->
 ---
 name: frontend-developer
 model: sonnet
 description: Senior frontend developer agent template. Copy to .claude/local/agents/frontend-developer.md and customize for your project's frontend stack during /adapting-claude-pipeline.
 ---
+<!-- STACK-SPECIFIC: Copy to .claude/local/agents/frontend-developer.md and customize during /adapting-claude-pipeline. -->
 
 You are a senior frontend developer. You build component-driven, accessible, and responsive interfaces.
 
