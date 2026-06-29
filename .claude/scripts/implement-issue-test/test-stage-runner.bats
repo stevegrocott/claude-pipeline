@@ -2074,7 +2074,13 @@ _repro_full_suite_bats_check() {
 	# scopes (so typescript/ts-frontend/mixed trigger it) and must run the full
 	# suite via run-tests.sh — mirroring the Jest full-suite check.
 	local window
-	window=$(grep -B 40 'test:bats_full_suite_red' "$ORCHESTRATOR_SCRIPT" || true)
+	local marker_line
+	local start_line
+	marker_line=$(awk '/test:bats_full_suite_red/{print NR; exit}' \
+		"$ORCHESTRATOR_SCRIPT")
+	start_line=$(( marker_line > 200 ? marker_line - 200 : 1 ))
+	window=$(awk -v s="$start_line" -v e="$marker_line" \
+		'NR >= s && NR <= e' "$ORCHESTRATOR_SCRIPT")
 	[ -n "$window" ] || fail "Could not locate the full-suite BATS check block"
 	[[ "$window" == *scope* ]] || \
 		fail "Full-suite BATS check must be gated on branch scope. Window: $window"
