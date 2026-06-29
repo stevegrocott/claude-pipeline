@@ -81,6 +81,13 @@ cp .claude/agents/fastify-backend-developer.md .claude/local/agents/
 cp .claude/agents/react-frontend-developer.md .claude/local/agents/
 cp .claude/agents/playwright-test-developer.md .claude/local/agents/
 
+# Strip STACK-SPECIFIC marker comments from local copies
+for f in .claude/local/agents/*.md; do
+    [[ -f "$f" ]] || continue
+    grep -v '^<!-- STACK-SPECIFIC:' "$f" > "${f}.tmp" \
+        && mv "${f}.tmp" "$f"
+done
+
 # Copy config for customization
 cp .claude/config/platform.sh .claude/local/config/
 
