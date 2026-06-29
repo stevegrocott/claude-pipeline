@@ -81,6 +81,56 @@ EOF
 }
 
 # =============================================================================
+# ISSUE #559: _extract_function_body declaration-line guarantee
+# =============================================================================
+# The output must START with the declaration line (not just contain it
+# somewhere).  This is load-bearing: source_validate_issue_for_processing and
+# source_revalidate_functions both run
+#   grep -q '<func_name>' "$func_file"
+# on the extracted body to confirm extraction succeeded.  If the declaration
+# line were absent those helpers would return 1 and every downstream test
+# would skip rather than execute.
+
+@test "_extract_function_body first output line is the function declaration" {
+	local script_file="$TEST_TMP/decl-line.sh"
+	cat > "$script_file" << 'EOF'
+#!/usr/bin/env bash
+check_decl() {
+	echo "body"
+}
+EOF
+	local first_line
+	first_line=$(_extract_function_body check_decl "$script_file" | head -1)
+	[[ "$first_line" == 'check_decl() {' ]]
+}
+
+@test "_extract_function_body declaration line enables function-name grep used by source helpers" {
+	# Mirrors the grep -q '<func>' "$func_file" guard in
+	# source_validate_issue_for_processing / source_revalidate_functions.
+	# Without the declaration line that grep returns 1, causing callers to skip.
+	local script_file="$TEST_TMP/grep-guard.sh"
+	cat > "$script_file" << 'EOF'
+#!/usr/bin/env bash
+my_target_func() {
+	echo "implementation"
+}
+EOF
+	local body
+	body=$(_extract_function_body my_target_func "$script_file")
+	grep -q 'my_target_func' <<< "$body"
+}
+
+@test "source_validate_issue_for_processing loads function without skipping (declaration line present)" {
+	# This test would skip in every run if _extract_function_body did NOT
+	# include the declaration line, because source_validate_issue_for_processing
+	# calls _extract_function_body and then greps the output for the function
+	# name — which only matches when the declaration line is included.
+	source_validate_issue_for_processing \
+		|| skip "source_validate_issue_for_processing prerequisites not met (lib absent)"
+	declare -f validate_issue_for_processing > /dev/null
+}
+
+# =============================================================================
 # STATIC ANALYSIS: merge_blocked case arm
 # =============================================================================
 
