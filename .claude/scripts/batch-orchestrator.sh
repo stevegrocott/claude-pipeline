@@ -138,6 +138,11 @@ usage() {
     echo "  (none specified)                Default claude behavior"
     echo ""
     echo "Note: process-pr stage always uses code-reviewer agent"
+    echo ""
+    echo "Environment:"
+    echo "  CONTEXT_MODE_ENABLED=1  Allow external MCP configs in claude invocations"
+    echo "                          (default: 0 — passes --strict-mcp-config to suppress"
+    echo "                          external MCP configs; set to 1 for treatment arm)"
     exit 3
 }
 
@@ -711,24 +716,17 @@ context_mode_claude_args() {
 	printf '%s\n' "--strict-mcp-config"
 }
 
-# collect_context_mode_args — read context_mode_claude_args output into an array.
-# Helper to avoid duplicating the flag-reading loop across run_composition functions.
-collect_context_mode_args() {
-	local -a args=()
-	local flag
-	while IFS= read -r flag; do
-		args+=("$flag")
-	done < <(context_mode_claude_args)
-	printf '%s\n' "${args[@]}"
-}
-
 # run_composition_subprocess — invoke a skill as a worktree-isolated subprocess.
 # Used for skills that require git worktree isolation (e.g. implement-issue).
 run_composition_subprocess() {
 	local prompt="$1"
 	shift
 	log "Composition dispatch → subprocess: $prompt"
-	local -a ctx_args=($(collect_context_mode_args))
+	local -a ctx_args=()
+	local _ctx_flag
+	while IFS= read -r _ctx_flag; do
+		ctx_args+=("$_ctx_flag")
+	done < <(context_mode_claude_args)
 	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
 		--dangerously-skip-permissions \
 		--output-format json \
@@ -755,7 +753,11 @@ run_composition_standard() {
 	local prompt="$1"
 	shift
 	log "Composition dispatch → standard: $prompt"
-	local -a ctx_args=($(collect_context_mode_args))
+	local -a ctx_args=()
+	local _ctx_flag
+	while IFS= read -r _ctx_flag; do
+		ctx_args+=("$_ctx_flag")
+	done < <(context_mode_claude_args)
 	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
 		${ctx_args[@]+"${ctx_args[@]}"} \
 		"$@" \
