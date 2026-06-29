@@ -358,3 +358,79 @@ teardown() {
 
 	[ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# (d) CONTEXT MODE WIRING — context_mode_claude_args (issue #542)
+# =============================================================================
+#
+# The ab-harness exports CONTEXT_MODE_ENABLED per arm (0 = control,
+# 1 = treatment).  batch-orchestrator must translate that env var into
+# claude(1) MCP flags so the control arm suppresses the context-mode plugin
+# (--strict-mcp-config) while the treatment arm keeps it.  Without this both
+# arms invoke claude identically and the A/B experiment is a no-op.
+
+# Source only context_mode_claude_args from batch-orchestrator.sh.  Soft
+# failure (skip) if the helper has not been added yet.
+source_context_mode_args() {
+	local body
+	body=$(_extract_function_body context_mode_claude_args \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	if [[ -z "$body" ]]; then
+		return 1
+	fi
+	eval "$body"
+	return 0
+}
+
+require_context_mode_args() {
+	source_context_mode_args \
+		|| skip "context_mode_claude_args() not yet implemented"
+}
+
+@test "(d) context_mode_claude_args prints nothing when enabled (treatment)" {
+	require_context_mode_args
+
+	CONTEXT_MODE_ENABLED=1 run context_mode_claude_args
+
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "(d) context_mode_claude_args suppresses MCP when disabled (control)" {
+	require_context_mode_args
+
+	CONTEXT_MODE_ENABLED=0 run context_mode_claude_args
+
+	[ "$status" -eq 0 ]
+	[[ "$output" == "--strict-mcp-config" ]]
+}
+
+@test "(d) context_mode_claude_args defaults to suppression when unset" {
+	require_context_mode_args
+	unset CONTEXT_MODE_ENABLED
+
+	run context_mode_claude_args
+
+	[ "$status" -eq 0 ]
+	[[ "$output" == "--strict-mcp-config" ]]
+}
+
+@test "(d) context_mode_claude_args treats any non-1 value as disabled" {
+	require_context_mode_args
+
+	# Only the exact string "1" enables; everything else suppresses.
+	CONTEXT_MODE_ENABLED=true run context_mode_claude_args
+
+	[[ "$output" == "--strict-mcp-config" ]]
+}
+
+@test "(d) both claude-invoking paths splice in context_mode_claude_args" {
+	# Structural: the helper must be defined AND consulted by both
+	# run_composition paths, so the per-arm flag actually reaches claude.
+	grep -q "^context_mode_claude_args() {$" "$BATCH_ORCHESTRATOR_SCRIPT"
+
+	# definition + one call site in each of the two run_composition functions
+	local count
+	count=$(grep -c "context_mode_claude_args" "$BATCH_ORCHESTRATOR_SCRIPT")
+	[ "$count" -ge 3 ]
+}

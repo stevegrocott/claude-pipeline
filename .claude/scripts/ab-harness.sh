@@ -370,6 +370,12 @@ launch_arm() {
 
 	(
 		cd "$arm_wt" || exit 1
+		# Per-arm differentiator: batch-orchestrator.sh reads this via
+		# context_mode_claude_args() and adds --strict-mcp-config to its
+		# claude invocations when 0 (control) — suppressing the context-mode
+		# MCP plugin — and leaves it untouched when 1 (treatment) so the
+		# plugin loads.  Exporting it here is what makes the arms actually
+		# differ; without the consumer the experiment is a no-op (issue #542).
 		export CONTEXT_MODE_ENABLED="$context_mode"
 		bash "$SCRIPT_DIR/batch-orchestrator.sh" \
 			--issues "$ISSUES" \

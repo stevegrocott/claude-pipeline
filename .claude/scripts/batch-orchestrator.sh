@@ -701,15 +701,47 @@ dispatch_composition() {
 	esac
 }
 
+# context_mode_claude_args — print the claude(1) MCP flags for this arm.
+#
+# The ab-harness exports CONTEXT_MODE_ENABLED per arm (0 = control,
+# 1 = treatment) so the two arms differ ONLY in whether the context-mode
+# MCP plugin is active.  This translates that env var into claude flags;
+# without it both arms invoke claude identically and the A/B experiment is a
+# no-op — the original bug in issue #542.
+#
+#   CONTEXT_MODE_ENABLED=1   treatment: print nothing — the context-mode MCP
+#                            plugin loads normally from the user's Claude
+#                            config, so the arm runs WITH it enabled.
+#   CONTEXT_MODE_ENABLED=0   control: print --strict-mcp-config so claude
+#   (or unset)               ignores all externally configured MCP servers,
+#                            suppressing the context-mode plugin so the arm
+#                            runs WITHOUT it.
+#
+# Prints one flag per line (nothing for treatment); callers read the output
+# into an array and splice it into the claude argv.  Pure: stdout only, no
+# logging, so command substitution stays clean.
+context_mode_claude_args() {
+	if [[ "${CONTEXT_MODE_ENABLED:-0}" == "1" ]]; then
+		return 0
+	fi
+	printf '%s\n' "--strict-mcp-config"
+}
+
 # run_composition_subprocess — invoke a skill as a worktree-isolated subprocess.
 # Used for skills that require git worktree isolation (e.g. implement-issue).
 run_composition_subprocess() {
 	local prompt="$1"
 	shift
 	log "Composition dispatch → subprocess: $prompt"
+	local -a ctx_args=()
+	local _flag
+	while IFS= read -r _flag; do
+		[[ -n "$_flag" ]] && ctx_args+=("$_flag")
+	done < <(context_mode_claude_args)
 	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
 		--dangerously-skip-permissions \
 		--output-format json \
+		${ctx_args[@]+"${ctx_args[@]}"} \
 		"$@" \
 		2>&1
 }
@@ -732,7 +764,13 @@ run_composition_standard() {
 	local prompt="$1"
 	shift
 	log "Composition dispatch → standard: $prompt"
+	local -a ctx_args=()
+	local _flag
+	while IFS= read -r _flag; do
+		[[ -n "$_flag" ]] && ctx_args+=("$_flag")
+	done < <(context_mode_claude_args)
 	timeout "$ISSUE_TIMEOUT" env -u CLAUDECODE claude -p "$prompt" \
+		${ctx_args[@]+"${ctx_args[@]}"} \
 		"$@" \
 		2>&1
 }
