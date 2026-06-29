@@ -620,3 +620,77 @@ EOF
 	assert_equals \
 		"$(jq -r '.aggregate.delta.total_turns' "$json")" "-2"
 }
+
+# =============================================================================
+# ab-harness.sh — INTEGRATION (stub batch-orchestrator via mock-bin)
+# =============================================================================
+
+# integration_stub_dir <repo_path>
+#
+# Creates a stub batch-orchestrator.sh alongside ab-harness.sh in the
+# given repo's .claude/scripts/ directory.  The stub accepts any arguments
+# from launch_arm and exits 0 to simulate a successful orchestrator run,
+# mirroring the real script's exit code contract without touching real git
+# hosts or the Claude CLI.
+integration_stub_dir() {
+	local repo="$1"
+	cat > "$repo/.claude/scripts/batch-orchestrator.sh" << 'STUB'
+#!/usr/bin/env bash
+# Stub batch-orchestrator.sh — accepts any args, exits 0
+exit 0
+STUB
+	chmod +x "$repo/.claude/scripts/batch-orchestrator.sh"
+}
+
+@test "ab-harness: integration — stub batch-orchestrator runs both arms and cleans up worktrees on EXIT" {
+	# ------------------------------------------------------------------
+	# ARRANGE: isolated git repo + harness copy + orchestrator stub
+	# ------------------------------------------------------------------
+	local repo="$TEST_TMP/repo"
+	init_git_repo "$repo"
+	mkdir -p "$repo/.claude/scripts"
+
+	# Place harness inside repo so REPO_ROOT resolves to $repo:
+	#   SCRIPT_DIR = $repo/.claude/scripts
+	#   REPO_ROOT  = $(cd "$SCRIPT_DIR/../.." && pwd) = $repo
+	cp "$AB_HARNESS" "$repo/.claude/scripts/ab-harness.sh"
+
+	# Stub batch-orchestrator.sh at the SCRIPT_DIR-relative path that
+	# launch_arm uses: bash "$SCRIPT_DIR/batch-orchestrator.sh" ...
+	integration_stub_dir "$repo"
+
+	# ------------------------------------------------------------------
+	# ACT: run the full harness against two mock issue numbers
+	# ------------------------------------------------------------------
+	run bash "$repo/.claude/scripts/ab-harness.sh" \
+		--issues "101,102" \
+		--base-branch base
+
+	# ------------------------------------------------------------------
+	# ASSERT 1: harness exited successfully
+	# ------------------------------------------------------------------
+	assert_exit_code "$status" 0
+
+	# ------------------------------------------------------------------
+	# ASSERT 2: both arms completed
+	# harness.log is written to $repo/logs/ab-<TIMESTAMP>/harness.log
+	# ------------------------------------------------------------------
+	local harness_log
+	harness_log=$(find "$repo/logs" -maxdepth 2 \
+		-name "harness.log" | head -1)
+	assert_not_empty "$harness_log" \
+		"harness.log not found under $repo/logs"
+
+	assert_file_contains "$harness_log" "Control arm finished"
+	assert_file_contains "$harness_log" "Treatment arm finished"
+
+	# ------------------------------------------------------------------
+	# ASSERT 3: EXIT trap cleaned up both arm worktrees
+	# After cleanup(), only the main worktree (the repo root itself)
+	# should remain registered.
+	# ------------------------------------------------------------------
+	local wt_count
+	wt_count=$(git -C "$repo" worktree list --porcelain 2>/dev/null \
+		| grep -c '^worktree' || printf '0\n')
+	[ "$wt_count" -eq 1 ]
+}
