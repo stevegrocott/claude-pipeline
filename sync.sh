@@ -155,6 +155,34 @@ sync_skills() {
     done
 }
 
+# Strip <!-- STACK-SPECIFIC: --> from line 1 of consumer agent files.
+# Agents whose first line is already --- are left untouched.
+# HTML comments that appear after line 1 are never removed.
+patch_agents() {
+	local dst="$1"
+	local agents_dir="$dst/agents"
+
+	[[ -d "$agents_dir" ]] || return
+
+	local file first_line tmp
+	local patched=0
+	for file in "$agents_dir"/*.md; do
+		[[ -f "$file" ]] || continue
+		IFS= read -r first_line < "$file"
+		if [[ "$first_line" == '<!-- STACK-SPECIFIC:'* ]]; then
+			tmp=$(mktemp)
+			tail -n +2 "$file" > "$tmp" && mv "$tmp" "$file"
+			echo "  PATCH agents/${file##*/}" \
+				"(stripped STACK-SPECIFIC comment from line 1)"
+			patched=$((patched + 1))
+		fi
+	done
+
+	if [[ "$patched" -eq 0 ]]; then
+		echo "  OK   agents/ (no STACK-SPECIFIC line-1 comments found)"
+	fi
+}
+
 # Diff a directory
 diff_dir() {
     local src="$1" dst="$2" dir="$3"
@@ -312,7 +340,11 @@ case "$COMMAND" in
         register_detect_hook "$PROJECT_DIR/settings.json"
 
         echo ""
-        echo "Done. Project-specific files (agents, config, prompts) untouched."
+        echo "Patching consumer agents:"
+        patch_agents "$PROJECT_DIR"
+
+        echo ""
+        echo "Done. Project-specific files (config, prompts) untouched."
         ;;
 
     from)
