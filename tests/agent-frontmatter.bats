@@ -16,7 +16,16 @@
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-AGENTS_DIR="$REPO_ROOT/.claude/agents"
+
+# Agent definitions moved under plugins/pipeline-core/agents/ in the plugin
+# migration (issue #571).  Before the git mv they still live in
+# .claude/agents/.  Prefer the plugin location and fall back to the legacy
+# path so this test passes on both sides of the restructure.
+if [[ -d "$REPO_ROOT/plugins/pipeline-core/agents" ]]; then
+	AGENTS_DIR="$REPO_ROOT/plugins/pipeline-core/agents"
+else
+	AGENTS_DIR="$REPO_ROOT/.claude/agents"
+fi
 
 # =============================================================================
 # FRONT-MATTER OPENER

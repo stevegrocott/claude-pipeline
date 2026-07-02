@@ -19,8 +19,19 @@
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
-ORCHESTRATOR="$REPO_ROOT/.claude/scripts/implement-issue-orchestrator.sh"
-AGENTS_DIR="$REPO_ROOT/.claude/agents"
+
+# Scripts and agents moved under plugins/pipeline-core/ in the plugin
+# migration (issue #571); before the git mv they live under .claude/.
+# Prefer the plugin root and fall back to the legacy layout.  Both layouts
+# keep scripts/ and agents/ as siblings, so _normalize_agent_name's
+# "${SCRIPT_DIR}/../agents/<name>.md" lookup resolves correctly either way.
+if [[ -d "$REPO_ROOT/plugins/pipeline-core/scripts" ]]; then
+	CORE_DIR="$REPO_ROOT/plugins/pipeline-core"
+else
+	CORE_DIR="$REPO_ROOT/.claude"
+fi
+ORCHESTRATOR="$CORE_DIR/scripts/implement-issue-orchestrator.sh"
+AGENTS_DIR="$CORE_DIR/agents"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown
@@ -31,8 +42,8 @@ setup() {
 	export TEST_TMP
 
 	# _normalize_agent_name resolves "${SCRIPT_DIR}/../agents/<name>.md", so
-	# SCRIPT_DIR must point at the real scripts directory.
-	export SCRIPT_DIR="$REPO_ROOT/.claude/scripts"
+	# SCRIPT_DIR must point at the real scripts directory (plugin or legacy).
+	export SCRIPT_DIR="$CORE_DIR/scripts"
 	export SCRIPT_NAME="agent-name-normalization-test"
 
 	# Empty LOG_FILE → log/log_warn write only to stderr (no file needed).
