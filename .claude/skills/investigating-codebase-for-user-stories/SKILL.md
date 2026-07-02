@@ -269,7 +269,7 @@ Generate stories as issues for sprint planning:
 ### Single Issue Creation
 
 ```bash
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="${CLAUDE_PLUGIN_ROOT}/scripts/platform"
 "$PLATFORM_DIR/create-issue.sh" \
   --title "As a guest, I want to sign up" \
   --body "$(cat docs/user-stories/authentication/guest-signup.md)" \
@@ -283,7 +283,7 @@ Generate `create-issues.sh` alongside stories:
 ```bash
 #!/bin/bash
 # Auto-generated from user stories
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="${CLAUDE_PLUGIN_ROOT}/scripts/platform"
 
 "$PLATFORM_DIR/create-issue.sh" --title "Guest Signup" \
   --body "$(cat docs/user-stories/authentication/guest-signup.md)" \

@@ -391,7 +391,7 @@ Extract from the user's context query:
 Build and execute `gh` command based on parsed criteria:
 
 ```bash
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="${CLAUDE_PLUGIN_ROOT}/scripts/platform"
 
 # Example: issues assigned to user
 "$PLATFORM_DIR/list-issues.sh" --assignee "@me" --state open
@@ -471,11 +471,11 @@ Launch the batch orchestrator as a background process:
 
 ```bash
 # Launch orchestrator (agent is read from manifest, or can be overridden via --agent)
-nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" \
+nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 # Or with explicit agent override:
-# nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --agent bulletproof-frontend-developer \
+# nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --agent bulletproof-frontend-developer \
 #   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 ORCHESTRATOR_PID=$!
@@ -703,7 +703,7 @@ Running `/handle-issues` with `--enrich-followups` (or `batch-orchestrator.sh --
 
 ```bash
 # Launch orchestrator with enrichment sweep enabled
-nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --enrich-followups \
+nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --enrich-followups \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 ```
 
@@ -711,7 +711,7 @@ Running `/handle-issues` with `--implement-followups` implies `--enrich-followup
 
 ```bash
 # Launch orchestrator with enrichment + implementation sweep enabled
-nohup .claude/scripts/batch-orchestrator.sh --manifest "$MANIFEST" --implement-followups \
+nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --implement-followups \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 ```
 
