@@ -1440,10 +1440,40 @@ handle_rate_limit() {
 # Returns empty string if skill file not found (non-fatal).
 load_skill() {
     local skill_name="$1"
-    # CLAUDE_PROJECT_DIR is set by Claude Code but absent when run from batch/shell directly.
-    # Fall back to the script's own repo root so skills load correctly in both contexts.
-    local _project_dir="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    local skill_file="$_project_dir/.claude/skills/$skill_name/SKILL.md"
+    local skill_file=""
+
+    # A project may override a plugin-shipped skill by placing its own copy
+    # at .claude/skills/<name>/SKILL.md. CLAUDE_PROJECT_DIR is set by Claude
+    # Code and absent when this script runs headlessly outside a session, so
+    # the override is only consulted when it is actually available.
+    if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+        local project_skill_file="$CLAUDE_PROJECT_DIR/.claude/skills/$skill_name/SKILL.md"
+        if [[ -f "$project_skill_file" ]]; then
+            skill_file="$project_skill_file"
+        fi
+    fi
+
+    if [[ -z "$skill_file" ]]; then
+        # Default: read the skill bundled with the plugin. CLAUDE_PLUGIN_ROOT
+        # is set by Claude Code when this script runs from an installed
+        # plugin. Fall back to the repo root computed from this script's own
+        # location so skills still resolve in dev/test and pre-migration
+        # checkouts, preferring the post-git-mv plugin layout
+        # (plugins/pipeline-core/skills/) and falling back to the legacy
+        # .claude/skills/ layout so this works on both sides of the restructure.
+        local _plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
+        if [[ -z "$_plugin_root" ]]; then
+            local _repo_root
+            _repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+            if [[ -d "$_repo_root/plugins/pipeline-core/skills" ]]; then
+                _plugin_root="$_repo_root/plugins/pipeline-core"
+            else
+                _plugin_root="$_repo_root/.claude"
+            fi
+        fi
+        skill_file="$_plugin_root/skills/$skill_name/SKILL.md"
+    fi
+
     if [[ -f "$skill_file" ]]; then
         cat "$skill_file"
     else
