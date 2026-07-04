@@ -1,0 +1,13 @@
+{
+  "name": "claude-pipeline",
+  "owner": {
+    "name": "Stephen Grocott"
+  },
+  "plugins": [
+    {
+      "name": "pipeline-core",
+      "source": "./plugins/pipeline-core",
+      "description": "Core explore -> issue -> implement engine, platform scripts, and hooks for the Claude Pipeline."
+    }
+  ]
+}

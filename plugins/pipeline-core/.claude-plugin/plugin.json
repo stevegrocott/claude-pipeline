@@ -1,0 +1,7 @@
+{
+  "name": "pipeline-core",
+  "version": "0.1.0",
+  "description": "Core explore -> issue -> implement engine, platform scripts, and hooks for the Claude Pipeline.",
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json"
+}
