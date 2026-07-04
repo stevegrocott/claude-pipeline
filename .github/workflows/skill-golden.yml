@@ -43,7 +43,7 @@ jobs:
             else
               skills=$(printf '%s\n' "$changed" \
                 | grep -E '^(\.claude|plugins/pipeline-core)/skills/[^/]+/' \
-                | sed -E 's|^(\.claude|plugins/pipeline-core)/skills/([^/]+)/.*|\2|' \
+                | sed -E 's#^(\.claude|plugins/pipeline-core)/skills/([^/]+)/.*#\2#' \
                 | sort -u \
                 | tr '\n' ' ' \
                 | sed 's/[[:space:]]*$//')
