@@ -7,23 +7,25 @@
 #   skill-golden.sh <skill-name> <fixture>  run single fixture by basename
 #   skill-golden.sh --all                   run every skill with a manifest
 #
-# Golden test config is read from .claude/skills/<skill>/SKILL.md frontmatter:
+# Golden test config is read from <SKILLS_DIR>/<skill>/SKILL.md frontmatter,
+# where SKILLS_DIR defaults to plugins/pipeline-core/skills (falling back to
+# the legacy .claude/skills layout):
 #
 #   golden:
 #     model:       haiku
-#     manifest:    .claude/skills/<skill>/golden.manifest.txt
+#     manifest:    plugins/pipeline-core/skills/<skill>/golden.manifest.txt
 #     fixture_dir: .claude/scripts/implement-issue-test/fixtures/<skill>
 #     schema:      .claude/scripts/schemas/<skill>.json
 #
 # Paths in SKILL.md frontmatter are relative to the repository root.
 #
-# Prompt building: .claude/skills/<skill>/prompt-builder.sh is sourced when
+# Prompt building: <SKILLS_DIR>/<skill>/prompt-builder.sh is sourced when
 # present; it must define a build_prompt() shell function that accepts the
 # fixture body on $1 and prints the full Claude prompt on stdout.  Skills
 # without a prompt-builder.sh are skipped with a warning so a partially-wired
 # suite does not block CI.
 #
-# Discovery (--all): scans .claude/skills/*/golden.manifest.txt.  Skills that
+# Discovery (--all): scans <SKILLS_DIR>/*/golden.manifest.txt.  Skills that
 # have a manifest but are missing other required config (schema, prompt builder)
 # are skipped with a warning; only fixture-level failures propagate to exit 1.
 #
@@ -45,7 +47,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 2
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)" || exit 2
 readonly SCRIPT_DIR REPO_ROOT
 
-SKILLS_DIR="${SKILLS_DIR:-"$SCRIPT_DIR/../skills"}"
+# Prefer the post-git-mv plugin layout (plugins/pipeline-core/skills/) and
+# fall back to the legacy .claude/skills/ layout so this works on both sides
+# of the restructure.
+if [[ -z "${SKILLS_DIR:-}" ]]; then
+	if [[ -d "$REPO_ROOT/plugins/pipeline-core/skills" ]]; then
+		SKILLS_DIR="$REPO_ROOT/plugins/pipeline-core/skills"
+	else
+		SKILLS_DIR="$SCRIPT_DIR/../skills"
+	fi
+fi
 
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/skill-golden-lib.sh" || {

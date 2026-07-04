@@ -119,6 +119,7 @@ _post_commit_path_allowlist_check() {
 			docs/**) continue ;;
 			.claude/agents/**) continue ;;
 			.claude/skills/**) continue ;;
+			plugins/pipeline-core/skills/**) continue ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs | *.sh | *.bats)
 				continue
 				;;
@@ -353,6 +354,24 @@ _orchestrator_guard_function_name() {
 	run _post_commit_path_allowlist_check "$repo"
 	[ "$status" -eq 0 ] || {
 		printf 'FAIL: allowlist check rejected a .claude/skills/ commit: %s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(4e-plugin) reference allowlist check accepts a commit of only plugins/pipeline-core/skills/ paths" {
+	local repo
+	repo="$(_make_repo guard-plugin-skills)"
+
+	mkdir -p "$repo/plugins/pipeline-core/skills/pr-review"
+	printf '# Skill\n\nInstructions.\n' \
+		> "$repo/plugins/pipeline-core/skills/pr-review/SKILL.md"
+	git -C "$repo" add -A
+	git -C "$repo" commit -q -m "chore: update pr-review skill"
+
+	run _post_commit_path_allowlist_check "$repo"
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: allowlist check rejected a plugins/pipeline-core/skills/ commit: %s\n' \
 			"$output" >&2
 		return 1
 	}

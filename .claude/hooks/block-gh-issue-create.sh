@@ -53,7 +53,7 @@ if pattern.search(cmd):
         ".claude/scripts/create-followup-issue.sh (follow-ups) or "
         ".claude/scripts/platform/create-issue.sh — they run assert_issue_valid "
         "fail-closed so every issue has parseable tasks + acceptance criteria. "
-        "See .claude/skills/process-pr/SKILL.md Step 4g.\n")
+        "See plugins/pipeline-core/skills/process-pr/SKILL.md Step 4g.\n")
     sys.exit(2)
 sys.exit(0)
 '

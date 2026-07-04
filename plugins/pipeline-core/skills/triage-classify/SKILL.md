@@ -43,7 +43,7 @@ failure_modes:
     mitigation: orchestrator falls back to full route and logs the raw model output for inspection
 golden:
   model: haiku
-  manifest: .claude/skills/triage-classify/golden.manifest.txt
+  manifest: plugins/pipeline-core/skills/triage-classify/golden.manifest.txt
   fixture_dir: .claude/scripts/implement-issue-test/fixtures/triage
   schema: .claude/scripts/schemas/implement-issue-triage.json
 ---

@@ -7,8 +7,9 @@
 #   (a) the skill file path resolves to a real file (non-empty output)
 #   (b) the YAML front-matter is present — 'name:' and 'description:' fields exist
 #
-# CLAUDE_PROJECT_DIR is set to the real project root so that load_skill resolves
-# .claude/skills/test-discovery/SKILL.md from the actual repo, not a test temp dir.
+# CLAUDE_PLUGIN_ROOT is set to the real plugin root so that load_skill resolves
+# plugins/pipeline-core/skills/test-discovery/SKILL.md from the actual repo, not
+# a test temp dir.
 #
 
 load 'helpers/test-helper.bash'
@@ -17,7 +18,17 @@ setup() {
     setup_test_env
     # Direct load_skill to the real project root (not the test temp dir).
     CLAUDE_PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    export CLAUDE_PROJECT_DIR
+    # Point load_skill at the plugin root the way Claude Code does in
+    # production. test-discovery lives under the plugin layout after the git mv;
+    # prefer it and fall back to the legacy .claude layout. The
+    # source_orchestrator_functions helper runs load_skill from a temp copy, so
+    # its BASH_SOURCE-based dev fallback cannot compute the real repo root.
+    if [[ -d "$CLAUDE_PROJECT_DIR/plugins/pipeline-core/skills" ]]; then
+        CLAUDE_PLUGIN_ROOT="$CLAUDE_PROJECT_DIR/plugins/pipeline-core"
+    else
+        CLAUDE_PLUGIN_ROOT="$CLAUDE_PROJECT_DIR/.claude"
+    fi
+    export CLAUDE_PROJECT_DIR CLAUDE_PLUGIN_ROOT
     source_orchestrator_functions
 }
 

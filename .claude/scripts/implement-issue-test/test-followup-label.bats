@@ -36,7 +36,11 @@
 load 'helpers/test-helper.bash'
 
 ORCHESTRATOR_SRC="$SCRIPT_DIR/implement-issue-orchestrator.sh"
-PROCESS_PR_SKILL="$SCRIPT_DIR/../skills/process-pr/SKILL.md"
+# Prefer the post-git-mv plugin layout (plugins/pipeline-core/skills/) and fall
+# back to the legacy .claude/skills/ layout so this works on both sides of the
+# restructure.
+PROCESS_PR_SKILL="$SCRIPT_DIR/../../plugins/pipeline-core/skills/process-pr/SKILL.md"
+[[ -f "$PROCESS_PR_SKILL" ]] || PROCESS_PR_SKILL="$SCRIPT_DIR/../skills/process-pr/SKILL.md"
 
 setup() {
 	setup_test_env
