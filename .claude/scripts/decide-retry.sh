@@ -190,7 +190,13 @@ _claude_retry_decide() {
 	local error_history="$3"
 
 	local schema_file="$SCRIPT_DIR/schemas/retry-policy.json"
-	local skill_file="$SCRIPT_DIR/../skills/retry-policy/SKILL.md"
+	# Prefer the post-git-mv plugin layout (plugins/pipeline-core/skills/) and
+	# fall back to the legacy .claude/skills/ layout so this works on both sides
+	# of the restructure.
+	local skill_file="$SCRIPT_DIR/../../plugins/pipeline-core/skills/retry-policy/SKILL.md"
+	if [[ ! -f "$skill_file" ]]; then
+		skill_file="$SCRIPT_DIR/../skills/retry-policy/SKILL.md"
+	fi
 
 	if [[ ! -f "$skill_file" ]]; then
 		printf '%s: retry-policy SKILL.md not found: %s\n' \

@@ -17,10 +17,22 @@ load 'helpers/test-helper.bash'
 setup() {
 	setup_test_env
 	PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-	SKILL_FILE="$PROJECT_DIR/.claude/skills/enrich-issue/SKILL.md"
-	export PROJECT_DIR SKILL_FILE
+	# Prefer the post-git-mv plugin layout (plugins/pipeline-core/skills/) and
+	# fall back to the legacy .claude/skills/ layout so this works on both sides
+	# of the restructure.
+	if [[ -d "$PROJECT_DIR/plugins/pipeline-core/skills" ]]; then
+		SKILLS_ROOT="$PROJECT_DIR/plugins/pipeline-core/skills"
+	else
+		SKILLS_ROOT="$PROJECT_DIR/.claude/skills"
+	fi
+	SKILL_FILE="$SKILLS_ROOT/enrich-issue/SKILL.md"
+	export PROJECT_DIR SKILLS_ROOT SKILL_FILE
 	CLAUDE_PROJECT_DIR="$PROJECT_DIR"
-	export CLAUDE_PROJECT_DIR
+	# Point load_skill at the plugin root the way Claude Code does in production;
+	# source_orchestrator_functions runs the function from a temp copy, so its
+	# BASH_SOURCE-based dev fallback cannot compute the real repo root.
+	CLAUDE_PLUGIN_ROOT="$(dirname "$SKILLS_ROOT")"
+	export CLAUDE_PROJECT_DIR CLAUDE_PLUGIN_ROOT
 	source_orchestrator_functions
 }
 
@@ -117,7 +129,7 @@ teardown() {
 
 @test "handle-issues SKILL.md documents --enrich-followups flag" {
 	local skill
-	skill="$PROJECT_DIR/.claude/skills/handle-issues/SKILL.md"
+	skill="$SKILLS_ROOT/handle-issues/SKILL.md"
 	[[ -f "$skill" ]]
 	grep -q 'enrich-followups' "$skill"
 }

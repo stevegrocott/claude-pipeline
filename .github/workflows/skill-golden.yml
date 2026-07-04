@@ -6,9 +6,11 @@ on:
       - '.claude/scripts/decide-*.sh'
       - '.claude/scripts/schemas/**'
       - '.claude/skills/*/SKILL.md'
+      - 'plugins/pipeline-core/skills/*/SKILL.md'
   pull_request:
     paths:
       - '.claude/skills/**'
+      - 'plugins/pipeline-core/skills/**'
       - '.claude/scripts/schemas/**'
       - '.claude/scripts/skill-golden.sh'
       - '.claude/scripts/skill-golden-lib.sh'
@@ -40,8 +42,8 @@ jobs:
               echo "mode=all" >> "$GITHUB_OUTPUT"
             else
               skills=$(printf '%s\n' "$changed" \
-                | grep -E '^\.claude/skills/[^/]+/' \
-                | sed -E 's|^\.claude/skills/([^/]+)/.*|\1|' \
+                | grep -E '^(\.claude|plugins/pipeline-core)/skills/[^/]+/' \
+                | sed -E 's#^(\.claude|plugins/pipeline-core)/skills/([^/]+)/.*#\2#' \
                 | sort -u \
                 | tr '\n' ' ' \
                 | sed 's/[[:space:]]*$//')

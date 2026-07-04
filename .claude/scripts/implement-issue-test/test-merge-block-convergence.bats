@@ -379,7 +379,9 @@ teardown() {
 
 @test "process-pr SKILL.md reads merge_blocked_reason from status.json before merging" {
 	local skill_file
-	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+	# Prefer the post-git-mv plugin layout; fall back to the legacy layout.
+	skill_file="$(dirname "$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")")/plugins/pipeline-core/skills/process-pr/SKILL.md"
+	[[ -f "$skill_file" ]] || skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
 
 	[[ -f "$skill_file" ]]
 	grep -q '\.merge_blocked_reason // empty' "$skill_file"
@@ -387,7 +389,9 @@ teardown() {
 
 @test "process-pr SKILL.md block check precedes merge-mr.sh invocation" {
 	local skill_file
-	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+	# Prefer the post-git-mv plugin layout; fall back to the legacy layout.
+	skill_file="$(dirname "$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")")/plugins/pipeline-core/skills/process-pr/SKILL.md"
+	[[ -f "$skill_file" ]] || skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
 
 	[[ -f "$skill_file" ]]
 
@@ -403,7 +407,9 @@ teardown() {
 
 @test "process-pr SKILL.md exits without merging when MERGE_BLOCKED_REASON is set" {
 	local skill_file
-	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+	# Prefer the post-git-mv plugin layout; fall back to the legacy layout.
+	skill_file="$(dirname "$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")")/plugins/pipeline-core/skills/process-pr/SKILL.md"
+	[[ -f "$skill_file" ]] || skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
 
 	[[ -f "$skill_file" ]]
 	# Skill must document a non-merge exit path when the block reason is populated
@@ -413,7 +419,9 @@ teardown() {
 
 @test "process-pr SKILL.md supports BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 override" {
 	local skill_file
-	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+	# Prefer the post-git-mv plugin layout; fall back to the legacy layout.
+	skill_file="$(dirname "$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")")/plugins/pipeline-core/skills/process-pr/SKILL.md"
+	[[ -f "$skill_file" ]] || skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
 
 	[[ -f "$skill_file" ]]
 	grep -q 'BLOCK_MERGE_ON_CONVERGENCE_FAILURE' "$skill_file"
@@ -421,7 +429,9 @@ teardown() {
 
 @test "process-pr SKILL.md falls back to degraded_stages scan when merge_blocked_reason absent" {
 	local skill_file
-	skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+	# Prefer the post-git-mv plugin layout; fall back to the legacy layout.
+	skill_file="$(dirname "$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")")/plugins/pipeline-core/skills/process-pr/SKILL.md"
+	[[ -f "$skill_file" ]] || skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
 
 	[[ -f "$skill_file" ]]
 	# Skill must document the degraded_stages fallback path

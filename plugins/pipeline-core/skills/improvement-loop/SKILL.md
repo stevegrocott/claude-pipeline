@@ -219,7 +219,7 @@ misroute cannot recur silently across model updates or prompt edits.
    - `expected_route` — `fast-path` or `full`
    - `expected_dq` — the disqualifying criterion name if `full`, or `*` to accept any
 
-3. **Add a manifest entry to `.claude/skills/triage-classify/golden.manifest.txt`**
+3. **Add a manifest entry to `plugins/pipeline-core/skills/triage-classify/golden.manifest.txt`**
 
    Append one pipe-delimited line:
 
@@ -239,7 +239,7 @@ misroute cannot recur silently across model updates or prompt edits.
 5. **Commit both files**
 
    ```bash
-   git add .claude/skills/triage-classify/golden.manifest.txt \
+   git add plugins/pipeline-core/skills/triage-classify/golden.manifest.txt \
            .claude/scripts/implement-issue-test/fixtures/triage/<issue-id>.md
    git commit -m "improve: triage-classify — add golden fixture for <issue-id>"
    ```

@@ -2383,7 +2383,7 @@ for m in re.finditer(r'\[\s*\{', t):
 #
 # Classify the issue into "fast-path" (surgical, test-only, well-specified) or
 # "full" (default verification pipeline). Conservative — biases hard toward
-# "full" whenever uncertain. See .claude/skills/handle-issues/SKILL.md for the
+# "full" whenever uncertain. See plugins/pipeline-core/skills/handle-issues/SKILL.md for the
 # six criteria and .claude/scripts/triage-validate.sh for prompt-quality tests.
 #
 # Arguments:
@@ -4422,6 +4422,7 @@ guard_commit_path_allowlist() {
 			docs/**) continue ;;
 			.claude/agents/**) continue ;;
 			.claude/skills/**) continue ;;
+			plugins/pipeline-core/skills/**) continue ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs)
 				continue ;;
 			*.sh | *.bats | *.py | *.go | *.rb | *.java | *.rs)

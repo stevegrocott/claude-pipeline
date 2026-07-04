@@ -6,8 +6,8 @@
 # complexity-to-tier table, model-escalation table, and the ordered
 # stage-prefix list.  Decision logic for retry and model-fallback
 # lives in the companion skills:
-#   .claude/skills/retry-policy/SKILL.md
-#   .claude/skills/model-fallback/SKILL.md
+#   plugins/pipeline-core/skills/retry-policy/SKILL.md
+#   plugins/pipeline-core/skills/model-fallback/SKILL.md
 #
 # Usage: source this file, then call resolve_model <stage> [complexity]
 #
@@ -28,7 +28,7 @@ readonly _MODEL_CONFIG_LOADED=1
 # advanced → opus    (deep reasoning: complex implementation)
 #
 # Lookup: _tier_to_model <tier>
-# Decision logic: .claude/skills/model-fallback/SKILL.md
+# Decision logic: plugins/pipeline-core/skills/model-fallback/SKILL.md
 
 readonly _MODEL_light="haiku"
 readonly _MODEL_standard="sonnet"
@@ -45,7 +45,7 @@ readonly _MODEL_default="opus"    # fallback for unknown tiers
 # L    → advanced → opus    (deep-reasoning tier)
 #
 # Lookup: _complexity_to_tier <hint>
-# Decision logic: .claude/skills/model-fallback/SKILL.md
+# Decision logic: plugins/pipeline-core/skills/model-fallback/SKILL.md
 
 readonly _COMPLEXITY_S="standard"
 readonly _COMPLEXITY_M="standard"
@@ -59,8 +59,8 @@ readonly _COMPLEXITY_L="advanced"
 # opus → opus signals the ceiling (no further escalation).
 #
 # Lookup: _next_model_up <model>
-# Retry decisions:    .claude/skills/retry-policy/SKILL.md
-# Fallback decisions: .claude/skills/model-fallback/SKILL.md
+# Retry decisions:    plugins/pipeline-core/skills/retry-policy/SKILL.md
+# Fallback decisions: plugins/pipeline-core/skills/model-fallback/SKILL.md
 
 readonly _NEXT_MODEL_haiku="sonnet"
 readonly _NEXT_MODEL_sonnet="opus"
@@ -79,7 +79,7 @@ readonly _NEXT_MODEL_default="opus"   # fallback for unknown models
 # (No stage defaults to advanced; complexity hint upgrades to advanced.)
 #
 # Lookup: _stage_to_tier <stage>
-# Decision logic: .claude/skills/model-fallback/SKILL.md
+# Decision logic: plugins/pipeline-core/skills/model-fallback/SKILL.md
 
 readonly -a _LIGHT_STAGES=(
 	parse-issue validate-plan triage
@@ -309,7 +309,7 @@ _match_stage_prefix() {
 # _next_model_up <model>
 # Prints the next model up in the escalation chain.
 # opus stays at opus (ceiling); unknown models fall back to opus.
-# Full decision logic: .claude/skills/model-fallback/SKILL.md
+# Full decision logic: plugins/pipeline-core/skills/model-fallback/SKILL.md
 _next_model_up() {
 	local _var="_NEXT_MODEL_${1//[^a-zA-Z]/}"
 	printf '%s' "${!_var:-$_NEXT_MODEL_default}"

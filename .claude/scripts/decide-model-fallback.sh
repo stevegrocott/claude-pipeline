@@ -146,7 +146,13 @@ _claude_model_fallback() {
 	local stage_result="$1"
 
 	local schema_file="$SCRIPT_DIR/schemas/model-fallback-output.json"
-	local skill_file="$SCRIPT_DIR/../skills/model-fallback/SKILL.md"
+	# Prefer the post-git-mv plugin layout (plugins/pipeline-core/skills/) and
+	# fall back to the legacy .claude/skills/ layout so this works on both sides
+	# of the restructure.
+	local skill_file="$SCRIPT_DIR/../../plugins/pipeline-core/skills/model-fallback/SKILL.md"
+	if [[ ! -f "$skill_file" ]]; then
+		skill_file="$SCRIPT_DIR/../skills/model-fallback/SKILL.md"
+	fi
 
 	if [[ ! -f "$skill_file" ]]; then
 		printf '%s: model-fallback SKILL.md not found: %s\n' \
