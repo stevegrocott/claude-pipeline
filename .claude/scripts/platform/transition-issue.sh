@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../../config/platform.sh"
 
 ISSUE="$1"
-TRANSITION="${2:-$JIRA_DONE_TRANSITION}"
+TRANSITION="${2:-${JIRA_DONE_TRANSITION:-}}"
 
 case "$TRACKER" in
   github) gh issue close "$ISSUE" ;;
