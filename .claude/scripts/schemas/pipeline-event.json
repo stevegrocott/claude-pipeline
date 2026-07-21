@@ -32,7 +32,8 @@
         "issue_start",
         "issue_end",
         "batch_paused",
-        "cost_trend_warning"
+        "cost_trend_warning",
+        "budget_exceeded"
       ],
       "description": "Event type discriminator"
     },
@@ -304,6 +305,38 @@
         }
       },
       "required": ["event", "latest_mt_per_issue", "baseline_mt_per_issue"]
+    },
+    {
+      "description": "A per-run or per-batch token/cost budget ceiling was exceeded; the run or batch halted with state budget_exceeded (issue #583). Terminal — never escalated or retried.",
+      "properties": {
+        "event": { "const": "budget_exceeded" },
+        "scope": {
+          "type": "string",
+          "enum": ["run", "batch"],
+          "description": "Whether the per-run or per-batch ceiling was breached"
+        },
+        "used_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cumulative tokens consumed at the breach"
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Configured token ceiling (0 = disabled)"
+        },
+        "used_cost_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cumulative cost in USD at the breach"
+        },
+        "max_cost_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Configured cost ceiling in USD (0 = disabled)"
+        }
+      },
+      "required": ["event", "scope"]
     }
   ]
 }

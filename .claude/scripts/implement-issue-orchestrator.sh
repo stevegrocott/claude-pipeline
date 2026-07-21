@@ -116,6 +116,20 @@ TEST_ITER_WALL_TIME_SLACK="${TEST_ITER_WALL_TIME_SLACK:-120}"
 # replaces test-iter-timeout×planned_iter+slack entirely.
 TEST_LOOP_WALL_BUDGET="${TEST_LOOP_WALL_BUDGET:-}"
 
+# Per-run token/cost budget ceiling (issue #583).  Mirrors the wall-clock
+# budget idiom above but bounds spend instead of wall time.  Defaults are
+# NON-BREAKING: 0 (or empty) means "disabled", so existing runs are entirely
+# unaffected until an operator opts in.  When set, check_run_budget() compares
+# the run's accumulated token/cost total (rolled up from issue #580's per-stage
+# .stages[].tokens / .stages[].estimated_cost accounting in status.json) against
+# these ceilings BETWEEN stages via _apply_stage_action.  A hard breach halts
+# the run with terminal state budget_exceeded — never escalating or retrying —
+# and a soft breach (>= RUN_BUDGET_SOFT_PCT% of a ceiling) emits a one-shot
+# warning first.  Env-overridable for tuning and tests.
+MAX_RUN_TOKENS="${MAX_RUN_TOKENS:-0}"
+MAX_RUN_COST_USD="${MAX_RUN_COST_USD:-0}"
+RUN_BUDGET_SOFT_PCT="${RUN_BUDGET_SOFT_PCT:-80}"
+
 # Per-command timeouts (seconds) for the merge_pr stage.  Each long-running
 # sub-step is wrapped in `timeout` so a hung network/git/CLI call cannot stall
 # the orchestrator indefinitely.  On timeout the stage transitions to
@@ -149,6 +163,9 @@ TEST_LOOP_GIT_TIMEOUT="${TEST_LOOP_GIT_TIMEOUT:-30}"
 ESCALATION_POLICY_BACKEND="${ESCALATION_POLICY_BACKEND:-}"
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
+# One-shot latch so the run-budget soft-threshold warning is emitted at most
+# once per run (issue #583).  Reset only at process start.
+_RUN_BUDGET_SOFT_WARNED=0
 readonly RATE_LIMIT_BUFFER=60
 readonly RATE_LIMIT_DEFAULT_WAIT=3600
 # Waits longer than this imply a weekly-cap exhaustion (rather than a transient
@@ -336,6 +353,90 @@ calc_orchestrator_wall_time() {
 		pr_budget=$(( 1200 * pr_iter + PR_REVIEW_WALL_TIME_SLACK ))
 	fi
 	printf '%s' "$(( test_budget + pr_budget + 5700 ))"
+}
+
+# =============================================================================
+# RUN-LEVEL TOKEN/COST BUDGET CEILING (issue #583)
+# =============================================================================
+
+# Check the run-level token/cost budget ceiling.
+#
+# Reuses issue #580's accounting rather than re-parsing the CLI JSON: every
+# stage already persists its tokens (.stages[].tokens) and estimated cost
+# (.stages[].estimated_cost) into status.json via set_stage_completed.  This
+# helper sums those into a run-level running total and compares it to the
+# configured ceilings.  No second parse of the --output-format json capture.
+#
+# Returns:
+#   0 — within budget, OR only a soft breach (a one-shot warning is emitted
+#       via _RUN_BUDGET_SOFT_WARNED and the run continues)
+#   1 — HARD breach: the caller must halt the run with budget_exceeded and
+#       must NOT escalate or retry
+#
+# Disabled (always returns 0) when both ceilings are unset/0, so existing runs
+# are unaffected.  Mirrors the check_*_wall_timeout idiom above.
+check_run_budget() {
+    local max_tokens="${MAX_RUN_TOKENS:-0}"
+    local max_cost="${MAX_RUN_COST_USD:-0}"
+    local soft_pct="${RUN_BUDGET_SOFT_PCT:-80}"
+
+    # Disabled unless at least one ceiling is a positive value.
+    if awk -v t="$max_tokens" -v c="$max_cost" \
+        'BEGIN { exit !((t+0) <= 0 && (c+0) <= 0) }'; then
+        return 0
+    fi
+    [[ -f "$STATUS_FILE" ]] || return 0
+
+    # Run-level running total from #580's per-stage accounting.  Each jq filter
+    # is kept on a single line so the BATS function extractor -- which counts
+    # braces to find a function end -- is never tripped by a multi-line filter.
+    local used_tokens used_cost
+    used_tokens=$(jq -r '[.stages[]?.tokens.input_tokens // 0, .stages[]?.tokens.output_tokens // 0, .stages[]?.tokens.cache_creation_input_tokens // 0, .stages[]?.tokens.cache_read_input_tokens // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_tokens=0
+    used_cost=$(jq -r '[.stages[]?.estimated_cost // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_cost=0
+    [[ -n "$used_tokens" ]] || used_tokens=0
+    [[ -n "$used_cost" ]] || used_cost=0
+
+    # Classify in awk so the float cost comparison is safe.
+    local verdict
+    verdict=$(awk -v ut="$used_tokens" -v uc="$used_cost" \
+        -v mt="$max_tokens" -v mc="$max_cost" -v sp="$soft_pct" '
+        BEGIN {
+            hard = 0; soft = 0;
+            if (mt + 0 > 0) {
+                if (ut + 0 >= mt + 0) hard = 1;
+                else if (ut + 0 >= (mt + 0) * (sp + 0) / 100) soft = 1;
+            }
+            if (mc + 0 > 0) {
+                if (uc + 0 >= mc + 0) hard = 1;
+                else if (uc + 0 >= (mc + 0) * (sp + 0) / 100) soft = 1;
+            }
+            if (hard) print "hard";
+            else if (soft) print "soft";
+            else print "ok";
+        }')
+
+    case "$verdict" in
+        hard)
+            log_warn "Run budget ceiling exceeded:" \
+                "tokens=${used_tokens}/${max_tokens}" \
+                "cost=\$${used_cost}/\$${max_cost}." \
+                "Halting run with budget_exceeded (no escalate/retry)."
+            return 1
+            ;;
+        soft)
+            if (( ${_RUN_BUDGET_SOFT_WARNED:-0} == 0 )); then
+                _RUN_BUDGET_SOFT_WARNED=1
+                log_warn "Run budget soft threshold reached (${soft_pct}%):" \
+                    "tokens=${used_tokens}/${max_tokens}" \
+                    "cost=\$${used_cost}/\$${max_cost}." \
+                    "Approaching hard ceiling — one more breach will halt."
+            fi
+            return 0
+            ;;
+        *)
+            return 0
+            ;;
+    esac
 }
 
 # =============================================================================
@@ -766,6 +867,33 @@ set_stage_failed() {
     emit_event "stage_end" "stage=$stage" "status=error" "error_kind=$error_kind"
 }
 
+# Terminal-state writer for a run-level token/cost budget ceiling breach
+# (issue #583).  Sibling of set_stage_failed, but records the dedicated
+# budget_exceeded state so downstream consumers (and the batch orchestrator)
+# treat the run as a clean spend-halt — never as a failure to escalate/retry.
+# The state is written to status.json (a real file that survives the run_stage
+# subshell) and set_final_state() refuses to overwrite it, so the halt is
+# preserved even as the bail path unwinds the stack.
+set_run_budget_exceeded() {
+    local stage="$1"
+    local detail="${2:-run token/cost ceiling exceeded}"
+    jq --arg stage "$stage" \
+       --arg detail "$detail" \
+       '.stages[$stage].completed_at = (now | todate) |
+        .stages[$stage].status = "budget_exceeded" |
+        .state = "budget_exceeded" |
+        .budget_exceeded_reason = $detail |
+        .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    sync_status_to_log
+    log_warn "Run halted: $detail (stage=$stage) — state set to budget_exceeded"
+    emit_event "budget_exceeded" \
+        "stage=$stage" \
+        "scope=run" \
+        "max_tokens:=${MAX_RUN_TOKENS:-0}" \
+        "max_cost_usd:=${MAX_RUN_COST_USD:-0}"
+}
+
 record_escalation() {
     local stage="$1"
     local from_model="$2"
@@ -830,6 +958,16 @@ set_final_state() {
         || prev_state="running"
     stage=$(jq -r '.current_stage // "unknown"' "$STATUS_FILE" 2>/dev/null) \
         || stage="unknown"
+
+    # Issue #583: budget_exceeded is a terminal spend-halt.  Once the run-budget
+    # ceiling fires (set_run_budget_exceeded), the bail path unwinds the stack
+    # and a caller may try to stamp a downstream error/failed state.  Refuse it
+    # here so the clean budget_exceeded halt is preserved end-to-end.
+    if [[ "$prev_state" == "budget_exceeded" && "$state" != "budget_exceeded" ]]; then
+        log_warn "set_final_state: run already halted (budget_exceeded);" \
+            "ignoring transition to '$state'"
+        return 0
+    fi
 
     jq --arg state "$state" \
        '.state = $state | .last_update = (now | todate)' \
@@ -1766,6 +1904,22 @@ _apply_stage_action() {
 	local stage_result="$1"
 	local action="$2"
 	local reason="${3:-}"
+
+	# Between-stages token/cost budget ceiling check (issue #583).  This is the
+	# single post-stage dispatch point, so it is the only place a budget check
+	# runs — never mid-stage.  A HARD breach overrides the requested action
+	# (accept/escalate/retry_same all included): the run halts cleanly with the
+	# terminal budget_exceeded state and is NEVER escalated or retried.  Soft
+	# breaches emit a one-shot warning inside check_run_budget and fall through
+	# to normal routing.  Disabled by default (ceilings 0), so no behaviour
+	# change for existing runs.
+	if ! check_run_budget; then
+		set_run_budget_exceeded \
+			"${_RUN_STAGE_NAME:-unknown}" \
+			"run token/cost ceiling exceeded (requested action=$action)"
+		printf '%s\n' "$stage_result"
+		return 1
+	fi
 
 	case "$action" in
 		accept)
