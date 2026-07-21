@@ -31,7 +31,8 @@
         "batch_end",
         "issue_start",
         "issue_end",
-        "batch_paused"
+        "batch_paused",
+        "cost_trend_warning"
       ],
       "description": "Event type discriminator"
     },
@@ -278,6 +279,31 @@
         }
       },
       "required": ["event", "consecutive_failures", "max_failures"]
+    },
+    {
+      "description": "Advisory cost/token trend guard fired — the batch's MT/issue exceeded the rolling baseline by the configured factor (issue #585). Non-blocking.",
+      "properties": {
+        "event": { "const": "cost_trend_warning" },
+        "latest_mt_per_issue": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Latest batch megatokens per completed issue"
+        },
+        "baseline_mt_per_issue": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Rolling baseline megatokens per issue over the window"
+        },
+        "factor": {
+          "type": "number",
+          "description": "Configured warn factor (COST_TREND_FACTOR)"
+        },
+        "window": {
+          "type": "integer",
+          "description": "Configured rolling window size (COST_TREND_WINDOW)"
+        }
+      },
+      "required": ["event", "latest_mt_per_issue", "baseline_mt_per_issue"]
     }
   ]
 }

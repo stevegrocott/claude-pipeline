@@ -82,6 +82,17 @@ ACTIVE_ORCH_PGID=""
 # to log and record why an issue was skipped in status.json.
 _SKIP_REASON=""
 
+# Epic-scope signal set by validate_issue_for_processing() when an issue is
+# flagged as epic-scope (see EPIC_SCOPE_MAX_TASKS). Epic issues concentrate
+# spend, so they are routed to split-first (skipped from a wholesale run)
+# rather than implemented in a single expensive pass. Empty when not epic.
+_EPIC_SCOPE=""
+
+# Epic-scope task-count threshold: an issue whose body carries more than this
+# many task/AC checkboxes is treated as epic-scope regardless of labels. Set
+# generously so ordinary multi-task issues are not flagged. Env-configurable.
+EPIC_SCOPE_MAX_TASKS="${EPIC_SCOPE_MAX_TASKS:-20}"
+
 # Timeouts and limits
 readonly ISSUE_TIMEOUT=10800  # 180 minutes per issue
 readonly MAX_CONSECUTIVE_FAILURES=3
@@ -879,6 +890,39 @@ validate_issue_for_processing() {
 			return 0
 		fi
 		_SKIP_REASON="needs-explore label"
+		return 1
+	fi
+
+	# -----------------------------------------------------------------
+	# Check 1b: epic-scope flag — route oversized issues to split-first
+	#
+	# Epic-scope issues concentrate spend (claude-spend: 48 epic-scope runs
+	# used 35% of tokens). Detect them at preflight — via an `epic`/
+	# `epic-scope` label or an oversized body (more than EPIC_SCOPE_MAX_TASKS
+	# task/AC checkboxes) — set _EPIC_SCOPE, and route to split-first by
+	# skipping the wholesale run so the issue is broken into sub-issues first.
+	# -----------------------------------------------------------------
+	_EPIC_SCOPE=""
+	local has_epic_label epic_body epic_task_count
+	has_epic_label=$(printf '%s' "$issue_json" \
+		| jq -r '[.labels[].name] | any(. == "epic" or . == "epic-scope")' \
+		2>/dev/null) || has_epic_label="false"
+	epic_body=$(printf '%s' "$issue_json" \
+		| jq -r '.body // ""' 2>/dev/null) || epic_body=""
+	epic_task_count=$(printf '%s' "$epic_body" \
+		| grep -cE '^[[:space:]]*[-*] \[[ xX]\]' 2>/dev/null) \
+		|| epic_task_count=0
+
+	if [[ "$has_epic_label" == "true" ]] \
+		|| (( epic_task_count > EPIC_SCOPE_MAX_TASKS )); then
+		if [[ "$has_epic_label" == "true" ]]; then
+			_EPIC_SCOPE="epic label"
+		else
+			_EPIC_SCOPE="oversized body ($epic_task_count checkboxes > $EPIC_SCOPE_MAX_TASKS)"
+		fi
+		log_warn "Preflight #$issue_num: epic-scope ($_EPIC_SCOPE)" \
+			"— routing to split-first"
+		_SKIP_REASON="epic-scope — split into sub-issues first ($_EPIC_SCOPE)"
 		return 1
 	fi
 
@@ -1794,9 +1838,43 @@ _batch_outcome=$(jq -r '.state' "$STATUS_FILE" 2>/dev/null)
 [[ -z "$_batch_outcome" || "$_batch_outcome" == "null" ]] && _batch_outcome="failed"
 emit_event "batch_end" "outcome=$_batch_outcome"
 
+# -----------------------------------------------------------------------------
+# COST/TOKEN TREND GUARD (advisory, non-blocking — issue #585)
+#
+# Evaluate this batch's MT/issue against a rolling baseline of recent batch
+# summaries. The guard reads #580's cost_summary (falling back to the ab-report
+# stage-log token parse) and NO-OPs cleanly when cost_summary is absent. Its
+# verdict is attached to summary.json as cost_rollup / trend_warning and, when
+# a drift is detected, surfaced on the event stream as cost_trend_warning.
+# Every failure mode degrades to a benign noop verdict so the guard can never
+# block or fail the batch.
+# -----------------------------------------------------------------------------
+_trend_verdict='{"status":"noop","warning":false}'
+_trend_guard="$SCRIPT_DIR/cost-trend-guard.sh"
+if [[ -x "$_trend_guard" ]]; then
+    _trend_out=$("$_trend_guard" \
+        --current "$STATUS_FILE" \
+        --history-dir "$(dirname "$LOG_BASE")" 2>/dev/null) || _trend_out=""
+    if [[ -n "$_trend_out" ]] && printf '%s' "$_trend_out" | jq empty 2>/dev/null; then
+        _trend_verdict="$_trend_out"
+    fi
+fi
+
+_trend_warn=$(printf '%s' "$_trend_verdict" | jq -r '.warning // false' 2>/dev/null)
+if [[ "$_trend_warn" == "true" ]]; then
+    _trend_msg=$(printf '%s' "$_trend_verdict" | jq -r '.message // "cost trend regression detected"')
+    log_warn "Cost trend guard: $_trend_msg"
+    emit_event "cost_trend_warning" \
+        "latest_mt_per_issue:=$(printf '%s' "$_trend_verdict" | jq -c '.latest_mt_per_issue // 0')" \
+        "baseline_mt_per_issue:=$(printf '%s' "$_trend_verdict" | jq -c '.baseline_mt_per_issue // 0')" \
+        "factor:=$(printf '%s' "$_trend_verdict" | jq -c '.factor // 0')" \
+        "window:=$(printf '%s' "$_trend_verdict" | jq -c '.window // 0')"
+fi
+
 # Write summary — include deploy_verify_failed and skipped counts in
-# .progress so consumers can query them without iterating .issues[].
-jq '{
+# .progress so consumers can query them without iterating .issues[]. The
+# cost_rollup / trend_warning fields carry the advisory trend guard verdict.
+jq --argjson trend "$_trend_verdict" '{
     state: .state,
     base_branch: .base_branch,
     progress: (.progress + {
@@ -1808,6 +1886,14 @@ jq '{
     issues: [.issues[] | {
         number, status, pr, follow_ups, error, deploy_verify_failed
     }],
+    cost_summary: (.cost_summary // null),
+    cost_rollup: {
+        latest_mt_per_issue: ($trend.latest_mt_per_issue // null),
+        baseline_mt_per_issue: ($trend.baseline_mt_per_issue // null),
+        window: ($trend.window // null),
+        factor: ($trend.factor // null)
+    },
+    trend_warning: ($trend.warning // false),
     log_dir: .log_dir,
     completed_at: (now | todate)
 }' "$STATUS_FILE" > "$LOG_BASE/summary.json"
