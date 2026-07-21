@@ -4032,6 +4032,15 @@ _parse_task_lines() {
 			desc="**(M)** $desc"
 		fi
 
+		# Warn-only mirror of assert_issue_valid criterion 7 (issue #582):
+		# a task with no recognisable file path forces the specialist to scan
+		# the codebase blind — the #1 explore-stage token sink.  This is a
+		# run-time nudge only; the hard gate lives in assert_issue_valid, so
+		# issues that bypass validation still surface the warning here.
+		if [[ -z "$(_extract_task_files_from_desc "$desc")" ]]; then
+			log_warn "No file path in task (scans codebase blind): $line"
+		fi
+
 		task_id=$((task_id + 1))
 		# Store task for now; affected_files will be attached in the second pass.
 		tasks_json=$(printf '%s' "$tasks_json" | jq \
