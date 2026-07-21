@@ -9,7 +9,7 @@
 #       unique — derived from the .claude/agents/*.md definitions.
 #
 #   assert_issue_valid <body>
-#       Validates an issue body string against five structural criteria:
+#       Validates an issue body string against six structural criteria:
 #         1. at least one parseable (open) task line
 #         2. every task agent resolves to a known agent (or "default")
 #         3. every file path referenced in a task resolves (file exists or
@@ -17,6 +17,10 @@
 #         4. an "Acceptance Criteria" section is present (any heading depth)
 #         5. a "Deploy Verification" section exists if and only if (any heading depth)
 #            DEPLOY_VERIFY_CMD is set
+#         6. task granularity — no M/L task references more than two distinct
+#            file paths (decomposable tasks must be split into S sub-tasks)
+#       Additionally emits a non-failing stderr WARNING reporting the
+#       M/L-vs-S task count whenever the body has any non-S task.
 #       Returns 0 when valid; prints one diagnostic per failure to stderr
 #       and returns 1 otherwise.
 #
@@ -184,6 +188,55 @@ _issue_body_extract_paths() {
 }
 
 #
+# Extracts the S/M/L complexity hint from a task description.  The hint is the
+# first `**(S)**` / `**(M)**` / `**(L)**` marker (case-insensitive) in the
+# description.  A description with no marker defaults to "M" — mirroring the
+# orchestrator's hint-less default (implement-issue-orchestrator.sh:3645),
+# which treats an unsized task as medium.
+#
+# Arguments:
+#   $1 - task description string
+# Outputs:
+#   One of "S", "M", or "L" on stdout
+#
+_issue_body_task_complexity() {
+	local desc="$1"
+	local hint="M"
+	if [[ "$desc" =~ \*\*\(([SsMmLl])\)\*\* ]]; then
+		hint="${BASH_REMATCH[1]}"
+	fi
+	# Normalize to uppercase without relying on bash-4 case conversion.
+	case "$hint" in
+		s) hint="S" ;;
+		m) hint="M" ;;
+		l) hint="L" ;;
+	esac
+	printf '%s' "$hint"
+}
+
+#
+# Counts the distinct file paths referenced in a task description for the
+# granularity criterion.  The canonical Task Format appends an optional
+# ":Lnn"/":nn-mm" line-range suffix to each backtick-quoted path
+# (e.g. `src/app.ts:L45-80`).  `_issue_body_extract_paths` cannot match those
+# tokens because its path char-class excludes ':', so the suffix is stripped
+# here first — this also collapses `file.ts:L10` and `file.ts:L90` to a single
+# distinct path, matching the "distinct file paths" intent.
+#
+# Arguments:
+#   $1 - task description string
+# Outputs:
+#   Distinct path count (integer) on stdout
+#
+_issue_body_task_path_count() {
+	local desc="$1"
+	local stripped
+	stripped=$(printf '%s' "$desc" \
+		| sed -E 's/(`[A-Za-z0-9_./-]+):[A-Za-z0-9_.,-]*(`)/\1\2/g')
+	_issue_body_extract_paths "$stripped" | grep -c '.' || true
+}
+
+#
 # Parses open task lines from an issue body, emitting one
 # "agent<TAB>description" record per task (mirrors the canonical and
 # fallback patterns of the orchestrator's _parse_task_lines).  Checked [x]
@@ -287,12 +340,26 @@ _issue_body_parse_tasks() {
 }
 
 #
-# Validates an issue body against the five structural criteria.
+# Validates an issue body against the structural criteria.
+#
+# Hard criteria (any failure → stderr diagnostic + return 1):
+#   1. at least one parseable open task line
+#   2. every task agent resolves to a known agent (or "default")
+#   3. every referenced file path resolves (file exists or parent dir exists)
+#   4. an "Acceptance Criteria" section is present
+#   5. a "Deploy Verification" section iff DEPLOY_VERIFY_CMD is set
+#   6. task granularity — no M/L task references more than two distinct file
+#      paths (a decomposable task that should be split into S sub-tasks)
+#
+# Soft advisory (never fails the body):
+#   * emits a stderr WARNING reporting the M/L-vs-S task count whenever the
+#     body contains at least one non-S task
 #
 # Arguments:
 #   $1 - issue body text
 # Outputs:
-#   One diagnostic per failure on stderr
+#   One diagnostic per hard failure, plus the optional task-mix warning, on
+#   stderr
 # Returns:
 #   0 when valid, 1 otherwise
 #
@@ -312,8 +379,9 @@ assert_issue_valid() {
 		errors+=("no parseable task lines found")
 	fi
 
-	# Criteria 2 & 3: agents resolve and path suffixes resolve.
-	local agent desc remapped path parent
+	# Criteria 2, 3 & 6: agents resolve, path suffixes resolve, granularity.
+	local agent desc remapped path parent complexity path_count
+	local -i s_count=0 nons_count=0
 	while IFS=$'\t' read -r agent desc; do
 		[[ -z "$agent" ]] && continue
 
@@ -337,7 +405,29 @@ assert_issue_valid() {
 				errors+=("unresolved path: $path")
 			fi
 		done < <(_issue_body_extract_paths "$desc")
+
+		# Criterion 6: task granularity.  Tally the S/non-S mix for the
+		# advisory warning, and hard-fail any M/L task that names more than
+		# two distinct file paths — a decomposable task the explore step
+		# should have split into S sub-tasks.
+		complexity=$(_issue_body_task_complexity "$desc")
+		if [[ "$complexity" == "S" ]]; then
+			s_count=$((s_count + 1))
+		else
+			nons_count=$((nons_count + 1))
+			path_count=$(_issue_body_task_path_count "$desc")
+			if (( path_count > 2 )); then
+				errors+=("task granularity: (${complexity}) task references ${path_count} distinct file paths (>2); split into S sub-tasks — ${desc}")
+			fi
+		fi
 	done <<< "$tasks"
+
+	# Advisory (never fails the body): report the non-S task mix so operators
+	# see the M/L-vs-S balance and are nudged toward S-only decomposition.
+	if (( nons_count > 0 )); then
+		printf 'assert_issue_valid: WARNING: %d non-S task(s) (M/L) vs %d S task(s); prefer splitting M/L into S sub-tasks\n' \
+			"$nons_count" "$s_count" >&2
+	fi
 
 	# Criterion 4: Acceptance Criteria section present.
 	if ! grep -qE '^##+ Acceptance Criteria' <<< "$body"; then

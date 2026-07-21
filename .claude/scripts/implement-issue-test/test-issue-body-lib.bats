@@ -6,7 +6,11 @@
 #   assert_issue_valid(body) — validates a pipeline issue body against the
 #                              six structural criteria (>=1 task, agents
 #                              resolve, path suffixes resolve, AC present,
-#                              Deploy Verification iff DEPLOY_VERIFY_CMD set)
+#                              Deploy Verification iff DEPLOY_VERIFY_CMD set,
+#                              task granularity: no M/L task naming >2 paths),
+#                              plus a non-failing non-S task-mix warning
+#   _issue_body_task_complexity(desc)  — S/M/L hint extraction (default M)
+#   _issue_body_task_path_count(desc)  — distinct path count (:Lnn-tolerant)
 #
 
 bats_require_minimum_version 1.5.0
@@ -740,4 +744,209 @@ Some prose but no task checkboxes.
 	line_count=$(printf '%s\n' "$output" | grep -c $'\t' || true)
 	[ "$line_count" -eq 1 ]
 	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+# =============================================================================
+# _issue_body_task_complexity()
+# =============================================================================
+
+@test "_issue_body_task_complexity: extracts (S) hint" {
+	run _issue_body_task_complexity "**(S)** Small task — \`a.sh\`"
+	[ "$status" -eq 0 ]
+	[ "$output" = "S" ]
+}
+
+@test "_issue_body_task_complexity: extracts (M) hint" {
+	run _issue_body_task_complexity "**(M)** Medium task — \`a.sh\`"
+	[ "$status" -eq 0 ]
+	[ "$output" = "M" ]
+}
+
+@test "_issue_body_task_complexity: extracts (L) hint" {
+	run _issue_body_task_complexity "**(L)** Large task — \`a.sh\`"
+	[ "$status" -eq 0 ]
+	[ "$output" = "L" ]
+}
+
+@test "_issue_body_task_complexity: defaults to M when no hint present" {
+	run _issue_body_task_complexity "Do the thing without a size hint"
+	[ "$status" -eq 0 ]
+	[ "$output" = "M" ]
+}
+
+@test "_issue_body_task_complexity: normalizes a lowercase hint to uppercase" {
+	run _issue_body_task_complexity "**(s)** small but lowercase"
+	[ "$status" -eq 0 ]
+	[ "$output" = "S" ]
+}
+
+# =============================================================================
+# _issue_body_task_path_count()
+# =============================================================================
+
+@test "_issue_body_task_path_count: counts three plain backtick paths" {
+	run _issue_body_task_path_count \
+		"Big — \`.claude/scripts/a.sh\`, \`.claude/scripts/b.sh\`, \`.claude/scripts/c.sh\`"
+	[ "$status" -eq 0 ]
+	[ "$output" -eq 3 ]
+}
+
+@test "_issue_body_task_path_count: counts paths carrying a :Lnn line-range suffix" {
+	run _issue_body_task_path_count \
+		"Big — \`src/a.ts:L45-80\`, \`src/b.ts:L5\`, \`src/c.ts:L20-30\`"
+	[ "$status" -eq 0 ]
+	[ "$output" -eq 3 ]
+}
+
+@test "_issue_body_task_path_count: collapses the same file at different lines to one" {
+	run _issue_body_task_path_count \
+		"One file — \`src/a.ts:L1\`, \`src/a.ts:L50\`, \`src/a.ts:L90\`"
+	[ "$status" -eq 0 ]
+	[ "$output" -eq 1 ]
+}
+
+@test "_issue_body_task_path_count: returns 0 when no paths are referenced" {
+	run _issue_body_task_path_count "Refactor the retry logic for reliability"
+	[ "$status" -eq 0 ]
+	[ "$output" -eq 0 ]
+}
+
+# =============================================================================
+# assert_issue_valid() — CRITERION 6: task granularity (M/L + >2 distinct paths)
+# =============================================================================
+
+@test "assert_issue_valid: rejects a decomposable M task naming three distinct paths" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(M)** Big task — \`.claude/scripts/a.sh\`, \`.claude/scripts/b.sh\`, \`.claude/scripts/c.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"granularity"* ]]
+}
+
+@test "assert_issue_valid: rejects a decomposable L task using the :Lnn path format" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(L)** Big task — \`.claude/scripts/a.sh:L1-10\`, \`.claude/scripts/b.sh:L5\`, \`.claude/scripts/c.sh:L9\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"granularity"* ]]
+}
+
+@test "assert_issue_valid: rejects a hint-less (default-M) task naming three distinct paths" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` Big task — \`.claude/scripts/a.sh\`, \`.claude/scripts/b.sh\`, \`.claude/scripts/c.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"granularity"* ]]
+}
+
+@test "assert_issue_valid: allows an atomic M task naming exactly two paths" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(M)** Atomic — \`.claude/scripts/a.sh\`, \`.claude/scripts/b.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"granularity"* ]]
+}
+
+@test "assert_issue_valid: allows an atomic L task referencing one file at multiple line ranges" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(L)** One file — \`.claude/scripts/a.sh:L1-10\`, \`.claude/scripts/a.sh:L90-120\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"granularity"* ]]
+}
+
+@test "assert_issue_valid: exempts an S task even when it names more than two paths" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Small but wide — \`.claude/scripts/a.sh\`, \`.claude/scripts/b.sh\`, \`.claude/scripts/c.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"granularity"* ]]
+}
+
+# =============================================================================
+# assert_issue_valid() — TASK-MIX ADVISORY WARNING (non-failing)
+# =============================================================================
+
+@test "assert_issue_valid: warns on stderr when the body contains a non-S task" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[default]\` **(M)** Medium task — \`.claude/scripts/a.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	# Warning does not fail the body.
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"WARNING"* ]]
+	[[ "$output" == *"non-S task"* ]]
+}
+
+@test "assert_issue_valid: does not warn when every task is S" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Small one — \`.claude/scripts/a.sh\`
+- [ ] \`[bash-script-craftsman]\` **(S)** Small two — \`.claude/scripts/b.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"WARNING"* ]]
+}
+
+@test "assert_issue_valid: warning counts M/L against S in a mixed body" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Small — \`.claude/scripts/a.sh\`
+- [ ] \`[bash-script-craftsman]\` **(M)** Medium — \`.claude/scripts/b.sh\`
+- [ ] \`[bash-script-craftsman]\` **(L)** Large — \`.claude/scripts/c.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"2 non-S task(s)"* ]]
+	[[ "$output" == *"1 S task(s)"* ]]
 }
