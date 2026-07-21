@@ -1102,6 +1102,16 @@ process_issue() {
                 pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
                 log "PR #${pr_number:-?} left open — merge blocked by quality gate"
                 ;;
+            completed_partial)
+                # Issue #577: partial delivery (not all tasks completed, or the
+                # PR review never approved).  Handle it like merge_blocked —
+                # leave the PR open and record it — rather than letting it fall
+                # to the *) error arm, where the PR-recovery logic below would
+                # wrongly flip it to success because a PR number exists.
+                impl_status="merge_blocked"
+                pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
+                log "PR #${pr_number:-?} left open — partial delivery (not all tasks completed / review unresolved)"
+                ;;
             error|max_iterations_quality|max_iterations_pr_review)
                 impl_status="error"
                 impl_error="Script exited with state: $state"
