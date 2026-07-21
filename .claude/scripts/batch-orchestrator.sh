@@ -423,7 +423,8 @@ init_status() {
             "deploy_verify_failed": false,
             "started_at": null,
             "stage_started_at": null,
-            "completed_at": null
+            "completed_at": null,
+            "cost_usd": 0
         }]')
     done
 
@@ -453,6 +454,9 @@ init_status() {
                 in_progress: 0
             },
             issues: $issues,
+            cost_summary: {
+                total_cost_usd: ($issues | map(.cost_usd // 0) | add // 0)
+            },
             rate_limit: {
                 waiting: false,
                 resume_at: null,
@@ -505,6 +509,8 @@ update_progress() {
             ([.issues[] | select(.status == "in_progress")] | length) |
         .progress.pending =
             ([.issues[] | select(.status == "pending")] | length) |
+        .cost_summary.total_cost_usd =
+            ([.issues[] | (.cost_usd // 0)] | add // 0) |
         .last_update = (now | todate)' \
         "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
@@ -1136,6 +1142,19 @@ process_issue() {
 
     log "implement-issue status: $impl_status, PR: ${pr_number:-none}"
 
+    # Cost accounting: the sub-orchestrator aggregates the cost of every
+    # CLI call it makes into a run-level cost_summary on its own status
+    # file. Record it now — before any early return below — so partial
+    # runs (skipped/merge_blocked/failed) still surface their spend in
+    # the batch cost_summary rollup. `// 0` degrades to zero when the
+    # field is absent rather than corrupting status.json.
+    local impl_cost_usd="0"
+    if [[ -f "$issue_status_file" ]]; then
+        impl_cost_usd=$(jq -r '.cost_summary.total_cost_usd // 0' \
+            "$issue_status_file" 2>/dev/null) || impl_cost_usd="0"
+    fi
+    update_issue_field "$issue_num" "cost_usd" "$impl_cost_usd" "true"
+
     # Log location of metrics.json emitted by the orchestrator's EXIT trap
     if [[ -f "$issue_status_file" ]]; then
         local issue_log_dir
@@ -1491,7 +1510,8 @@ sweep_implement_followups() {
 					"deploy_verify_failed": false,
 					"started_at": null,
 					"stage_started_at": null,
-					"completed_at": null
+					"completed_at": null,
+					"cost_usd": 0
 				}]
 				| .progress.total = (.progress.total + 1)
 				| .progress.pending = (.progress.pending + 1)
