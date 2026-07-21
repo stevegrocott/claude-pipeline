@@ -1523,6 +1523,32 @@ _extract_denials() {
     fi
 }
 
+# Extract token usage and reported cost from raw CLI output as a JSON
+# object. Every field is guarded with `// 0` so a missing/null value
+# (e.g. an error response emitted before usage accrued) degrades to zero
+# rather than corrupting downstream status.json / stage_result consumers.
+# Returns a zeroed object when raw is empty, malformed, or jq fails.
+#
+# See issue #580: usage/total_cost_usd are already present in every
+# --output-format json response but were previously dropped on the floor.
+_extract_usage() {
+    local raw="$1"
+    local usage
+    usage=$(printf '%s' "$raw" \
+        | jq -c '{
+            input_tokens: (.usage.input_tokens // 0),
+            output_tokens: (.usage.output_tokens // 0),
+            cache_creation_input_tokens: (.usage.cache_creation_input_tokens // 0),
+            cache_read_input_tokens: (.usage.cache_read_input_tokens // 0),
+            total_cost_usd: (.total_cost_usd // 0)
+          }' 2>/dev/null)
+    if [[ -z "$usage" || "$usage" == "null" ]]; then
+        printf '{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"total_cost_usd":0}\n'
+    else
+        printf '%s\n' "$usage"
+    fi
+}
+
 # Emit a stage_result JSON envelope on stdout. All payload args are
 # JSON-encoded so callers can pass nested objects/arrays safely via
 # --argjson without shell-quoting hazards.
@@ -1856,6 +1882,14 @@ run_stage() {
     printf '%s\n' "=== $stage_name output ===" >> "$stage_log"
     printf '%s\n' "$output" >> "$stage_log"
     printf '%s\n' "=== exit code: $exit_code ===" >> "$stage_log"
+
+    # Parse token usage and reported cost from the CLI's JSON envelope
+    # alongside the existing structured-output extraction below. Every
+    # field is `// 0` guarded (see _extract_usage) so a missing/null usage
+    # block degrades to zero. Threaded into the stage_result envelope by
+    # _emit_stage_result (issue #580).
+    local _stage_usage
+    _stage_usage=$(_extract_usage "$output")
 
     # Check timeout — but still try to extract structured output first.
     # The agent may have produced valid output before the timeout killed the CLI.
