@@ -730,7 +730,27 @@ set_stage_completed() {
     sync_status_to_log
     # Schema enum for stage_end.status is ["success","error","rate_limit"];
     # "completed" is the status.json column name, not the event-stream value.
-    emit_event "stage_end" "stage=$stage" "status=success"
+    #
+    # When per-stage token/cost data is available, thread it onto the
+    # stage_end event so events.jsonl carries per-stage spend (issue #580).
+    # `:=` passes JSON-typed (numeric) values; the schema's stage_end branch
+    # declares these fields optional so events without them still validate.
+    local -a _stage_end_args=("stage=$stage" "status=success")
+    if [[ -n "$tokens_json" ]]; then
+        local _end_in _end_out _end_cache_creation _end_cache_read
+        _end_in=$(printf '%s' "$tokens_json" | jq -r '.input_tokens // 0' 2>/dev/null)
+        _end_out=$(printf '%s' "$tokens_json" | jq -r '.output_tokens // 0' 2>/dev/null)
+        _end_cache_creation=$(printf '%s' "$tokens_json" | jq -r '.cache_creation_input_tokens // 0' 2>/dev/null)
+        _end_cache_read=$(printf '%s' "$tokens_json" | jq -r '.cache_read_input_tokens // 0' 2>/dev/null)
+        _stage_end_args+=(
+            "input_tokens:=${_end_in:-0}"
+            "output_tokens:=${_end_out:-0}"
+            "cache_creation_input_tokens:=${_end_cache_creation:-0}"
+            "cache_read_input_tokens:=${_end_cache_read:-0}"
+            "estimated_cost:=${estimated_cost:-0}"
+        )
+    fi
+    emit_event "stage_end" "${_stage_end_args[@]}"
 }
 
 set_stage_failed() {

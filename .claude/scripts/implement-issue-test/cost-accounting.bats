@@ -113,15 +113,17 @@ run_with_config() {
 }
 
 @test "_model_cost prices cache read tokens at 0.1x the input price" {
-	# sonnet: 1M cache-read tokens -> 0.1 * $3.00 = $0.30
-	run_with_config '_model_cost sonnet 0 0 1000000 0'
+	# Signature: _model_cost <model> <input> <output> <cache_creation> <cache_read>
+	# sonnet: 1M cache-read tokens (arg5) -> 0.1 * $3.00 = $0.30
+	run_with_config '_model_cost sonnet 0 0 0 1000000'
 	[ "$status" -eq 0 ]
 	assert_cost_equals "$output" "0.30"
 }
 
 @test "_model_cost prices cache creation tokens at 1.25x the input price" {
-	# sonnet: 1M cache-write tokens -> 1.25 * $3.00 = $3.75
-	run_with_config '_model_cost sonnet 0 0 0 1000000'
+	# Signature: _model_cost <model> <input> <output> <cache_creation> <cache_read>
+	# sonnet: 1M cache-write/creation tokens (arg4) -> 1.25 * $3.00 = $3.75
+	run_with_config '_model_cost sonnet 0 0 1000000 0'
 	[ "$status" -eq 0 ]
 	assert_cost_equals "$output" "3.75"
 }
