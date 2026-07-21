@@ -191,7 +191,7 @@ _issue_body_extract_paths() {
 # Extracts the S/M/L complexity hint from a task description.  The hint is the
 # first `**(S)**` / `**(M)**` / `**(L)**` marker (case-insensitive) in the
 # description.  A description with no marker defaults to "M" — mirroring the
-# orchestrator's hint-less default (implement-issue-orchestrator.sh:3645),
+# orchestrator's hint-less default (implement-issue-orchestrator.sh:3834),
 # which treats an unsized task as medium.
 #
 # Arguments:
