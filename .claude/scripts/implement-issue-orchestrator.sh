@@ -818,12 +818,37 @@ set_stage_completed() {
             .stages[$stage].status = "completed" |
             .stages[$stage].tokens = $tokens |
             .stages[$stage].estimated_cost = $estimated_cost |
+            # Roll every stage'"'"'s tokens/estimated_cost up into the run-level
+            # top-level cost_summary NOW (issue #580). Recomputed from .stages[]
+            # on every completion — idempotent and resume-safe (re-derived, not
+            # incremented, so re-running a stage never double-counts). This
+            # makes status.json the canonical live per-run cost source that
+            # batch-orchestrator.sh reads (metrics.json stays the final
+            # artifact, written by export_metrics). Field names match
+            # init_status'"'"'s seed and metrics.json. `// 0` guards throughout.
+            .cost_summary = {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            } |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     else
+        # No token data for this stage — still recompute the top-level
+        # cost_summary from .stages[] so it stays consistent with whatever
+        # other stages have recorded (issue #580).
         jq --arg stage "$stage" \
            '.stages[$stage].completed_at = (now | todate) |
             .stages[$stage].status = "completed" |
+            .cost_summary = {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            } |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     fi

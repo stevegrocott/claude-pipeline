@@ -2287,6 +2287,18 @@ EOF
 	awk -v c="$cost" 'BEGIN { exit !((c + 0) > 0) }' \
 		|| fail "estimated_cost not > 0: '$cost'"
 
+	# AC3 (issue #580): the TOP-LEVEL cost_summary on status.json is rolled up
+	# LIVE during the run (not just in metrics.json) — this is the canonical
+	# per-run cost source batch-orchestrator.sh reads. Guards the gap where it
+	# stayed at the init_status-seeded zero.
+	local sj_cost sj_input
+	sj_cost=$(jq -r '.cost_summary.total_cost_usd' "$STATUS_FILE")
+	sj_input=$(jq -r '.cost_summary.total_input_tokens' "$STATUS_FILE")
+	awk -v t="$sj_cost" 'BEGIN { exit !((t + 0) > 0) }' \
+		|| fail "status.json cost_summary.total_cost_usd not > 0: '$sj_cost'"
+	[ "$sj_input" = "1234" ] \
+		|| fail "status.json cost_summary.total_input_tokens expected 1234, got '$sj_input'"
+
 	# AC2: export_metrics rolls the per-stage spend into a run-level total > 0.
 	export_metrics
 	[ -f "$LOG_BASE/metrics.json" ] || fail "metrics.json not written"
