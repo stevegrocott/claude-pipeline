@@ -8483,6 +8483,12 @@ $complete_summary
         local merge_blocked_reason=""
         local merge_block_kind=""   # "convergence" | "partial"
 
+        # Read the persisted merge_blocked_reason once; nothing mutates
+        # status.json between the two gates, so both share this value.
+        local _persisted
+        _persisted=$(jq -r '.merge_blocked_reason // empty' \
+            "$STATUS_FILE" 2>/dev/null || printf '')
+
         # Gate A — quality-loop convergence failure.  Override:
         # BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0.  A convergence reason may be
         # persisted in status.json (so a standalone process-pr honours it) or
@@ -8492,9 +8498,6 @@ $complete_summary
         if [[ "${BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1}" == "0" ]]; then
             log "BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 — skipping merge-block check"
         else
-            local _persisted
-            _persisted=$(jq -r '.merge_blocked_reason // empty' \
-                "$STATUS_FILE" 2>/dev/null || printf '')
             if [[ -n "$_persisted" && "$_persisted" != "Partial implementation:"* ]]; then
                 merge_blocked_reason="$_persisted"
                 merge_block_kind="convergence"
@@ -8519,11 +8522,8 @@ $complete_summary
             if [[ "${BLOCK_MERGE_ON_PARTIAL:-1}" == "0" ]]; then
                 log "BLOCK_MERGE_ON_PARTIAL=0 — skipping partial/pr-review merge-block check"
             else
-                local _persisted_p
-                _persisted_p=$(jq -r '.merge_blocked_reason // empty' \
-                    "$STATUS_FILE" 2>/dev/null || printf '')
-                if [[ "$_persisted_p" == "Partial implementation:"* ]]; then
-                    merge_blocked_reason="$_persisted_p"
+                if [[ "$_persisted" == "Partial implementation:"* ]]; then
+                    merge_blocked_reason="$_persisted"
                     merge_block_kind="partial"
                 else
                     local _dsp
