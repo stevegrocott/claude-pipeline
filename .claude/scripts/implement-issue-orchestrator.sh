@@ -1561,6 +1561,22 @@ _extract_usage() {
 #   $5 - model:            resolved model id (e.g. haiku|sonnet|opus)
 #   $6 - error_kind_json:  "null" or JSON-encoded string (e.g. "\"timeout\"")
 #   $7 - elapsed_ms:       integer milliseconds
+#   $8 - usage_json:       (optional) JSON object from _extract_usage — token
+#                          counts + the CLI's reported total_cost_usd. Defaults
+#                          to a zeroed object when omitted so older/partial
+#                          call sites still produce a valid envelope.
+#
+# The envelope carries two cost-accounting fields derived from $8 (issue #580):
+#   .tokens - token counts only (input/output/cache_creation/cache_read),
+#             lifted straight out of usage_json for downstream persistence
+#             (e.g. set_stage_completed's tokens arg).
+#   .cost   - {reported_usd, computed_usd, estimated_usd}. reported_usd is
+#             the CLI's own total_cost_usd; computed_usd is priced from the
+#             token counts via _model_cost (model-config.sh) using the
+#             envelope's resolved model; estimated_usd prefers reported_usd
+#             and falls back to computed_usd when the CLI didn't report one
+#             (e.g. a response emitted before usage accrued) — see the
+#             risk mitigation in issue #580's evaluation section.
 _emit_stage_result() {
     local status="$1"
     local output_json="$2"
@@ -1569,6 +1585,24 @@ _emit_stage_result() {
     local model="$5"
     local error_kind_json="$6"
     local elapsed_ms="$7"
+    local usage_json="${8:-}"
+
+    if [[ -z "$usage_json" || "$usage_json" == "null" ]]; then
+        usage_json='{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"total_cost_usd":0}'
+    fi
+
+    local input_tokens output_tokens cache_creation_tokens cache_read_tokens reported_usd
+    input_tokens=$(printf '%s' "$usage_json" | jq -r '.input_tokens // 0' 2>/dev/null)
+    output_tokens=$(printf '%s' "$usage_json" | jq -r '.output_tokens // 0' 2>/dev/null)
+    cache_creation_tokens=$(printf '%s' "$usage_json" | jq -r '.cache_creation_input_tokens // 0' 2>/dev/null)
+    cache_read_tokens=$(printf '%s' "$usage_json" | jq -r '.cache_read_input_tokens // 0' 2>/dev/null)
+    reported_usd=$(printf '%s' "$usage_json" | jq -r '.total_cost_usd // 0' 2>/dev/null)
+
+    local computed_usd
+    computed_usd=$(_model_cost "$model" \
+        "${input_tokens:-0}" "${output_tokens:-0}" \
+        "${cache_creation_tokens:-0}" "${cache_read_tokens:-0}" 2>/dev/null)
+    computed_usd="${computed_usd:-0}"
 
     jq -nc \
         --arg status "$status" \
@@ -1578,8 +1612,19 @@ _emit_stage_result() {
         --arg model "$model" \
         --argjson error_kind "$error_kind_json" \
         --argjson elapsed_ms "$elapsed_ms" \
+        --argjson input_tokens "${input_tokens:-0}" \
+        --argjson output_tokens "${output_tokens:-0}" \
+        --argjson cache_creation_tokens "${cache_creation_tokens:-0}" \
+        --argjson cache_read_tokens "${cache_read_tokens:-0}" \
+        --argjson reported_usd "${reported_usd:-0}" \
+        --argjson computed_usd "$computed_usd" \
         '{status: $status, output: $output, raw: $raw, denials: $denials,
-          model: $model, error_kind: $error_kind, elapsed_ms: $elapsed_ms}'
+          model: $model, error_kind: $error_kind, elapsed_ms: $elapsed_ms,
+          tokens: {input_tokens: $input_tokens, output_tokens: $output_tokens,
+                    cache_creation_input_tokens: $cache_creation_tokens,
+                    cache_read_input_tokens: $cache_read_tokens},
+          cost: {reported_usd: $reported_usd, computed_usd: $computed_usd,
+                 estimated_usd: (if $reported_usd > 0 then $reported_usd else $computed_usd end)}}'
 }
 
 # Apply a stage outcome action to a stage_result envelope.
@@ -1903,7 +1948,8 @@ run_stage() {
                 "success" "$timeout_structured" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))")
+                "$(( $(_epoch_ms) - result_start_ms ))" \
+                "$_stage_usage")
             _apply_stage_action "$_sr" "accept"
             return $?
         fi
@@ -1923,7 +1969,8 @@ run_stage() {
                 "success" "$timeout_fallback_result" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))")
+                "$(( $(_epoch_ms) - result_start_ms ))" \
+                "$_stage_usage")
             _apply_stage_action "$_sr" "accept"
             return $?
         fi
@@ -1998,6 +2045,10 @@ run_stage() {
 
         output=$(< "$_retry_out_tmp")
         rm -f "$_retry_out_tmp"
+
+        # Re-extract usage — output now reflects the retry attempt, not the
+        # original (likely-zeroed) timed-out attempt captured above.
+        _stage_usage=$(_extract_usage "$output")
 
         printf '%s\n' "$output" >> "$stage_log"
         printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"
@@ -2185,7 +2236,8 @@ for m in re.finditer(r'\[\s*\{', t):
         "$_interim_status" "${_interim_structured}" "$output" \
         "$(_extract_denials "$output")" \
         "$result_model" "$_error_kind_json" \
-        "$(( $(_epoch_ms) - result_start_ms ))")
+        "$(( $(_epoch_ms) - result_start_ms ))" \
+        "$_stage_usage")
 
     # Escalation history from status file
     local _history="[]"
@@ -2219,7 +2271,8 @@ for m in re.finditer(r'\[\s*\{', t):
                 "success" "$_interim_structured" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))")
+                "$(( $(_epoch_ms) - result_start_ms ))" \
+                "$_stage_usage")
             _apply_stage_action "$_sr_accept" "accept"
             return $?
             ;;
@@ -2285,6 +2338,11 @@ for m in re.finditer(r'\[\s*\{', t):
                 > "$_esc_raw" 2>&1 || _esc_exit_code=$?
             output=$(cat "$_esc_raw"); rm -f "$_esc_raw"
 
+            # Re-extract usage — output now reflects the escalated (pricier)
+            # model's attempt, so its tokens/cost must replace the original
+            # pre-escalation usage in the emitted envelope (issue #580).
+            _stage_usage=$(_extract_usage "$output")
+
             result_model="$_esc_model"
             printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
@@ -2317,7 +2375,8 @@ for m in re.finditer(r'\[\s*\{', t):
                     "success" "$_esc_structured" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" "null" \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage")
             else
                 emit_event "schema_validation_fail" \
                     "stage=$stage_name" \
@@ -2330,7 +2389,8 @@ for m in re.finditer(r'\[\s*\{', t):
                     "error" "null" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" '"no_structured_output"' \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage")
             fi
             _apply_stage_action "$_sr_esc" "escalate" "$_da_reason"
             return $?
@@ -2369,6 +2429,11 @@ for m in re.finditer(r'\[\s*\{', t):
                 > "$_retry_raw" 2>&1 || _retry_exit_code=$?
             output=$(cat "$_retry_raw"); rm -f "$_retry_raw"
 
+            # Re-extract usage — output now reflects the retry attempt, not the
+            # rate-limited original, so the emitted envelope carries the retry's
+            # tokens/cost (issue #580).
+            _stage_usage=$(_extract_usage "$output")
+
             printf '%s\n' "=== $stage_name retry output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' \
@@ -2392,13 +2457,15 @@ for m in re.finditer(r'\[\s*\{', t):
                     "success" "$_retry_structured" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" "null" \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage")
             else
                 _sr_retry=$(_emit_stage_result \
                     "error" "null" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" '"no_structured_output"' \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage")
             fi
             _apply_stage_action "$_sr_retry" "retry_same" "$_da_reason"
             return $?
