@@ -3960,6 +3960,11 @@ _infer_agent_from_path() {
 _parse_task_lines() {
 	local tasks_section="$1"
 
+	# Strip carriage returns so a CRLF issue body parses identically to an LF
+	# one — otherwise "\r" leaks into descriptions and defeats the $-anchored
+	# task regexes (mirrors _issue_body_tasks_section in issue-body-lib.sh).
+	tasks_section="${tasks_section//$'\r'/}"
+
 	# Strip backslash-escaped backticks (gh API returns \` instead of `)
 	tasks_section="${tasks_section//\\\`/\`}"
 
@@ -7208,8 +7213,11 @@ Log directory: \`$LOG_BASE\`"
         # Extract tasks from ## Implementation Tasks section
         # Format: - [ ] `[agent-name]` Task description
         log "Parsing implementation tasks from issue body..."
+        # Section slice mirrors _issue_body_tasks_section: strip CR for CRLF
+        # tolerance and match the heading case-insensitively (via tolower) so
+        # "## implementation tasks" and CRLF bodies both parse.
         local tasks_section
-        tasks_section=$(printf '%s' "$issue_body" | awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} found && /^##+[[:space:]]/{exit} found{print}')
+        tasks_section=$(printf '%s' "$issue_body" | awk '{ sub(/\r$/, "") } tolower($0) ~ /^##+[[:space:]]+implementation tasks/{found=1; next} found && /^##+[[:space:]]/{exit} found{print}')
 
         if [[ -z "$tasks_section" ]]; then
             log_error "No 'Implementation Tasks' section found in issue #$ISSUE_NUMBER"
@@ -7225,11 +7233,40 @@ Log directory: \`$LOG_BASE\`"
         task_count=$(printf '%s' "$tasks_json" | jq length)
 
         if (( task_count == 0 )); then
-            local excerpt="${issue_body:0:500}"
-            log_error "No parseable tasks found in issue #$ISSUE_NUMBER. Issue body excerpt (first 500 chars):
+            # LOUD failure (issue #584): rather than dump a raw body excerpt and
+            # leave the operator guessing, run the shared preflight lint and
+            # report WHY each in-section candidate line was rejected
+            # (format / agent-unresolved / path-unresolved).  This replaces the
+            # silent per-line `continue` drop in _parse_task_lines with an
+            # actionable, per-line report before the run aborts.
+            #
+            # The library is sourced inside a subshell so its helper definitions
+            # (e.g. _infer_agent_from_path, which the orchestrator defines with
+            # different internals) never collide with this script's own.
+            local lint_report=""
+            if [[ -f "$SCRIPT_DIR/issue-body-lib.sh" ]]; then
+                lint_report=$(
+                    source "$SCRIPT_DIR/issue-body-lib.sh" 2>/dev/null \
+                        && lint_task_lines "$issue_body"
+                )
+            fi
+
+            log_error "No parseable tasks found in issue #$ISSUE_NUMBER's '## Implementation Tasks' section."
+            if [[ -n "$lint_report" ]]; then
+                log_error "Per-line rejection report (cause <TAB> line):"
+                local _lint_line
+                while IFS= read -r _lint_line; do
+                    [[ -z "$_lint_line" ]] && continue
+                    log_error "  rejected: $_lint_line"
+                done <<< "$lint_report"
+                log_error "Fix: each task must be '- [ ] \`[agent-name]\` **(S)** desc — \`path\`'. See plugins/pipeline-core/skills/explore/SKILL.md (Task Format Specification)."
+            else
+                local excerpt="${issue_body:0:500}"
+                log_error "Preflight lint found no candidate lines to classify. Issue body excerpt (first 500 chars):
 ---
 $excerpt
 ---"
+            fi
             set_final_state "error"
             exit 1
         fi
@@ -7397,7 +7434,10 @@ $excerpt
         # (c) Validate ## Implementation Tasks section exists in saved issue body
         local issue_body_file="$LOG_BASE/context/issue-body.md"
         if [[ -f "$issue_body_file" ]]; then
-            if ! grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file"; then
+            # Case-insensitive (-i) to match the hardened section extractor —
+            # a lowercase "## implementation tasks" heading must not trip this
+            # resume-path guard after the parser accepted it.
+            if ! grep -qiE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file"; then
                 log_error "Issue body missing 'Implementation Tasks' section"
                 set_final_state "error"
                 exit 1
