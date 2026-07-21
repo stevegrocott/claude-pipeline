@@ -637,7 +637,14 @@ init_status() {
             last_update: (now | todate),
             log_dir: $log_dir,
             merge_blocked_reason: null,
-            escalations: []
+            escalations: [],
+            cost_summary: {
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                total_cache_read_tokens: 0,
+                total_cache_creation_tokens: 0,
+                total_cost_usd: 0
+            }
         }' > "$STATUS_FILE"
 
     log "Initialized status file: $STATUS_FILE"
