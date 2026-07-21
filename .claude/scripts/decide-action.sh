@@ -61,6 +61,20 @@ _next_model() {
 }
 
 # ---------------------------------------------------------------------------
+# _s_opus_gate_bail <error_kind>
+# Emit the S-complexity Opus-gate bail action (issue #579).  A short task at
+# sonnet must not auto-escalate to opus on a single stage failure — Opus buys
+# no completion lift for S tasks, only cost — so bail and require a bounded
+# trigger.  Shared by _bash_decide (double_timeout + default branches) and
+# _compose_decide (escalate branch) so both backends emit identical output.
+# ---------------------------------------------------------------------------
+_s_opus_gate_bail() {
+	local error_kind="${1:-unknown}"
+	printf '{"action":"bail","reason":"%s: S-complexity task at sonnet — not escalating to opus (issue #579)"}\n' \
+		"$error_kind"
+}
+
+# ---------------------------------------------------------------------------
 # _bash_decide <stage_result_json> <history_json>
 # Inline decision tree matching escalation-policy SKILL.md.
 # Prints action JSON to stdout; never calls external scripts.
@@ -120,11 +134,8 @@ _bash_decide() {
 				'{"action":"bail","reason":"double_timeout"}'
 		elif [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
 			# S-complexity gate (issue #579): a short task at sonnet must
-			# not auto-escalate to opus on a single double_timeout — Opus
-			# buys no completion lift for S tasks, only cost.  Bail so Opus
-			# requires a bounded trigger, not one stage failure.
-			printf '%s\n' \
-				'{"action":"bail","reason":"double_timeout: S-complexity task at sonnet — not escalating to opus (issue #579)"}'
+			# not auto-escalate to opus on a single double_timeout.
+			_s_opus_gate_bail "double_timeout"
 		else
 			local next_model
 			next_model=$(_next_model "$model")
@@ -159,8 +170,7 @@ _bash_decide() {
 	# rate_limit retry_same and opus-ceiling checks so those paths are
 	# unaffected — only the sonnet→opus escalation is gated.
 	if [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
-		printf '{"action":"bail","reason":"%s: S-complexity task at sonnet — not escalating to opus (issue #579)"}\n' \
-			"${error_kind:-unknown}"
+		_s_opus_gate_bail "${error_kind:-unknown}"
 		return 0
 	fi
 
@@ -279,8 +289,7 @@ _compose_decide() {
 			# Checked before model-fallback delegation because sonnet's next
 			# tier is opus.
 			if [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
-				printf '{"action":"bail","reason":"%s: S-complexity task at sonnet — not escalating to opus (issue #579)"}\n' \
-					"${error_kind:-unknown}"
+				_s_opus_gate_bail "${error_kind:-unknown}"
 				return 0
 			fi
 
