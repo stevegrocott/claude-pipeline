@@ -259,6 +259,33 @@ _setup_orchestrator_env() {
 	assert_cost_equals "$estimated_cost" "0.00105"
 }
 
+@test "export_metrics rolls per-stage tokens/cost up into cost_summary totals" {
+	_setup_orchestrator_env
+	init_status
+	# Two completed stages carrying tokens + estimated_cost, but no run-level
+	# cost_summary was ever accumulated (init_status seeds it at zero). The
+	# rollup in export_metrics must sum the per-stage figures.
+	jq '.stages.implement.tokens = {input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 10, cache_creation_input_tokens: 5} |
+	    .stages.implement.estimated_cost = 0.00105 |
+	    .stages.review.tokens = {input_tokens: 200, output_tokens: 25, cache_read_input_tokens: 0, cache_creation_input_tokens: 0} |
+	    .stages.review.estimated_cost = 0.00042' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	export_metrics
+
+	local total_input total_output total_cache_read total_cache_creation total_cost
+	total_input=$(jq -r '.cost_summary.total_input_tokens' "$LOG_BASE/metrics.json")
+	total_output=$(jq -r '.cost_summary.total_output_tokens' "$LOG_BASE/metrics.json")
+	total_cache_read=$(jq -r '.cost_summary.total_cache_read_tokens' "$LOG_BASE/metrics.json")
+	total_cache_creation=$(jq -r '.cost_summary.total_cache_creation_tokens' "$LOG_BASE/metrics.json")
+	total_cost=$(jq -r '.cost_summary.total_cost_usd' "$LOG_BASE/metrics.json")
+	[ "$total_input" = "300" ]
+	[ "$total_output" = "75" ]
+	[ "$total_cache_read" = "10" ]
+	[ "$total_cache_creation" = "5" ]
+	assert_cost_equals "$total_cost" "0.00147"
+}
+
 # =============================================================================
 # BATCH-LEVEL cost_summary ROLLUP (batch-orchestrator.sh)
 # =============================================================================

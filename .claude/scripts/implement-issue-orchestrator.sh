@@ -977,7 +977,14 @@ write_task_summary_to_status() {
 #   },
 #   "escalations": [
 #     { "stage": string, "from_model": string, "to_model": string, "reason": string }, ...
-#   ]
+#   ],
+#   "cost_summary": {
+#     "total_input_tokens":          number,
+#     "total_output_tokens":         number,
+#     "total_cache_read_tokens":     number,
+#     "total_cache_creation_tokens": number,
+#     "total_cost_usd":              number
+#   }
 # }
 export_metrics() {
     local metrics_file="$LOG_BASE/metrics.json"
@@ -1011,6 +1018,27 @@ export_metrics() {
         def all_started: [.stages[].started_at // empty] | map(select(. != null));
         def all_completed: [.stages[].completed_at // empty] | map(select(. != null));
 
+        # Default cost_summary for status.json predating issue #580 (or any
+        # run where init_status has not yet seeded the object) so metrics.json
+        # always exposes the full schema rather than a null field.
+        def default_cost_summary:
+            { total_input_tokens: 0, total_output_tokens: 0,
+              total_cache_read_tokens: 0, total_cache_creation_tokens: 0,
+              total_cost_usd: 0 };
+
+        # Roll each per-stage tokens/estimated_cost (written by
+        # set_stage_completed) up into run-level totals. This is the run-level
+        # analogue of the batch-orchestrator per-issue cost rollup (issue #580).
+        # Missing tokens/estimated_cost on a stage coalesce to 0.
+        def stage_cost_rollup:
+            {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            };
+
         . as $status |
 
         # Calculate overall start/end from earliest/latest stage timestamps
@@ -1036,7 +1064,19 @@ export_metrics() {
                 test_iterations:      ($status.test_iterations // 0),
                 pr_review_iterations: ($status.pr_review_iterations // 0)
             },
-            escalations: ($status.escalations // [])
+            escalations: ($status.escalations // []),
+            # Roll per-stage tokens/estimated_cost up into the run-level
+            # cost_summary (issue #580). When no stage carries token data
+            # (e.g. a pre-#580 status file, or a run that recorded only a
+            # top-level cost_summary), fall back to the seeded/persisted
+            # cost_summary rather than emitting all zeros.
+            cost_summary: (
+                ($status | stage_cost_rollup) as $rollup |
+                if ([$rollup[]] | add // 0) > 0
+                then $rollup
+                else ($status.cost_summary // default_cost_summary)
+                end
+            )
         }
     ' "$STATUS_FILE" > "$metrics_file" 2>/dev/null
 
