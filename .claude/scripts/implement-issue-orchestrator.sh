@@ -696,11 +696,30 @@ set_stage_started() {
 
 set_stage_completed() {
     local stage="$1"
-    jq --arg stage "$stage" \
-       '.stages[$stage].completed_at = (now | todate) |
-        .stages[$stage].status = "completed" |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    local tokens_json="${2:-}"
+    local estimated_cost="${3:-}"
+
+    if [[ -n "$tokens_json" ]]; then
+        # Mirror the existing `.model` write (see run_stage's resolved-model
+        # persistence above): thread the stage_result envelope's tokens
+        # object and estimated cost onto the stage entry so per-stage spend
+        # survives into status.json/metrics.json (issue #580).
+        jq --arg stage "$stage" \
+           --argjson tokens "$tokens_json" \
+           --argjson estimated_cost "${estimated_cost:-0}" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "completed" |
+            .stages[$stage].tokens = $tokens |
+            .stages[$stage].estimated_cost = $estimated_cost |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    else
+        jq --arg stage "$stage" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "completed" |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    fi
     sync_status_to_log
     # Schema enum for stage_end.status is ["success","error","rate_limit"];
     # "completed" is the status.json column name, not the event-stream value.
