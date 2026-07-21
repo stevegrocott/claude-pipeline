@@ -2243,3 +2243,107 @@ _repro_full_suite_bats_check() {
 	[[ "$script_content" == *'informational only, non-blocking'* ]] || \
 		fail "Orchestrator must retain informational-only label for mixed-scope bats_section"
 }
+
+# =============================================================================
+# INTEGRATION: per-stage token/cost accumulator bridge (issue #580)
+#
+# Drives a real stage through run_stage with a stubbed CLI response carrying a
+# usage block + total_cost_usd, then asserts the tokens/cost land on the stage
+# entry (via set_stage_completed defaulting from the accumulator) and roll up
+# into the run-level cost_summary (via export_metrics). Guards the blocking bug
+# where every set_stage_completed call site passes only the stage name, so
+# .stages[].tokens was never written and cost_summary was permanently zero.
+# =============================================================================
+
+@test "INTEGRATION: run_stage tokens/cost persist to stage entry + cost_summary (issue #580)" {
+	init_status
+
+	local mock_response="$TEST_TMP/mock-usage.json"
+	cat > "$mock_response" << 'EOF'
+{"result":"done","structured_output":{"status":"success","result":"done"},"usage":{"input_tokens":1234,"output_tokens":567,"cache_creation_input_tokens":10,"cache_read_input_tokens":20},"total_cost_usd":0.042}
+EOF
+	# Stub the CLI: bypass timeout(1)/claude and emit the usage-bearing JSON.
+	timeout() { shift; cat "$mock_response"; }
+	export -f timeout
+
+	set_stage_started "triage"
+	local result
+	result=$(run_stage "triage" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$result" ] || fail "run_stage returned no JSON output"
+	set_stage_completed "triage"
+
+	# AC1: the stage entry carries the stubbed token counts.
+	local in_tok out_tok cache_read
+	in_tok=$(jq -r '.stages.triage.tokens.input_tokens' "$STATUS_FILE")
+	out_tok=$(jq -r '.stages.triage.tokens.output_tokens' "$STATUS_FILE")
+	cache_read=$(jq -r '.stages.triage.tokens.cache_read_input_tokens' "$STATUS_FILE")
+	[ "$in_tok" = "1234" ] || fail "expected input_tokens 1234, got '$in_tok'"
+	[ "$out_tok" = "567" ] || fail "expected output_tokens 567, got '$out_tok'"
+	[ "$cache_read" = "20" ] || fail "expected cache_read 20, got '$cache_read'"
+
+	# AC1: estimated_cost > 0 (prefers the CLI's reported total_cost_usd).
+	local cost
+	cost=$(jq -r '.stages.triage.estimated_cost' "$STATUS_FILE")
+	awk -v c="$cost" 'BEGIN { exit !((c + 0) > 0) }' \
+		|| fail "estimated_cost not > 0: '$cost'"
+
+	# AC2: export_metrics rolls the per-stage spend into a run-level total > 0.
+	export_metrics
+	[ -f "$LOG_BASE/metrics.json" ] || fail "metrics.json not written"
+	local total_cost total_input
+	total_cost=$(jq -r '.cost_summary.total_cost_usd' "$LOG_BASE/metrics.json")
+	total_input=$(jq -r '.cost_summary.total_input_tokens' "$LOG_BASE/metrics.json")
+	awk -v t="$total_cost" 'BEGIN { exit !((t + 0) > 0) }' \
+		|| fail "cost_summary.total_cost_usd not > 0: '$total_cost'"
+	[ "$total_input" = "1234" ] || fail "expected total_input_tokens 1234, got '$total_input'"
+}
+
+@test "INTEGRATION: multiple run_stage calls in one stage accumulate (issue #580)" {
+	init_status
+
+	local mock_response="$TEST_TMP/mock-usage.json"
+	cat > "$mock_response" << 'EOF'
+{"result":"done","structured_output":{"status":"success","result":"done"},"usage":{"input_tokens":1234,"output_tokens":567,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"total_cost_usd":0.042}
+EOF
+	timeout() { shift; cat "$mock_response"; }
+	export -f timeout
+
+	# One logical stage (test_loop), two run_stage iterations with distinct
+	# run_stage names — both must ACCUMULATE, not last-wins.
+	set_stage_started "test_loop"
+	local r1 r2
+	r1=$(run_stage "test-iter-1" "prompt" "test-schema.json" | grep '^{')
+	r2=$(run_stage "test-iter-2" "prompt" "test-schema.json" | grep '^{')
+	[ -n "$r1" ] && [ -n "$r2" ] || fail "run_stage returned no JSON output"
+	set_stage_completed "test_loop"
+
+	local in_tok
+	in_tok=$(jq -r '.stages.test_loop.tokens.input_tokens' "$STATUS_FILE")
+	[ "$in_tok" = "2468" ] || fail "expected accumulated input_tokens 2468, got '$in_tok'"
+}
+
+@test "INTEGRATION: skip-path set_stage_completed with no started reset records zero (issue #580)" {
+	init_status
+
+	# Prime an accumulator for a *different* stage, then complete a stage that
+	# was never started — it must record zero, not the primed stage's spend.
+	local mock_response="$TEST_TMP/mock-usage.json"
+	cat > "$mock_response" << 'EOF'
+{"result":"done","structured_output":{"status":"success","result":"done"},"usage":{"input_tokens":1234,"output_tokens":567,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"total_cost_usd":0.042}
+EOF
+	timeout() { shift; cat "$mock_response"; }
+	export -f timeout
+
+	set_stage_started "implement"
+	run_stage "implement" "prompt" "test-schema.json" > /dev/null
+	set_stage_completed "implement"
+	# quality_loop is completed without ever being started (real config-skip path)
+	set_stage_completed "quality_loop"
+
+	# implement carries the real spend; quality_loop must be zero / no bleed.
+	local impl_in ql_tokens
+	impl_in=$(jq -r '.stages.implement.tokens.input_tokens' "$STATUS_FILE")
+	[ "$impl_in" = "1234" ] || fail "expected implement input_tokens 1234, got '$impl_in'"
+	ql_tokens=$(jq -r '.stages.quality_loop.tokens // "absent"' "$STATUS_FILE")
+	[ "$ql_tokens" = "absent" ] || fail "quality_loop must not inherit spend, got '$ql_tokens'"
+}
