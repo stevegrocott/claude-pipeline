@@ -23,7 +23,11 @@ teardown() {
 	teardown_test_env
 }
 
-# Build a batch summary JSON with token totals under cost_summary.
+# Build a batch summary/status JSON in the shape batch-orchestrator.sh writes:
+# a batch-level cost_summary with the #580 token totals (total_input_tokens /
+# total_output_tokens / total_cache_read_tokens / total_cache_creation_tokens)
+# plus progress.completed. Cache token totals are 0 here; the input/output
+# split is what drives the MT/issue arithmetic in these tests.
 # Usage: _mk_summary <file> <input_tokens> <output_tokens> <completed>
 _mk_summary() {
 	local file="$1" in_tok="$2" out_tok="$3" completed="$4"
@@ -32,8 +36,50 @@ _mk_summary() {
 		--argjson i "$in_tok" \
 		--argjson o "$out_tok" \
 		--argjson c "$completed" \
-		'{cost_summary: {input_tokens: $i, output_tokens: $o},
+		'{cost_summary: {
+			total_cost_usd: 0,
+			total_input_tokens: $i,
+			total_output_tokens: $o,
+			total_cache_read_tokens: 0,
+			total_cache_creation_tokens: 0
+		},
 		  progress: {completed: $c}}' > "$file"
+}
+
+# Build a batch status/summary JSON in the EXACT shape batch-orchestrator.sh
+# writes: an issues[] array carrying per-issue cost_usd + token fields, and a
+# batch-level cost_summary rolled up from those issues exactly as
+# update_progress does. Two completed issues total 10.5M tokens
+# (8M input + 1.5M output + 0.5M cache_read + 0.5M cache_creation) over 2
+# completed issues = 5.25 MT/issue.
+_mk_batch_status() {
+	local file="$1"
+	mkdir -p "$(dirname "$file")"
+	jq -n '{
+		state: "completed",
+		base_branch: "main",
+		progress: {total: 2, completed: 2, failed: 0},
+		issues: [
+			{number:"1", status:"completed", cost_usd:1.0,
+			 input_tokens:5000000, output_tokens:1000000,
+			 cache_read_tokens:500000, cache_creation_tokens:0},
+			{number:"2", status:"completed", cost_usd:0.6,
+			 input_tokens:3000000, output_tokens:500000,
+			 cache_read_tokens:0, cache_creation_tokens:500000}
+		]
+	}
+	| .cost_summary = {
+		total_cost_usd:
+			([.issues[] | (.cost_usd // 0)] | add // 0),
+		total_input_tokens:
+			([.issues[] | (.input_tokens // 0)] | add // 0),
+		total_output_tokens:
+			([.issues[] | (.output_tokens // 0)] | add // 0),
+		total_cache_read_tokens:
+			([.issues[] | (.cache_read_tokens // 0)] | add // 0),
+		total_cache_creation_tokens:
+			([.issues[] | (.cache_creation_tokens // 0)] | add // 0)
+	}' > "$file"
 }
 
 # =============================================================================
@@ -74,14 +120,18 @@ _mk_summary() {
 	[[ "$mt" == "2.000000" ]]
 }
 
-@test "ctg_batch_mt reads total_tokens when present" {
+@test "ctg_batch_mt sums all four token totals (incl. cache) from cost_summary" {
 	source "$GUARD_SCRIPT"
-	jq -n '{cost_summary: {total_tokens: 5000000}, progress: {completed: 2}}' \
-		> "$TEST_TMP/s.json"
+	# 5M in + 1M out + 0.5M cache_read + 0.5M cache_creation = 7M over 2 = 3.5.
+	jq -n '{cost_summary: {
+			total_input_tokens: 5000000,
+			total_output_tokens: 1000000,
+			total_cache_read_tokens: 500000,
+			total_cache_creation_tokens: 500000
+		}, progress: {completed: 2}}' > "$TEST_TMP/s.json"
 	local mt
 	mt=$(ctg_batch_mt "$TEST_TMP/s.json")
-	# 5M / 1e6 / 2 = 2.5
-	[[ "$mt" == "2.500000" ]]
+	[[ "$mt" == "3.500000" ]]
 }
 
 @test "ctg_baseline averages MT/issue over the window" {
@@ -189,13 +239,24 @@ _mk_summary() {
 	[[ -z "$mt" ]]
 }
 
-@test "no-ops when cost_summary present but no derivable token metric" {
-	# Only total_cost_usd, no token fields, and no stage logs to fall back on.
-	jq -n '{cost_summary: {total_cost_usd: 1.23}, progress: {completed: 3},
-	        log_dir: "does-not-exist"}' > "$TEST_TMP/costonly.json"
+@test "no-ops when cost_summary carries only total_cost_usd (no token totals)" {
+	# Old/absent token rollup: cost_summary has total_cost_usd but none of the
+	# total_*_tokens fields → token sum is 0 → not computable → noop. This is
+	# the pre-token-rollup graceful-degradation contract.
+	jq -n '{cost_summary: {total_cost_usd: 1.23}, progress: {completed: 3}}' \
+		> "$TEST_TMP/costonly.json"
 	run "$GUARD_SCRIPT" --current "$TEST_TMP/costonly.json"
 	[[ "$status" -eq 0 ]]
 	[[ "$(printf '%s' "$output" | jq -r '.status')" == "noop" ]]
+}
+
+@test "ctg_batch_mt prints nothing for token-less (cost-only) summary" {
+	source "$GUARD_SCRIPT"
+	jq -n '{cost_summary: {total_cost_usd: 1.23}, progress: {completed: 3}}' \
+		> "$TEST_TMP/costonly.json"
+	local mt
+	mt=$(ctg_batch_mt "$TEST_TMP/costonly.json")
+	[[ -z "$mt" ]]
 }
 
 @test "advisory: guard exits 0 even with no history and no baseline" {
@@ -208,26 +269,40 @@ _mk_summary() {
 }
 
 # =============================================================================
-# FALLBACK: token parse over stage logs (ab-report pattern)
+# REAL SHAPE: exact batch-orchestrator.sh status.json / summary.json end-to-end
+#
+# These exercise the guard against the EXACT JSON batch-orchestrator.sh now
+# writes — an issues[] array plus a batch-level cost_summary rolled up from the
+# #580 per-issue token fields. This is the RED→GREEN case: the pre-fix guard
+# read total_tokens / input_tokens / output_tokens (field names no producer
+# emits) and would derive nothing (noop, empty) from this shape.
 # =============================================================================
 
-@test "falls back to stage-log token parse when cost_summary lacks tokens" {
-	# cost_summary has only total_cost_usd; tokens come from a stage log line
-	# matching ab-report.sh's `total_cost_usd` result grep.
-	local run_dir="$TEST_TMP/run"
-	mkdir -p "$run_dir/stages"
-	printf '%s\n' \
-		'{"total_cost_usd":0.5,"usage":{"input_tokens":4000000,"output_tokens":0}}' \
-		> "$run_dir/stages/implement.log"
-	jq -n --arg ld "$run_dir" \
-		'{cost_summary: {total_cost_usd: 0.5}, progress: {completed: 2},
-		  log_dir: $ld}' > "$run_dir/status.json"
-
+@test "REAL SHAPE: ctg_batch_mt derives non-zero MT/issue from batch cost_summary" {
 	source "$GUARD_SCRIPT"
+	_mk_batch_status "$TEST_TMP/status.json"
 	local mt
-	mt=$(ctg_batch_mt "$run_dir/status.json")
-	# 4M / 1e6 / 2 = 2.0
-	[[ "$mt" == "2.000000" ]]
+	mt=$(ctg_batch_mt "$TEST_TMP/status.json")
+	[[ -n "$mt" ]]                 # must NOT no-op on the real shape
+	# 10.5M tokens / 2 completed issues = 5.25 MT/issue.
+	[[ "$mt" == "5.250000" ]]
+}
+
+@test "REAL SHAPE: ctg_evaluate warns when latest exceeds baseline * factor" {
+	# Realistic history: two prior batches at 1.0 MT/issue. Current batch (real
+	# full shape) is 5.25 MT/issue > 1.0 * 1.5 → warn.
+	_mk_summary "$TEST_TMP/hist/batch-1/summary.json" 1000000 0 1
+	_mk_summary "$TEST_TMP/hist/batch-2/summary.json" 1000000 0 1
+	_mk_batch_status "$TEST_TMP/cur/status.json"
+
+	run env COST_TREND_FACTOR=1.5 COST_TREND_WINDOW=5 \
+		"$GUARD_SCRIPT" --current "$TEST_TMP/cur/status.json" \
+		--history-dir "$TEST_TMP/hist"
+	[[ "$status" -eq 0 ]]
+	[[ "$(printf '%s' "$output" | jq -r '.status')" == "ok" ]]
+	[[ "$(printf '%s' "$output" | jq -r '.warning')" == "true" ]]
+	[[ "$(printf '%s' "$output" | jq -r '.latest_mt_per_issue')" == "5.250000" ]]
+	[[ "$(printf '%s' "$output" | jq -r '.baseline_mt_per_issue')" == "1.000000" ]]
 }
 
 # =============================================================================
