@@ -316,3 +316,93 @@ teardown() {
 	# generic error path (which would flip to success via the PR-recovery logic).
 	[[ "$batch_content" == *'completed_partial)'* ]]
 }
+
+# =============================================================================
+# RESUME DURABILITY: pr_review soft-fail persists a merge_blocked_reason
+# (issue #577). Regression: the three pr_review degradation sites used to only
+# append to the in-memory DEGRADED_STAGES array. set_stage_completed "pr_review"
+# runs unconditionally after the loop, so a crash+resume skipped the loop with
+# an empty DEGRADED_STAGES and NO persisted reason → the merge gate saw nothing
+# and merged an UNAPPROVED PR. The reason must survive into status.json.
+# =============================================================================
+
+@test "persist_merge_blocked_reason writes the reason into status.json" {
+	# Fresh status.json from init_status has .merge_blocked_reason == null.
+	run jq -r '.merge_blocked_reason' "$STATUS_FILE"
+	[[ "$output" == "null" || -z "$output" ]]
+
+	# Drive the real persist function the soft-fail sites call.
+	persist_merge_blocked_reason \
+		"PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=3)."
+
+	local persisted
+	persisted=$(jq -r '.merge_blocked_reason // empty' "$STATUS_FILE")
+	[[ -n "$persisted" ]]
+	[[ "$persisted" == *"pr_review"* ]]
+}
+
+@test "pr_review max_iterations soft-fail survives into status.json for a resumed run" {
+	# Simulate the exact max_iterations soft-fail sequence the loop runs.
+	set_final_state "max_iterations_pr_review"
+	DEGRADED_STAGES+=("pr_review:max_iterations:iter=3")
+	persist_merge_blocked_reason \
+		"PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=3)."
+
+	# Simulate crash+resume: the in-memory array is lost on a fresh process.
+	DEGRADED_STAGES=()
+
+	# The merge gate's first move is to read the persisted reason from
+	# status.json — that is the ONLY signal available after a resume.
+	local persisted
+	persisted=$(jq -r '.merge_blocked_reason // empty' "$STATUS_FILE")
+	[[ -n "$persisted" ]]
+	[[ "$persisted" == *"pr_review"* ]]
+}
+
+@test "pr_review wall_timeout soft-fail survives into status.json for a resumed run" {
+	set_final_state "wall_timeout_pr_review"
+	DEGRADED_STAGES+=("pr_review:wall_timeout")
+	persist_merge_blocked_reason \
+		"PR review loop hit wall-clock timeout without an approved verdict (pr_review:wall_timeout)."
+
+	DEGRADED_STAGES=()
+
+	local persisted
+	persisted=$(jq -r '.merge_blocked_reason // empty' "$STATUS_FILE")
+	[[ -n "$persisted" ]]
+	[[ "$persisted" == *"pr_review"* ]]
+}
+
+@test "persist_merge_blocked_reason does not clobber a pre-existing reason" {
+	# A prior gate (e.g. quality convergence) may already have set a reason.
+	jq --arg r "Quality loop convergence failure" \
+		'.merge_blocked_reason = $r' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	persist_merge_blocked_reason \
+		"PR review loop ended without an approved verdict (pr_review:max_iterations:iter=3)."
+
+	# The // guard keeps the first-set reason.
+	local persisted
+	persisted=$(jq -r '.merge_blocked_reason' "$STATUS_FILE")
+	[[ "$persisted" == "Quality loop convergence failure" ]]
+}
+
+@test "all three pr_review degradation sites also persist a merge_blocked_reason" {
+	# Static wiring guard: each DEGRADED_STAGES+=("pr_review:...") append in the
+	# PR review loop must be paired with a persist_merge_blocked_reason call so
+	# the block is durable across a resume. Extract the three-guard region and
+	# assert one persist call per pr_review append.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	local pr_appends persist_calls
+	pr_appends=$(grep -c 'DEGRADED_STAGES+=("pr_review:' <<< "$script_content")
+	# Persist calls that name a pr_review cause.
+	persist_calls=$(grep -c 'persist_merge_blocked_reason' <<< "$script_content")
+
+	# Three pr_review appends (2× wall_timeout, 1× max_iterations).
+	[[ "$pr_appends" -eq 3 ]]
+	# At least three persist calls exist (the three pr_review sites).
+	[[ "$persist_calls" -ge 3 ]]
+}

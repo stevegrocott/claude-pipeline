@@ -966,6 +966,23 @@ set_final_state() {
         "to_state=$state"
 }
 
+# ---------------------------------------------------------------------------
+# persist_merge_blocked_reason <reason>
+# Persist a merge-block reason into status.json so the merge gate honours it
+# on a resumed run — after a crash+resume the in-memory DEGRADED_STAGES array
+# is empty, so soft-fail sites (implement:partial, pr_review:*) must durably
+# record WHY the merge is blocked. Uses `// $reason` so a reason a prior gate
+# already set (e.g. quality convergence) is not clobbered.
+# ---------------------------------------------------------------------------
+persist_merge_blocked_reason() {
+    local reason="$1"
+    [[ -f "$STATUS_FILE" ]] || return 0
+    jq --arg reason "$reason" \
+       '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    sync_status_to_log
+}
+
 increment_quality_iteration() {
     jq '.quality_iterations += 1 |
         .stages.quality_loop.iteration = .quality_iterations |
@@ -8226,6 +8243,8 @@ $pr_creation_skill}"
             log_warn "Wall-clock timeout in PR review loop at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            persist_merge_blocked_reason \
+                "PR review loop hit wall-clock timeout without an approved verdict (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -8235,6 +8254,8 @@ $pr_creation_skill}"
             log_warn "PR-review budget timeout at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            persist_merge_blocked_reason \
+                "PR review loop hit its wall-clock budget without an approved verdict (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -8243,6 +8264,8 @@ $pr_creation_skill}"
             log_warn "PR review loop exceeded max iterations ($pr_review_max_iter). Soft-failing and continuing."
             set_final_state "max_iterations_pr_review"
             DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
+            persist_merge_blocked_reason \
+                "PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
             pr_approved=true
             break
         fi
