@@ -11,7 +11,7 @@
 #       session (no premature kill before one pass completes).
 #
 #   (2) MAX_TASK_WALL_TIME_SECS default (1800) >= get_stage_timeout("test-iter-*")
-#       (900) — the task wall-time budget allows at least one complete test
+#       (1500) — the task wall-time budget allows at least one complete test
 #       iteration before the wall-clock guard fires.
 #
 #   (3) MAX_PR_REVIEW_ITERATIONS and MAX_TEST_ITERATIONS environment variables
@@ -170,7 +170,7 @@ _mock_diff_count() {
 # (2) Test loop: task wall-time budget >= one test-iter stage timeout
 # =============================================================================
 
-@test "(2a) get_stage_timeout test-iter returns 900" {
+@test "(2a) get_stage_timeout test-iter returns 1500" {
 	[[ -f "$ORCHESTRATOR" ]] \
 		|| fail "orchestrator not present: $ORCHESTRATOR"
 
@@ -179,8 +179,11 @@ _mock_diff_count() {
 	local timeout
 	timeout=$(get_stage_timeout "test-iter-1" "")
 
-	[[ "$timeout" -eq 900 ]] || {
-		printf 'FAIL: expected 900, got %s\n' "$timeout" >&2
+	# test-iter was raised 900→1500 in issue #512 (task-2); this asserts the
+	# established value that test-stage-runner.bats / test-constants.bats also
+	# encode.
+	[[ "$timeout" -eq 1500 ]] || {
+		printf 'FAIL: expected 1500, got %s\n' "$timeout" >&2
 		return 1
 	}
 }
@@ -577,7 +580,7 @@ _mock_diff_count() {
 	}
 }
 
-@test "(5d) calc_orchestrator_wall_time default value is 11040" {
+@test "(5d) calc_orchestrator_wall_time default value is 12840" {
 	[[ -f "$ORCHESTRATOR" ]] \
 		|| fail "orchestrator not present: $ORCHESTRATOR"
 
@@ -589,11 +592,11 @@ _mock_diff_count() {
 	local budget
 	budget=$(calc_orchestrator_wall_time)
 
-	# Default: test-loop(900×3+120=2820) + pr-review(1200×2+120=2520)
-	#          + overhead(5700) = 11040
-	[[ "$budget" -eq 11040 ]] || {
+	# Default: test-loop(1500×3+120=4620) + pr-review(1200×2+120=2520)
+	#          + overhead(5700) = 12840  (test-iter raised 900→1500, issue #512)
+	[[ "$budget" -eq 12840 ]] || {
 		printf \
-			'FAIL: expected default budget=11040, got %s\n' \
+			'FAIL: expected default budget=12840, got %s\n' \
 			"$budget" >&2
 		return 1
 	}

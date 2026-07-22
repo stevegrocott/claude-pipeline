@@ -96,15 +96,19 @@ MAX_ESCALATIONS_PER_RUN="${MAX_ESCALATIONS_PER_RUN:-5}"
 # Default = sum of per-phase budgets so the global cap never pre-empts
 # a loop that is within its own budget.  See calc_orchestrator_wall_time()
 # for the formula; the numeric default mirrors its calculation:
-#   test-loop  (900s × 3 + 120s slack)               = 2820s
+#   test-loop  (1500s × 3 + 120s slack)              = 4620s
 #   pr-review  (1200s × 2 + 120s slack, 200+ lines)  = 2520s
 #   overhead   (validate 1800 + implement 1800
 #               + task-review 900 + test 600 + pr 600) = 5700s
-#                                              Total : 11040s (~3h)
+#                                              Total : 12840s (~3.5h)
 # Recalculated at runtime by calc_orchestrator_wall_time() using the
-# actual env-overridden per-phase budget variables.
+# actual env-overridden per-phase budget variables.  The invariant
+# MAX_ORCHESTRATOR_WALL_TIME >= calc_orchestrator_wall_time() must hold so
+# the global cap never fires while a per-loop budget still has time left;
+# the default therefore tracks the test-iter timeout (raised 900→1500 in
+# issue #512, which the earlier 11040 default was never reconciled with).
 # Override via MAX_ORCHESTRATOR_WALL_TIME env to set a different base.
-MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-11040}"
+MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-12840}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
 # Slack added on top of the per-iteration timeout when computing the
 # PR-review loop wall-clock budget.  Override via env to tune.
@@ -4112,8 +4116,13 @@ _normalize_agent_name() {
 	fi
 
 	# Unknown name with no local definition — fall back to generic agent.
-	log_warn "_normalize_agent_name: unknown agent '${name}' — falling back to '$_AGENT_SENTINEL_DEFAULT'"
-	printf '%s' "$_AGENT_SENTINEL_DEFAULT"
+	# Degrade to the literal "default" when _AGENT_SENTINEL_DEFAULT is not in
+	# scope (e.g. when this function is sourced in isolation by a test harness
+	# that strips module-level `readonly` declarations) so the documented
+	# fall-back contract holds in every sourcing context.
+	local fallback="${_AGENT_SENTINEL_DEFAULT:-default}"
+	log_warn "_normalize_agent_name: unknown agent '${name}' — falling back to '$fallback'"
+	printf '%s' "$fallback"
 }
 
 #
