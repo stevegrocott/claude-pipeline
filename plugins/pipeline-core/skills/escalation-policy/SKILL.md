@@ -36,9 +36,12 @@ Model escalation path: **haiku → sonnet → opus** (no tier above opus; opus i
   "denials":    ["<tool_name>"]   ,
   "model":      "haiku | sonnet | opus",
   "error_kind": "timeout | schema_not_found | no_structured_output | quality_stall | max_turns_exhausted_at_ceiling | rate_limit | permission_denied | null",
-  "elapsed_ms": 12345
+  "elapsed_ms": 12345,
+  "complexity": "S | M | L | \"\"  — task complexity hint; gates S-task Opus routing"
 }
 ```
+
+`complexity` is threaded from `run_stage()` into the envelope (issue #579) so the escalation decision can distinguish a short (S) task from an M/L task when deciding whether Opus is worth spending.
 
 ### `escalation_history` — from `STATUS_FILE.escalations[]`
 
@@ -56,6 +59,8 @@ Array of records appended by `record_escalation()` each time a stage is retried 
 ```
 
 Filter to records where `stage == current_stage_name` before reasoning.
+
+**Per-run escalation cap (issue #579).** The whole `escalation_history` array (run-wide, not stage-filtered) is also bounded by `MAX_ESCALATIONS_PER_RUN` (default 5, env-overridable). Once `escalation_history | length >= MAX_ESCALATIONS_PER_RUN`, any non-success stage_result routes to **bail** — before any other rule — so a run cannot spend into the pathological 6+ escalation bucket where completion rate collapses (85% at 0–2 escalations vs 60% at 6+). A `success` stage_result is still accepted regardless of history length.
 
 ## Output Contract
 
@@ -117,6 +122,8 @@ Re-run the stage with the next higher model tier.
 - `stage_result.model == "opus"` — already at ceiling; use `bail` instead
 - `error_kind == "permission_denied"` — a higher model cannot bypass permissions
 - `error_kind == "schema_not_found"` — a configuration error, not a capability gap
+- `complexity == "S"` AND `stage_result.model == "sonnet"` — **S-Opus gate (issue #579):** a short task at sonnet must NOT auto-escalate to opus on a single stage failure (Opus buys no completion lift for S tasks, only cost). Use `bail` so Opus requires a bounded trigger, not one `double_timeout`/`no_structured_output`. M and L tasks at sonnet still escalate to opus normally.
+- `escalation_history | length >= MAX_ESCALATIONS_PER_RUN` — per-run cap reached; use `bail`
 
 **Model selection:** always the next tier up from `stage_result.model`:
 - haiku → sonnet
@@ -135,6 +142,8 @@ Terminate the stage as a permanent failure; propagate the error to the caller.
 - `error_kind == "schema_not_found"` — missing schema file; fix the configuration
 - `error_kind == "max_turns_exhausted_at_ceiling"` — explicitly set by `run_stage` when opus exhausted turns
 - `escalation_history` shows the stage has already been escalated to opus and failed again
+- `escalation_history | length >= MAX_ESCALATIONS_PER_RUN` (default 5) — **per-run escalation cap (issue #579):** the run has already escalated too many times; fail fast rather than continuing into the 6+ bucket
+- `complexity == "S"` AND `stage_result.model == "sonnet"` AND a non-transient failure — **S-Opus gate (issue #579):** bail instead of escalating sonnet→opus for a short task
 
 **Required output fields:** `action`, `reason`
 
@@ -178,6 +187,11 @@ status == "success" AND output valid?
   no  ↓
         │
         ▼
+escalation_history | length >= MAX_ESCALATIONS_PER_RUN (default 5)?   ← per-run cap (issue #579)
+  yes → bail  (escalation cap reached: fail fast, do not enter the 6+ bucket)
+  no  ↓
+        │
+        ▼
 error_kind == "permission_denied" OR "schema_not_found"?
   yes → bail
   no  ↓
@@ -187,6 +201,15 @@ error_kind == "quality_stall"?
   yes → model == "opus"?
           yes → bail  (quality_stall: already at opus ceiling)
           no  → escalate (quality_stall: escalating from <model> to <next>)
+  no  ↓
+        │
+        ▼
+error_kind == "double_timeout"?
+  yes → model == "opus"?
+          yes → bail  (double_timeout: already at opus ceiling)
+          no  → complexity == "S" AND model == "sonnet"?     ← S-Opus gate (issue #579)
+                  yes → bail  (S-complexity task at sonnet — not escalating to opus)
+                  no  → escalate (double_timeout)
   no  ↓
         │
         ▼
@@ -200,7 +223,9 @@ error_kind == "rate_limit" AND no prior retry at same model?
   no  ↓
         │
         ▼
-escalate  (double_timeout | max_turns_exhausted | empty_output | structured_error | quality_stall)
+complexity == "S" AND model == "sonnet"?                     ← S-Opus gate (issue #579)
+  yes → bail  (S-complexity task at sonnet — not escalating to opus)
+  no  → escalate  (max_turns_exhausted | empty_output | structured_error)
 ```
 
 ## Common Mistakes
@@ -212,3 +237,5 @@ escalate  (double_timeout | max_turns_exhausted | empty_output | structured_erro
 | retry_same after a prior retry | Check `escalation_history` for same stage+model; escalate if present |
 | Omitting `model` on escalate action | `model` is required when action is `escalate` |
 | Escalating on `permission_denied` | A higher model cannot bypass permission hooks; bail |
+| Escalating an S task from sonnet to opus | S-Opus gate (issue #579): bail instead; only M/L tasks escalate sonnet→opus |
+| Continuing to escalate past the per-run cap | Bail once `escalation_history \| length >= MAX_ESCALATIONS_PER_RUN` (default 5) |

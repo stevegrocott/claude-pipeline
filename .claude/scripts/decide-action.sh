@@ -33,6 +33,13 @@ set -o pipefail
 readonly SCRIPT_NAME="${0##*/}"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Per-run escalation cap (issue #579).  Mirrors the orchestrator constant of the
+# same name.  Once the escalation history reaches this length, main() bails fast
+# instead of dispatching another escalation — this prevents the pathological 6+
+# escalation bucket where completion rate collapses.  Env-overridable; set to a
+# large value (e.g. 999) to restore prior unbounded behaviour.
+MAX_ESCALATIONS_PER_RUN="${MAX_ESCALATIONS_PER_RUN:-5}"
+
 die() {
 	printf '%s: error: %s\n' "$SCRIPT_NAME" "$*" >&2
 	exit 1
@@ -54,6 +61,20 @@ _next_model() {
 }
 
 # ---------------------------------------------------------------------------
+# _s_opus_gate_bail <error_kind>
+# Emit the S-complexity Opus-gate bail action (issue #579).  A short task at
+# sonnet must not auto-escalate to opus on a single stage failure — Opus buys
+# no completion lift for S tasks, only cost — so bail and require a bounded
+# trigger.  Shared by _bash_decide (double_timeout + default branches) and
+# _compose_decide (escalate branch) so both backends emit identical output.
+# ---------------------------------------------------------------------------
+_s_opus_gate_bail() {
+	local error_kind="${1:-unknown}"
+	printf '{"action":"bail","reason":"%s: S-complexity task at sonnet — not escalating to opus (issue #579)"}\n' \
+		"$error_kind"
+}
+
+# ---------------------------------------------------------------------------
 # _bash_decide <stage_result_json> <history_json>
 # Inline decision tree matching escalation-policy SKILL.md.
 # Prints action JSON to stdout; never calls external scripts.
@@ -62,10 +83,11 @@ _bash_decide() {
 	local stage_result="$1"
 	local history="$2"
 
-	local status error_kind model
+	local status error_kind model complexity
 	status=$(printf '%s' "$stage_result" | jq -r '.status')
 	error_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind')
 	model=$(printf '%s' "$stage_result" | jq -r '.model // "haiku"')
+	complexity=$(printf '%s' "$stage_result" | jq -r '.complexity // empty')
 
 	# success at top level → accept regardless of .output.status presence
 	if [[ "$status" == "success" ]]; then
@@ -96,6 +118,18 @@ _bash_decide() {
 		if [[ "$model" == "opus" ]]; then
 			printf '%s\n' \
 				'{"action":"bail","reason":"quality_stall: already at opus ceiling"}'
+		elif [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+			# S-complexity gate (issue #579): a short task at sonnet must
+			# not auto-escalate to opus on a quality_stall — mirrors the
+			# double_timeout branch, and matches the compose backend which
+			# already bails this case.  run_quality_loop threads task_size
+			# through, so a fix/simplify stage quality-stalling on an S task
+			# reaches here on a realistic path.
+			#
+			# NOTE: M/L quality_stall backend divergence (bash escalates,
+			# compose bails "not a recognised upgrade trigger") is
+			# pre-existing and NOT introduced by #579 — left unchanged here.
+			_s_opus_gate_bail "quality_stall"
 		else
 			local next_model
 			next_model=$(_next_model "$model")
@@ -110,6 +144,10 @@ _bash_decide() {
 		if [[ "$model" == "opus" ]]; then
 			printf '%s\n' \
 				'{"action":"bail","reason":"double_timeout"}'
+		elif [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+			# S-complexity gate (issue #579): a short task at sonnet must
+			# not auto-escalate to opus on a single double_timeout.
+			_s_opus_gate_bail "double_timeout"
 		else
 			local next_model
 			next_model=$(_next_model "$model")
@@ -137,6 +175,15 @@ _bash_decide() {
 				'{"action":"retry_same","reason":"rate_limit: transient throttle, retrying with same model"}'
 			return 0
 		fi
+	fi
+
+	# S-complexity gate (issue #579): before the default escalate, bail an
+	# S task at sonnet rather than promoting it to opus.  Placed after the
+	# rate_limit retry_same and opus-ceiling checks so those paths are
+	# unaffected — only the sonnet→opus escalation is gated.
+	if [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+		_s_opus_gate_bail "${error_kind:-unknown}"
+		return 0
 	fi
 
 	# default: escalate to next tier
@@ -185,10 +232,11 @@ _compose_decide() {
 	local stage_result="$1"
 	local history="$2"
 
-	local status error_kind model
+	local status error_kind model complexity
 	status=$(printf '%s' "$stage_result" | jq -r '.status')
 	error_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind')
 	model=$(printf '%s' "$stage_result" | jq -r '.model // "haiku"')
+	complexity=$(printf '%s' "$stage_result" | jq -r '.complexity // empty')
 
 	# success at top level → accept regardless of .output.status presence
 	if [[ "$status" == "success" ]]; then
@@ -247,6 +295,16 @@ _compose_decide() {
 			return 0
 			;;
 		escalate)
+			# S-complexity gate (issue #579): keep the skill-native path in
+			# agreement with _bash_decide — an S task at sonnet bails rather
+			# than escalating to opus, so Opus requires a bounded trigger.
+			# Checked before model-fallback delegation because sonnet's next
+			# tier is opus.
+			if [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+				_s_opus_gate_bail "${error_kind:-unknown}"
+				return 0
+			fi
+
 			# Delegate model selection to decide-model-fallback.sh.
 			# Defaults to bash backend unless MODEL_FALLBACK_BACKEND is set.
 			local retry_reason fallback_out
@@ -300,6 +358,22 @@ main() {
 
 	local stage_result="$1"
 	local history="$2"
+
+	# Per-run escalation cap (issue #579): once the run has accrued
+	# MAX_ESCALATIONS_PER_RUN escalations, fail fast instead of continuing into
+	# the pathological 6+ bucket where completion rate collapses.  Checked here,
+	# before either backend, so the inline bash and skill-native compose paths
+	# agree.  Only an error stage is capped — a success must still be accepted
+	# regardless of history length, so both backends still run for success.
+	local _status _esc_count
+	_status=$(printf '%s' "$stage_result" | jq -r '.status // empty' 2>/dev/null)
+	_esc_count=$(printf '%s' "$history" | jq 'length' 2>/dev/null) || _esc_count=0
+	if [[ "$_status" != "success" ]] \
+		&& (( _esc_count >= MAX_ESCALATIONS_PER_RUN )); then
+		printf '{"action":"bail","reason":"escalation cap reached: %s escalations >= MAX_ESCALATIONS_PER_RUN=%s (issue #579)"}\n' \
+			"$_esc_count" "$MAX_ESCALATIONS_PER_RUN"
+		return 0
+	fi
 
 	# Kill-switch: bypass composition and use inline bash directly
 	if [[ "${ESCALATION_POLICY_BACKEND:-}" == "bash" ]]; then

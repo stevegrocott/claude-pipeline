@@ -86,6 +86,13 @@ MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"
 MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
 MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
+# Per-run escalation cap (issue #579).  Bounds the number of model escalations
+# a single run may accrue.  Once .escalations[] reaches this length,
+# decide-action.sh bails fast instead of continuing into the pathological 6+
+# escalation bucket where completion rate collapses (85% at 0-2 vs 60% at 6+).
+# Purely a cost lever — env-overridable, so operators can restore prior
+# unbounded behaviour with MAX_ESCALATIONS_PER_RUN=999.
+MAX_ESCALATIONS_PER_RUN="${MAX_ESCALATIONS_PER_RUN:-5}"
 # Default = sum of per-phase budgets so the global cap never pre-empts
 # a loop that is within its own budget.  See calc_orchestrator_wall_time()
 # for the formula; the numeric default mirrors its calculation:
@@ -2027,6 +2034,10 @@ _emit_stage_result() {
     local error_kind_json="$6"
     local elapsed_ms="$7"
     local usage_json="${8:-}"
+    # Task complexity (S/M/L or empty) threaded into the envelope so the
+    # escalation decision (decide-action.sh) can gate S-task Opus routing
+    # (issue #579).  Empty when the stage carries no complexity hint.
+    local complexity="${9:-}"
 
     if [[ -z "$usage_json" || "$usage_json" == "null" ]]; then
         usage_json='{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"total_cost_usd":0}'
@@ -2059,8 +2070,10 @@ _emit_stage_result() {
         --argjson cache_read_tokens "${cache_read_tokens:-0}" \
         --argjson reported_usd "${reported_usd:-0}" \
         --argjson computed_usd "$computed_usd" \
+        --arg complexity "$complexity" \
         '{status: $status, output: $output, raw: $raw, denials: $denials,
           model: $model, error_kind: $error_kind, elapsed_ms: $elapsed_ms,
+          complexity: $complexity,
           tokens: {input_tokens: $input_tokens, output_tokens: $output_tokens,
                     cache_creation_input_tokens: $cache_creation_tokens,
                     cache_read_input_tokens: $cache_read_tokens},
@@ -2191,7 +2204,8 @@ run_stage() {
         _sr=$(_emit_stage_result \
             "error" "null" "" "[]" \
             "$result_model" '"schema_not_found"' \
-            "$(( $(_epoch_ms) - result_start_ms ))")
+            "$(( $(_epoch_ms) - result_start_ms ))" \
+            "" "${complexity:-}")
         _apply_stage_action "$_sr" "bail" "schema_not_found"
         return $?
     fi
@@ -2412,7 +2426,7 @@ run_stage() {
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
                 "$(( $(_epoch_ms) - result_start_ms ))" \
-                "$_stage_usage")
+                "$_stage_usage" "${complexity:-}")
             _apply_stage_action "$_sr" "accept"
             return $?
         fi
@@ -2433,7 +2447,7 @@ run_stage() {
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
                 "$(( $(_epoch_ms) - result_start_ms ))" \
-                "$_stage_usage")
+                "$_stage_usage" "${complexity:-}")
             _apply_stage_action "$_sr" "accept"
             return $?
         fi
@@ -2700,7 +2714,7 @@ for m in re.finditer(r'\[\s*\{', t):
         "$(_extract_denials "$output")" \
         "$result_model" "$_error_kind_json" \
         "$(( $(_epoch_ms) - result_start_ms ))" \
-        "$_stage_usage")
+        "$_stage_usage" "${complexity:-}")
 
     # Escalation history from status file
     local _history="[]"
@@ -2735,7 +2749,7 @@ for m in re.finditer(r'\[\s*\{', t):
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
                 "$(( $(_epoch_ms) - result_start_ms ))" \
-                "$_stage_usage")
+                "$_stage_usage" "${complexity:-}")
             _apply_stage_action "$_sr_accept" "accept"
             return $?
             ;;
@@ -2855,7 +2869,7 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$(_extract_denials "$output")" \
                     "$result_model" "null" \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
-                    "$_stage_usage")
+                    "$_stage_usage" "${complexity:-}")
             else
                 emit_event "schema_validation_fail" \
                     "stage=$stage_name" \
@@ -2869,7 +2883,7 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$(_extract_denials "$output")" \
                     "$result_model" '"no_structured_output"' \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
-                    "$_stage_usage")
+                    "$_stage_usage" "${complexity:-}")
             fi
             _apply_stage_action "$_sr_esc" "escalate" "$_da_reason"
             return $?
@@ -2951,14 +2965,14 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$(_extract_denials "$output")" \
                     "$result_model" "null" \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
-                    "$_stage_usage")
+                    "$_stage_usage" "${complexity:-}")
             else
                 _sr_retry=$(_emit_stage_result \
                     "error" "null" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" '"no_structured_output"' \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
-                    "$_stage_usage")
+                    "$_stage_usage" "${complexity:-}")
             fi
             _apply_stage_action "$_sr_retry" "retry_same" "$_da_reason"
             return $?
