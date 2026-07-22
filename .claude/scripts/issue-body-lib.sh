@@ -2,11 +2,17 @@
 #
 # issue-body-lib.sh - Validation helpers for pipeline issue bodies
 #
-# Sourceable library (no main()).  Exposes two public functions:
+# Sourceable library (no main()).  Exposes three public functions:
 #
 #   valid_agents
 #       Prints the set of known agent names — one per line, sorted and
 #       unique — derived from the .claude/agents/*.md definitions.
+#
+#   lint_task_lines <body>
+#       Preflight lint for the "Implementation Tasks" section — emits one
+#       "<cause>\t<line>" record (cause: format / agent-unresolved /
+#       path-unresolved) per in-section line a parse would silently drop or
+#       degrade.  Makes 0-task / mis-extracted parses loud and actionable.
 #
 #   assert_issue_valid <body>
 #       Validates an issue body string against seven structural criteria:
@@ -46,6 +52,20 @@ _ISSUE_BODY_LIB_SOURCED=1
 # KNOWN_FILE_EXTENSIONS in the orchestrator (version strings, domains, etc.
 # are excluded).
 readonly ISSUE_BODY_KNOWN_EXTS='sh|bats|bash|ts|tsx|js|jsx|mjs|cjs|py|go|rb|rs|java|kt|swift|json|yaml|yml|toml|sql|md|css|html|tf'
+
+# Canonical "Implementation Tasks" heading matcher (issue #584 parity) — the
+# SINGLE source of truth for both library parsers, which both route section
+# slicing through _issue_body_tasks_section.  Behaviour, applied IDENTICALLY at
+# every mirror site:
+#   * ERE, UNANCHORED at the tail — annotated headings such as
+#     "## Implementation Tasks (draft)" are recognised (do NOT re-add a `$`).
+#   * Case-insensitive — folded at the call site (bash: nocasematch; awk:
+#     tolower($0); grep: -i).
+#   * CRLF-tolerant — the caller strips carriage returns before matching.
+# The orchestrator mirrors this exact behaviour via ISSUE_TASKS_HEADING_ERE in
+# implement-issue-orchestrator.sh; a parity test (test-parser-parity.bats)
+# guards the two against drift.
+readonly ISSUE_BODY_TASKS_HEADING_RE='^##+[[:space:]]+Implementation Tasks'
 
 # Resolve this library's own directory so the default agents dir can be
 # located relative to it.
@@ -264,22 +284,50 @@ _issue_body_task_path_count() {
 # Outputs:
 #   Tab-separated agent/description records on stdout
 #
-_issue_body_parse_tasks() {
+#
+# Extracts the raw text of the "Implementation Tasks" section from an issue
+# body — the single source of truth for section slicing shared by
+# _issue_body_parse_tasks and lint_task_lines so the two stay behaviourally
+# identical.
+#
+# Hardening (issue #584):
+#   * CRLF tolerance — strips carriage returns first so a Windows/gh CRLF
+#     body cannot leak "\r" into descriptions or defeat the $-anchored
+#     task regexes (the heading matcher is deliberately UNANCHORED — see
+#     ISSUE_BODY_TASKS_HEADING_RE — so annotated headings still match).
+#   * Case-insensitive heading — matches "## Implementation Tasks",
+#     "## implementation tasks", etc. via a locally-scoped nocasematch
+#     (bash-3.2-safe; ${x,,} is deliberately avoided elsewhere in this lib).
+#
+# The section spans from the "Implementation Tasks" heading (any depth:
+# ##, ###, …) up to the next ## or deeper heading (or end of body).
+#
+# Arguments:
+#   $1 - issue body text
+# Outputs:
+#   Section text on stdout (may be empty when the section has no lines)
+# Returns:
+#   0 when an "Implementation Tasks" heading was found, 1 otherwise
+#
+_issue_body_tasks_section() {
 	local body="$1"
+	# Strip carriage returns so CRLF bodies parse identically to LF bodies.
+	body="${body//$'\r'/}"
 	# Normalize gh API's backslash-escaped backticks.
 	body="${body//\\\`/\`}"
 
-	# Extract only the lines under "Implementation Tasks" (any heading
-	# level: ##, ###, etc.), stopping at the next ## or deeper heading (or
-	# end of body).  Lines from other sections
-	# (Acceptance Criteria, Notes, Deploy Verification, etc.) are never
-	# matched as tasks, preventing false positives from prose that happens
-	# to resemble a task line.
+	# Case-insensitive heading match — save/restore nocasematch so callers
+	# are unaffected.  Only the heading detection needs it; the task-line
+	# regexes below run case-sensitively (agent names, [x] markers).
+	local _ci_saved
+	_ci_saved=$(shopt -p nocasematch)
+	shopt -s nocasematch
+
 	local in_section=false
 	local section=""
 	local line
 	while IFS= read -r line; do
-		if [[ "$line" =~ ^##+[[:space:]]+Implementation\ Tasks$ ]]; then
+		if [[ "$line" =~ $ISSUE_BODY_TASKS_HEADING_RE ]]; then
 			in_section=true
 			continue
 		fi
@@ -292,8 +340,25 @@ _issue_body_parse_tasks() {
 		fi
 	done <<< "$body"
 
-	# No "Implementation Tasks" heading found (any depth) — emit nothing.
-	$in_section || return 0
+	eval "$_ci_saved"
+
+	$in_section || return 1
+	printf '%s' "$section"
+	return 0
+}
+
+_issue_body_parse_tasks() {
+	local body="$1"
+
+	# Extract only the lines under "Implementation Tasks" (any heading
+	# level: ##, ###, etc.), stopping at the next ## or deeper heading (or
+	# end of body).  Lines from other sections
+	# (Acceptance Criteria, Notes, Deploy Verification, etc.) are never
+	# matched as tasks, preventing false positives from prose that happens
+	# to resemble a task line.  No "Implementation Tasks" heading (any
+	# depth) — emit nothing.
+	local section
+	section=$(_issue_body_tasks_section "$body") || return 0
 
 	# Backtick-bearing regex must live in a variable — bash cannot escape a
 	# backtick inside an inline [[ =~ ]] pattern reliably.
@@ -339,6 +404,120 @@ _issue_body_parse_tasks() {
 
 		printf '%s\t%s\n' "$agent" "$desc"
 	done <<< "$section"
+}
+
+#
+# Preflight lint for the "Implementation Tasks" section (issue #584).
+#
+# Emits one tab-separated rejection record — "<cause>\t<line>" — for every
+# in-section candidate line that a downstream parse would silently drop or
+# silently degrade.  This makes the failure classes the mirrored parsers hide
+# LOUD and actionable:
+#
+#   format            the line matches no task pattern (canonical or any of
+#                     the four fuzzy fallbacks) — e.g. a prose "Task 1: …"
+#                     line or a bullet with neither backticks nor brackets.
+#                     _parse_task_lines / _issue_body_parse_tasks would
+#                     `continue` past it with no diagnostic.
+#   agent-unresolved  the line parses, but its agent name resolves to neither
+#                     a known agent nor "default" — the parser would silently
+#                     degrade it to "default".
+#   path-unresolved   the line parses, but a backtick-quoted file path it
+#                     references neither exists nor has an existing parent
+#                     directory (mirrors assert_issue_valid criterion 3).
+#
+# Well-formed tasks emit nothing.  Blank lines, checked [x] tasks, and
+# "Affected files:" continuation lines are skipped (never candidates).  One
+# record per line, cause priority: format > agent-unresolved > path-unresolved.
+#
+# Section slicing (CRLF tolerance + case-insensitive heading) is shared with
+# _issue_body_parse_tasks via _issue_body_tasks_section, so the lint sees
+# exactly the lines the parser would.
+#
+# Arguments:
+#   $1 - issue body text
+# Outputs:
+#   Zero or more "<cause>\t<line>" records on stdout
+# Returns:
+#   0 always (a lint report is informational, not a failure signal)
+#
+lint_task_lines() {
+	local body="$1"
+	local repo_root="${ISSUE_BODY_REPO_ROOT:-.}"
+
+	# No "Implementation Tasks" heading — nothing to lint.
+	local section
+	section=$(_issue_body_tasks_section "$body") || return 0
+
+	local valid_set
+	valid_set=$(valid_agents)
+
+	local bt='`'
+	local re_bare_agent="^- (\[ \] )?${bt}([^${bt}]+)${bt} (.+)\$"
+
+	local line agent desc remapped path parent unresolved_path
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		# Checked [x] tasks are complete; the parser skips them, so does lint.
+		[[ "$line" =~ \[x\] ]] && continue
+		# "Affected files:" continuation lines are metadata, not candidates.
+		[[ "$line" =~ ^[[:space:]]*[Aa]ffected[[:space:]][Ff]iles: ]] && continue
+
+		agent=""
+		desc=""
+
+		# Same pattern ladder as _issue_body_parse_tasks — a line that matches
+		# none of these is a format rejection.
+		if [[ "$line" =~ ^-\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ (.+)$ ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+		elif [[ "$line" =~ ^-\ (\[\ \]\ )?\[([^\]\ ]+)\]\ (.+)$ ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+		elif [[ "$line" =~ ^\*\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ (.+)$ ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+		elif [[ "$line" =~ ^[[:space:]]+-\ (\[\ \]\ )?\`\[([^\]]+)\]\`\ (.+)$ ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+		elif [[ "$line" =~ $re_bare_agent ]]; then
+			agent="${BASH_REMATCH[2]}"
+			desc="${BASH_REMATCH[3]}"
+		else
+			printf 'format\t%s\n' "$line"
+			continue
+		fi
+
+		# Criterion-2 mirror: agent must resolve to a known agent or "default".
+		remapped=$(_issue_body_remap_agent "$agent")
+		if [[ "$remapped" != "default" ]] \
+			&& ! grep -qxF "$remapped" <<< "$valid_set"; then
+			printf 'agent-unresolved\t%s\n' "$line"
+			continue
+		fi
+
+		# Criterion-3 mirror: every referenced path must resolve.
+		unresolved_path=""
+		while IFS= read -r path; do
+			[[ -z "$path" ]] && continue
+			if [[ "$path" == */* ]]; then
+				parent="${path%/*}"
+			else
+				parent="."
+			fi
+			if [[ ! -e "$repo_root/$path" && ! -d "$repo_root/$parent" ]]; then
+				unresolved_path="$path"
+				break
+			fi
+		done < <(_issue_body_extract_paths "$desc")
+
+		if [[ -n "$unresolved_path" ]]; then
+			printf 'path-unresolved\t%s\n' "$line"
+			continue
+		fi
+	done <<< "$section"
+
+	return 0
 }
 
 #

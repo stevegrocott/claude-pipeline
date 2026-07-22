@@ -96,7 +96,7 @@ Example — a single "**(L)** Add auth middleware, wire routes, add tests" namin
 - [ ] `[fastify-backend-developer]` **(S)** Apply middleware to protected routes — `src/routes/index.ts:L20-55`
 - [ ] `[default]` **(S)** Add middleware unit tests — `tests/unit/auth.test.ts:L1-60`
 ```
-- **Parseable format required:** Every task line in `## Implementation Tasks` MUST begin with `- [ ] \`[agent-name]\``. Prose lines such as "Task 1: Do something" are **silently skipped** by the orchestrator — no error is raised and no warning is emitted; the task simply never executes.
+- **Parseable format required:** Every task line in `## Implementation Tasks` MUST begin with `- [ ] \`[agent-name]\``. Prose lines such as "Task 1: Do something" are **not parsed as tasks**. As of the hardened parser (issue #584) this failure is **loud, not silent**: if the section yields zero parseable tasks the run aborts with a per-line rejection report (`lint_task_lines`) naming each rejected line and its cause — `format` (matches no task pattern), `agent-unresolved` (agent name resolves to neither a known agent nor `default`), or `path-unresolved` (a backtick-quoted path neither exists nor has an existing parent). Do not rely on the parser to skip a mis-formatted line — it will now bounce the whole run.
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
 - **E2E tests (REQUIRED for UI changes):** If `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E task for ANY issue touching user-visible UI — CSS, components, layouts, forms, navigation, visual regressions. This is NOT optional for UI work.
   `- [ ] \`[playwright-test-developer]\` **(S)** Write Playwright E2E test for [flow description]`
@@ -249,6 +249,11 @@ The `## Implementation Tasks` section must use this parseable convention:
 **Files suffix:** Append ` — \`path/to/file.ts:L10-40\`` (em dash, space, backtick-quoted path with optional line range) to every task description. Multiple files: ` — \`file1.ts:L5\`, \`file2.ts:L20-35\``. This tells subagents exactly where to look, eliminating broad codebase scans.
 - **Paths must be real repo paths** — verify each path exists in the repository before writing it. Never invent or guess file paths.
 - **Task descriptions must stay under ~200 characters** — keep the description concise; put details in the Research Findings section of the issue body instead.
+
+**Parser hardening (issue #584) — the section extractor is tolerant, the failure mode is loud:** the two mirrored parsers (`_parse_task_lines` in the orchestrator and `_issue_body_parse_tasks` in `issue-body-lib.sh`) stay behaviourally identical and both now:
+- **Match the heading case-insensitively** — `## Implementation Tasks`, `## implementation tasks`, `### IMPLEMENTATION TASKS`, etc. all resolve the same section.
+- **Tolerate CRLF line endings** — carriage returns are stripped before matching, so a Windows/`gh`-sourced body parses identically to an LF body (no `\r` leaks into descriptions or defeats the anchored regexes).
+- **Fail loudly on a 0-task section** — when the section yields no parseable tasks the PARSE ISSUE stage runs `lint_task_lines` and prints a **per-line rejection report** before aborting, tagging each rejected line with its cause (`format` / `agent-unresolved` / `path-unresolved`). There is no silent-skip path: a mis-formatted task list stops the run with an actionable reason instead of proceeding with an empty set.
 
 **Granularity is enforced by `assert_issue_valid` (not advisory):** the shared validator every created issue passes through (`.claude/scripts/issue-body-lib.sh`) now applies a hard granularity criterion in addition to the structural checks:
 - **HARD error — issue is rejected:** any `**(M)**` or `**(L)**` task whose files-suffix names **more than two distinct file paths** (line-range suffixes like `:L10-40` are ignored, so `file.ts:L10` and `file.ts:L90` count as one path). A hint-less task is treated as `**(M)**`. Split such a task into ordered S sub-tasks (see Step 4) before creating the issue.

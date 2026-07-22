@@ -1031,3 +1031,121 @@ Some prose but no task checkboxes.
 	[[ "$output" == *"2 non-S task(s)"* ]]
 	[[ "$output" == *"1 S task(s)"* ]]
 }
+
+# =============================================================================
+# Hardened section extraction (issue #584): CRLF + case-insensitive heading
+# =============================================================================
+
+@test "_issue_body_parse_tasks: parses a CRLF-terminated body and strips CR" {
+	local body
+	body=$(printf '## Implementation Tasks\r\n\r\n- [ ] `[bash-script-craftsman]` **(S)** Do it — `.claude/scripts/a.sh`\r\n\r\n## Acceptance Criteria\r\n')
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+	# No carriage return leaks into the emitted record.
+	[[ "$output" != *$'\r'* ]]
+}
+
+@test "_issue_body_parse_tasks: matches a lowercase 'implementation tasks' heading" {
+	local body
+	body="## implementation tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Do it — \`.claude/scripts/a.sh\`
+
+## Acceptance Criteria"
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+}
+
+@test "_issue_body_parse_tasks: keeps valid tasks and drops prose in a mixed section" {
+	local body
+	body="## Implementation Tasks
+
+Task 1: prose that should be ignored
+- [ ] \`[bash-script-craftsman]\` **(S)** Real task — \`.claude/scripts/a.sh\`
+
+## Acceptance Criteria"
+	run _issue_body_parse_tasks "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"bash-script-craftsman"* ]]
+	[[ "$output" != *"prose that should be ignored"* ]]
+}
+
+@test "assert_issue_valid: accepts a CRLF body with a lowercase heading" {
+	local body
+	body=$(printf '## implementation tasks\r\n\r\n- [ ] `[bash-script-craftsman]` **(S)** Do it — `.claude/scripts/a.sh`\r\n\r\n## Acceptance Criteria\r\n\r\n- [ ] done\r\n')
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# lint_task_lines (issue #584): per-line rejection report
+# =============================================================================
+
+@test "lint_task_lines: reports prose 'Task N:' lines as format rejections" {
+	local body
+	body="## Implementation Tasks
+
+Task 1: build the thing
+Task 2: test the thing
+
+## Acceptance Criteria"
+	run lint_task_lines "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"format"*"Task 1: build the thing"* ]]
+	[[ "$output" == *"format"*"Task 2: test the thing"* ]]
+}
+
+@test "lint_task_lines: reports a task missing both brackets and backticks as format" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] bash-script-craftsman do the work here
+
+## Acceptance Criteria"
+	run lint_task_lines "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"format"* ]]
+}
+
+@test "lint_task_lines: reports an unresolved agent" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[nonexistent-agent]\` **(S)** Do it — \`.claude/scripts/a.sh\`
+
+## Acceptance Criteria"
+	run lint_task_lines "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"agent-unresolved"* ]]
+	[[ "$output" == *"nonexistent-agent"* ]]
+}
+
+@test "lint_task_lines: reports an unresolved file path" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Do it — \`nonexistent/dir/ghost.sh\`
+
+## Acceptance Criteria"
+	run lint_task_lines "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"path-unresolved"* ]]
+	[[ "$output" == *"nonexistent/dir/ghost.sh"* ]]
+}
+
+@test "lint_task_lines: emits nothing for a well-formed task list" {
+	run lint_task_lines "$(valid_body)"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "lint_task_lines: tolerates CRLF and a lowercase heading" {
+	local body
+	body=$(printf '## implementation tasks\r\n\r\nTask 1: prose form\r\n\r\n## Acceptance Criteria\r\n')
+	run lint_task_lines "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"format"*"Task 1: prose form"* ]]
+	[[ "$output" != *$'\r'* ]]
+}

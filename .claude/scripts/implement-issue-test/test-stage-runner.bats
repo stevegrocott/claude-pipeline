@@ -1853,12 +1853,14 @@ EOF
 }
 
 # =============================================================================
-# TASK-EXTRACTION AWK — DEPTH-AGNOSTIC HEADING ACCEPTANCE
+# TASK-EXTRACTION — DEPTH-AGNOSTIC HEADING ACCEPTANCE
 #
-# The inline awk in main()'s parse_issue stage must accept any ATX heading
-# depth (## and ###) for the Implementation Tasks section, mirroring the
-# depth-agnostic behaviour of _issue_body_parse_tasks in issue-body-lib.sh.
-# Fixed depth-agnostic pattern: /^##+[[:space:]]+Implementation Tasks/
+# The parse_issue stage slices the section via the shared _extract_tasks_section
+# helper (real orchestrator code, sourced by source_orchestrator_functions), so
+# these tests exercise the production matcher directly instead of a hand-copied
+# awk literal — they cannot drift when the pattern changes.  The helper accepts
+# any ATX heading depth (## and ###), mirroring _issue_body_tasks_section in
+# issue-body-lib.sh (see ISSUE_TASKS_HEADING_ERE).
 # =============================================================================
 
 @test "task-extraction awk: ##-headed body yields non-empty tasks_section" {
@@ -1869,9 +1871,7 @@ EOF
 		'- [ ] `[bash-script-craftsman]` Task one')
 
 	local tasks_section
-	tasks_section=$(printf '%s' "$body" \
-		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
-			found && /^##+[[:space:]]/{exit} found{print}')
+	tasks_section=$(_extract_tasks_section "$body")
 
 	[[ -n "$tasks_section" ]] || \
 		fail "##-headed body must yield non-empty tasks_section"
@@ -1885,9 +1885,7 @@ EOF
 		'- [ ] `[bash-script-craftsman]` Task one')
 
 	local tasks_section
-	tasks_section=$(printf '%s' "$body" \
-		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
-			found && /^##+[[:space:]]/{exit} found{print}')
+	tasks_section=$(_extract_tasks_section "$body")
 
 	[[ -n "$tasks_section" ]] || \
 		fail "###-headed body must yield non-empty tasks_section"
@@ -1908,9 +1906,7 @@ EOF
 		'- [ ] All tasks complete')
 
 	local tasks_section
-	tasks_section=$(printf '%s' "$body" \
-		| awk '/^##+[[:space:]]+Implementation Tasks/{found=1; next} \
-			found && /^##+[[:space:]]/{exit} found{print}')
+	tasks_section=$(_extract_tasks_section "$body")
 
 	[[ "$tasks_section" != *"All tasks complete"* ]] || \
 		fail "Section extraction must stop at next heading"
@@ -1922,8 +1918,9 @@ EOF
 # VALIDATE_PLAN GREP — DEPTH-AGNOSTIC HEADING ACCEPTANCE
 #
 # The validate_plan stage grep gate must accept any ATX heading depth
-# (## and ###) for the Implementation Tasks section.
-# Fixed depth-agnostic pattern: grep -qE '^##+[[:space:]]+Implementation Tasks'
+# (## and ###) for the Implementation Tasks section.  These tests assert
+# against the real shared matcher ISSUE_TASKS_HEADING_ERE (grep -qiE), the same
+# constant the production resume-path guard uses, so they cannot drift.
 # =============================================================================
 
 @test "validate_plan grep: ##-headed body file passes section check" {
@@ -1934,7 +1931,7 @@ EOF
 		'- [ ] `[bash-script-craftsman]` Task one' \
 		> "$issue_body_file"
 
-	grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file" || \
+	grep -qiE "$ISSUE_TASKS_HEADING_ERE" "$issue_body_file" || \
 		fail "validate_plan grep must accept ##-headed Implementation Tasks"
 }
 
@@ -1946,7 +1943,7 @@ EOF
 		'- [ ] `[bash-script-craftsman]` Task one' \
 		> "$issue_body_file"
 
-	grep -qE '^##+[[:space:]]+Implementation Tasks' "$issue_body_file" || \
+	grep -qiE "$ISSUE_TASKS_HEADING_ERE" "$issue_body_file" || \
 		fail "validate_plan grep must accept ###-headed Implementation Tasks"
 }
 
