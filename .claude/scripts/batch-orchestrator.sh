@@ -19,7 +19,11 @@
 # Exit codes:
 #   0  - All issues processed successfully
 #   1  - Some issues failed (check status.json)
-#   2  - Circuit breaker triggered
+#   2  - Circuit breaker triggered.  Two independent breakers share this code
+#        and set a distinct batch state before exiting:
+#          * consecutive failures    -> state "circuit_breaker"
+#          * per-batch token/cost cap -> state "budget_exceeded" (issue #583,
+#            terminal: the batch is never resumed or retried on a budget halt)
 #   3  - Configuration/argument error
 #
 
@@ -92,6 +96,25 @@ _EPIC_SCOPE=""
 # many task/AC checkboxes is treated as epic-scope regardless of labels. Set
 # generously so ordinary multi-task issues are not flagged. Env-configurable.
 EPIC_SCOPE_MAX_TASKS="${EPIC_SCOPE_MAX_TASKS:-20}"
+
+# Per-batch cumulative token/cost budget ceiling (issue #583).  A second
+# circuit breaker alongside MAX_CONSECUTIVE_FAILURES: after every processed
+# issue the running batch tally is compared against these ceilings, and a hard
+# breach halts the loop with batch state `budget_exceeded` (exit code 2),
+# mirroring the consecutive-failure breaker.  Defaults are NON-BREAKING: 0 (or
+# empty) = disabled, so existing batches are unaffected until an operator opts
+# in.  A soft breach at BATCH_BUDGET_SOFT_PCT% of a ceiling warns once first.
+# Env-overridable for tuning and tests.
+MAX_BATCH_TOKENS="${MAX_BATCH_TOKENS:-0}"
+MAX_BATCH_COST_USD="${MAX_BATCH_COST_USD:-0}"
+BATCH_BUDGET_SOFT_PCT="${BATCH_BUDGET_SOFT_PCT:-80}"
+
+# Cumulative batch spend tally.  Summed after each process_issue from the same
+# per-issue cost_summary the batch already records (see process_issue).  Read
+# by check_batch_budget().  _BATCH_BUDGET_SOFT_WARNED latches the one-shot warn.
+_BATCH_TOKENS_USED=0
+_BATCH_COST_USED=0
+_BATCH_BUDGET_SOFT_WARNED=0
 
 # Timeouts and limits
 readonly ISSUE_TIMEOUT=10800  # 180 minutes per issue
@@ -581,6 +604,71 @@ set_state() {
     local state="$1"
     jq --arg state "$state" '.state = $state | .last_update = (now | todate)' \
         "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+}
+
+# Check the cumulative per-batch token/cost budget ceiling (issue #583).
+#
+# Uses the running tally accumulated in _BATCH_TOKENS_USED / _BATCH_COST_USED
+# after each process_issue (summed from every issue's cost_summary — the same
+# per-issue accounting the batch already records).  Returns:
+#   0 — within budget, OR only a soft breach (one-shot warning emitted, batch
+#       continues)
+#   1 — HARD breach: the caller halts the loop with state budget_exceeded
+#
+# Disabled (always returns 0) when both ceilings are unset/0, so existing
+# batches are unaffected.  Mirrors the consecutive-failure circuit breaker.
+check_batch_budget() {
+    local max_tokens="${MAX_BATCH_TOKENS:-0}"
+    local max_cost="${MAX_BATCH_COST_USD:-0}"
+    local soft_pct="${BATCH_BUDGET_SOFT_PCT:-80}"
+    local used_tokens="${_BATCH_TOKENS_USED:-0}"
+    local used_cost="${_BATCH_COST_USED:-0}"
+
+    # Disabled unless at least one ceiling is a positive value.
+    if awk -v t="$max_tokens" -v c="$max_cost" \
+        'BEGIN { exit !((t+0) <= 0 && (c+0) <= 0) }'; then
+        return 0
+    fi
+
+    local verdict
+    verdict=$(awk -v ut="$used_tokens" -v uc="$used_cost" \
+        -v mt="$max_tokens" -v mc="$max_cost" -v sp="$soft_pct" '
+        BEGIN {
+            hard = 0; soft = 0;
+            if (mt + 0 > 0) {
+                if (ut + 0 >= mt + 0) hard = 1;
+                else if (ut + 0 >= (mt + 0) * (sp + 0) / 100) soft = 1;
+            }
+            if (mc + 0 > 0) {
+                if (uc + 0 >= mc + 0) hard = 1;
+                else if (uc + 0 >= (mc + 0) * (sp + 0) / 100) soft = 1;
+            }
+            if (hard) print "hard";
+            else if (soft) print "soft";
+            else print "ok";
+        }')
+
+    case "$verdict" in
+        hard)
+            log_error "BATCH BUDGET CEILING:" \
+                "tokens=${used_tokens}/${max_tokens}" \
+                "cost=\$${used_cost}/\$${max_cost} —" \
+                "stopping batch (budget_exceeded)."
+            return 1
+            ;;
+        soft)
+            if (( ${_BATCH_BUDGET_SOFT_WARNED:-0} == 0 )); then
+                _BATCH_BUDGET_SOFT_WARNED=1
+                log_warn "Batch budget soft threshold reached (${soft_pct}%):" \
+                    "tokens=${used_tokens}/${max_tokens}" \
+                    "cost=\$${used_cost}/\$${max_cost}."
+            fi
+            return 0
+            ;;
+        *)
+            return 0
+            ;;
+    esac
 }
 
 # =============================================================================
@@ -1176,6 +1264,16 @@ process_issue() {
                 pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
                 log "PR #${pr_number:-?} left open — partial delivery (not all tasks completed / review unresolved)"
                 ;;
+            budget_exceeded)
+                # Issue #583: the per-run token/cost ceiling halted the
+                # orchestrator cleanly before completion.  Treat it as terminal
+                # like merge_blocked — leave any PR open, record it, and do NOT
+                # let the recovery arm below flip it to success on a stray PR
+                # number.  This is a spend-halt, never an escalate/retry.
+                impl_status="budget_exceeded"
+                pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
+                log "Issue #$issue_num halted — per-run budget ceiling exceeded (budget_exceeded)"
+                ;;
             error|max_iterations_quality|max_iterations_pr_review)
                 impl_status="error"
                 impl_error="Script exited with state: $state"
@@ -1249,6 +1347,21 @@ process_issue() {
     update_issue_field "$issue_num" "cache_creation_tokens" \
         "$impl_cache_creation_tokens" "true"
 
+    # Feed the cumulative per-batch spend tally (issue #583) from the same
+    # per-issue cost_summary read above.  Runs before every early return so
+    # partial/failed/skipped issues still count toward the batch ceiling. The
+    # tally is checked by check_batch_budget() in the main loop after this
+    # function returns.  Tokens are integer; cost is a float summed via awk.
+    local impl_tokens="0"
+    if [[ -f "$issue_status_file" ]]; then
+        impl_tokens=$(jq -r '(.cost_summary.total_input_tokens // 0) + (.cost_summary.total_output_tokens // 0) + (.cost_summary.total_cache_read_tokens // 0) + (.cost_summary.total_cache_creation_tokens // 0)' \
+            "$issue_status_file" 2>/dev/null) || impl_tokens="0"
+    fi
+    [[ -n "$impl_tokens" ]] || impl_tokens=0
+    _BATCH_TOKENS_USED=$(( ${_BATCH_TOKENS_USED:-0} + impl_tokens ))
+    _BATCH_COST_USED=$(awk -v a="${_BATCH_COST_USED:-0}" -v b="${impl_cost_usd:-0}" \
+        'BEGIN { printf "%.6f", (a + 0) + (b + 0) }')
+
     # Log location of metrics.json emitted by the orchestrator's EXIT trap
     if [[ -f "$issue_status_file" ]]; then
         local issue_log_dir
@@ -1291,6 +1404,23 @@ process_issue() {
     if [[ "$impl_status" == "merge_blocked" ]]; then
         log "Issue #$issue_num PR #${pr_number:-?} left open — merge blocked by quality gate."
         update_issue_field "$issue_num" "status" "merge_blocked"
+        if [[ -n "$pr_number" ]]; then
+            update_issue_field "$issue_num" "pr" "$pr_number" "true"
+        fi
+        update_progress
+        git checkout "$BRANCH" 2>/dev/null || true
+        return 0
+    fi
+
+    if [[ "$impl_status" == "budget_exceeded" ]]; then
+        # Issue #583: per-run budget ceiling halted this issue.  Record it as a
+        # terminal spend-halt (not a failure) and leave any PR open, mirroring
+        # merge_blocked.  Returning 0 keeps it out of consecutive_failures — the
+        # per-BATCH ceiling (check_batch_budget) is what stops the whole batch;
+        # a single over-budget issue does not, since the next issue starts fresh
+        # against its own per-run ceiling.
+        log "Issue #$issue_num PR #${pr_number:-?} left open — per-run budget ceiling exceeded."
+        update_issue_field "$issue_num" "status" "budget_exceeded"
         if [[ -n "$pr_number" ]]; then
             update_issue_field "$issue_num" "pr" "$pr_number" "true"
         fi
@@ -1794,6 +1924,25 @@ for issue in "${ISSUE_ARRAY[@]}"; do
             exit_code=2
             break
         fi
+    fi
+
+    # Per-batch token/cost budget breaker (issue #583).  Checked after every
+    # processed issue — success or failure — mirroring the consecutive-failure
+    # circuit breaker above.  A HARD breach halts the batch with the terminal
+    # budget_exceeded state (exit code 2); the batch is never resumed on a
+    # budget halt.  Disabled by default, so no behaviour change until an
+    # operator sets MAX_BATCH_TOKENS / MAX_BATCH_COST_USD.
+    if ! check_batch_budget; then
+        log_error "BATCH BUDGET BREAKER: cumulative token/cost ceiling exceeded. Stopping batch."
+        set_state "budget_exceeded"
+        emit_event "budget_exceeded" \
+            "scope=batch" \
+            "used_tokens:=${_BATCH_TOKENS_USED:-0}" \
+            "max_tokens:=${MAX_BATCH_TOKENS:-0}" \
+            "used_cost_usd:=${_BATCH_COST_USED:-0}" \
+            "max_cost_usd:=${MAX_BATCH_COST_USD:-0}"
+        exit_code=2
+        break
     fi
 done
 
