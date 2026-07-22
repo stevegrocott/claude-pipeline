@@ -1152,3 +1152,87 @@ JSON
 	[ "$status" -eq 0 ]
 	[[ "$output" == "opus" ]]
 }
+
+# =============================================================================
+# _model_cost() - PRICE TABLE / USD COST CALCULATION
+# =============================================================================
+
+@test "_model_cost computes haiku input-only cost" {
+	run_with_config '_model_cost haiku 1000000 0 0 0'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "1.000000" ]]
+}
+
+@test "_model_cost computes sonnet output-only cost" {
+	run_with_config '_model_cost sonnet 0 1000000 0 0'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "15.000000" ]]
+}
+
+@test "_model_cost computes opus combined input+output cost" {
+	run_with_config '_model_cost opus 1000000 1000000 0 0'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "30.000000" ]]
+}
+
+@test "_model_cost prices cache creation and cache read tokens" {
+	run_with_config '_model_cost opus 0 0 1000000 1000000'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "6.750000" ]]
+}
+
+@test "_model_cost sums input, output, and cache tokens together" {
+	run_with_config '_model_cost haiku 1000000 1000000 1000000 1000000'
+	[ "$status" -eq 0 ]
+	# 1.00 + 5.00 + 1.25 + 0.10
+	[[ "$output" == "7.350000" ]]
+}
+
+@test "_model_cost handles small token counts with correct precision" {
+	run_with_config '_model_cost haiku 100 50 0 0'
+	[ "$status" -eq 0 ]
+	# (100 * 1.00 + 50 * 5.00) / 1e6 = 350 / 1e6
+	[[ "$output" == "0.000350" ]]
+}
+
+@test "_model_cost falls back to opus pricing for an unknown model" {
+	run_with_config '_model_cost gpt-4 1000000 0 0 0'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "5.000000" ]]
+}
+
+@test "_model_cost falls back to opus pricing for empty model" {
+	run_with_config '_model_cost "" 1000000 0 0 0'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "5.000000" ]]
+}
+
+@test "_model_cost matches a full model ID containing the opus tier" {
+	run_with_config '_model_cost claude-opus-4-8 1000000 0 0 0'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "5.000000" ]]
+}
+
+@test "_model_cost matches a full model ID containing the sonnet tier" {
+	run_with_config '_model_cost claude-sonnet-4-6 0 1000000 0 0'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "15.000000" ]]
+}
+
+@test "_model_cost matches a full model ID containing the haiku tier" {
+	run_with_config '_model_cost claude-haiku-4-5 1000000 0 0 0'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "1.000000" ]]
+}
+
+@test "_model_cost defaults missing token-count arguments to zero" {
+	run_with_config '_model_cost haiku'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "0.000000" ]]
+}
+
+@test "_model_cost output has no trailing newline beyond the single line" {
+	run_with_config '_model_cost opus 1000000 0 0 0'
+	[ "$status" -eq 0 ]
+	[ "${#lines[@]}" -eq 1 ]
+}

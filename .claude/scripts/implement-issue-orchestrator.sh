@@ -637,7 +637,14 @@ init_status() {
             last_update: (now | todate),
             log_dir: $log_dir,
             merge_blocked_reason: null,
-            escalations: []
+            escalations: [],
+            cost_summary: {
+                total_input_tokens: 0,
+                total_output_tokens: 0,
+                total_cache_read_tokens: 0,
+                total_cache_creation_tokens: 0,
+                total_cost_usd: 0
+            }
         }' > "$STATUS_FILE"
 
     log "Initialized status file: $STATUS_FILE"
@@ -671,9 +678,92 @@ update_stage() {
     sync_status_to_log
 }
 
+# =============================================================================
+# PER-STAGE TOKEN/COST ACCUMULATOR (issue #580)
+# =============================================================================
+#
+# run_stage is always invoked as `result=$(run_stage ...)`, so it executes in a
+# command-substitution subshell — a shell-global accumulator assigned there
+# would not survive back to the parent. The bridge is therefore FILE-BACKED,
+# one file per LOGICAL stage under $LOG_BASE/.stage-acc:
+#
+#   set_stage_started     (re)initialises the current logical stage's file and
+#                         records the stage name in _STAGE_ACC_CURRENT, which
+#                         the run_stage subshell inherits via the environment.
+#   _apply_stage_action   on `accept`, appends the accepted stage_result's
+#                         tokens + cost.estimated_usd to that file (one JSONL
+#                         line per accepted run_stage call — so a stage with
+#                         several run_stage calls, e.g. test_loop / pr_review
+#                         iterations, ACCUMULATES rather than last-wins).
+#   set_stage_completed   sums the file to default its tokens/cost args when the
+#                         caller didn't pass them explicitly.
+#
+# Keying by logical stage (not the run_stage name, which is e.g. "test-iter-3")
+# means each set_stage_completed reads only its own stage's file: two completes
+# in a row (implement then quality_loop) never double-count, and a stage that
+# completes WITHOUT a preceding set_stage_started has no file and records ZERO —
+# so config-only-skip paths never inherit a previous stage's spend. Every jq
+# extraction is `// 0` / `// {}` guarded so a missing field degrades to zero.
+# bash-3.2 safe (no associative arrays; float sums done in jq).
+
+_stage_acc_dir() {
+    printf '%s/.stage-acc' "${LOG_BASE:-.}"
+}
+
+_stage_acc_file() {
+    local _s="${1//[^A-Za-z0-9_-]/_}"
+    printf '%s/%s.jsonl' "$(_stage_acc_dir)" "$_s"
+}
+
+# Truncate/create the accumulator file for a logical stage.
+_stage_acc_reset() {
+    local _dir
+    _dir=$(_stage_acc_dir)
+    mkdir -p "$_dir" 2>/dev/null || true
+    : > "$(_stage_acc_file "$1")" 2>/dev/null || true
+}
+
+# Append one accepted stage_result's tokens/cost to the current logical stage's
+# file. Safe to call from inside the run_stage subshell (it writes to a file,
+# which the parent can read). No-op when no logical stage is active.
+_stage_acc_add() {
+    local _sr="$1"
+    local _cur="${_STAGE_ACC_CURRENT:-}"
+    [[ -n "$_cur" ]] || return 0
+    local _line
+    _line=$(printf '%s' "$_sr" \
+        | jq -c '{tokens: (.tokens // {}), cost: (.cost.estimated_usd // 0)}' \
+        2>/dev/null) || return 0
+    [[ -n "$_line" ]] || return 0
+    printf '%s\n' "$_line" >> "$(_stage_acc_file "$_cur")" 2>/dev/null || true
+}
+
+# Sum a logical stage's accumulator file into one {tokens,cost} object. Prints
+# nothing when the file is absent or empty so callers can detect "no data".
+_stage_acc_sum() {
+    local _f
+    _f=$(_stage_acc_file "$1")
+    [[ -s "$_f" ]] || return 0
+    jq -cs '{
+        tokens: {
+            input_tokens:                (map(.tokens.input_tokens // 0) | add // 0),
+            output_tokens:               (map(.tokens.output_tokens // 0) | add // 0),
+            cache_creation_input_tokens: (map(.tokens.cache_creation_input_tokens // 0) | add // 0),
+            cache_read_input_tokens:     (map(.tokens.cache_read_input_tokens // 0) | add // 0)
+        },
+        cost: (map(.cost // 0) | add // 0)
+    }' "$_f" 2>/dev/null || true
+}
+
 set_stage_started() {
     local stage="$1"
     local model="${2:-}"
+
+    # issue #580: mark this the active logical stage and clear its accumulator
+    # so per-stage token/cost starts from zero for this run.
+    _STAGE_ACC_CURRENT="$stage"
+    _stage_acc_reset "$stage"
+
     jq --arg stage "$stage" \
        '.stages[$stage].started_at = (now | todate) |
         .stages[$stage].status = "in_progress" |
@@ -696,15 +786,96 @@ set_stage_started() {
 
 set_stage_completed() {
     local stage="$1"
-    jq --arg stage "$stage" \
-       '.stages[$stage].completed_at = (now | todate) |
-        .stages[$stage].status = "completed" |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    local tokens_json="${2:-}"
+    local estimated_cost="${3:-}"
+
+    # issue #580 bridge: real call sites pass only the stage name, so default
+    # tokens/cost from the per-stage accumulator that run_stage populated via
+    # _apply_stage_action. Explicit args (used by unit tests and any direct
+    # caller) always win. A stage with no accumulator file — a config-only-skip
+    # path, or a stage that ran no CLI call — yields nothing here and is
+    # persisted as zero/absent, never inheriting a previous stage's spend.
+    if [[ -z "$tokens_json" || -z "$estimated_cost" ]]; then
+        local _acc_sum
+        _acc_sum=$(_stage_acc_sum "$stage")
+        if [[ -n "$_acc_sum" ]]; then
+            [[ -n "$tokens_json" ]] \
+                || tokens_json=$(printf '%s' "$_acc_sum" | jq -c '.tokens' 2>/dev/null)
+            [[ -n "$estimated_cost" ]] \
+                || estimated_cost=$(printf '%s' "$_acc_sum" | jq -r '.cost' 2>/dev/null)
+        fi
+    fi
+
+    if [[ -n "$tokens_json" ]]; then
+        # Mirror the existing `.model` write (see run_stage's resolved-model
+        # persistence above): thread the stage_result envelope's tokens
+        # object and estimated cost onto the stage entry so per-stage spend
+        # survives into status.json/metrics.json (issue #580).
+        jq --arg stage "$stage" \
+           --argjson tokens "$tokens_json" \
+           --argjson estimated_cost "${estimated_cost:-0}" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "completed" |
+            .stages[$stage].tokens = $tokens |
+            .stages[$stage].estimated_cost = $estimated_cost |
+            # Roll every stage'"'"'s tokens/estimated_cost up into the run-level
+            # top-level cost_summary NOW (issue #580). Recomputed from .stages[]
+            # on every completion — idempotent and resume-safe (re-derived, not
+            # incremented, so re-running a stage never double-counts). This
+            # makes status.json the canonical live per-run cost source that
+            # batch-orchestrator.sh reads (metrics.json stays the final
+            # artifact, written by export_metrics). Field names match
+            # init_status'"'"'s seed and metrics.json. `// 0` guards throughout.
+            .cost_summary = {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            } |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    else
+        # No token data for this stage — still recompute the top-level
+        # cost_summary from .stages[] so it stays consistent with whatever
+        # other stages have recorded (issue #580).
+        jq --arg stage "$stage" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "completed" |
+            .cost_summary = {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            } |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    fi
     sync_status_to_log
     # Schema enum for stage_end.status is ["success","error","rate_limit"];
     # "completed" is the status.json column name, not the event-stream value.
-    emit_event "stage_end" "stage=$stage" "status=success"
+    #
+    # When per-stage token/cost data is available, thread it onto the
+    # stage_end event so events.jsonl carries per-stage spend (issue #580).
+    # `:=` passes JSON-typed (numeric) values; the schema's stage_end branch
+    # declares these fields optional so events without them still validate.
+    local -a _stage_end_args=("stage=$stage" "status=success")
+    if [[ -n "$tokens_json" ]]; then
+        local _end_in _end_out _end_cache_creation _end_cache_read
+        _end_in=$(printf '%s' "$tokens_json" | jq -r '.input_tokens // 0' 2>/dev/null)
+        _end_out=$(printf '%s' "$tokens_json" | jq -r '.output_tokens // 0' 2>/dev/null)
+        _end_cache_creation=$(printf '%s' "$tokens_json" | jq -r '.cache_creation_input_tokens // 0' 2>/dev/null)
+        _end_cache_read=$(printf '%s' "$tokens_json" | jq -r '.cache_read_input_tokens // 0' 2>/dev/null)
+        _stage_end_args+=(
+            "input_tokens:=${_end_in:-0}"
+            "output_tokens:=${_end_out:-0}"
+            "cache_creation_input_tokens:=${_end_cache_creation:-0}"
+            "cache_read_input_tokens:=${_end_cache_read:-0}"
+            "estimated_cost:=${estimated_cost:-0}"
+        )
+    fi
+    emit_event "stage_end" "${_stage_end_args[@]}"
 }
 
 set_stage_failed() {
@@ -951,7 +1122,14 @@ write_task_summary_to_status() {
 #   },
 #   "escalations": [
 #     { "stage": string, "from_model": string, "to_model": string, "reason": string }, ...
-#   ]
+#   ],
+#   "cost_summary": {
+#     "total_input_tokens":          number,
+#     "total_output_tokens":         number,
+#     "total_cache_read_tokens":     number,
+#     "total_cache_creation_tokens": number,
+#     "total_cost_usd":              number
+#   }
 # }
 export_metrics() {
     local metrics_file="$LOG_BASE/metrics.json"
@@ -985,6 +1163,27 @@ export_metrics() {
         def all_started: [.stages[].started_at // empty] | map(select(. != null));
         def all_completed: [.stages[].completed_at // empty] | map(select(. != null));
 
+        # Default cost_summary for status.json predating issue #580 (or any
+        # run where init_status has not yet seeded the object) so metrics.json
+        # always exposes the full schema rather than a null field.
+        def default_cost_summary:
+            { total_input_tokens: 0, total_output_tokens: 0,
+              total_cache_read_tokens: 0, total_cache_creation_tokens: 0,
+              total_cost_usd: 0 };
+
+        # Roll each per-stage tokens/estimated_cost (written by
+        # set_stage_completed) up into run-level totals. This is the run-level
+        # analogue of the batch-orchestrator per-issue cost rollup (issue #580).
+        # Missing tokens/estimated_cost on a stage coalesce to 0.
+        def stage_cost_rollup:
+            {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            };
+
         . as $status |
 
         # Calculate overall start/end from earliest/latest stage timestamps
@@ -1010,7 +1209,19 @@ export_metrics() {
                 test_iterations:      ($status.test_iterations // 0),
                 pr_review_iterations: ($status.pr_review_iterations // 0)
             },
-            escalations: ($status.escalations // [])
+            escalations: ($status.escalations // []),
+            # Roll per-stage tokens/estimated_cost up into the run-level
+            # cost_summary (issue #580). When no stage carries token data
+            # (e.g. a pre-#580 status file, or a run that recorded only a
+            # top-level cost_summary), fall back to the seeded/persisted
+            # cost_summary rather than emitting all zeros.
+            cost_summary: (
+                ($status | stage_cost_rollup) as $rollup |
+                if ([$rollup[]] | add // 0) > 0
+                then $rollup
+                else ($status.cost_summary // default_cost_summary)
+                end
+            )
         }
     ' "$STATUS_FILE" > "$metrics_file" 2>/dev/null
 
@@ -1523,6 +1734,32 @@ _extract_denials() {
     fi
 }
 
+# Extract token usage and reported cost from raw CLI output as a JSON
+# object. Every field is guarded with `// 0` so a missing/null value
+# (e.g. an error response emitted before usage accrued) degrades to zero
+# rather than corrupting downstream status.json / stage_result consumers.
+# Returns a zeroed object when raw is empty, malformed, or jq fails.
+#
+# See issue #580: usage/total_cost_usd are already present in every
+# --output-format json response but were previously dropped on the floor.
+_extract_usage() {
+    local raw="$1"
+    local usage
+    usage=$(printf '%s' "$raw" \
+        | jq -c '{
+            input_tokens: (.usage.input_tokens // 0),
+            output_tokens: (.usage.output_tokens // 0),
+            cache_creation_input_tokens: (.usage.cache_creation_input_tokens // 0),
+            cache_read_input_tokens: (.usage.cache_read_input_tokens // 0),
+            total_cost_usd: (.total_cost_usd // 0)
+          }' 2>/dev/null)
+    if [[ -z "$usage" || "$usage" == "null" ]]; then
+        printf '{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"total_cost_usd":0}\n'
+    else
+        printf '%s\n' "$usage"
+    fi
+}
+
 # Emit a stage_result JSON envelope on stdout. All payload args are
 # JSON-encoded so callers can pass nested objects/arrays safely via
 # --argjson without shell-quoting hazards.
@@ -1535,6 +1772,22 @@ _extract_denials() {
 #   $5 - model:            resolved model id (e.g. haiku|sonnet|opus)
 #   $6 - error_kind_json:  "null" or JSON-encoded string (e.g. "\"timeout\"")
 #   $7 - elapsed_ms:       integer milliseconds
+#   $8 - usage_json:       (optional) JSON object from _extract_usage — token
+#                          counts + the CLI's reported total_cost_usd. Defaults
+#                          to a zeroed object when omitted so older/partial
+#                          call sites still produce a valid envelope.
+#
+# The envelope carries two cost-accounting fields derived from $8 (issue #580):
+#   .tokens - token counts only (input/output/cache_creation/cache_read),
+#             lifted straight out of usage_json for downstream persistence
+#             (e.g. set_stage_completed's tokens arg).
+#   .cost   - {reported_usd, computed_usd, estimated_usd}. reported_usd is
+#             the CLI's own total_cost_usd; computed_usd is priced from the
+#             token counts via _model_cost (model-config.sh) using the
+#             envelope's resolved model; estimated_usd prefers reported_usd
+#             and falls back to computed_usd when the CLI didn't report one
+#             (e.g. a response emitted before usage accrued) — see the
+#             risk mitigation in issue #580's evaluation section.
 _emit_stage_result() {
     local status="$1"
     local output_json="$2"
@@ -1543,6 +1796,24 @@ _emit_stage_result() {
     local model="$5"
     local error_kind_json="$6"
     local elapsed_ms="$7"
+    local usage_json="${8:-}"
+
+    if [[ -z "$usage_json" || "$usage_json" == "null" ]]; then
+        usage_json='{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"total_cost_usd":0}'
+    fi
+
+    local input_tokens output_tokens cache_creation_tokens cache_read_tokens reported_usd
+    input_tokens=$(printf '%s' "$usage_json" | jq -r '.input_tokens // 0' 2>/dev/null)
+    output_tokens=$(printf '%s' "$usage_json" | jq -r '.output_tokens // 0' 2>/dev/null)
+    cache_creation_tokens=$(printf '%s' "$usage_json" | jq -r '.cache_creation_input_tokens // 0' 2>/dev/null)
+    cache_read_tokens=$(printf '%s' "$usage_json" | jq -r '.cache_read_input_tokens // 0' 2>/dev/null)
+    reported_usd=$(printf '%s' "$usage_json" | jq -r '.total_cost_usd // 0' 2>/dev/null)
+
+    local computed_usd
+    computed_usd=$(_model_cost "$model" \
+        "${input_tokens:-0}" "${output_tokens:-0}" \
+        "${cache_creation_tokens:-0}" "${cache_read_tokens:-0}" 2>/dev/null)
+    computed_usd="${computed_usd:-0}"
 
     jq -nc \
         --arg status "$status" \
@@ -1552,8 +1823,19 @@ _emit_stage_result() {
         --arg model "$model" \
         --argjson error_kind "$error_kind_json" \
         --argjson elapsed_ms "$elapsed_ms" \
+        --argjson input_tokens "${input_tokens:-0}" \
+        --argjson output_tokens "${output_tokens:-0}" \
+        --argjson cache_creation_tokens "${cache_creation_tokens:-0}" \
+        --argjson cache_read_tokens "${cache_read_tokens:-0}" \
+        --argjson reported_usd "${reported_usd:-0}" \
+        --argjson computed_usd "$computed_usd" \
         '{status: $status, output: $output, raw: $raw, denials: $denials,
-          model: $model, error_kind: $error_kind, elapsed_ms: $elapsed_ms}'
+          model: $model, error_kind: $error_kind, elapsed_ms: $elapsed_ms,
+          tokens: {input_tokens: $input_tokens, output_tokens: $output_tokens,
+                    cache_creation_input_tokens: $cache_creation_tokens,
+                    cache_read_input_tokens: $cache_read_tokens},
+          cost: {reported_usd: $reported_usd, computed_usd: $computed_usd,
+                 estimated_usd: (if $reported_usd > 0 then $reported_usd else $computed_usd end)}}'
 }
 
 # Apply a stage outcome action to a stage_result envelope.
@@ -1583,6 +1865,12 @@ _apply_stage_action() {
 
 	case "$action" in
 		accept)
+			# issue #580: record this accepted run_stage's final (post-
+			# escalation/retry) tokens + cost into the current logical stage's
+			# accumulator. accept is the single choke point every accepted
+			# run_stage exit funnels through, so one append happens per
+			# accepted run_stage call.
+			_stage_acc_add "$stage_result"
 			printf '%s\n' "$stage_result"
 			return 0
 			;;
@@ -1857,6 +2145,14 @@ run_stage() {
     printf '%s\n' "$output" >> "$stage_log"
     printf '%s\n' "=== exit code: $exit_code ===" >> "$stage_log"
 
+    # Parse token usage and reported cost from the CLI's JSON envelope
+    # alongside the existing structured-output extraction below. Every
+    # field is `// 0` guarded (see _extract_usage) so a missing/null usage
+    # block degrades to zero. Threaded into the stage_result envelope by
+    # _emit_stage_result (issue #580).
+    local _stage_usage
+    _stage_usage=$(_extract_usage "$output")
+
     # Check timeout — but still try to extract structured output first.
     # The agent may have produced valid output before the timeout killed the CLI.
     if (( exit_code == 124 )); then
@@ -1869,7 +2165,8 @@ run_stage() {
                 "success" "$timeout_structured" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))")
+                "$(( $(_epoch_ms) - result_start_ms ))" \
+                "$_stage_usage")
             _apply_stage_action "$_sr" "accept"
             return $?
         fi
@@ -1889,7 +2186,8 @@ run_stage() {
                 "success" "$timeout_fallback_result" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))")
+                "$(( $(_epoch_ms) - result_start_ms ))" \
+                "$_stage_usage")
             _apply_stage_action "$_sr" "accept"
             return $?
         fi
@@ -1964,6 +2262,10 @@ run_stage() {
 
         output=$(< "$_retry_out_tmp")
         rm -f "$_retry_out_tmp"
+
+        # Re-extract usage — output now reflects the retry attempt, not the
+        # original (likely-zeroed) timed-out attempt captured above.
+        _stage_usage=$(_extract_usage "$output")
 
         printf '%s\n' "$output" >> "$stage_log"
         printf '%s\n' "=== timeout retry exit code: $exit_code ===" >> "$stage_log"
@@ -2151,7 +2453,8 @@ for m in re.finditer(r'\[\s*\{', t):
         "$_interim_status" "${_interim_structured}" "$output" \
         "$(_extract_denials "$output")" \
         "$result_model" "$_error_kind_json" \
-        "$(( $(_epoch_ms) - result_start_ms ))")
+        "$(( $(_epoch_ms) - result_start_ms ))" \
+        "$_stage_usage")
 
     # Escalation history from status file
     local _history="[]"
@@ -2185,7 +2488,8 @@ for m in re.finditer(r'\[\s*\{', t):
                 "success" "$_interim_structured" "$output" \
                 "$(_extract_denials "$output")" \
                 "$result_model" "null" \
-                "$(( $(_epoch_ms) - result_start_ms ))")
+                "$(( $(_epoch_ms) - result_start_ms ))" \
+                "$_stage_usage")
             _apply_stage_action "$_sr_accept" "accept"
             return $?
             ;;
@@ -2251,6 +2555,11 @@ for m in re.finditer(r'\[\s*\{', t):
                 > "$_esc_raw" 2>&1 || _esc_exit_code=$?
             output=$(cat "$_esc_raw"); rm -f "$_esc_raw"
 
+            # Re-extract usage — output now reflects the escalated (pricier)
+            # model's attempt, so its tokens/cost must replace the original
+            # pre-escalation usage in the emitted envelope (issue #580).
+            _stage_usage=$(_extract_usage "$output")
+
             result_model="$_esc_model"
             printf '%s\n' "=== $stage_name escalation output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
@@ -2283,7 +2592,8 @@ for m in re.finditer(r'\[\s*\{', t):
                     "success" "$_esc_structured" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" "null" \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage")
             else
                 emit_event "schema_validation_fail" \
                     "stage=$stage_name" \
@@ -2296,7 +2606,8 @@ for m in re.finditer(r'\[\s*\{', t):
                     "error" "null" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" '"no_structured_output"' \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage")
             fi
             _apply_stage_action "$_sr_esc" "escalate" "$_da_reason"
             return $?
@@ -2335,6 +2646,11 @@ for m in re.finditer(r'\[\s*\{', t):
                 > "$_retry_raw" 2>&1 || _retry_exit_code=$?
             output=$(cat "$_retry_raw"); rm -f "$_retry_raw"
 
+            # Re-extract usage — output now reflects the retry attempt, not the
+            # rate-limited original, so the emitted envelope carries the retry's
+            # tokens/cost (issue #580).
+            _stage_usage=$(_extract_usage "$output")
+
             printf '%s\n' "=== $stage_name retry output ===" >> "$stage_log"
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' \
@@ -2358,13 +2674,15 @@ for m in re.finditer(r'\[\s*\{', t):
                     "success" "$_retry_structured" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" "null" \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage")
             else
                 _sr_retry=$(_emit_stage_result \
                     "error" "null" "$output" \
                     "$(_extract_denials "$output")" \
                     "$result_model" '"no_structured_output"' \
-                    "$(( $(_epoch_ms) - result_start_ms ))")
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage")
             fi
             _apply_stage_action "$_sr_retry" "retry_same" "$_da_reason"
             return $?

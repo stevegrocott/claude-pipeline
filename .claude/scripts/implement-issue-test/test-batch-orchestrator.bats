@@ -417,6 +417,91 @@ _simulate_update_progress() {
 }
 
 # =============================================================================
+# TASK 10: batch-level cost_summary rollup in init_status/update_progress
+# =============================================================================
+
+# --- Static analysis ---
+
+@test "init_status seeds each issue object with a cost_usd field" {
+	local body
+	body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'"cost_usd": 0'* ]]
+}
+
+@test "init_status emits a cost_summary.total_cost_usd rollup" {
+	local body
+	body=$(awk '/^init_status\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'cost_summary'* ]]
+	[[ "$body" == *'total_cost_usd'* ]]
+}
+
+@test "update_progress recomputes cost_summary.total_cost_usd" {
+	local body
+	body=$(awk '/^update_progress\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'.cost_summary.total_cost_usd'* ]]
+}
+
+@test "process_issue records per-issue cost_usd from the sub-run status" {
+	grep -q 'cost_summary.total_cost_usd' "$BATCH_ORCHESTRATOR_SCRIPT"
+	grep -q 'update_issue_field "\$issue_num" "cost_usd"' \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+# --- Functional simulation ---
+#
+# Verify the rollup jq sums each issue's cost_usd and degrades a missing
+# cost_usd to zero via `// 0`, matching the filter used in update_progress.
+
+_make_cost_status_json() {
+	local file="$1"
+	jq -n '{
+		state: "running",
+		issues: [
+			{number: "1", status: "completed", cost_usd: 1.25},
+			{number: "2", status: "failed", cost_usd: 0.50},
+			{number: "3", status: "pending"}
+		],
+		cost_summary: {total_cost_usd: 0}
+	}' > "$file"
+}
+
+_simulate_cost_rollup() {
+	local status_file="$1"
+	jq '.cost_summary.total_cost_usd =
+			([.issues[] | (.cost_usd // 0)] | add // 0)' \
+		"$status_file"
+}
+
+@test "cost simulation: rollup sums each issue's cost_usd" {
+	local status_file="$TEST_TMP/cost-status.json"
+	_make_cost_status_json "$status_file"
+	local total
+	total=$(_simulate_cost_rollup "$status_file" \
+		| jq '.cost_summary.total_cost_usd')
+	[[ "$total" == "1.75" ]]
+}
+
+@test "cost simulation: missing cost_usd degrades to zero, not null" {
+	local status_file="$TEST_TMP/cost-status.json"
+	_make_cost_status_json "$status_file"
+	# Issue 3 has no cost_usd — the rollup must still be numeric.
+	local total
+	total=$(_simulate_cost_rollup "$status_file" \
+		| jq -r '.cost_summary.total_cost_usd | type')
+	[[ "$total" == "number" ]]
+}
+
+@test "cost simulation: all-zero issues roll up to zero" {
+	local status_file="$TEST_TMP/cost-zero-status.json"
+	jq -n '{issues: [{cost_usd: 0}, {cost_usd: 0}],
+		cost_summary: {total_cost_usd: 99}}' > "$status_file"
+	local total
+	total=$(_simulate_cost_rollup "$status_file" \
+		| jq '.cost_summary.total_cost_usd')
+	[[ "$total" == "0" ]]
+}
+
+# =============================================================================
 # TASK 3: pre-flight else-branch warns when session key is unset
 # =============================================================================
 

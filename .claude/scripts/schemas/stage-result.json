@@ -49,6 +49,53 @@
       "type": "integer",
       "minimum": 0,
       "description": "Wall-clock milliseconds from stage invocation to return"
+    },
+    "tokens": {
+      "type": "object",
+      "description": "Per-stage token counts lifted from the CLI response usage block (issue #580). All fields default to 0 when the CLI omits usage.",
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Uncached input tokens billed for this stage"
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Output tokens generated for this stage"
+        },
+        "cache_creation_input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Input tokens written to the prompt cache (billed at the cache-write rate)"
+        },
+        "cache_read_input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Input tokens served from the prompt cache (billed at the cache-read rate)"
+        }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "description": "Per-stage USD cost breakdown (issue #580). estimated_usd is the figure persisted as .stages[<stage>].estimated_cost.",
+      "properties": {
+        "reported_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The CLI's own total_cost_usd for the stage, when present"
+        },
+        "computed_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cost priced from the token counts via _model_cost (model-config.sh)"
+        },
+        "estimated_usd": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Preferred cost: reported_usd when > 0, else computed_usd"
+        }
+      }
     }
   },
   "required": ["status"]

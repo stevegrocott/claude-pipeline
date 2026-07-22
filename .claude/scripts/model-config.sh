@@ -36,6 +36,51 @@ readonly _MODEL_advanced="opus"
 readonly _MODEL_default="opus"    # fallback for unknown tiers
 
 # =============================================================================
+# PER-MODEL PRICE TABLE
+# =============================================================================
+#
+# USD price per 1,000,000 tokens, by tier. Source: Anthropic published
+# pricing, cached 2026-07-21 (see plugins/pipeline-core skill "claude-api"
+# section "Current Models").
+#
+#   Tier    Input   Output
+#   haiku   $1.00   $5.00
+#   sonnet  $3.00   $15.00
+#   opus    $5.00   $25.00
+#
+# Cache write/read are not separately published per-tier; they scale off the
+# tier's input price using the documented multipliers (shared/prompt-caching.md):
+#   cache write (5m TTL, the CLI default) = 1.25x input
+#   cache read                            = 0.1x  input
+#
+# Update this table when Anthropic pricing changes — it is the single place
+# cost math lives; _model_cost is the only function that reads it.
+#
+# Lookup: _model_cost <model> <input> <output> [cache_creation] [cache_read]
+
+readonly _PRICE_INPUT_haiku="1.00"
+readonly _PRICE_OUTPUT_haiku="5.00"
+readonly _PRICE_CACHE_WRITE_haiku="1.25"
+readonly _PRICE_CACHE_READ_haiku="0.10"
+
+readonly _PRICE_INPUT_sonnet="3.00"
+readonly _PRICE_OUTPUT_sonnet="15.00"
+readonly _PRICE_CACHE_WRITE_sonnet="3.75"
+readonly _PRICE_CACHE_READ_sonnet="0.30"
+
+readonly _PRICE_INPUT_opus="5.00"
+readonly _PRICE_OUTPUT_opus="25.00"
+readonly _PRICE_CACHE_WRITE_opus="6.25"
+readonly _PRICE_CACHE_READ_opus="0.50"
+
+# Fallback for unknown/unrecognized models — priced at opus rates so an
+# unrecognized model never silently undercounts spend.
+readonly _PRICE_INPUT_default="$_PRICE_INPUT_opus"
+readonly _PRICE_OUTPUT_default="$_PRICE_OUTPUT_opus"
+readonly _PRICE_CACHE_WRITE_default="$_PRICE_CACHE_WRITE_opus"
+readonly _PRICE_CACHE_READ_default="$_PRICE_CACHE_READ_opus"
+
+# =============================================================================
 # COMPLEXITY-TO-TIER TABLE
 # =============================================================================
 #
@@ -313,6 +358,56 @@ _match_stage_prefix() {
 _next_model_up() {
 	local _var="_NEXT_MODEL_${1//[^a-zA-Z]/}"
 	printf '%s' "${!_var:-$_NEXT_MODEL_default}"
+}
+
+# _model_cost <model> <input_tokens> <output_tokens> \
+#             [cache_creation_tokens] [cache_read_tokens]
+# Prints the USD cost (6 decimal places) for the given model/tier and token
+# counts, using the price table above.
+#
+# <model> matches on tier name ("haiku"/"sonnet"/"opus") or any string
+# containing one as a substring (e.g. a concrete model ID such as
+# "claude-opus-4-8") — so callers can pass either the CLI's --model alias or
+# the model string a CLI JSON response echoes back. Unrecognized models fall
+# back to the opus price table (_PRICE_*_default) — see AC4.
+#
+# Missing token-count arguments default to 0. Non-numeric arguments are
+# rejected by awk's arithmetic context and print 0.000000 rather than
+# erroring, so a bad upstream value degrades to zero cost instead of
+# corrupting status.json.
+_model_cost() {
+	local _model="${1:-}"
+	local _input="${2:-0}" _output="${3:-0}"
+	local _cache_write="${4:-0}" _cache_read="${5:-0}"
+	local _tier
+
+	case "$_model" in
+		*opus*) _tier="opus" ;;
+		*sonnet*) _tier="sonnet" ;;
+		*haiku*) _tier="haiku" ;;
+		*) _tier="default" ;;
+	esac
+
+	local _price_input_var="_PRICE_INPUT_${_tier}"
+	local _price_output_var="_PRICE_OUTPUT_${_tier}"
+	local _price_cache_write_var="_PRICE_CACHE_WRITE_${_tier}"
+	local _price_cache_read_var="_PRICE_CACHE_READ_${_tier}"
+
+	awk \
+		-v input="$_input" -v output="$_output" \
+		-v cache_write="$_cache_write" -v cache_read="$_cache_read" \
+		-v price_input="${!_price_input_var}" \
+		-v price_output="${!_price_output_var}" \
+		-v price_cache_write="${!_price_cache_write_var}" \
+		-v price_cache_read="${!_price_cache_read_var}" \
+		'BEGIN {
+			cost = (input + 0) * price_input \
+				+ (output + 0) * price_output \
+				+ (cache_write + 0) * price_cache_write \
+				+ (cache_read + 0) * price_cache_read
+			cost = cost / 1000000
+			printf "%.6f\n", cost
+		}'
 }
 
 # =============================================================================

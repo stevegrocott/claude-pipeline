@@ -1200,3 +1200,60 @@ FIXTURE_EOF
 		echo "# PASS: log_error writes to stderr without tee" >&3
 	fi
 }
+
+# =============================================================================
+# _extract_usage — parse usage token counts and total_cost_usd (issue #580)
+# The CLI --output-format json envelope carries a .usage block and a
+# top-level .total_cost_usd. run_stage feeds raw stdout through this helper;
+# every field is `// 0` guarded so a missing/null value degrades to zero
+# instead of corrupting downstream status.json / stage_result consumers.
+# =============================================================================
+
+@test "_extract_usage parses full usage block and total_cost_usd" {
+	local raw='{"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":2,"cache_read_input_tokens":3},"total_cost_usd":0.04}'
+	run _extract_usage "$raw"
+	[ "$status" -eq 0 ]
+	[ "$(printf '%s' "$output" | jq -r '.input_tokens')" = "10" ]
+	[ "$(printf '%s' "$output" | jq -r '.output_tokens')" = "5" ]
+	[ "$(printf '%s' "$output" | jq -r '.cache_creation_input_tokens')" = "2" ]
+	[ "$(printf '%s' "$output" | jq -r '.cache_read_input_tokens')" = "3" ]
+	[ "$(printf '%s' "$output" | jq -r '.total_cost_usd')" = "0.04" ]
+}
+
+@test "_extract_usage returns a zeroed object for empty input" {
+	run _extract_usage ""
+	[ "$status" -eq 0 ]
+	[ "$(printf '%s' "$output" | jq -r '.input_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.output_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.cache_creation_input_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.cache_read_input_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.total_cost_usd')" = "0" ]
+}
+
+@test "_extract_usage returns a zeroed object for malformed JSON" {
+	run _extract_usage 'not json at all'
+	[ "$status" -eq 0 ]
+	[ "$(printf '%s' "$output" | jq -r '.input_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.total_cost_usd')" = "0" ]
+}
+
+@test "_extract_usage // 0 guards each missing field independently" {
+	# Only input_tokens present; every other field must degrade to 0.
+	local raw='{"usage":{"input_tokens":7}}'
+	run _extract_usage "$raw"
+	[ "$status" -eq 0 ]
+	[ "$(printf '%s' "$output" | jq -r '.input_tokens')" = "7" ]
+	[ "$(printf '%s' "$output" | jq -r '.output_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.cache_creation_input_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.cache_read_input_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.total_cost_usd')" = "0" ]
+}
+
+@test "_extract_usage // 0 guards explicit null values" {
+	local raw='{"usage":{"input_tokens":null,"output_tokens":9},"total_cost_usd":null}'
+	run _extract_usage "$raw"
+	[ "$status" -eq 0 ]
+	[ "$(printf '%s' "$output" | jq -r '.input_tokens')" = "0" ]
+	[ "$(printf '%s' "$output" | jq -r '.output_tokens')" = "9" ]
+	[ "$(printf '%s' "$output" | jq -r '.total_cost_usd')" = "0" ]
+}
