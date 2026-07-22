@@ -435,7 +435,11 @@ init_status() {
             "started_at": null,
             "stage_started_at": null,
             "completed_at": null,
-            "cost_usd": 0
+            "cost_usd": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0
         }]')
     done
 
@@ -466,7 +470,15 @@ init_status() {
             },
             issues: $issues,
             cost_summary: {
-                total_cost_usd: ($issues | map(.cost_usd // 0) | add // 0)
+                total_cost_usd: ($issues | map(.cost_usd // 0) | add // 0),
+                total_input_tokens:
+                    ($issues | map(.input_tokens // 0) | add // 0),
+                total_output_tokens:
+                    ($issues | map(.output_tokens // 0) | add // 0),
+                total_cache_read_tokens:
+                    ($issues | map(.cache_read_tokens // 0) | add // 0),
+                total_cache_creation_tokens:
+                    ($issues | map(.cache_creation_tokens // 0) | add // 0)
             },
             rate_limit: {
                 waiting: false,
@@ -522,6 +534,14 @@ update_progress() {
             ([.issues[] | select(.status == "pending")] | length) |
         .cost_summary.total_cost_usd =
             ([.issues[] | (.cost_usd // 0)] | add // 0) |
+        .cost_summary.total_input_tokens =
+            ([.issues[] | (.input_tokens // 0)] | add // 0) |
+        .cost_summary.total_output_tokens =
+            ([.issues[] | (.output_tokens // 0)] | add // 0) |
+        .cost_summary.total_cache_read_tokens =
+            ([.issues[] | (.cache_read_tokens // 0)] | add // 0) |
+        .cost_summary.total_cache_creation_tokens =
+            ([.issues[] | (.cache_creation_tokens // 0)] | add // 0) |
         .last_update = (now | todate)' \
         "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
@@ -1203,11 +1223,31 @@ process_issue() {
     # the batch cost_summary rollup. `// 0` degrades to zero when the
     # field is absent rather than corrupting status.json.
     local impl_cost_usd="0"
+    local impl_input_tokens="0" impl_output_tokens="0"
+    local impl_cache_read_tokens="0" impl_cache_creation_tokens="0"
     if [[ -f "$issue_status_file" ]]; then
         impl_cost_usd=$(jq -r '.cost_summary.total_cost_usd // 0' \
             "$issue_status_file" 2>/dev/null) || impl_cost_usd="0"
+        impl_input_tokens=$(jq -r '.cost_summary.total_input_tokens // 0' \
+            "$issue_status_file" 2>/dev/null) || impl_input_tokens="0"
+        impl_output_tokens=$(jq -r '.cost_summary.total_output_tokens // 0' \
+            "$issue_status_file" 2>/dev/null) || impl_output_tokens="0"
+        impl_cache_read_tokens=$(jq -r \
+            '.cost_summary.total_cache_read_tokens // 0' \
+            "$issue_status_file" 2>/dev/null) || impl_cache_read_tokens="0"
+        impl_cache_creation_tokens=$(jq -r \
+            '.cost_summary.total_cache_creation_tokens // 0' \
+            "$issue_status_file" 2>/dev/null) || impl_cache_creation_tokens="0"
     fi
     update_issue_field "$issue_num" "cost_usd" "$impl_cost_usd" "true"
+    update_issue_field "$issue_num" "input_tokens" \
+        "$impl_input_tokens" "true"
+    update_issue_field "$issue_num" "output_tokens" \
+        "$impl_output_tokens" "true"
+    update_issue_field "$issue_num" "cache_read_tokens" \
+        "$impl_cache_read_tokens" "true"
+    update_issue_field "$issue_num" "cache_creation_tokens" \
+        "$impl_cache_creation_tokens" "true"
 
     # Log location of metrics.json emitted by the orchestrator's EXIT trap
     if [[ -f "$issue_status_file" ]]; then
@@ -1842,8 +1882,9 @@ emit_event "batch_end" "outcome=$_batch_outcome"
 # COST/TOKEN TREND GUARD (advisory, non-blocking — issue #585)
 #
 # Evaluate this batch's MT/issue against a rolling baseline of recent batch
-# summaries. The guard reads #580's cost_summary (falling back to the ab-report
-# stage-log token parse) and NO-OPs cleanly when cost_summary is absent. Its
+# summaries. The guard reads the batch cost_summary token totals (rolled up
+# from #580's per-issue cost_summary) and NO-OPs cleanly when cost_summary is
+# absent or carries only total_cost_usd (no token totals). Its
 # verdict is attached to summary.json as cost_rollup / trend_warning and, when
 # a drift is detected, surfaced on the event stream as cost_trend_warning.
 # Every failure mode degrades to a benign noop verdict so the guard can never
