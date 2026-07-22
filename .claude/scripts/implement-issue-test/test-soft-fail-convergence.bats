@@ -222,28 +222,41 @@ teardown() {
 # Historically the quality/test/pr loops hard-failed with `exit 2` when they
 # exceeded their iteration budget; that was replaced with the soft-fail pattern
 # (break + DEGRADED_STAGES) so the pipeline continues to PR/merge reporting.
-# Issue #577 reintroduces a SINGLE, TERMINAL `exit 2` at the merge gate for the
+# Issue #577 reintroduces a TERMINAL `exit 2` at the merge gate for the
 # completed_partial state (after the PR exists) — a distinct non-zero exit so
 # batch metrics and operators can tell a partial delivery from an error or a
-# full success.  These tests guard the original invariant (loops soft-fail)
-# while permitting that one terminal exit.
+# full success.  Issue #583/#590 adds a SECOND terminal `exit 2` in the
+# parent-shell budget guard (_halt_if_budget_exceeded → set_final_state
+# "budget_exceeded"; exit 2), which halts the whole run when the token/cost
+# ceiling is breached — again a run-halt, not a mid-loop hard-fail.  These
+# tests guard the original invariant (loops soft-fail) while permitting those
+# two terminal exits, and only those two.
 # =============================================================================
 
-@test "the only exit 2 is the terminal completed_partial merge-gate path" {
+@test "every exit 2 is a terminal run-halt (completed_partial or budget_exceeded)" {
 	local script_content
 	script_content=$(< "$ORCHESTRATOR_SCRIPT")
 
-	# Exactly one `exit 2` (line-terminal) may remain.
+	# Exactly two line-terminal `exit 2` sites may remain — the completed_partial
+	# merge gate (#577) and the budget_exceeded run halt (#583/#590).
 	local exit2_count
 	exit2_count=$(grep -c 'exit 2$' "$ORCHESTRATOR_SCRIPT" || true)
-	[ "$exit2_count" -eq 1 ]
+	[ "$exit2_count" -eq 2 ]
 
-	# ...and it must follow set_final_state "completed_partial" (issue #577),
-	# i.e. it is the terminal partial-delivery exit, not a mid-loop hard-fail.
-	local block_pos next_exit
-	block_pos=$(grep -n 'set_final_state "completed_partial"' <<< "$script_content" \
+	# Each terminal state's set_final_state must be immediately followed by an
+	# `exit 2` (its next exit is exit 2), i.e. both exits are terminal run-halts
+	# and neither is a mid-loop hard-fail.  Two accounted-for terminal exits +
+	# a total count of exactly two ⇒ no unaccounted mid-loop exit 2 remains.
+	local partial_pos budget_pos next_exit
+
+	partial_pos=$(grep -n 'set_final_state "completed_partial"' <<< "$script_content" \
 		| tail -1 | cut -d: -f1)
-	next_exit=$(awk "NR>$block_pos && /exit [0-9]/{ print; exit }" <<< "$script_content")
+	next_exit=$(awk "NR>$partial_pos && /exit [0-9]/{ print; exit }" <<< "$script_content")
+	[[ "$next_exit" == *'exit 2'* ]]
+
+	budget_pos=$(grep -n 'set_final_state "budget_exceeded"' <<< "$script_content" \
+		| tail -1 | cut -d: -f1)
+	next_exit=$(awk "NR>$budget_pos && /exit [0-9]/{ print; exit }" <<< "$script_content")
 	[[ "$next_exit" == *'exit 2'* ]]
 }
 
@@ -257,10 +270,11 @@ teardown() {
 	[[ "$script_content" == *'DEGRADED_STAGES+=("quality:max_iterations:'* ]]
 	[[ "$script_content" == *'DEGRADED_STAGES+=("quality:convergence_failure:'* ]]
 
-	# No more than the single terminal completed_partial exit 2 may exist.
+	# No more than the two terminal run-halt exit 2 sites (completed_partial +
+	# budget_exceeded) may exist; any third would be a mid-loop hard-fail.
 	local exit2_count
 	exit2_count=$(grep -c 'exit 2$' "$ORCHESTRATOR_SCRIPT" || true)
-	[ "$exit2_count" -le 1 ]
+	[ "$exit2_count" -le 2 ]
 }
 
 # =============================================================================
