@@ -79,6 +79,8 @@ _source_orchestrator_functions() {
 		/^sync_status_to_log\(\) \{$/,/^\}$/ { print; next }
 		/^emit_event\(\) \{$/,/^\}$/         { print; next }
 		/^set_stage_failed\(\) \{$/,/^\}$/   { print; next }
+		/^check_run_budget\(\) \{$/,/^\}$/   { print; next }
+		/^set_run_budget_exceeded\(\) \{$/,/^\}$/ { print; next }
 		/^_apply_stage_action\(\) \{$/,/^\}$/ { print; next }
 	' "$ORCHESTRATOR" > "$func_file"
 	# shellcheck disable=SC1090
