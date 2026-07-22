@@ -118,6 +118,18 @@ _bash_decide() {
 		if [[ "$model" == "opus" ]]; then
 			printf '%s\n' \
 				'{"action":"bail","reason":"quality_stall: already at opus ceiling"}'
+		elif [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+			# S-complexity gate (issue #579): a short task at sonnet must
+			# not auto-escalate to opus on a quality_stall — mirrors the
+			# double_timeout branch, and matches the compose backend which
+			# already bails this case.  run_quality_loop threads task_size
+			# through, so a fix/simplify stage quality-stalling on an S task
+			# reaches here on a realistic path.
+			#
+			# NOTE: M/L quality_stall backend divergence (bash escalates,
+			# compose bails "not a recognised upgrade trigger") is
+			# pre-existing and NOT introduced by #579 — left unchanged here.
+			_s_opus_gate_bail "quality_stall"
 		else
 			local next_model
 			next_model=$(_next_model "$model")
