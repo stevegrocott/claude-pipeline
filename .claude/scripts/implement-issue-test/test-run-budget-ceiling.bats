@@ -320,3 +320,140 @@ _seed_status() {
 	grep -q 'if ! check_batch_budget; then' "$BATCH_ORCHESTRATOR_SCRIPT_PATH"
 	grep -q 'set_state "budget_exceeded"' "$BATCH_ORCHESTRATOR_SCRIPT_PATH"
 }
+
+# =============================================================================
+# INTEGRATION — the run-level halt is OBSERVABLE and actually stops spending
+#
+# Blocking bug 1 (issue #583): check_run_budget()/set_run_budget_exceeded() run
+# inside the run_stage command-substitution SUBSHELL.  Returning 1 there cannot
+# stop the parent — every caller is `x=$(run_stage ...)` and branches on the
+# JSON .status, never on $?.  So the halt was swallowed: the pipeline advanced
+# to the next stage and kept spending.
+#
+# These tests drive TWO sequential stages through the REAL run_stage machinery
+# (a stubbed `claude` that logs each call and emits a usage block).  A breach at
+# stage 1 must halt the run — exit 2, state budget_exceeded — BEFORE stage 2's
+# CLI call.  Pre-fix (no _halt_if_budget_exceeded guard) the stub is called
+# twice (pipeline continues → RED); post-fix it is called once (GREEN).
+# =============================================================================
+
+# Wire the full run_stage harness (mock claude + real decide-action backend) and
+# install a call-logging claude stub that emits a usage block on every call.
+_setup_run_stage_harness() {
+	install_mocks
+	install_decide_scripts
+
+	export ISSUE_NUMBER=123
+	export BASE_BRANCH=test
+	export STATUS_FILE="$TEST_TMP/status.json"
+	export LOG_BASE="$TEST_TMP/logs/test"
+	export LOG_FILE="$LOG_BASE/orchestrator.log"
+	export STAGE_COUNTER=0
+	export _CONSECUTIVE_TIMEOUTS=0
+	export SCHEMA_DIR="$TEST_TMP/schemas"
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context" "$SCHEMA_DIR"
+
+	cat > "$SCHEMA_DIR/budget-int.json" << 'EOF'
+{ "type": "object", "properties": { "status": { "type": "string" }, "result": { "type": "string" } } }
+EOF
+
+	# Per-call ledger — one line appended per CLI invocation, so the count is a
+	# direct proof of how many stages actually spent.
+	export CLAUDE_CALL_LOG="$TEST_TMP/claude-calls.log"
+	: > "$CLAUDE_CALL_LOG"
+
+	# Response emitted on every call: success + a real usage block (issue #583
+	# reads .usage.* / .total_cost_usd).  MOCK_STAGE_STATUS lets a test flip the
+	# structured status to "error" to exercise the escalate decision path.
+	export CLAUDE_RESPONSE_FILE="$TEST_TMP/claude-response.json"
+	_write_stub_response "success"
+
+	# Overwrite the default mock with a call-logging stub bound to the ledger and
+	# response file above (paths expand now, at write time).
+	cat > "$TEST_TMP/bin/claude" << STUB
+#!/usr/bin/env bash
+printf 'call\n' >> "$CLAUDE_CALL_LOG"
+cat "$CLAUDE_RESPONSE_FILE"
+STUB
+	chmod +x "$TEST_TMP/bin/claude"
+
+	source_orchestrator_functions
+}
+
+_write_stub_response() {
+	local status="$1"
+	jq -n --arg s "$status" '{
+		type: "result",
+		subtype: "success",
+		is_error: false,
+		result: "done",
+		total_cost_usd: 0.01,
+		structured_output: { status: $s, result: "done" },
+		usage: {
+			input_tokens: 50,
+			output_tokens: 50,
+			cache_creation_input_tokens: 0,
+			cache_read_input_tokens: 0
+		}
+	}' > "$CLAUDE_RESPONSE_FILE"
+}
+
+@test "INTEGRATION: hard breach halts the run so the next stage's CLI never runs" {
+	_setup_run_stage_harness
+	export MAX_RUN_TOKENS=1000
+	export MAX_RUN_COST_USD=0
+	# Accumulated prior spend already over the ceiling: the between-stage check
+	# at stage 1's completion trips, so stage 2 must never be reached.
+	_seed_status 2000 0
+
+	# REAL caller pattern: capture the stage result, then run the guard every
+	# caller now runs, then the next stage.  A subshell makes the guard's
+	# `exit 2` observable without killing the bats process.
+	set +e
+	(
+		rA=$(run_stage "stageA" "prompt A" "budget-int.json" "default")
+		_halt_if_budget_exceeded
+		# Reached only if the halt was swallowed (the pre-fix bug): stage 2 spends.
+		rB=$(run_stage "stageB" "prompt B" "budget-int.json" "default")
+		_halt_if_budget_exceeded
+	)
+	local rc=$?
+	set -e
+
+	# Halted in the parent shell with the issue's budget exit code.
+	[ "$rc" -eq 2 ] || fail "expected exit 2 (budget halt), got $rc"
+	# Durable terminal state recorded.
+	assert_json_field "$STATUS_FILE" '.state' 'budget_exceeded'
+	# The decisive proof: exactly ONE claude call (stage A). Stage B never spent.
+	local calls
+	calls=$(grep -c 'call' "$CLAUDE_CALL_LOG" 2>/dev/null || printf '0')
+	[ "$calls" -eq 1 ] || fail "expected exactly 1 CLI call (stage B must not run), got $calls"
+}
+
+@test "INTEGRATION: hard breach in the escalate path skips the pricier retry call" {
+	_setup_run_stage_harness
+	export MAX_RUN_TOKENS=1000
+	export MAX_RUN_COST_USD=0
+	_seed_status 2000 0
+	# A structured error at a NON-ceiling model (haiku, pinned via model_override
+	# arg 7) steers the bash decide-action backend to 'escalate' (a model at the
+	# opus ceiling would 'bail' instead).  This exercises blocking bug 2: the
+	# pre-escalation budget check must fire BEFORE the second (escalated) CLI
+	# call, so only the primary call is ever made.
+	_write_stub_response "error"
+
+	set +e
+	(
+		rA=$(run_stage "stageA" "prompt A" "budget-int.json" "default" "" "" "haiku")
+		_halt_if_budget_exceeded
+	)
+	local rc=$?
+	set -e
+
+	[ "$rc" -eq 2 ] || fail "expected exit 2 (budget halt), got $rc"
+	assert_json_field "$STATUS_FILE" '.state' 'budget_exceeded'
+	# Only the primary attempt spent — the escalated call was suppressed.
+	local calls
+	calls=$(grep -c 'call' "$CLAUDE_CALL_LOG" 2>/dev/null || printf '0')
+	[ "$calls" -eq 1 ] || fail "escalation was not suppressed: expected 1 CLI call, got $calls"
+}

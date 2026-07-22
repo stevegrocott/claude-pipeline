@@ -295,6 +295,61 @@ teardown() {
         fail "Expected cap-reached reason in compose, got: $output"
 }
 
+# =============================================================================
+# S-COMPLEXITY OPUS GATE — quality_stall branch (issue #579, AC1 + AC4)
+#
+# The S-gate must also cover error_kind=quality_stall, not only double_timeout
+# and the default escalate.  run_quality_loop threads task_size through, so a
+# fix/simplify stage quality-stalling on an S task reaches _bash_decide's
+# quality_stall branch on a realistic path.  Both backends must agree.
+# =============================================================================
+
+@test "S-complexity quality_stall at sonnet bails in bash backend (does not escalate to opus)" {
+    local sr='{"status":"error","error_kind":"quality_stall","model":"sonnet","complexity":"S"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action
+    action=$(printf '%s' "$output" | jq -r '.action')
+    [ "$action" = "bail" ] || fail "Expected bail for S-at-sonnet quality_stall, got: $action ($output)"
+    [[ "$output" == *"S-complexity"* ]] || fail "Expected S-complexity reason, got: $output"
+}
+
+@test "backend parity: compose path also bails S-at-sonnet quality_stall" {
+    local sr='{"status":"error","error_kind":"quality_stall","model":"sonnet","complexity":"S"}'
+    # Skill-native compose path (bash sub-backends), NOT ESCALATION_POLICY_BACKEND=bash
+    run env RETRY_POLICY_BACKEND=bash MODEL_FALLBACK_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action
+    action=$(printf '%s' "$output" | jq -r '.action')
+    [ "$action" = "bail" ] || fail "Expected compose bail for S-at-sonnet quality_stall, got: $action ($output)"
+}
+
+@test "M-complexity quality_stall at sonnet still escalates to opus (bash backend, no over-blocking)" {
+    local sr='{"status":"error","error_kind":"quality_stall","model":"sonnet","complexity":"M"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action model
+    action=$(printf '%s' "$output" | jq -r '.action')
+    model=$(printf '%s' "$output" | jq -r '.model')
+    [ "$action" = "escalate" ] || fail "Expected escalate for M quality_stall, got: $action ($output)"
+    [ "$model" = "opus" ] || fail "Expected opus for M quality_stall, got: $model"
+}
+
+@test "L-complexity quality_stall at sonnet still escalates to opus (bash backend, no over-blocking)" {
+    local sr='{"status":"error","error_kind":"quality_stall","model":"sonnet","complexity":"L"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action model
+    action=$(printf '%s' "$output" | jq -r '.action')
+    model=$(printf '%s' "$output" | jq -r '.model')
+    [ "$action" = "escalate" ] || fail "Expected escalate for L quality_stall, got: $action ($output)"
+    [ "$model" = "opus" ] || fail "Expected opus for L quality_stall, got: $model"
+}
+
 @test "stage_result envelope carries complexity field (issue #579)" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local sr
