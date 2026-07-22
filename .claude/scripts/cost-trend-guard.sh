@@ -9,15 +9,16 @@
 # orchestrator attaches to summary.json (as cost_rollup / trend_warning) and
 # forwards to the event stream as a `cost_trend_warning` event.
 #
-# Metric source (in order):
-#   1. #580's `cost_summary` token fields in a batch summary/status JSON.
-#   2. Fallback: the total_cost_usd/token parse pattern from ab-report.sh's
-#      collect_stage_costs(), applied over the run's log_dir stage logs — used
-#      when cost_summary carries only total_cost_usd (no token totals).
+# Metric source:
+#   The batch-level `cost_summary` token totals — total_input_tokens,
+#   total_output_tokens, total_cache_read_tokens, total_cache_creation_tokens —
+#   emitted per-issue by #580 and rolled up across the batch by
+#   batch-orchestrator.sh (init_status / update_progress).
 #
 # NO-OP contract: when `cost_summary` is absent (older summaries pre-#580) or
-# no token metric can be derived, the verdict is {"status":"noop",...} and no
-# warning is produced.
+# carries only total_cost_usd with no token totals, the token sum is 0 and no
+# MT/issue is derivable, so the verdict is {"status":"noop",...} and no warning
+# is produced.
 #
 # Environment:
 #   COST_TREND_WINDOW  Rolling window size (# of recent batches).  Default 5.
@@ -39,39 +40,6 @@ set -uo pipefail
 
 COST_TREND_WINDOW="${COST_TREND_WINDOW:-5}"
 COST_TREND_FACTOR="${COST_TREND_FACTOR:-1.5}"
-
-# -----------------------------------------------------------------------------
-# ctg_tokens_from_logs <log_dir>
-#
-# Fallback token extractor. Reuses ab-report.sh's canonical parse: grep the
-# Claude CLI `--output-format json` result lines (identified by the presence of
-# "total_cost_usd") from every *.log under the run directory, then sum the
-# input/output/cache token fields. Prints a single integer (0 when nothing is
-# found).
-# -----------------------------------------------------------------------------
-ctg_tokens_from_logs() {
-	local log_dir="$1"
-	[[ -n "$log_dir" && -d "$log_dir" ]] || { printf '0'; return 0; }
-
-	local lines
-	lines=$(find "$log_dir" -type f -name '*.log' \
-		-exec grep -h '^{.*"total_cost_usd"' {} + 2>/dev/null) || lines=""
-	[[ -n "$lines" ]] || { printf '0'; return 0; }
-
-	printf '%s\n' "$lines" | jq -cs '
-		[.[] | select(.total_cost_usd != null)]
-		| ( map(.usage.input_tokens // .input_tokens // 0) | add // 0)
-		+ ( map(.usage.output_tokens // .output_tokens // 0) | add // 0)
-		+ ( map(.usage.cache_creation_input_tokens
-			// .usage.cache_creation_tokens
-			// .cache_creation_input_tokens
-			// .cache_creation_tokens // 0) | add // 0)
-		+ ( map(.usage.cache_read_input_tokens
-			// .usage.cache_read_tokens
-			// .cache_read_input_tokens
-			// .cache_read_tokens // 0) | add // 0)
-	' 2>/dev/null || printf '0'
-}
 
 # -----------------------------------------------------------------------------
 # ctg_batch_mt <summary_json_file>
@@ -98,25 +66,17 @@ ctg_batch_mt() {
 			or .status == "already_done")] | length)
 		// 0' "$file" 2>/dev/null) || completed=0
 
+	# Sum the batch-level token totals emitted by #580 (per-issue
+	# cost_summary) and rolled up by batch-orchestrator.sh (init_status /
+	# update_progress). When cost_summary carries only total_cost_usd (older
+	# summaries pre-token-rollup), every field is absent → sum is 0 → no-op.
 	tokens=$(jq -r '
 		(.cost_summary) as $cs
-		| ($cs.total_tokens
-			// (($cs.input_tokens // 0)
-				+ ($cs.output_tokens // 0)
-				+ ($cs.cache_creation_tokens // 0)
-				+ ($cs.cache_read_tokens // 0))
-			// 0)' "$file" 2>/dev/null) || tokens=0
-
-	# Fallback: cost_summary present but carries no token totals (current
-	# #580 records only total_cost_usd). Derive tokens from the run's stage
-	# logs using ab-report.sh's parse pattern.
-	if [[ -z "$tokens" || "$tokens" == "0" || "$tokens" == "null" ]]; then
-		local log_dir
-		log_dir=$(jq -r '.log_dir // empty' "$file" 2>/dev/null) || log_dir=""
-		if [[ -n "$log_dir" ]]; then
-			tokens=$(ctg_tokens_from_logs "$log_dir")
-		fi
-	fi
+		| (($cs.total_input_tokens // 0)
+			+ ($cs.total_output_tokens // 0)
+			+ ($cs.total_cache_read_tokens // 0)
+			+ ($cs.total_cache_creation_tokens // 0))' \
+		"$file" 2>/dev/null) || tokens=0
 
 	# Not computable → no-op (print nothing).
 	[[ -n "$tokens" && "$tokens" != "0" && "$tokens" != "null" ]] || return 0
