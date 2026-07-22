@@ -678,9 +678,92 @@ update_stage() {
     sync_status_to_log
 }
 
+# =============================================================================
+# PER-STAGE TOKEN/COST ACCUMULATOR (issue #580)
+# =============================================================================
+#
+# run_stage is always invoked as `result=$(run_stage ...)`, so it executes in a
+# command-substitution subshell — a shell-global accumulator assigned there
+# would not survive back to the parent. The bridge is therefore FILE-BACKED,
+# one file per LOGICAL stage under $LOG_BASE/.stage-acc:
+#
+#   set_stage_started     (re)initialises the current logical stage's file and
+#                         records the stage name in _STAGE_ACC_CURRENT, which
+#                         the run_stage subshell inherits via the environment.
+#   _apply_stage_action   on `accept`, appends the accepted stage_result's
+#                         tokens + cost.estimated_usd to that file (one JSONL
+#                         line per accepted run_stage call — so a stage with
+#                         several run_stage calls, e.g. test_loop / pr_review
+#                         iterations, ACCUMULATES rather than last-wins).
+#   set_stage_completed   sums the file to default its tokens/cost args when the
+#                         caller didn't pass them explicitly.
+#
+# Keying by logical stage (not the run_stage name, which is e.g. "test-iter-3")
+# means each set_stage_completed reads only its own stage's file: two completes
+# in a row (implement then quality_loop) never double-count, and a stage that
+# completes WITHOUT a preceding set_stage_started has no file and records ZERO —
+# so config-only-skip paths never inherit a previous stage's spend. Every jq
+# extraction is `// 0` / `// {}` guarded so a missing field degrades to zero.
+# bash-3.2 safe (no associative arrays; float sums done in jq).
+
+_stage_acc_dir() {
+    printf '%s/.stage-acc' "${LOG_BASE:-.}"
+}
+
+_stage_acc_file() {
+    local _s="${1//[^A-Za-z0-9_-]/_}"
+    printf '%s/%s.jsonl' "$(_stage_acc_dir)" "$_s"
+}
+
+# Truncate/create the accumulator file for a logical stage.
+_stage_acc_reset() {
+    local _dir
+    _dir=$(_stage_acc_dir)
+    mkdir -p "$_dir" 2>/dev/null || true
+    : > "$(_stage_acc_file "$1")" 2>/dev/null || true
+}
+
+# Append one accepted stage_result's tokens/cost to the current logical stage's
+# file. Safe to call from inside the run_stage subshell (it writes to a file,
+# which the parent can read). No-op when no logical stage is active.
+_stage_acc_add() {
+    local _sr="$1"
+    local _cur="${_STAGE_ACC_CURRENT:-}"
+    [[ -n "$_cur" ]] || return 0
+    local _line
+    _line=$(printf '%s' "$_sr" \
+        | jq -c '{tokens: (.tokens // {}), cost: (.cost.estimated_usd // 0)}' \
+        2>/dev/null) || return 0
+    [[ -n "$_line" ]] || return 0
+    printf '%s\n' "$_line" >> "$(_stage_acc_file "$_cur")" 2>/dev/null || true
+}
+
+# Sum a logical stage's accumulator file into one {tokens,cost} object. Prints
+# nothing when the file is absent or empty so callers can detect "no data".
+_stage_acc_sum() {
+    local _f
+    _f=$(_stage_acc_file "$1")
+    [[ -s "$_f" ]] || return 0
+    jq -cs '{
+        tokens: {
+            input_tokens:                (map(.tokens.input_tokens // 0) | add // 0),
+            output_tokens:               (map(.tokens.output_tokens // 0) | add // 0),
+            cache_creation_input_tokens: (map(.tokens.cache_creation_input_tokens // 0) | add // 0),
+            cache_read_input_tokens:     (map(.tokens.cache_read_input_tokens // 0) | add // 0)
+        },
+        cost: (map(.cost // 0) | add // 0)
+    }' "$_f" 2>/dev/null || true
+}
+
 set_stage_started() {
     local stage="$1"
     local model="${2:-}"
+
+    # issue #580: mark this the active logical stage and clear its accumulator
+    # so per-stage token/cost starts from zero for this run.
+    _STAGE_ACC_CURRENT="$stage"
+    _stage_acc_reset "$stage"
+
     jq --arg stage "$stage" \
        '.stages[$stage].started_at = (now | todate) |
         .stages[$stage].status = "in_progress" |
@@ -706,6 +789,23 @@ set_stage_completed() {
     local tokens_json="${2:-}"
     local estimated_cost="${3:-}"
 
+    # issue #580 bridge: real call sites pass only the stage name, so default
+    # tokens/cost from the per-stage accumulator that run_stage populated via
+    # _apply_stage_action. Explicit args (used by unit tests and any direct
+    # caller) always win. A stage with no accumulator file — a config-only-skip
+    # path, or a stage that ran no CLI call — yields nothing here and is
+    # persisted as zero/absent, never inheriting a previous stage's spend.
+    if [[ -z "$tokens_json" || -z "$estimated_cost" ]]; then
+        local _acc_sum
+        _acc_sum=$(_stage_acc_sum "$stage")
+        if [[ -n "$_acc_sum" ]]; then
+            [[ -n "$tokens_json" ]] \
+                || tokens_json=$(printf '%s' "$_acc_sum" | jq -c '.tokens' 2>/dev/null)
+            [[ -n "$estimated_cost" ]] \
+                || estimated_cost=$(printf '%s' "$_acc_sum" | jq -r '.cost' 2>/dev/null)
+        fi
+    fi
+
     if [[ -n "$tokens_json" ]]; then
         # Mirror the existing `.model` write (see run_stage's resolved-model
         # persistence above): thread the stage_result envelope's tokens
@@ -718,12 +818,37 @@ set_stage_completed() {
             .stages[$stage].status = "completed" |
             .stages[$stage].tokens = $tokens |
             .stages[$stage].estimated_cost = $estimated_cost |
+            # Roll every stage'"'"'s tokens/estimated_cost up into the run-level
+            # top-level cost_summary NOW (issue #580). Recomputed from .stages[]
+            # on every completion — idempotent and resume-safe (re-derived, not
+            # incremented, so re-running a stage never double-counts). This
+            # makes status.json the canonical live per-run cost source that
+            # batch-orchestrator.sh reads (metrics.json stays the final
+            # artifact, written by export_metrics). Field names match
+            # init_status'"'"'s seed and metrics.json. `// 0` guards throughout.
+            .cost_summary = {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            } |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     else
+        # No token data for this stage — still recompute the top-level
+        # cost_summary from .stages[] so it stays consistent with whatever
+        # other stages have recorded (issue #580).
         jq --arg stage "$stage" \
            '.stages[$stage].completed_at = (now | todate) |
             .stages[$stage].status = "completed" |
+            .cost_summary = {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            } |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     fi
@@ -839,6 +964,23 @@ set_final_state() {
         "stage=$stage" \
         "from_state=$prev_state" \
         "to_state=$state"
+}
+
+# ---------------------------------------------------------------------------
+# persist_merge_blocked_reason <reason>
+# Persist a merge-block reason into status.json so the merge gate honours it
+# on a resumed run — after a crash+resume the in-memory DEGRADED_STAGES array
+# is empty, so soft-fail sites (implement:partial, pr_review:*) must durably
+# record WHY the merge is blocked. Uses `// $reason` so a reason a prior gate
+# already set (e.g. quality convergence) is not clobbered.
+# ---------------------------------------------------------------------------
+persist_merge_blocked_reason() {
+    local reason="$1"
+    [[ -f "$STATUS_FILE" ]] || return 0
+    jq --arg reason "$reason" \
+       '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    sync_status_to_log
 }
 
 increment_quality_iteration() {
@@ -1769,6 +1911,12 @@ _apply_stage_action() {
 
 	case "$action" in
 		accept)
+			# issue #580: record this accepted run_stage's final (post-
+			# escalation/retry) tokens + cost into the current logical stage's
+			# accumulator. accept is the single choke point every accepted
+			# run_stage exit funnels through, so one append happens per
+			# accepted run_stage call.
+			_stage_acc_add "$stage_result"
 			printf '%s\n' "$stage_result"
 			return 0
 			;;
@@ -8095,6 +8243,8 @@ $pr_creation_skill}"
             log_warn "Wall-clock timeout in PR review loop at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            persist_merge_blocked_reason \
+                "PR review loop hit wall-clock timeout without an approved verdict (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -8104,6 +8254,8 @@ $pr_creation_skill}"
             log_warn "PR-review budget timeout at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            persist_merge_blocked_reason \
+                "PR review loop hit its wall-clock budget without an approved verdict (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -8112,6 +8264,8 @@ $pr_creation_skill}"
             log_warn "PR review loop exceeded max iterations ($pr_review_max_iter). Soft-failing and continuing."
             set_final_state "max_iterations_pr_review"
             DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
+            persist_merge_blocked_reason \
+                "PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
             pr_approved=true
             break
         fi
