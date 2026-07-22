@@ -217,25 +217,50 @@ teardown() {
 }
 
 # =============================================================================
-# NO EXIT 2 IN SCRIPT (soft-fail replaces hard exit)
+# NO MID-LOOP HARD EXIT (soft-fail replaces hard exit)
+#
+# Historically the quality/test/pr loops hard-failed with `exit 2` when they
+# exceeded their iteration budget; that was replaced with the soft-fail pattern
+# (break + DEGRADED_STAGES) so the pipeline continues to PR/merge reporting.
+# Issue #577 reintroduces a SINGLE, TERMINAL `exit 2` at the merge gate for the
+# completed_partial state (after the PR exists) — a distinct non-zero exit so
+# batch metrics and operators can tell a partial delivery from an error or a
+# full success.  These tests guard the original invariant (loops soft-fail)
+# while permitting that one terminal exit.
 # =============================================================================
 
-@test "no exit 2 calls remain in orchestrator" {
-	local script_path
-	script_path="$ORCHESTRATOR_SCRIPT"
-	local exit2_count
-	exit2_count=$(grep -c 'exit 2' "$script_path" || true)
-	[ "$exit2_count" -eq 0 ]
-}
-
-@test "orchestrator uses soft-fail pattern instead of exit 2" {
+@test "the only exit 2 is the terminal completed_partial merge-gate path" {
 	local script_content
 	script_content=$(< "$ORCHESTRATOR_SCRIPT")
 
-	# Soft-fail means loops break and add to DEGRADED_STAGES
-	# rather than calling exit 2
+	# Exactly one `exit 2` (line-terminal) may remain.
+	local exit2_count
+	exit2_count=$(grep -c 'exit 2$' "$ORCHESTRATOR_SCRIPT" || true)
+	[ "$exit2_count" -eq 1 ]
+
+	# ...and it must follow set_final_state "completed_partial" (issue #577),
+	# i.e. it is the terminal partial-delivery exit, not a mid-loop hard-fail.
+	local block_pos next_exit
+	block_pos=$(grep -n 'set_final_state "completed_partial"' <<< "$script_content" \
+		| tail -1 | cut -d: -f1)
+	next_exit=$(awk "NR>$block_pos && /exit [0-9]/{ print; exit }" <<< "$script_content")
+	[[ "$next_exit" == *'exit 2'* ]]
+}
+
+@test "orchestrator uses soft-fail pattern in loops (not a mid-loop exit 2)" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	# Soft-fail means the quality/test/pr loops break and add to DEGRADED_STAGES
+	# rather than hard-exiting.
 	[[ "$script_content" == *"DEGRADED_STAGES"* ]]
-	[[ "$script_content" != *"exit 2"* ]]
+	[[ "$script_content" == *'DEGRADED_STAGES+=("quality:max_iterations:'* ]]
+	[[ "$script_content" == *'DEGRADED_STAGES+=("quality:convergence_failure:'* ]]
+
+	# No more than the single terminal completed_partial exit 2 may exist.
+	local exit2_count
+	exit2_count=$(grep -c 'exit 2$' "$ORCHESTRATOR_SCRIPT" || true)
+	[ "$exit2_count" -le 1 ]
 }
 
 # =============================================================================

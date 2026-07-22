@@ -966,6 +966,23 @@ set_final_state() {
         "to_state=$state"
 }
 
+# ---------------------------------------------------------------------------
+# persist_merge_blocked_reason <reason>
+# Persist a merge-block reason into status.json so the merge gate honours it
+# on a resumed run — after a crash+resume the in-memory DEGRADED_STAGES array
+# is empty, so soft-fail sites (implement:partial, pr_review:*) must durably
+# record WHY the merge is blocked. Uses `// $reason` so a reason a prior gate
+# already set (e.g. quality convergence) is not clobbered.
+# ---------------------------------------------------------------------------
+persist_merge_blocked_reason() {
+    local reason="$1"
+    [[ -f "$STATUS_FILE" ]] || return 0
+    jq --arg reason "$reason" \
+       '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)' \
+       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    sync_status_to_log
+}
+
 increment_quality_iteration() {
     jq '.quality_iterations += 1 |
         .stages.quality_loop.iteration = .quality_iterations |
@@ -1029,6 +1046,35 @@ compute_task_summary() {
             sp_total: ([$tasks[] | .size | size_points] | add // 0)
         }
     ' "$STATUS_FILE"
+}
+
+# _format_task_summary_line() — emit a single human-readable task-summary line
+# for inclusion in terminal issue/PR comments (issue #577).  Reads the task
+# roster from status.json and reports "<completed>/<total> tasks completed",
+# appending "(<n> failed)" when any task failed.  Prints nothing when there is
+# no task roster (e.g. surgical fast-path runs) so callers can splice the
+# result unconditionally.  Data-returning function: no log() to stdout.
+_format_task_summary_line() {
+    [[ -f "$STATUS_FILE" ]] || { printf ''; return 0; }
+
+    local total done_count failed_count
+    total=$(jq -r '(.tasks // []) | length' "$STATUS_FILE" 2>/dev/null || printf '0')
+    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    (( total > 0 )) || { printf ''; return 0; }
+
+    done_count=$(jq -r '[(.tasks // [])[] | select(.status == "completed")] | length' \
+        "$STATUS_FILE" 2>/dev/null || printf '0')
+    failed_count=$(jq -r '[(.tasks // [])[] | select(.status == "failed")] | length' \
+        "$STATUS_FILE" 2>/dev/null || printf '0')
+    [[ "$done_count" =~ ^[0-9]+$ ]] || done_count=0
+    [[ "$failed_count" =~ ^[0-9]+$ ]] || failed_count=0
+
+    if (( failed_count > 0 )); then
+        printf '**Task summary:** %s/%s tasks completed (%s failed).' \
+            "$done_count" "$total" "$failed_count"
+    else
+        printf '**Task summary:** %s/%s tasks completed.' "$done_count" "$total"
+    fi
 }
 
 # _rewrite_running_to_interrupted() — called from the EXIT trap to surface
@@ -7722,6 +7768,50 @@ $impl_summary" "$tagent"
                 exit 1
             fi
         fi
+
+        # -----------------------------------------------------------------
+        # PARTIAL-COMPLETION GATE (issue #577)
+        # When fewer tasks completed this run than were planned, this is a
+        # partial delivery: record an implement:partial:<n>/<m> marker in
+        # DEGRADED_STAGES (consulted by the merge gate below to block
+        # auto-merge) and post an issue comment naming each failed task.
+        # DEGRADED_STAGES is guarded against set -u unbound expansion at every
+        # read site, so appending here is safe.
+        # -----------------------------------------------------------------
+        if (( completed_tasks < task_count )); then
+            DEGRADED_STAGES+=("implement:partial:${completed_tasks}/${task_count}")
+            log_warn "Partial implementation: ${completed_tasks}/${task_count} tasks completed —" \
+                "recording implement:partial and reporting failed tasks."
+
+            # Persist a merge-block reason so a standalone process-pr or a
+            # resumed run honours the gate from status.json too.  Use // to
+            # avoid clobbering a reason a prior gate (e.g. convergence) set.
+            if [[ -f "$STATUS_FILE" ]]; then
+                jq --arg reason "Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count})." \
+                   '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)' \
+                   "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+                sync_status_to_log
+            fi
+
+            # Build a bullet list of the failed tasks from status.json.
+            local _failed_list=""
+            if [[ -f "$STATUS_FILE" ]]; then
+                _failed_list=$(jq -r '
+                    [.tasks[]? | select(.status == "failed")
+                        | "- Task \(.id // "?"): \(.description // "(no description)")"]
+                    | join("\n")' "$STATUS_FILE" 2>/dev/null || printf '')
+            fi
+            [[ -n "$_failed_list" ]] \
+                || _failed_list="- (failed tasks not individually recorded in status.json)"
+
+            comment_issue "Implementation: Partial" \
+                "⚠️ Only **${completed_tasks}/${task_count}** implementation task(s) completed. The following task(s) failed:
+
+$_failed_list
+
+Auto-merge will be blocked and the PR left open for review. To merge anyway, re-run with \`BLOCK_MERGE_ON_PARTIAL=0\`." \
+                "default"
+        fi
     fi
 
     # -------------------------------------------------------------------------
@@ -8153,6 +8243,8 @@ $pr_creation_skill}"
             log_warn "Wall-clock timeout in PR review loop at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            persist_merge_blocked_reason \
+                "PR review loop hit wall-clock timeout without an approved verdict (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -8162,6 +8254,8 @@ $pr_creation_skill}"
             log_warn "PR-review budget timeout at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            persist_merge_blocked_reason \
+                "PR review loop hit its wall-clock budget without an approved verdict (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -8170,6 +8264,8 @@ $pr_creation_skill}"
             log_warn "PR review loop exceeded max iterations ($pr_review_max_iter). Soft-failing and continuing."
             set_final_state "max_iterations_pr_review"
             DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
+            persist_merge_blocked_reason \
+                "PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
             pr_approved=true
             break
         fi
@@ -8539,24 +8635,109 @@ $complete_summary
         # DEGRADED_STAGES array.  Override with BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0.
         # ---------------------------------------------------------------------
         local merge_blocked_reason=""
+        local merge_block_kind=""   # "convergence" | "partial"
+
+        # Read the persisted merge_blocked_reason once; nothing mutates
+        # status.json between the two gates, so both share this value.
+        local _persisted
+        _persisted=$(jq -r '.merge_blocked_reason // empty' \
+            "$STATUS_FILE" 2>/dev/null || printf '')
+
+        # Gate A — quality-loop convergence failure.  Override:
+        # BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0.  A convergence reason may be
+        # persisted in status.json (so a standalone process-pr honours it) or
+        # live in the in-memory DEGRADED_STAGES array.  A persisted *partial*
+        # reason is deliberately left for Gate B so it gets the
+        # completed_partial state rather than merge_blocked.
         if [[ "${BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1}" == "0" ]]; then
             log "BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 — skipping merge-block check"
         else
-            merge_blocked_reason=$(jq -r '.merge_blocked_reason // empty' \
-                "$STATUS_FILE" 2>/dev/null || printf '')
-            if [[ -z "$merge_blocked_reason" ]]; then
+            if [[ -n "$_persisted" && "$_persisted" != "Partial implementation:"* ]]; then
+                merge_blocked_reason="$_persisted"
+                merge_block_kind="convergence"
+            else
                 local _ds
                 for _ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
                     if [[ "$_ds" == quality:convergence_failure:* ]]; then
                         merge_blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
+                        merge_block_kind="convergence"
                         break
                     fi
                 done
             fi
         fi
-        log "merge_pr: merge_blocked_reason check done — blocked='${merge_blocked_reason:-<none>}'"
+
+        # Gate B — partial task completion or an unresolved PR-review verdict
+        # (issue #577).  Override: BLOCK_MERGE_ON_PARTIAL=0.  Reason source is a
+        # persisted "Partial implementation:" line (process-pr / resumed runs)
+        # or the in-memory DEGRADED_STAGES array (implement:partial:*,
+        # pr_review:max_iterations:*, pr_review:wall_timeout).
+        if [[ -z "$merge_blocked_reason" ]]; then
+            if [[ "${BLOCK_MERGE_ON_PARTIAL:-1}" == "0" ]]; then
+                log "BLOCK_MERGE_ON_PARTIAL=0 — skipping partial/pr-review merge-block check"
+            else
+                if [[ "$_persisted" == "Partial implementation:"* ]]; then
+                    merge_blocked_reason="$_persisted"
+                    merge_block_kind="partial"
+                else
+                    local _dsp
+                    for _dsp in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+                        if [[ "$_dsp" == implement:partial:* ]]; then
+                            merge_blocked_reason="Partial implementation — not all tasks completed (degraded_stages: $_dsp)."
+                            merge_block_kind="partial"
+                            break
+                        fi
+                        if [[ "$_dsp" == pr_review:max_iterations:* || "$_dsp" == pr_review:wall_timeout ]]; then
+                            merge_blocked_reason="PR review loop ended without an approved verdict (degraded_stages: $_dsp)."
+                            merge_block_kind="partial"
+                            break
+                        fi
+                    done
+                fi
+            fi
+        fi
+        log "merge_pr: merge_blocked_reason check done — blocked='${merge_blocked_reason:-<none>}' kind='${merge_block_kind:-none}'"
 
         if [[ -n "$merge_blocked_reason" ]]; then
+            local _task_summary_line
+            _task_summary_line=$(_format_task_summary_line)
+
+            # Partial-delivery / unresolved-review block (issue #577): distinct
+            # completed_partial state and a non-zero exit (2) so batch metrics
+            # and operators can tell a partial delivery from an error or a full
+            # success.
+            if [[ "$merge_block_kind" == "partial" ]]; then
+                log_warn "Merge blocked for PR #$pr_number: partial delivery / unresolved review"
+                comment_pr "$pr_number" "Merge Blocked — Partial Delivery" \
+                    "🚫 Auto-merge was blocked because not all implementation tasks completed or the PR review never reached an approved verdict. This PR has been left **open** for a human to review and merge (or push further fixes).
+
+$merge_blocked_reason${_task_summary_line:+
+
+$_task_summary_line}
+
+To override this gate and merge anyway, re-run with \`BLOCK_MERGE_ON_PARTIAL=0\`." \
+                    "default"
+                comment_issue "Merge: Blocked (Partial Delivery)" \
+                    "🚫 Merge of PR #$pr_number blocked — partial delivery. PR left open for human review.
+
+$merge_blocked_reason${_task_summary_line:+
+
+$_task_summary_line}" \
+                    "default"
+                set_final_state "completed_partial"
+                cp "$STATUS_FILE" "$LOG_BASE/status.json"
+
+                log "=========================================="
+                log "Implement Issue Complete (partial delivery — merge blocked)"
+                log "=========================================="
+                log "Issue: #$ISSUE_NUMBER"
+                log "PR: #$pr_number"
+                log "Branch: $branch"
+                log "Status: completed_partial"
+                exit 2
+            fi
+
+            # Gate A (convergence) — unchanged behaviour: merge_blocked, exit 0.
             log_warn "Merge blocked for PR #$pr_number: unresolved quality feedback"
             comment_pr "$pr_number" "Merge Blocked — Unresolved Quality Feedback" \
                 "🚫 Auto-merge was blocked because the internal quality loop could not resolve recurring review feedback. This PR has been left **open** for a human to review and merge (or push further fixes).
@@ -8568,7 +8749,9 @@ To override this gate and merge anyway, re-run with \`BLOCK_MERGE_ON_CONVERGENCE
             comment_issue "Merge: Blocked" \
                 "🚫 Merge of PR #$pr_number blocked — unresolved quality feedback. PR left open for human review.${merge_blocked_reason:+
 
-$merge_blocked_reason}" \
+$merge_blocked_reason}${_task_summary_line:+
+
+$_task_summary_line}" \
                 "default"
             set_final_state "merge_blocked"
             cp "$STATUS_FILE" "$LOG_BASE/status.json"
@@ -8659,12 +8842,18 @@ $merge_blocked_reason}" \
 
         if [[ "${QUIET:-false}" != "true" ]]; then
             log "merge_pr: posting merge-complete comment on issue"
+            # Include the task summary on this terminal exit path too (issue
+            # #577) so a full-success merge still reports what was delivered.
+            local _merge_summary_line
+            _merge_summary_line=$(_format_task_summary_line)
             local _merge_comment
             _merge_comment=$(cat <<EOF
 ## Merge: Complete
 ###### *Posted by \`implement-issue-orchestrator\`*
 
-✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully.
+✅ PR #$pr_number merged into \`$BASE_BRANCH\` successfully.${_merge_summary_line:+
+
+$_merge_summary_line}
 EOF
 )
             timeout "$MERGE_COMMENT_TIMEOUT" "$PLATFORM_DIR/comment-issue.sh" \
