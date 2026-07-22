@@ -82,8 +82,20 @@ Break the chosen approach into implementable tasks:
 - Tasks are ordered by dependency (data layer first, then presentation)
 - Each task is a single logical unit of work
 - Each task should target 5-30 minutes of subagent execution time
-- If a task requires reading more than 3 files or modifying more than 2 files, split it
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small (~5 min), M=medium (~15 min), L=large (~30 min)
+
+**Split M/L into ordered S sub-tasks — this is enforced, not advice.** Task granularity is the dominant quality lever: completion rate falls sharply with size (S ~90%, M ~67%, L ~63%), and `assert_issue_valid` now **hard-rejects** any `**(M)**`/`**(L)**` task that names more than two distinct file paths (see Task Format Specification). So do the decomposition *before* writing the task list, not after the gate bounces it:
+
+1. **Draft the task, then test it against the S bar:** an S task touches ≤2 files and has a single, verifiable done-criterion. If a task you were about to mark `**(M)**` or `**(L)**` names >2 files, or bundles two independent done-criteria, it is decomposable — split it.
+2. **Split by file scope and dependency order**, not by convenience. Each resulting S sub-task gets: (a) its own agent, (b) an explicit per-task done-criterion, (c) a file scope of ≤2 paths. Order them so each depends only on earlier sub-tasks (data/lib layer → callers → presentation → tests).
+3. **Only keep a task at `**(M)**`/`**(L)**` when it is genuinely atomic** — the work cannot be divided into independently-verifiable steps *and* it touches ≤2 files (e.g. one dense algorithm in a single file). An atomic M/L naming ≤2 paths passes the gate; a decomposable one naming >2 paths does not.
+
+Example — a single "**(L)** Add auth middleware, wire routes, add tests" naming 3+ files must become ordered S sub-tasks:
+```
+- [ ] `[fastify-backend-developer]` **(S)** Add token-verify middleware — `src/middleware/auth.ts:L1-40`
+- [ ] `[fastify-backend-developer]` **(S)** Apply middleware to protected routes — `src/routes/index.ts:L20-55`
+- [ ] `[default]` **(S)** Add middleware unit tests — `tests/unit/auth.test.ts:L1-60`
+```
 - **Parseable format required:** Every task line in `## Implementation Tasks` MUST begin with `- [ ] \`[agent-name]\``. Prose lines such as "Task 1: Do something" are **silently skipped** by the orchestrator — no error is raised and no warning is emitted; the task simply never executes.
 - Frontend and backend changes in the same task should be split — backend first (data layer), then frontend (presentation)
 - **E2E tests (REQUIRED for UI changes):** If `TEST_E2E_CMD` is configured in `.claude/config/platform.sh`, include an E2E task for ANY issue touching user-visible UI — CSS, components, layouts, forms, navigation, visual regressions. This is NOT optional for UI work.
@@ -238,6 +250,10 @@ The `## Implementation Tasks` section must use this parseable convention:
 - **Paths must be real repo paths** — verify each path exists in the repository before writing it. Never invent or guess file paths.
 - **Task descriptions must stay under ~200 characters** — keep the description concise; put details in the Research Findings section of the issue body instead.
 
+**Granularity is enforced by `assert_issue_valid` (not advisory):** the shared validator every created issue passes through (`.claude/scripts/issue-body-lib.sh`) now applies a hard granularity criterion in addition to the structural checks:
+- **HARD error — issue is rejected:** any `**(M)**` or `**(L)**` task whose files-suffix names **more than two distinct file paths** (line-range suffixes like `:L10-40` are ignored, so `file.ts:L10` and `file.ts:L90` count as one path). A hint-less task is treated as `**(M)**`. Split such a task into ordered S sub-tasks (see Step 4) before creating the issue.
+- **WARNING — non-failing:** whenever the body contains any non-S task, the validator prints the M/L-vs-S count to stderr. This is a nudge to keep decomposing toward S; it does not block issue creation, but treat a large M/L count as a sign the plan is under-decomposed.
+
 **Agent values** — use agents defined in `.claude/agents/`:
 
 | Agent | Use for |
@@ -274,7 +290,7 @@ The `## Implementation Tasks` section must use this parseable convention:
 Task sizing directly controls model cost via `model-config.sh`:
 
 - **Prefer S-complexity tasks** — S and M tasks use sonnet; only L tasks use opus. Prefer S over M/L for smaller scope, not model savings.
-- **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps.
+- **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps. **This is now enforced:** `assert_issue_valid` hard-rejects a decomposable M/L task (M/L hint AND >2 distinct file paths) and warns on the overall non-S mix — see the Task Format Specification. Decompose at explore time; do not rely on the gate to catch it.
 - **Every task MUST include at least one file path. Tasks without file paths will cause subagents to scan broadly — this is the #1 token waste in the pipeline.**
 - **Each task's affected file list reduces subagent exploration cost** — include file paths in the task description.
 
