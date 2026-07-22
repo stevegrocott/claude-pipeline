@@ -163,9 +163,11 @@ TEST_LOOP_GIT_TIMEOUT="${TEST_LOOP_GIT_TIMEOUT:-30}"
 ESCALATION_POLICY_BACKEND="${ESCALATION_POLICY_BACKEND:-}"
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
-# One-shot latch so the run-budget soft-threshold warning is emitted at most
-# once per run (issue #583).  Reset only at process start.
-_RUN_BUDGET_SOFT_WARNED=0
+# The run-budget soft-threshold warning is emitted at most once per run
+# (issue #583).  The latch lives in status.json (.run_budget_soft_warned), NOT a
+# shell global: check_run_budget() runs inside the run_stage command-substitution
+# subshell, so a global would reset every stage and re-fire the "one-shot"
+# warning on every stage.  Durable state survives the subshell.
 readonly RATE_LIMIT_BUFFER=60
 readonly RATE_LIMIT_DEFAULT_WAIT=3600
 # Waits longer than this imply a weekly-cap exhaustion (rather than a transient
@@ -369,7 +371,8 @@ calc_orchestrator_wall_time() {
 #
 # Returns:
 #   0 — within budget, OR only a soft breach (a one-shot warning is emitted
-#       via _RUN_BUDGET_SOFT_WARNED and the run continues)
+#       once, latched durably in status.json .run_budget_soft_warned, and the
+#       run continues)
 #   1 — HARD breach: the caller must halt the run with budget_exceeded and
 #       must NOT escalate or retry
 #
@@ -424,8 +427,20 @@ check_run_budget() {
             return 1
             ;;
         soft)
-            if (( ${_RUN_BUDGET_SOFT_WARNED:-0} == 0 )); then
-                _RUN_BUDGET_SOFT_WARNED=1
+            # One-shot warning, latched in status.json so it survives the
+            # run_stage subshell (a shell global would reset every stage and
+            # re-warn each time).  Read the durable latch; warn + set it once.
+            local _soft_warned="false"
+            if [[ -f "$STATUS_FILE" ]]; then
+                _soft_warned=$(jq -r '.run_budget_soft_warned // false' \
+                    "$STATUS_FILE" 2>/dev/null) || _soft_warned="false"
+            fi
+            if [[ "$_soft_warned" != "true" ]]; then
+                if [[ -f "$STATUS_FILE" ]]; then
+                    jq '.run_budget_soft_warned = true | .last_update = (now | todate)' \
+                        "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+                        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+                fi
                 log_warn "Run budget soft threshold reached (${soft_pct}%):" \
                     "tokens=${used_tokens}/${max_tokens}" \
                     "cost=\$${used_cost}/\$${max_cost}." \
@@ -1017,6 +1032,37 @@ set_run_budget_exceeded() {
         "scope=run" \
         "max_tokens:=${MAX_RUN_TOKENS:-0}" \
         "max_cost_usd:=${MAX_RUN_COST_USD:-0}"
+}
+
+# Parent-shell halt guard for the run-level budget ceiling (issue #583).
+#
+# check_run_budget()/set_run_budget_exceeded() run INSIDE the run_stage
+# command-substitution subshell (`result=$(run_stage ...)`), so a `return 1`
+# there cannot stop the parent — the caller inspects the stage_result JSON, not
+# $?, and would otherwise call set_stage_completed and advance to the next
+# (spending) stage.  The one signal that DOES survive the subshell is the
+# durable state written to status.json: `.state == "budget_exceeded"`.
+#
+# This guard is invoked in the PARENT shell immediately after every run_stage
+# capture that can spend.  It reads that durable state and, on a breach,
+# finalizes the run and exits 2 (the issue's chosen budget-halt exit code) so
+# NO subsequent stage's CLI call can run.  It is a cheap no-op otherwise, so
+# sprinkling it after each spending stage is safe.
+_halt_if_budget_exceeded() {
+    [[ -f "$STATUS_FILE" ]] || return 0
+    local _state
+    _state=$(jq -r '.state // empty' "$STATUS_FILE" 2>/dev/null) || return 0
+    [[ "$_state" == "budget_exceeded" ]] || return 0
+
+    # set_final_state is a no-op when already budget_exceeded (it refuses to
+    # overwrite the terminal spend-halt), but call it so the EXIT trap / metrics
+    # observe a consistent terminal state regardless of entry path.
+    set_final_state "budget_exceeded"
+    local _reason
+    _reason=$(jq -r '.budget_exceeded_reason // "run token/cost ceiling exceeded"' \
+        "$STATUS_FILE" 2>/dev/null) || _reason="run token/cost ceiling exceeded"
+    log_error "Run halted (budget ceiling): $_reason — no further stages will run."
+    exit 2
 }
 
 record_escalation() {
@@ -2706,6 +2752,22 @@ for m in re.finditer(r'\[\s*\{', t):
             return $?
             ;;
         escalate)
+            # Issue #583: check the run budget BEFORE spending on the pricier
+            # escalated model.  The post-dispatch check in _apply_stage_action
+            # runs only AFTER the extra CLI call, so without this pre-check the
+            # escalation would already have spent by the time the ceiling fires.
+            # On a HARD breach, halt cleanly WITHOUT making the escalated call:
+            # record the terminal budget_exceeded state and emit the interim
+            # result unchanged (the parent-shell _halt_if_budget_exceeded guard
+            # finalizes + exits).  This satisfies "must NOT trigger escalation".
+            if ! check_run_budget; then
+                set_run_budget_exceeded \
+                    "$stage_name" \
+                    "run token/cost ceiling exceeded (escalation suppressed)"
+                printf '%s\n' "$_sr_interim"
+                return 1
+            fi
+
             # Re-run with the model decide-action.sh selected
             local _esc_model="${_da_target_model:-$(effective_fallback "$model")}"
             local _esc_fallback
@@ -2813,6 +2875,20 @@ for m in re.finditer(r'\[\s*\{', t):
             return $?
             ;;
         retry_same)
+            # Issue #583: check the run budget BEFORE spending on the retry.
+            # Same rationale as the escalate branch — the post-dispatch check in
+            # _apply_stage_action runs only AFTER the retry CLI call.  On a HARD
+            # breach, halt WITHOUT retrying: record budget_exceeded and emit the
+            # interim result (the parent-shell guard finalizes + exits).  This
+            # satisfies "must NOT trigger retry".
+            if ! check_run_budget; then
+                set_run_budget_exceeded \
+                    "$stage_name" \
+                    "run token/cost ceiling exceeded (retry suppressed)"
+                printf '%s\n' "$_sr_interim"
+                return 1
+            fi
+
             # handle_rate_limit() was already called during error_kind
             # classification above; emit the retry/model_call events now.
             emit_event "retry" \
@@ -3139,6 +3215,7 @@ Output a summary of changes made."
             simplify_head_before=$(git -C "$loop_dir" rev-parse HEAD \
                 2>/dev/null || true)
             simplify_result=$(run_stage "$simplify_stage_name" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
+            _halt_if_budget_exceeded
             local simplify_status
             simplify_status=$(printf '%s' "$simplify_result" | jq -r '.status // "success"')
             if [[ "$simplify_status" != "error" ]]; then
@@ -3225,6 +3302,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         set_stage_started "$review_stage_name"
         local review_result
         review_result=$(run_stage "$review_stage_name" "$review_prompt" "implement-issue-review.json" "code-reviewer" "$loop_complexity")
+        _halt_if_budget_exceeded
         local review_run_status
         review_run_status=$(printf '%s' "$review_result" | jq -r '.status // "success"')
         if [[ "$review_run_status" != "error" ]]; then
@@ -3443,6 +3521,7 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             set_stage_started "$fix_stage_name"
             local fix_result
             fix_result=$(run_stage "$fix_stage_name" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity" "" "${loop_model_override:-}")
+            _halt_if_budget_exceeded
             local fix_status
             fix_status=$(printf '%s' "$fix_result" | jq -r '.status // "success"')
             if [[ "$fix_status" != "error" ]]; then
@@ -4755,6 +4834,7 @@ Commit your changes with a descriptive message."
 				"implement-issue-implement.json" \
 				"$task_agent" "$task_size")
 		fi
+		_halt_if_budget_exceeded
 
 		local impl_status
 		impl_status=$(printf '%s' "$impl_result" \
@@ -5443,6 +5523,7 @@ Commit your changes with a descriptive message."
 						"implement-issue-implement.json" \
 						"$_next_tagent" "$_next_tsize" \
 						"$_pw_timeout" "$_pw_model")
+					_halt_if_budget_exceeded
 
 					local _pw_status
 					_pw_status=$(printf '%s' "$_pw_result" \
@@ -5599,6 +5680,7 @@ Commit your changes with a descriptive message."
 					"implement-issue-implement.json" \
 					"$tagent" "$tsize")
 			fi
+			_halt_if_budget_exceeded
 
 			local impl_status
 			impl_status=$(printf '%s' "$impl_result" \
@@ -6361,6 +6443,7 @@ Output both test results and validation findings in one structured response.
 
         local test_result
         test_result=$(run_stage "test-iter-$test_iteration" "$test_prompt" "implement-issue-test-validate.json" "default" "$loop_complexity")
+        _halt_if_budget_exceeded
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$test_result"; then
@@ -6500,6 +6583,7 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_result
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
+            _halt_if_budget_exceeded
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
@@ -6563,6 +6647,7 @@ Output a summary of fixes applied."
             # task size: S→haiku, M→sonnet, L→opus (via resolve_model).
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
+            _halt_if_budget_exceeded
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
@@ -6791,6 +6876,7 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				"$e2e_verify_prompt" \
 				"implement-issue-e2e-validate.json" \
 				"playwright-test-developer")
+			_halt_if_budget_exceeded
 
 			local e2e_verify_status e2e_verify_summary
 			e2e_verify_status=$(printf '%s' "$e2e_verify_result" \
@@ -6879,6 +6965,7 @@ Output result as 'passed' or 'failed' with a detailed summary."
 					"$acceptance_prompt" \
 					"implement-issue-test.json" \
 					"default")
+				_halt_if_budget_exceeded
 
 				local acceptance_status acceptance_summary
 				acceptance_status=$(printf '%s' "$acceptance_result" \
@@ -6939,6 +7026,11 @@ $acceptance_summary" "default"
 		fi
 	fi
 
+	# Issue #583: a parallel stage (e2e/acceptance) may have tripped the run
+	# budget inside its background subshell.  Halt in the PARENT shell BEFORE
+	# dispatching any sequential fix stage, so no fix CLI call runs post-breach.
+	_halt_if_budget_exceeded
+
 	# ------------------------------------------------------------------
 	# Sequential fix dispatch: if a stage failed, dispatch fix agents
 	# one at a time to avoid concurrent commits to $branch.
@@ -6980,6 +7072,7 @@ Commit your changes."
 				"implement-issue-fix.json" \
 				"$AGENT" \
 				"$max_task_size")
+			_halt_if_budget_exceeded
 
 			local e2e_fix_summary
 			e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
@@ -7022,6 +7115,7 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				"$rerun_prompt" \
 				"implement-issue-e2e-validate.json" \
 				"playwright-test-developer")
+			_halt_if_budget_exceeded
 
 			local rerun_status rerun_summary
 			rerun_status=$(printf '%s' "$rerun_result" \
@@ -7089,6 +7183,7 @@ Investigate the root cause and fix the issue. Commit your changes."
 			"$acceptance_fix_prompt" \
 			"implement-issue-fix.json" \
 			"$AGENT")
+		_halt_if_budget_exceeded
 
 		local acceptance_fix_summary
 		acceptance_fix_summary=$(printf '%s' \
@@ -7670,6 +7765,13 @@ $task_list_md
         _process_batch_results() {
             local result_json="$1"
             local src_label="$2"
+
+            # Issue #583: the batch executors (execute_batch_serial/parallel) run
+            # in command-substitution subshells, so a budget halt inside them
+            # exits only that subshell.  This funnel runs in the PARENT shell
+            # after every batch dispatch, so re-assert the durable budget halt
+            # here — otherwise the run would keep spending on later stages.
+            _halt_if_budget_exceeded
 
             # Process completed tasks
             local comp_count
@@ -8300,6 +8402,7 @@ $pr_creation_skill}"
 
         local pr_result
         pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "opus")
+        _halt_if_budget_exceeded
 
         local pr_status
         pr_status=$(printf '%s' "$pr_result" | jq -r '.output.status')
@@ -8518,6 +8621,7 @@ Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
         review_result=$(run_stage "pr-review-iter-$pr_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer" "" "$pr_review_timeout" "$pr_review_model")
+        _halt_if_budget_exceeded
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$review_result"; then
@@ -8695,6 +8799,7 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             local fix_result
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
+            _halt_if_budget_exceeded
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
@@ -8734,6 +8839,7 @@ $complete_skill
 
         local complete_result
         complete_result=$(run_stage "complete" "$complete_prompt" "implement-issue-complete.json")
+        _halt_if_budget_exceeded
 
         local complete_summary
         complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
@@ -9160,6 +9266,7 @@ STEPS:
                         "$deploy_verify_prompt" \
                         "implement-issue-deploy-verify.json" \
                         "default")
+                    _halt_if_budget_exceeded
 
                     local dv_status dv_health dv_summary
                     dv_status=$(printf '%s' "$deploy_verify_result" \
