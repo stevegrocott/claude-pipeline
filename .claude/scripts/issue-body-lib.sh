@@ -53,6 +53,20 @@ _ISSUE_BODY_LIB_SOURCED=1
 # are excluded).
 readonly ISSUE_BODY_KNOWN_EXTS='sh|bats|bash|ts|tsx|js|jsx|mjs|cjs|py|go|rb|rs|java|kt|swift|json|yaml|yml|toml|sql|md|css|html|tf'
 
+# Canonical "Implementation Tasks" heading matcher (issue #584 parity) — the
+# SINGLE source of truth for both library parsers, which both route section
+# slicing through _issue_body_tasks_section.  Behaviour, applied IDENTICALLY at
+# every mirror site:
+#   * ERE, UNANCHORED at the tail — annotated headings such as
+#     "## Implementation Tasks (draft)" are recognised (do NOT re-add a `$`).
+#   * Case-insensitive — folded at the call site (bash: nocasematch; awk:
+#     tolower($0); grep: -i).
+#   * CRLF-tolerant — the caller strips carriage returns before matching.
+# The orchestrator mirrors this exact behaviour via ISSUE_TASKS_HEADING_ERE in
+# implement-issue-orchestrator.sh; a parity test (test-parser-parity.bats)
+# guards the two against drift.
+readonly ISSUE_BODY_TASKS_HEADING_RE='^##+[[:space:]]+Implementation Tasks'
+
 # Resolve this library's own directory so the default agents dir can be
 # located relative to it.
 _issue_body_lib_dir() {
@@ -279,7 +293,8 @@ _issue_body_task_path_count() {
 # Hardening (issue #584):
 #   * CRLF tolerance — strips carriage returns first so a Windows/gh CRLF
 #     body cannot leak "\r" into descriptions or defeat the $-anchored
-#     heading and task regexes.
+#     task regexes (the heading matcher is deliberately UNANCHORED — see
+#     ISSUE_BODY_TASKS_HEADING_RE — so annotated headings still match).
 #   * Case-insensitive heading — matches "## Implementation Tasks",
 #     "## implementation tasks", etc. via a locally-scoped nocasematch
 #     (bash-3.2-safe; ${x,,} is deliberately avoided elsewhere in this lib).
@@ -312,7 +327,7 @@ _issue_body_tasks_section() {
 	local section=""
 	local line
 	while IFS= read -r line; do
-		if [[ "$line" =~ ^##+[[:space:]]+Implementation\ Tasks$ ]]; then
+		if [[ "$line" =~ $ISSUE_BODY_TASKS_HEADING_RE ]]; then
 			in_section=true
 			continue
 		fi

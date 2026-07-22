@@ -261,17 +261,17 @@ Another random line'
 }
 
 # =============================================================================
-# SECTION-EXTRACTION AWK (inline awk in main() at L6733)
-# Tests the widened regex: ##+[[:space:]]+Implementation Tasks
-# and the section-end pattern: ##+[[:space:]]
-# These cover the codepath distinct from _issue_body_parse_tasks().
+# SECTION-EXTRACTION (parse_issue stage's _extract_tasks_section helper)
+# Exercises the depth-agnostic, CRLF-tolerant, case-insensitive, UNANCHORED
+# heading matcher (ISSUE_TASKS_HEADING_ERE) and the section-end pattern
+# ##+[[:space:]].  Distinct codepath from _issue_body_parse_tasks().
 # =============================================================================
 
-# Helper: runs the section-extraction awk from L6733 against $1 (body text).
-# Keeps the pattern in one place so tests stay in sync with the production code.
+# Helper: delegates to the REAL orchestrator section slicer
+# (_extract_tasks_section, sourced via source_orchestrator_functions) so these
+# tests can never drift from the production pattern.
 _run_section_awk() {
-	printf '%s' "$1" | awk \
-		'/^##+[[:space:]]+Implementation Tasks/{found=1; next} found && /^##+[[:space:]]/{exit} found{print}'
+	_extract_tasks_section "$1"
 }
 
 @test "section-extraction awk: extracts lines under ## Implementation Tasks" {
