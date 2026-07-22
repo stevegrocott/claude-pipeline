@@ -291,7 +291,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 
 - **Prefer S-complexity tasks** — S and M tasks use sonnet; only L tasks use opus. Prefer S over M/L for smaller scope, not model savings.
 - **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps. **This is now enforced:** `assert_issue_valid` hard-rejects a decomposable M/L task (M/L hint AND >2 distinct file paths) and warns on the overall non-S mix — see the Task Format Specification. Decompose at explore time; do not rely on the gate to catch it.
-- **Every task MUST include at least one file path. Tasks without file paths will cause subagents to scan broadly — this is the #1 token waste in the pipeline.**
+- **Every task MUST include at least one file path. This is now ENFORCED, not advised:** `assert_issue_valid` (`.claude/scripts/issue-body-lib.sh`) hard-rejects any OPEN task whose description yields zero file paths (the diagnostic names the offending task), so an issue with a path-less task is bounced before creation. Line-range suffixes count (`file.ts:L10-40` satisfies the rule) and directory-only paths count (`.claude/scripts/`); already-completed `[x]` tasks are exempt. Tasks without file paths otherwise cause subagents to scan broadly — the #1 token waste in the pipeline.
 - **Each task's affected file list reduces subagent exploration cost** — include file paths in the task description.
 
 ## Integration
@@ -310,7 +310,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Combine multiple concerns in one issue | One issue = one problem = one PR |
 | Ask too many clarifying questions | 0-2 questions max; research answers most questions |
 | Single task modifies 5+ files | Split into focused subtasks |
-| Task has no file paths | Subagent reads 13+ files to orient; include at least 1 file path per task |
+| Task has no file paths | **Rejected by `assert_issue_valid`** — an OPEN task with zero file paths fails validation before the issue is created (subagents would otherwise read 13+ files to orient). Include at least 1 file path per task |
 | File path doesn't exist in repo | Subagent wastes a full search cycle; verify paths before writing them |
 | Task description over ~200 chars | Truncated in UI and hard to scan; put details in the issue body instead |
 | Writing `[test-engineer]` as agent | Legacy alias — write `[playwright-test-developer]` for E2E or `[default]` for general tests |

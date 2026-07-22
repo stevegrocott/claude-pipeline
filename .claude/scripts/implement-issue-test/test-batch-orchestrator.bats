@@ -1797,7 +1797,7 @@ GHEOF
 	# Re-fetch after enrich returns a structurally valid body → proceed.
 	_install_gh_two_phase_mock \
 		'{"body":"## Background\n\nNo tasks here.","labels":[]}' \
-		'{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+		'{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing — `.claude/scripts/x.sh`\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
 
 	source_revalidate_functions \
 		|| skip "revalidate_issue_after_enrich() not yet present"
@@ -1834,7 +1834,7 @@ GHEOF
 	# post-enrich re-fetch returns a structurally valid body → proceed.
 	_install_gh_two_phase_mock \
 		'{"body":"<!-- pipeline-autocreated -->\n## Implementation Tasks\n\nProse only, no task lines.","labels":[]}' \
-		'{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+		'{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing — `.claude/scripts/x.sh`\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
 
 	source_revalidate_functions \
 		|| skip "revalidate_issue_after_enrich() not yet present"

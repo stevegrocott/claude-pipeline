@@ -9,7 +9,7 @@
 #       unique — derived from the .claude/agents/*.md definitions.
 #
 #   assert_issue_valid <body>
-#       Validates an issue body string against six structural criteria:
+#       Validates an issue body string against seven structural criteria:
 #         1. at least one parseable (open) task line
 #         2. every task agent resolves to a known agent (or "default")
 #         3. every file path referenced in a task resolves (file exists or
@@ -19,6 +19,8 @@
 #            DEPLOY_VERIFY_CMD is set
 #         6. task granularity — no M/L task references more than two distinct
 #            file paths (decomposable tasks must be split into S sub-tasks)
+#         7. every open task references at least one file path (a task with
+#            zero path tokens is rejected — the #1 explore-stage token sink)
 #       Additionally emits a non-failing stderr WARNING reporting the
 #       M/L-vs-S task count whenever the body has any non-S task.
 #       Returns 0 when valid; prints one diagnostic per failure to stderr
@@ -350,6 +352,10 @@ _issue_body_parse_tasks() {
 #   5. a "Deploy Verification" section iff DEPLOY_VERIFY_CMD is set
 #   6. task granularity — no M/L task references more than two distinct file
 #      paths (a decomposable task that should be split into S sub-tasks)
+#   7. every open task references at least one file path — a task whose
+#      description yields zero path tokens is rejected (the diagnostic names
+#      the offending task).  Checked [x] tasks are exempt (the parser skips
+#      them, so only OPEN tasks reach this gate)
 #
 # Soft advisory (never fails the body):
 #   * emits a stderr WARNING reporting the M/L-vs-S task count whenever the
@@ -379,7 +385,8 @@ assert_issue_valid() {
 		errors+=("no parseable task lines found")
 	fi
 
-	# Criteria 2, 3 & 6: agents resolve, path suffixes resolve, granularity.
+	# Criteria 2, 3, 6 & 7: agents resolve, path suffixes resolve, granularity,
+	# and every open task carries at least one file path.
 	local agent desc remapped path parent complexity path_count
 	local -i s_count=0 nons_count=0
 	while IFS=$'\t' read -r agent desc; do
@@ -406,6 +413,20 @@ assert_issue_valid() {
 			fi
 		done < <(_issue_body_extract_paths "$desc")
 
+		# Distinct file-path count (":Lnn"-suffix aware — reuses #581's
+		# _issue_body_task_path_count so a lone `file.ts:L10-40` still counts as
+		# one path).  Computed once and shared by criteria 7 and 6.
+		path_count=$(_issue_body_task_path_count "$desc")
+
+		# Criterion 7: every open task must reference at least one file path.
+		# A task with zero path tokens forces the implement stage to scan the
+		# codebase blind — the #1 token sink the explore skill warns about.
+		# The parser already skips checked [x] tasks, so only OPEN tasks are
+		# gated here; the diagnostic names the offending task.
+		if (( path_count == 0 )); then
+			errors+=("task has no file path: ${desc}")
+		fi
+
 		# Criterion 6: task granularity.  Tally the S/non-S mix for the
 		# advisory warning, and hard-fail any M/L task that names more than
 		# two distinct file paths — a decomposable task the explore step
@@ -415,7 +436,6 @@ assert_issue_valid() {
 			s_count=$((s_count + 1))
 		else
 			nons_count=$((nons_count + 1))
-			path_count=$(_issue_body_task_path_count "$desc")
 			if (( path_count > 2 )); then
 				errors+=("task granularity: (${complexity}) task references ${path_count} distinct file paths (>2); split into S sub-tasks — ${desc}")
 			fi

@@ -900,6 +900,87 @@ Some prose but no task checkboxes.
 }
 
 # =============================================================================
+# assert_issue_valid() — CRITERION 7: every open task carries a file path
+# =============================================================================
+
+@test "assert_issue_valid: rejects an open task that references no file path" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Refactor the retry logic for reliability
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"task has no file path"* ]]
+	# The diagnostic must name the offending task.
+	[[ "$output" == *"Refactor the retry logic for reliability"* ]]
+}
+
+@test "assert_issue_valid: accepts an open task that references a resolvable file path" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Add a helper — \`.claude/scripts/issue-body-lib.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"task has no file path"* ]]
+}
+
+@test "assert_issue_valid: accepts an open task whose only path carries a :Lnn suffix" {
+	# Reuses #581's :Lnn-tolerant path counter — a lone line-range-suffixed
+	# path must satisfy the file-path requirement, not be silently skipped.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Patch one spot — \`.claude/scripts/issue-body-lib.sh:L10-40\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"task has no file path"* ]]
+}
+
+@test "assert_issue_valid: accepts an open task whose only path is a directory" {
+	# Dir-only paths still count as a path — no regression from criterion 7.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Touch the scripts dir — \`.claude/scripts/\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"task has no file path"* ]]
+}
+
+@test "assert_issue_valid: exempts a checked [x] task that has no file path" {
+	# Only OPEN tasks are gated; a completed task with no path must not fail.
+	local body
+	body="## Implementation Tasks
+
+- [x] \`[bash-script-craftsman]\` **(S)** Legacy done task with no path at all
+- [ ] \`[bash-script-craftsman]\` **(S)** Open task — \`.claude/scripts/x.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"task has no file path"* ]]
+}
+
+# =============================================================================
 # assert_issue_valid() — TASK-MIX ADVISORY WARNING (non-failing)
 # =============================================================================
 

@@ -381,7 +381,7 @@ MOCK
 	# A body with ## Implementation Tasks AND proper task format plus Acceptance
 	# Criteria must pass assert_issue_valid and proceed to create the issue.
 	local body
-	body=$(printf 'Context.\n\n## Implementation Tasks\n\n- [ ] `[default]` **(S)** Fix the bug\n\n## Acceptance Criteria\n\n- [ ] Bug is fixed\n')
+	body=$(printf 'Context.\n\n## Implementation Tasks\n\n- [ ] `[default]` **(S)** Fix the bug — `.claude/scripts/issue-body-lib.sh`\n\n## Acceptance Criteria\n\n- [ ] Bug is fixed\n')
 	unset DEPLOY_VERIFY_CMD
 	_run_create_issue --title "Test" --body "$body"
 	[ "$status" -eq 0 ]
