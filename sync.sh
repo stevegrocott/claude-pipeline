@@ -16,6 +16,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PIPELINE_DIR="$SCRIPT_DIR/.claude"
+# Universal skills were migrated out of .claude/skills/ into the pipeline-core
+# plugin. When the pipeline is the sync source, skills are resolved from here
+# as a fallback so plugin-hosted skill docs still propagate to consumers'
+# .claude/skills/ until they adopt the plugin marketplace directly.
+PLUGIN_SKILLS_DIR="$SCRIPT_DIR/plugins/pipeline-core/skills"
 
 # ---------------------------------------------------------------------------
 # Core files — synced between pipeline and projects.
@@ -26,10 +31,15 @@ CORE_DIRS=(
     "hooks"
 )
 
-# Files within .claude/ that are core (synced individually)
-CORE_FILES=(
-    "settings.json"
-)
+# Files within .claude/ that are core (synced individually, wholesale-copied).
+#
+# settings.json is intentionally NOT here: every consumer customizes it
+# (permissions, env, project hooks), so a wholesale copy would clobber that
+# config. Instead, `to` calls register_detect_hook() which MERGES only the
+# required detect-core-edit.sh hook into the project's own settings.json,
+# leaving everything else untouched. Add a file here only if it is truly
+# identical across all projects.
+CORE_FILES=()
 
 # ---------------------------------------------------------------------------
 # Adapted files — NEVER synced. Project-specific.
@@ -143,16 +153,31 @@ sync_skills() {
     local src="$1" dst="$2"
 
     for skill in "${UNIVERSAL_SKILLS[@]}"; do
-        if [[ -d "$src/skills/$skill" ]]; then
+        local skill_src
+        skill_src=$(resolve_skill_src "$src" "$skill")
+        if [[ -n "$skill_src" ]]; then
             mkdir -p "$dst/skills/$skill"
             rsync -a --delete \
                 --exclude '.DS_Store' \
-                "$src/skills/$skill/" "$dst/skills/$skill/"
+                "$skill_src/" "$dst/skills/$skill/"
             echo "  SYNC skills/$skill/"
         else
             echo "  SKIP skills/$skill/ (not in source)"
         fi
     done
+}
+
+# Resolve a universal skill's source directory. Skills were migrated out of
+# .claude/skills/ into plugins/pipeline-core/skills/; when the source is the
+# pipeline, fall back to the plugin location so plugin-hosted skills still
+# sync. Prints the resolved dir, or nothing if the skill is not in source.
+resolve_skill_src() {
+    local base="$1" skill="$2"
+    if [[ -d "$base/skills/$skill" ]]; then
+        printf '%s' "$base/skills/$skill"
+    elif [[ "$base" == "$PIPELINE_DIR" && -d "$PLUGIN_SKILLS_DIR/$skill" ]]; then
+        printf '%s' "$PLUGIN_SKILLS_DIR/$skill"
+    fi
 }
 
 # Strip <!-- STACK-SPECIFIC: --> from line 1 of consumer agent files.
@@ -269,9 +294,11 @@ diff_skills() {
     local src="$1" dst="$2"
 
     for skill in "${UNIVERSAL_SKILLS[@]}"; do
-        if [[ -d "$src/skills/$skill" && -d "$dst/skills/$skill" ]]; then
+        local skill_src
+        skill_src=$(resolve_skill_src "$src" "$skill")
+        if [[ -n "$skill_src" && -d "$dst/skills/$skill" ]]; then
             local changes
-            changes=$(diff -rq "$src/skills/$skill" "$dst/skills/$skill" \
+            changes=$(diff -rq "$skill_src" "$dst/skills/$skill" \
                 --exclude '.DS_Store' 2>/dev/null) || true
             if [[ -z "$changes" ]]; then
                 echo "  OK   skills/$skill/"
@@ -292,7 +319,7 @@ list_core() {
 
     echo ""
     echo "Core files (individually synced):"
-    for file in "${CORE_FILES[@]}"; do
+    for file in ${CORE_FILES[@]+"${CORE_FILES[@]}"}; do
         echo "  .claude/$file"
     done
 
@@ -329,7 +356,7 @@ case "$COMMAND" in
             sync_dir "$PIPELINE_DIR" "$PROJECT_DIR" "$dir"
         done
 
-        for file in "${CORE_FILES[@]}"; do
+        for file in ${CORE_FILES[@]+"${CORE_FILES[@]}"}; do
             sync_file "$PIPELINE_DIR" "$PROJECT_DIR" "$file"
         done
 
@@ -357,7 +384,7 @@ case "$COMMAND" in
             sync_dir "$PROJECT_DIR" "$PIPELINE_DIR" "$dir"
         done
 
-        for file in "${CORE_FILES[@]}"; do
+        for file in ${CORE_FILES[@]+"${CORE_FILES[@]}"}; do
             sync_file "$PROJECT_DIR" "$PIPELINE_DIR" "$file"
         done
 
@@ -379,7 +406,7 @@ case "$COMMAND" in
             diff_dir "$PIPELINE_DIR" "$PROJECT_DIR" "$dir"
         done
 
-        for file in "${CORE_FILES[@]}"; do
+        for file in ${CORE_FILES[@]+"${CORE_FILES[@]}"}; do
             diff_file "$PIPELINE_DIR" "$PROJECT_DIR" "$file"
         done
 
