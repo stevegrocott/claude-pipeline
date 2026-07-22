@@ -282,10 +282,10 @@ readonly -a _STAGE_PREFIXES=(
 #                               + PR_REVIEW_WALL_TIME_SLACK)
 #       + overhead (validate_plan 1800 + implement 1800 + task-review 900
 #                   + test 600 + pr-create 600 = 5700s)
-#   Default: 11040s (2820 + 2520 + 5700)
+#   Default: 12840s (4620 + 2520 + 5700)
 #   Enforced at the complexity-adjustment step (after env vars take effect).
 #   Env vars:
-#     MAX_ORCHESTRATOR_WALL_TIME — initial base (default 11040s; raised to
+#     MAX_ORCHESTRATOR_WALL_TIME — initial base (default 12840s; raised to
 #                                  the phase-budget sum if env value is less)
 #   After the phase-budget floor, per-L-task bumps (1800s each) are added
 #   on top, capped at 4× the phase-budget-floored base value.
