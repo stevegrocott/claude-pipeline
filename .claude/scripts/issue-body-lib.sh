@@ -43,6 +43,16 @@
 #   _extract_task_files_from_desc  (path token extraction)
 #
 
+# Bash-host guard (issue #601) — this library uses bash-only builtins (shopt,
+# [[ =~ ]], BASH_SOURCE).  When sourced under a non-bash shell (e.g. zsh, the
+# macOS default) it would otherwise emit spurious validation verdicts instead
+# of erroring.  Fail fast with a clear message.  Kept POSIX-portable ([ ], not
+# [[ ]]) so a non-bash shell parses it.
+if [ -z "${BASH_VERSION:-}" ]; then
+    printf '%s\n' "issue-body-lib.sh: requires bash (sourced under a non-bash shell)." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 # Idempotent source guard — re-sourcing is a no-op so readonly constants and
 # repeated `source` calls never error.
 [[ -n "${_ISSUE_BODY_LIB_SOURCED:-}" ]] && return 0
