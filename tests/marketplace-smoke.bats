@@ -308,6 +308,61 @@ JSON
 }
 
 # ===========================================================================
+# Bundled runtime — scripts + schemas ship in the plugin and self-resolve
+# (issue #599 Task 9). A marketplace consumer with NO copied .claude/scripts
+# must still get the orchestration engine + JSON schemas from the plugin, and
+# resolve-pipeline-root.sh must locate a bundled schema via BASH_SOURCE alone
+# (CLAUDE_PLUGIN_ROOT is unset in the model's Bash-tool shell — Task 1 finding).
+# ===========================================================================
+
+@test "bundle: pipeline-core ships the orchestrator scripts and schemas" {
+	local scripts_dir="$REPO_ROOT/plugins/pipeline-core/scripts"
+	[ -d "$scripts_dir" ] \
+		|| { echo "scripts dir missing: $scripts_dir" >&2; return 1; }
+
+	local orch
+	for orch in \
+		implement-issue-orchestrator.sh \
+		explore-orchestrator.sh \
+		batch-orchestrator.sh; do
+		[ -f "$scripts_dir/$orch" ] \
+			|| { echo "missing bundled orchestrator: $orch" >&2; return 1; }
+	done
+
+	# JSON schemas ship alongside the scripts under scripts/schemas/.
+	[ -d "$scripts_dir/schemas" ] \
+		|| { echo "schemas dir missing: $scripts_dir/schemas" >&2; return 1; }
+	local schema_count
+	schema_count=$(find "$scripts_dir/schemas" -maxdepth 1 -name '*.json' | wc -l)
+	[ "$schema_count" -gt 0 ] \
+		|| { echo "no *.json schemas under $scripts_dir/schemas" >&2; return 1; }
+}
+
+@test "bundle: resolve-pipeline-root.sh self-resolves a bundled schema (CLAUDE_PLUGIN_ROOT unset)" {
+	local scripts_dir="$REPO_ROOT/plugins/pipeline-core/scripts"
+	local resolver="$scripts_dir/resolve-pipeline-root.sh"
+	[ -f "$resolver" ] \
+		|| { echo "resolver missing: $resolver" >&2; return 1; }
+
+	# Pick a real bundled schema and resolve it by its relative path.
+	local schema
+	schema="$(find "$scripts_dir/schemas" -maxdepth 1 -name '*.json' | head -1)"
+	[ -n "$schema" ] || skip "no bundled schema to resolve"
+	local rel="schemas/$(basename "$schema")"
+
+	# Source the resolver FROM the bundle with CLAUDE_PLUGIN_ROOT unset, so the
+	# only way it can find the schema is BASH_SOURCE self-location.
+	run env -u CLAUDE_PLUGIN_ROOT bash -c '
+		source "$1"
+		resolve_pipeline_file "$2"
+	' _ "$resolver" "$rel"
+
+	[ "$status" -eq 0 ] || { echo "resolver failed: $output" >&2; return 1; }
+	[ "$output" = "$scripts_dir/$rel" ] \
+		|| { echo "resolved wrong: got '$output' want '$scripts_dir/$rel'" >&2; return 1; }
+}
+
+# ===========================================================================
 # bin entrypoints — self-locating wrappers on the Bash-tool PATH (issue #599 Task 5)
 #
 # When pipeline-core is enabled its bin/ dir is added to PATH by convention, so

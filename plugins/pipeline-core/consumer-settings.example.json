@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "claude-pipeline": {
+      "source": {
+        "source": "github",
+        "repo": "stevegrocott/claude-pipeline"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "pipeline-core@claude-pipeline": true
+  }
+}
