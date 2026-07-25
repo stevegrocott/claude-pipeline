@@ -337,6 +337,25 @@ list_core() {
     echo "  .claude/skills/ (non-universal skills)"
 }
 
+# Deprecation notice for the script/skill copy path. Marketplace consumers
+# should enable the pipeline-core plugin instead of copying files. Non-fatal:
+# the legacy copy still runs below for mid-transition consumers that have not
+# adopted the plugin marketplace yet.
+print_marketplace_deprecation() {
+    cat <<'NOTICE'
+  ---------------------------------------------------------------------------
+  DEPRECATED: copying .claude/scripts + skills into a consumer is being phased
+  out in favour of the pipeline-core marketplace plugin (no file copying).
+
+  Prefer: merge plugins/pipeline-core/consumer-settings.example.json into the
+  consumer's .claude/settings.json and commit it — Claude Code then resolves
+  scripts, schemas, skills, and hooks from the installed plugin.
+
+  The legacy copy below still runs for mid-transition consumers.
+  ---------------------------------------------------------------------------
+NOTICE
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -349,6 +368,8 @@ case "$COMMAND" in
     to)
         [[ $# -lt 2 ]] && usage
         PROJECT_DIR=$(resolve_project_dir "$2")
+        print_marketplace_deprecation
+        echo ""
         echo "Syncing core files: pipeline → $2"
         echo ""
 
