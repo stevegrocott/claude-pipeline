@@ -93,7 +93,7 @@ digraph process_pr {
 
     approved -> check_block;
     check_block -> merge [label="no block"];
-    check_block -> output_blocked [label="merge_blocked_reason set\nor quality:convergence_failure\nin degraded_stages"];
+    check_block -> output_blocked [label="merge_blocked_reason set\nor quality:convergence_failure\nor pr_review:max_iterations\nin degraded_stages"];
     merge -> comment -> close -> delete -> parse -> create_issues -> output_success;
     changes -> rerun -> output_rerun;
 }
@@ -208,6 +208,16 @@ if [[ -f "$STATUS_JSON" ]]; then
         CONVERGENCE_ENTRY=$(jq -r '(.degraded_stages // [])[] | select(startswith("quality:convergence_failure"))' "$STATUS_JSON" 2>/dev/null | head -1)
         if [[ -n "$CONVERGENCE_ENTRY" ]]; then
             MERGE_BLOCKED_REASON="Quality loop convergence failure recorded in degraded_stages: $CONVERGENCE_ENTRY"
+        fi
+    fi
+
+    # Fall back to scanning degraded_stages for a pr_review:max_iterations entry —
+    # the PR-review loop exhausted its iterations without an approved verdict, so
+    # the review never converged (mirrors the orchestrator merge gate).
+    if [[ -z "$MERGE_BLOCKED_REASON" ]]; then
+        MAX_ITER_ENTRY=$(jq -r '(.degraded_stages // [])[] | select(startswith("pr_review:max_iterations"))' "$STATUS_JSON" 2>/dev/null | head -1)
+        if [[ -n "$MAX_ITER_ENTRY" ]]; then
+            MERGE_BLOCKED_REASON="PR review loop ended without an approved verdict recorded in degraded_stages: $MAX_ITER_ENTRY"
         fi
     fi
 fi
@@ -466,6 +476,7 @@ Re-running /implement-issue $ISSUE_NUMBER $BASE_BRANCH to address requested chan
 | No review status in comments | Stop, report - need code review comment with Status line first |
 | `merge_blocked_reason` set in `status.json` | Leave PR open, post block comment, return `merge_blocked` — do NOT close issue or delete branch |
 | `quality:convergence_failure` in `degraded_stages` | Same as above (fallback when `merge_blocked_reason` absent) |
+| `pr_review:max_iterations` in `degraded_stages` | Same as above — PR-review loop exhausted iterations without an approved verdict (fallback when `merge_blocked_reason` absent) |
 | Issue creation fails (`create-followup-issue.sh` exits non-zero) | Log warning, skip that item — NEVER fall back to `gh issue create` or `create-issue.sh` |
 | Merge fails | Stop, return failure, do NOT close issue |
 | Issue close fails | Log warning (merge succeeded) |
