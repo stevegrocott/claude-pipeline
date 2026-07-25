@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#
+# pipeline-core-feedback-record — plugin bin entrypoint (on PATH when pipeline-core is enabled).
+#
+# Self-locates the bundled script via ${BASH_SOURCE[0]} so it resolves whether it runs
+# from the plugin cache dir or a repo-local checkout. CLAUDE_PLUGIN_ROOT is NOT relied on:
+# it is unset in the model's Bash-tool shell (issue #599 Task 1 finding).
+set -euo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$PLUGIN_ROOT/scripts/feedback-record.sh" "$@"

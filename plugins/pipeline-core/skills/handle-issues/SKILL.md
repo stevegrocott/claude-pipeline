@@ -313,7 +313,8 @@ escalates sonnet → opus on the fly.
 If the response shape changes:
 
 ```bash
-.claude/scripts/capture-usage-fixture.sh
+CAPTURE_USAGE="$(command -v pipeline-core-capture-usage-fixture || echo .claude/scripts/capture-usage-fixture.sh)"
+"$CAPTURE_USAGE"
 ```
 
 (prompts for sessionKey + org UUID, writes to
@@ -391,7 +392,7 @@ Extract from the user's context query:
 Build and execute `gh` command based on parsed criteria:
 
 ```bash
-PLATFORM_DIR="${CLAUDE_PLUGIN_ROOT}/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 
 # Example: issues assigned to user
 "$PLATFORM_DIR/list-issues.sh" --assignee "@me" --state open
@@ -470,12 +471,16 @@ echo "Manifest written to: $MANIFEST"
 Launch the batch orchestrator as a background process:
 
 ```bash
+# Resolve the batch orchestrator dual-mode: prefer the plugin bin (on PATH when
+# pipeline-core is enabled), else fall back to the repo-local script.
+BATCH="$(command -v pipeline-core-batch || echo .claude/scripts/batch-orchestrator.sh)"
+
 # Launch orchestrator (agent is read from manifest, or can be overridden via --agent)
-nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" \
+nohup "$BATCH" --manifest "$MANIFEST" \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 # Or with explicit agent override:
-# nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --agent bulletproof-frontend-developer \
+# nohup "$BATCH" --manifest "$MANIFEST" --agent bulletproof-frontend-developer \
 #   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 ORCHESTRATOR_PID=$!
@@ -703,7 +708,8 @@ Running `/handle-issues` with `--enrich-followups` (or `batch-orchestrator.sh --
 
 ```bash
 # Launch orchestrator with enrichment sweep enabled
-nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --enrich-followups \
+BATCH="$(command -v pipeline-core-batch || echo .claude/scripts/batch-orchestrator.sh)"
+nohup "$BATCH" --manifest "$MANIFEST" --enrich-followups \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 ```
 
@@ -711,7 +717,8 @@ Running `/handle-issues` with `--implement-followups` implies `--enrich-followup
 
 ```bash
 # Launch orchestrator with enrichment + implementation sweep enabled
-nohup "${CLAUDE_PLUGIN_ROOT}/scripts/batch-orchestrator.sh" --manifest "$MANIFEST" --implement-followups \
+BATCH="$(command -v pipeline-core-batch || echo .claude/scripts/batch-orchestrator.sh)"
+nohup "$BATCH" --manifest "$MANIFEST" --implement-followups \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 ```
 

@@ -306,3 +306,99 @@ JSON
 	run _validate_hooks "$core"
 	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
+
+# ===========================================================================
+# bin entrypoints — self-locating wrappers on the Bash-tool PATH (issue #599 Task 5)
+#
+# When pipeline-core is enabled its bin/ dir is added to PATH by convention, so
+# skills invoke bundled scripts by prefixed name (pipeline-core-*). Each wrapper
+# self-locates its sibling scripts/ dir via ${BASH_SOURCE[0]} — CLAUDE_PLUGIN_ROOT
+# is NOT set in the model's Bash-tool shell (Task 1 finding), so it cannot be used.
+# Skills use a dual-mode guard so they also work repo-local (no plugin):
+#   X="$(command -v pipeline-core-<name> || echo .claude/scripts/<orch>.sh)"; "$X" ...
+# ===========================================================================
+
+# The distinct bin entrypoints and the sibling script each must exec.
+_bin_entrypoints() {
+	cat <<'MAP'
+pipeline-core-implement|implement-issue-orchestrator.sh
+pipeline-core-batch|batch-orchestrator.sh
+pipeline-core-create-followup-issue|create-followup-issue.sh
+pipeline-core-feedback-record|feedback-record.sh
+pipeline-core-skill-golden|skill-golden.sh
+pipeline-core-capture-usage-fixture|capture-usage-fixture.sh
+MAP
+}
+
+@test "bin: every pipeline-core-* wrapper exists and is executable" {
+	local bin_dir="$REPO_ROOT/plugins/pipeline-core/bin"
+	[ -d "$bin_dir" ] || { echo "bin dir missing: $bin_dir" >&2; return 1; }
+
+	local name script
+	while IFS='|' read -r name script; do
+		[ -n "$name" ] || continue
+		[ -f "$bin_dir/$name" ] || { echo "missing wrapper: $name" >&2; return 1; }
+		[ -x "$bin_dir/$name" ] || { echo "not executable: $name" >&2; return 1; }
+	done < <(_bin_entrypoints)
+
+	# The platform-dir resolver is also required.
+	[ -x "$bin_dir/pipeline-core-platform-dir" ] \
+		|| { echo "missing/not executable: pipeline-core-platform-dir" >&2; return 1; }
+}
+
+@test "bin: exec wrappers self-locate scripts/<orch>.sh via BASH_SOURCE and pass args" {
+	local bin_dir="$REPO_ROOT/plugins/pipeline-core/bin"
+	local name script
+	while IFS='|' read -r name script; do
+		[ -n "$name" ] || continue
+
+		# Build a stub plugin layout: bin/<wrapper> + scripts/<orch>.sh (stub).
+		local stub="$TEST_TMP/$name"
+		mkdir -p "$stub/bin" "$stub/scripts"
+		cp "$bin_dir/$name" "$stub/bin/$name"
+		printf '#!/usr/bin/env bash\necho "RAN:%s args=$*"\n' "$script" \
+			> "$stub/scripts/$script"
+		chmod +x "$stub/scripts/$script"
+
+		# Run from an unrelated cwd so resolution can only come from BASH_SOURCE.
+		run bash -c 'cd / && "$1" --issue 7 --branch main' _ "$stub/bin/$name"
+		[ "$status" -eq 0 ] || { echo "$name failed: $output" >&2; return 1; }
+		[[ "$output" == "RAN:$script args=--issue 7 --branch main" ]] \
+			|| { echo "$name resolved wrong: $output" >&2; return 1; }
+	done < <(_bin_entrypoints)
+}
+
+@test "bin: pipeline-core-platform-dir prints the self-located scripts/platform dir" {
+	local bin_dir="$REPO_ROOT/plugins/pipeline-core/bin"
+	local stub="$TEST_TMP/platform"
+	mkdir -p "$stub/bin" "$stub/scripts/platform"
+	cp "$bin_dir/pipeline-core-platform-dir" "$stub/bin/"
+
+	run bash -c 'cd / && "$1"' _ "$stub/bin/pipeline-core-platform-dir"
+	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+	[ "$output" = "$stub/scripts/platform" ] \
+		|| { echo "got: $output want: $stub/scripts/platform" >&2; return 1; }
+}
+
+@test "skills: no bundle skill has a bare .claude/scripts/*.sh invocation without a guard" {
+	local skills_dir="$REPO_ROOT/plugins/pipeline-core/skills"
+	[ -d "$skills_dir" ] || skip "bundle skills not present"
+
+	# Command-position invocation: line starts (after optional ws / nohup / quote /
+	# leading $) with .claude/scripts/....sh. Prose, tables, and dual-mode guards
+	# (which reference the path only after `echo`) are not command-position, so they
+	# do not match. Any match is an un-guarded hardcoded invocation and must fail.
+	run grep -rnE '^[[:space:]]*(nohup[[:space:]]+)?"?\$?\.claude/scripts/[^ ]*\.sh' \
+		"$skills_dir"
+	[ "$status" -ne 0 ] \
+		|| { echo "bare .claude/scripts invocation(s) found:" >&2; echo "$output" >&2; return 1; }
+}
+
+@test "skills: no bundle skill runs a bundled script via \${CLAUDE_PLUGIN_ROOT} (unset in Bash-tool shell)" {
+	local skills_dir="$REPO_ROOT/plugins/pipeline-core/skills"
+	[ -d "$skills_dir" ] || skip "bundle skills not present"
+
+	run grep -rnE 'CLAUDE_PLUGIN_ROOT' "$skills_dir"
+	[ "$status" -ne 0 ] \
+		|| { echo "CLAUDE_PLUGIN_ROOT used in a skill (use a pipeline-core-* bin instead):" >&2; echo "$output" >&2; return 1; }
+}

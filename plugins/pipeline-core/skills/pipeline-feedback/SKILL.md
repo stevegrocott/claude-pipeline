@@ -70,7 +70,8 @@ After kind is determined, gather the remaining fields. Ask each in one `AskUserQ
 Once fields are collected, invoke:
 
 ```bash
-.claude/scripts/feedback-record.sh \
+FEEDBACK_RECORD="$(command -v pipeline-core-feedback-record || echo .claude/scripts/feedback-record.sh)"
+"$FEEDBACK_RECORD" \
   --kind   "$KIND" \
   --issue  "$ISSUE" \
   --observed "$OBSERVED" \

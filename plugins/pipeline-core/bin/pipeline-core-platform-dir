@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#
+# pipeline-core-platform-dir — plugin bin entrypoint (on PATH when pipeline-core is enabled).
+#
+# Prints the absolute path to the bundled platform-abstraction scripts dir, self-located
+# via ${BASH_SOURCE[0]} so it resolves whether it runs from the plugin cache dir or a
+# repo-local checkout. Skills use it to resolve PLATFORM_DIR in dual mode:
+#   PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
+# CLAUDE_PLUGIN_ROOT is NOT relied on: it is unset in the model's Bash-tool shell (#599 Task 1).
+set -euo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+printf '%s\n' "$PLUGIN_ROOT/scripts/platform"
