@@ -217,6 +217,22 @@ $l_desc"
 	done
 }
 
+@test "parity: both extractors admit bracket/paren App Router path segments (issue #600)" {
+	# The widened char class must be identical in both parsers: a backtick token
+	# with '[' ']' or '(' ')' segments extracts to the same path in each.
+	local desc token orch lib
+	for token in \
+		'apps/frontend/src/app/onboarding/[step]/page.tsx' \
+		'apps/frontend/src/app/(public)/login/page.tsx'; do
+		desc="Edit \`$token\` to add the page"
+		orch=$(_extract_task_files_from_desc "$desc")
+		lib=$( ( source "$LIB_PATH"; _issue_body_extract_paths "$desc" ) )
+		[ "$orch" = "$token" ] || fail "orchestrator did not extract bracketed path: got '$orch'"
+		[ "$lib" = "$token" ]  || fail "library did not extract bracketed path: got '$lib'"
+		[ "$orch" = "$lib" ]   || fail "extractors diverged on '$token': orch='$orch' lib='$lib'"
+	done
+}
+
 @test "parity: a body with NO Implementation Tasks heading yields empty in both" {
 	local body
 	body=$(printf '%s\n' \
