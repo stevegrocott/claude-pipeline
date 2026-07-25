@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "properties": {
+    "result": {"enum": ["passed", "failed"]},
+    "summary": {"type": "string"},
+    "container_rebuild_status": {"enum": ["success", "failed", "skipped"]},
+    "health_check_status": {"enum": ["healthy", "unhealthy", "skipped"]},
+    "tests_run": {"type": "integer"},
+    "tests_passed": {"type": "integer"},
+    "tests_failed": {"type": "integer"},
+    "screenshots_captured": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "targeted_test_files": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "test": {"type": "string"},
+          "message": {"type": "string"},
+          "screenshot": {"type": "string"}
+        }
+      }
+    }
+  },
+  "required": ["result", "summary", "container_rebuild_status", "health_check_status"]
+}

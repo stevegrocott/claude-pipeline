@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"enum": ["success", "error"]},
+    "already_done": {"type": "boolean"},
+    "commit": {"type": "string"},
+    "files_changed": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "summary": {"type": "string"},
+    "error": {"type": ["string", "null"]}
+  },
+  "required": ["status", "summary"]
+}
