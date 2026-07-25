@@ -48,13 +48,27 @@ fi
 
 printf 'PR/MR URL found, triggering simplifier\n' >> "$debug_log"
 
-# Get the list of changed files for context
-changed_files=$(git diff --name-only main...HEAD 2>/dev/null | head -20 | tr '\n' ',')
-changed_files=${changed_files%,}
+# Derive changed files + stats from the ACTUAL PR (repo-agnostic). The previous
+# `git diff main...HEAD` always ran in $CLAUDE_PROJECT_DIR regardless of which
+# repo the PR was created in, so a PR opened in another repo (or off a non-main
+# base) got the WRONG file list AND a wrong block/allow decision. Prefer the PR
+# URL from the command output; fall back to the local diff only if it can't be
+# resolved (e.g. GitLab MRs, or `gh` unavailable).
+pr_url=$(printf '%s' "$stdout" | grep -oE 'https://github\.com/[^[:space:]]+/pull/[0-9]+' | head -1)
+pr_json=""
+[[ -n "$pr_url" ]] && pr_json=$(gh pr view "$pr_url" --json files,additions 2>/dev/null)
 
-# Compute diff stats to decide whether to block or allow
-lines_added=$(git diff --numstat main...HEAD 2>/dev/null | awk '{s+=$1} END {print s+0}')
-files_changed=$(git diff --name-only main...HEAD 2>/dev/null | wc -l | tr -d ' ')
+if [[ -n "$pr_json" ]]; then
+    changed_files=$(printf '%s' "$pr_json" | jq -r '[.files[].path] | .[0:20] | join(",")')
+    lines_added=$(printf '%s' "$pr_json" | jq -r '.additions // 0')
+    files_changed=$(printf '%s' "$pr_json" | jq -r '.files | length')
+else
+    # Fallback: local diff against main (legacy behaviour).
+    changed_files=$(git diff --name-only main...HEAD 2>/dev/null | head -20 | tr '\n' ',')
+    changed_files=${changed_files%,}
+    lines_added=$(git diff --numstat main...HEAD 2>/dev/null | awk '{s+=$1} END {print s+0}')
+    files_changed=$(git diff --name-only main...HEAD 2>/dev/null | wc -l | tr -d ' ')
+fi
 
 printf 'lines_added=%s files_changed=%s\n' "$lines_added" "$files_changed" >> "$debug_log"
 
