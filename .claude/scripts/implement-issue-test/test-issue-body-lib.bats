@@ -1231,3 +1231,34 @@ Task 2: test the thing
 	[[ "$output" == *"format"*"Task 1: prose form"* ]]
 	[[ "$output" != *$'\r'* ]]
 }
+
+# =============================================================================
+# bash-host guard (issue #601)
+# =============================================================================
+
+# (a) Structural: the POSIX-portable BASH_VERSION guard block is present.
+@test "bash-host guard: BASH_VERSION check is present in the library" {
+	run grep -F 'if [ -z "${BASH_VERSION:-}" ]; then' "$LIB_PATH"
+	[ "$status" -eq 0 ]
+	run grep -F 'requires bash' "$LIB_PATH"
+	[ "$status" -eq 0 ]
+}
+
+# (b) Functional: sourcing under a non-bash shell (zsh) fails fast with a clear
+# message. NOTE macOS /bin/sh is bash-in-posix-mode and SETS BASH_VERSION, so
+# it is unsuitable for this check — use zsh. Skip when zsh is unavailable.
+@test "bash-host guard: sourcing under zsh errors non-zero with a clear message" {
+	if ! command -v zsh >/dev/null 2>&1; then
+		skip "zsh not available"
+	fi
+	run zsh -c "source '$LIB_PATH'"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"requires bash"* ]]
+}
+
+# (c) Regression: under bash the lib still sources cleanly and validates a
+# known-good body.
+@test "bash-host guard: under bash the lib sources and assert_issue_valid still passes" {
+	run assert_issue_valid "$(valid_body)"
+	[ "$status" -eq 0 ]
+}
