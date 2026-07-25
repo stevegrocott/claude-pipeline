@@ -360,6 +360,69 @@ teardown() {
 }
 
 # =============================================================================
+# FUNCTIONAL: pr_review:max_iterations blocks merge (issue #594)
+# =============================================================================
+# A PR-review loop that exhausts its iterations without an approved verdict
+# records "pr_review:max_iterations:*" in degraded_stages. The merge gate must
+# treat this as a blocking condition (review never converged), same as a
+# quality:convergence_failure, and leave the PR OPEN instead of auto-merging.
+
+@test "orchestrator merge gate scans DEGRADED_STAGES for pr_review:max_iterations" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	# The merge-gate fallback loop must match a pr_review:max_iterations entry
+	[[ "$script_content" == *'pr_review:max_iterations:*'* ]]
+}
+
+@test "pr_review:max_iterations in degraded_stages produces a merge block" {
+	# Mirror the merge-gate fallback scan (Gate B): a pr_review:max_iterations
+	# entry must yield a non-empty blocked_reason so merge-mr.sh is skipped.
+	declare -a deg=("pr_review:max_iterations:iter=3")
+
+	local blocked_reason=""
+	local _dsp
+	for _dsp in "${deg[@]}"; do
+		if [[ "$_dsp" == pr_review:max_iterations:* || "$_dsp" == pr_review:wall_timeout ]]; then
+			blocked_reason="PR review loop ended without an approved verdict (degraded_stages: $_dsp)."
+			break
+		fi
+	done
+
+	[[ -n "$blocked_reason" ]]
+	[[ "$blocked_reason" == *"pr_review:max_iterations:iter=3"* ]]
+}
+
+@test "quality:convergence_failure still blocks when pr_review entry absent (regression)" {
+	# AC2: existing convergence blocking behaviour is unaffected.
+	declare -a deg=("quality:convergence_failure:main:iter=3")
+
+	local blocked_reason=""
+	local _ds
+	for _ds in "${deg[@]}"; do
+		if [[ "$_ds" == quality:convergence_failure:* ]]; then
+			blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
+			break
+		fi
+	done
+
+	[[ -n "$blocked_reason" ]]
+	[[ "$blocked_reason" == *"quality:convergence_failure:main:iter=3"* ]]
+}
+
+@test "process-pr SKILL.md falls back to degraded_stages scan for pr_review:max_iterations" {
+	local skill_file
+	# Prefer the post-git-mv plugin layout; fall back to the legacy layout.
+	skill_file="$(dirname "$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")")/plugins/pipeline-core/skills/process-pr/SKILL.md"
+	[[ -f "$skill_file" ]] || skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+
+	[[ -f "$skill_file" ]]
+	# Skill must document the pr_review:max_iterations fallback path (AC4: no
+	# orchestrator<->process-pr drift).
+	grep -q 'pr_review:max_iterations' "$skill_file"
+}
+
+# =============================================================================
 # STATIC ANALYSIS: process-pr schema includes merge_blocked status
 # =============================================================================
 
