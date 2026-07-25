@@ -105,7 +105,7 @@ digraph process_pr {
 
 ```bash
 # Verify PR/MR exists and is open
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 "$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER"
 
 # Verify issue exists and is open
@@ -118,7 +118,7 @@ PLATFORM_DIR=".claude/scripts/platform"
 
 ```bash
 # Get PR/MR comments
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 "$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER"
 ```
 
@@ -134,7 +134,7 @@ PLATFORM_DIR=".claude/scripts/platform"
 
 ```bash
 # Get comments as JSON array
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 COMMENTS=$("$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER" | jq -r '.[]')
 ```
 
@@ -225,7 +225,7 @@ fi
 if [[ -n "$MERGE_BLOCKED_REASON" ]]; then
     echo "MERGE BLOCKED: $MERGE_BLOCKED_REASON"
     # Post a comment on the PR explaining why it was not merged
-    PLATFORM_DIR=".claude/scripts/platform"
+    PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
     "$PLATFORM_DIR/comment-mr.sh" "$PR_NUMBER" "$(cat <<EOF
 ## Merge Blocked — Unresolved Quality Feedback
 
@@ -257,7 +257,7 @@ fi
 ### Step 4b: Merge PR/MR
 
 ```bash
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 "$PLATFORM_DIR/merge-mr.sh" "$PR_NUMBER"
 ```
 
@@ -271,7 +271,7 @@ PLATFORM_DIR=".claude/scripts/platform"
 ### Step 4c: Comment on Issue
 
 ```bash
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 "$PLATFORM_DIR/comment-issue.sh" "$ISSUE_NUMBER" "$(cat <<'EOF'
 ## Completed
 
@@ -289,7 +289,7 @@ EOF
 ### Step 4d: Close Issue
 
 ```bash
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 "$PLATFORM_DIR/transition-issue.sh" "$ISSUE_NUMBER"
 ```
 
@@ -354,10 +354,12 @@ Examples:
 
 > **CRITICAL — NEVER use `gh issue create` or `create-issue.sh` directly.** Every follow-up issue MUST go through `create-followup-issue.sh`. It runs `assert_issue_valid` fail-closed before creation, ensuring the body has parseable task lines, a known agent, a resolvable file path, and an `## Acceptance Criteria` section. Writing bodies by hand and bypassing this script produces malformed issues that stall the pipeline and require manual remediation. If `create-followup-issue.sh` exits non-zero for any reason (missing argument, validation failure), log the error and skip that item — do NOT fall back to `gh issue create`.
 
-For each extracted issue, invoke `create-followup-issue.sh`:
+For each extracted issue, invoke `create-followup-issue.sh` (dual-mode: prefer the plugin
+bin `pipeline-core-create-followup-issue`, else the repo-local script):
 
 ```bash
-".claude/scripts/create-followup-issue.sh" \
+CREATE_FOLLOWUP="$(command -v pipeline-core-create-followup-issue || echo .claude/scripts/create-followup-issue.sh)"
+"$CREATE_FOLLOWUP" \
   --title "$ISSUE_TITLE" \
   --description "$EXTRACTED_DESCRIPTION" \
   --task-description "$INFERRED_TASK_DESCRIPTION" \

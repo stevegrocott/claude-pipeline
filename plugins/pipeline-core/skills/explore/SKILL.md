@@ -129,7 +129,7 @@ The `## Deploy Verification` section body **must** include a `**Verification com
 Create the issue using the platform wrapper with `--parent` set to the chosen epic:
 
 ```bash
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 "$PLATFORM_DIR/create-issue.sh" --title "$TITLE" --parent "$EPIC_KEY" --body "$(cat <<'EOF'
 ## Context
 [What was discovered and why it matters — 2-3 sentences]

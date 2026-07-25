@@ -44,10 +44,13 @@ End-to-end issue implementation — reads plan from issue tracker, implements wi
 
 ## Invocation
 
-Immediately launch the orchestrator:
+Immediately launch the orchestrator. Resolve it dual-mode — prefer the plugin bin
+(`pipeline-core-implement`, on PATH when `pipeline-core` is enabled), else fall back to
+the repo-local script:
 
 ```bash
-.claude/scripts/implement-issue-orchestrator.sh \
+IMPL="$(command -v pipeline-core-implement || echo .claude/scripts/implement-issue-orchestrator.sh)"
+"$IMPL" \
   --issue $ISSUE_NUMBER \
   --branch $BASE_BRANCH
 ```
@@ -55,7 +58,8 @@ Immediately launch the orchestrator:
 Or with explicit agent override:
 
 ```bash
-.claude/scripts/implement-issue-orchestrator.sh \
+IMPL="$(command -v pipeline-core-implement || echo .claude/scripts/implement-issue-orchestrator.sh)"
+"$IMPL" \
   --issue $ISSUE_NUMBER \
   --branch $BASE_BRANCH \
   --agent bulletproof-frontend-developer

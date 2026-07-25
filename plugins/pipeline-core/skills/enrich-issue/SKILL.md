@@ -52,7 +52,7 @@ On success, removes the `needs-explore` label from the issue.
 Read the issue body and title:
 
 ```bash
-PLATFORM_DIR=".claude/scripts/platform"
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
 [[ -f .claude/config/platform.sh ]] && source .claude/config/platform.sh
 ISSUE_BODY=$(gh issue view "$ISSUE_NUMBER" --json body,title,labels \
   --jq '{title: .title, body: .body, labels: [.labels[].name]}')

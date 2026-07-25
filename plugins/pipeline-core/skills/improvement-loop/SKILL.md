@@ -230,7 +230,8 @@ misroute cannot recur silently across model updates or prompt edits.
 4. **Verify the new fixture passes**
 
    ```bash
-   .claude/scripts/skill-golden.sh triage-classify <issue-id>
+   SKILL_GOLDEN="$(command -v pipeline-core-skill-golden || echo .claude/scripts/skill-golden.sh)"
+   "$SKILL_GOLDEN" triage-classify <issue-id>
    ```
 
    The fixture must pass before committing. If it fails, the prompt or the expected
