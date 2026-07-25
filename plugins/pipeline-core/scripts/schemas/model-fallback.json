@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "model-fallback skill output: next model to escalate to, or at-ceiling indication",
+  "properties": {
+    "next_model": {
+      "type": ["string", "null"],
+      "enum": ["haiku", "sonnet", "opus", null],
+      "description": "Model to escalate to, or null when no further escalation is possible"
+    },
+    "at_ceiling": {
+      "type": "boolean",
+      "description": "True when current_model is opus or the error_kind makes escalation impossible"
+    },
+    "reason": {
+      "type": "string",
+      "description": "Human-readable escalation rationale"
+    }
+  },
+  "required": ["next_model", "at_ceiling", "reason"]
+}

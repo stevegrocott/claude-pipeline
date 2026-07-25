@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "model-fallback skill output: next model tier to try, or null when at the opus ceiling",
+  "properties": {
+    "next_model": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["haiku", "sonnet", "opus"],
+          "description": "The next model tier to use; only present when at_ceiling is false"
+        },
+        {
+          "type": "null",
+          "description": "null when at_ceiling is true — no further fallback is possible"
+        }
+      ]
+    },
+    "at_ceiling": {
+      "type": "boolean",
+      "description": "true when current_model is opus or error_kind is non-escalatable (permission_denied, schema_not_found, max_turns_exhausted_at_ceiling)"
+    },
+    "reason": {
+      "type": "string",
+      "description": "Human-readable rationale for the decision"
+    }
+  },
+  "required": ["next_model", "at_ceiling", "reason"]
+}

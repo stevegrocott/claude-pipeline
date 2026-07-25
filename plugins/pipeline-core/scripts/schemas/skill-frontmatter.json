@@ -1,0 +1,142 @@
+{
+  "description": "JSON schema for SKILL.md YAML frontmatter — validates the existing required fields and the five optional metadata fields added in issue #177.",
+  "type": "object",
+  "required": ["name", "description", "inputs", "outputs", "side_effects", "composes", "failure_modes"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Canonical skill identifier (matches the directory name under .claude/skills/)"
+    },
+    "description": {
+      "type": "string",
+      "description": "One-line summary used by the skill router to decide whether this skill applies"
+    },
+    "argument-hint": {
+      "type": "string",
+      "description": "Human-readable hint for the argument(s) the skill accepts, shown in skill listings"
+    },
+    "inputs": {
+      "type": "array",
+      "description": "Explicit contract for what the skill consumes; enables a meta-skill to validate args before invocation",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Input parameter name"
+          },
+          "type": {
+            "type": "string",
+            "description": "Data type of the input (e.g. string, integer, url, boolean, file_path)"
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether this input is required; defaults to false if omitted"
+          },
+          "description": {
+            "type": "string",
+            "description": "What the input represents and how it is used"
+          }
+        }
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "description": "Explicit contract for what consumers can rely on; enables piping skill outputs into other skills",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Output value name"
+          },
+          "type": {
+            "type": "string",
+            "description": "Data type of the output (e.g. string, integer, url, boolean, file_path, json)"
+          },
+          "description": {
+            "type": "string",
+            "description": "What the output represents and where it can be found"
+          }
+        }
+      }
+    },
+    "side_effects": {
+      "type": "array",
+      "description": "Declares what changes outside the conversation (files written, issues created, processes spawned) so a dry-run skill can predict impact",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Named side effect with no extra detail (e.g. 'creates_github_issue')"
+          },
+          {
+            "type": "object",
+            "description": "Named side effect with an associated path or value (e.g. {writes_log: 'logs/foo/status.json'})",
+            "minProperties": 1,
+            "maxProperties": 1,
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "composes": {
+      "type": "array",
+      "description": "Names sub-skills invoked via the Skill tool; enables a graph of skill dependencies",
+      "items": {
+        "type": "string",
+        "description": "Skill name as it appears in the skills directory (e.g. 'mcp-tools', 'explore')"
+      }
+    },
+    "failure_modes": {
+      "type": "array",
+      "description": "Known ways this skill can fail and what callers should do; enables a pipeline-recovery skill to take action",
+      "items": {
+        "type": "object",
+        "required": ["id", "mitigation"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Short snake_case identifier for the failure mode (e.g. 'gh_api_unauthorized')"
+          },
+          "mitigation": {
+            "type": "string",
+            "description": "What the skill or its caller should do when this failure occurs"
+          }
+        }
+      }
+    },
+    "golden": {
+      "type": "object",
+      "description": "Golden test configuration for decision skills — declares the model, manifest path, fixture directory, and output schema used by skill-golden.sh",
+      "required": ["model", "manifest", "fixture_dir"],
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Model tier to use for golden test runs (e.g. haiku, sonnet)"
+        },
+        "manifest": {
+          "type": "string",
+          "description": "Path to the golden manifest file (relative to repo root) listing fixture|expected_route|expected_criterion entries"
+        },
+        "fixture_dir": {
+          "type": "string",
+          "description": "Path to the directory containing fixture files (relative to repo root)"
+        },
+        "schema": {
+          "type": "string",
+          "description": "Path to the JSON schema file used to validate Claude's structured output (relative to repo root). Falls back to .claude/scripts/schemas/<skill-name>.json when omitted."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "description": "Schema for pipeline feedback records — structured observations about classification or routing errors for offline analysis and prompt improvement.",
+  "type": "object",
+  "required": ["timestamp", "kind", "issue", "observed", "expected"],
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the feedback was recorded"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "triage_misclassification",
+        "prompt_regression",
+        "criterion_drift",
+        "agent_misroute",
+        "escalation_loop"
+      ],
+      "description": "Category of pipeline failure being reported"
+    },
+    "issue": {
+      "type": "string",
+      "description": "Issue number or identifier associated with this feedback, e.g. 176"
+    },
+    "observed": {
+      "type": "string",
+      "description": "What the pipeline actually did (the incorrect or unexpected behaviour)"
+    },
+    "expected": {
+      "type": "string",
+      "description": "What the pipeline should have done (the correct or desired behaviour)"
+    },
+    "evidence_path": {
+      "type": "string",
+      "description": "Relative path to a log file, JSONL event stream, or artifact that supports this feedback (optional)"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Free-form context, hypotheses, or reproduction steps (optional)"
+    }
+  }
+}

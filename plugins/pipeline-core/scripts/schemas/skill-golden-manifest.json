@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Golden test manifest for a decision skill. Each entry pins one fixture to its expected output so prompt regressions surface before merge. Mirrors the 'fixture|expected_route|expected_criterion' pipe-delimited convention from triage-validate.sh but expressed as structured JSON.",
+  "type": "array",
+  "minItems": 0,
+  "items": {
+    "type": "object",
+    "description": "One golden test case: a fixture file mapped to the output the model must produce.",
+    "required": ["fixture", "expected_route"],
+    "additionalProperties": false,
+    "properties": {
+      "fixture": {
+        "type": "string",
+        "description": "Fixture file basename without extension, relative to the skill's fixture directory (e.g. 'issue-2836')"
+      },
+      "expected_route": {
+        "type": "string",
+        "description": "The categorical routing decision the model must return for this fixture (e.g. 'fast-path', 'full', 'escalate', 'retry')"
+      },
+      "expected_criterion": {
+        "type": "string",
+        "description": "Expected disqualifying criterion name. Use '*' when the route alone is the contract and any criterion reason is acceptable. Mutually exclusive with any_of."
+      },
+      "any_of": {
+        "type": "array",
+        "description": "Two or more acceptable criterion values for multi-correct cases — the test passes if the model returns any one of them. Mutually exclusive with expected_criterion.",
+        "minItems": 2,
+        "items": {
+          "type": "string",
+          "description": "An acceptable criterion name"
+        }
+      }
+    }
+  }
+}

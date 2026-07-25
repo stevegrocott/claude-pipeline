@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["status", "summary"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "partial", "error"]
+    },
+    "summary": {
+      "type": "string",
+      "description": "Concise summary of research findings (2-5 sentences)"
+    },
+    "affected_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "what_needs_changing"],
+        "properties": {
+          "path": { "type": "string" },
+          "what_needs_changing": { "type": "string" }
+        }
+      }
+    },
+    "current_behavior": {
+      "type": "string",
+      "description": "What happens now"
+    },
+    "desired_behavior": {
+      "type": "string",
+      "description": "What should happen"
+    },
+    "patterns_to_follow": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Existing codebase patterns the implementation should follow"
+    },
+    "data_findings": {
+      "type": "string",
+      "description": "Raw data or measurements relevant to the investigation"
+    }
+  },
+  "additionalProperties": false
+}

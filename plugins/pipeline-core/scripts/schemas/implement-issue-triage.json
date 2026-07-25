@@ -1,0 +1,99 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["success", "error", "rate_limit"],
+      "description": "Whether triage classification succeeded"
+    },
+    "route": {
+      "type": "string",
+      "enum": ["fast-path", "full"],
+      "description": "Pipeline route. 'fast-path' = surgical pipeline (branch → implement → commit → PR → squash-merge). 'full' = standard pipeline with all verification stages."
+    },
+    "criteria": {
+      "type": "object",
+      "description": "Per-criterion evaluation. ALL six must be passed=true for fast-path.",
+      "properties": {
+        "test_only_scope": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" },
+            "reason": { "type": "string" }
+          },
+          "required": ["passed", "reason"]
+        },
+        "surgical_size": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" },
+            "reason": { "type": "string" }
+          },
+          "required": ["passed", "reason"]
+        },
+        "established_pattern": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" },
+            "reason": { "type": "string" }
+          },
+          "required": ["passed", "reason"]
+        },
+        "precise_specification": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" },
+            "reason": { "type": "string" }
+          },
+          "required": ["passed", "reason"]
+        },
+        "benign_failure_mode": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" },
+            "reason": { "type": "string" }
+          },
+          "required": ["passed", "reason"]
+        },
+        "no_security_concerns": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" },
+            "reason": { "type": "string" }
+          },
+          "required": ["passed", "reason"]
+        }
+      },
+      "required": [
+        "test_only_scope",
+        "surgical_size",
+        "established_pattern",
+        "precise_specification",
+        "benign_failure_mode",
+        "no_security_concerns"
+      ]
+    },
+    "established_pattern_grep": {
+      "type": ["string", "null"],
+      "description": "Grep-able regex identifying the pattern this change applies. Shell wrapper runs `git grep -lE` and verifies ≥3 matching files. Null when no specific pattern can be identified (criterion 3 fails)."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "Classifier confidence. medium/low forces route='full' regardless of criteria."
+    },
+    "disqualifying_criterion": {
+      "type": ["string", "null"],
+      "description": "Name of the criterion that forced route='full'. Null when all criteria passed AND route is 'fast-path'."
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-sentence explanation of the routing decision."
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "Error message when status='error'."
+    }
+  },
+  "required": ["status"]
+}

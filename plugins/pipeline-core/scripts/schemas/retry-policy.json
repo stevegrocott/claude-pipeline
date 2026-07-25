@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "description": "retry-policy skill output: retry same tier, escalate, or bail permanently",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["retry", "escalate", "bail"],
+      "description": "Decision: retry at same tier, escalate to higher tier, or bail permanently"
+    },
+    "reason": {
+      "type": "string",
+      "description": "Human-readable rationale for the decision"
+    },
+    "backoff_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Milliseconds to wait before retrying; only present when action==retry and error_kind==rate_limit"
+    }
+  },
+  "required": ["action", "reason"]
+}
