@@ -4465,9 +4465,13 @@ _extract_task_files_from_desc() {
 	local desc="$1"
 	local grep_pat
 	# Backtick tokens: only qualify when they contain '/' (path-like)
-	# or end in a known file extension — bare words are excluded.
-	grep_pat='`[a-zA-Z0-9_.-]*/[a-zA-Z0-9_./-]+`'
-	grep_pat+='|`[a-zA-Z0-9_.-]+\.'"($KNOWN_FILE_EXTENSIONS)"'`'
+	# or end in a known file extension — bare words are excluded.  The char
+	# classes admit bracket/paren/brace segments so Next.js App Router paths
+	# ( `foo/[step]/page.tsx`, `app/(public)/login/page.tsx` ) are matched;
+	# kept identical to issue-body-lib.sh's parser for the parity contract.
+	# In each class `]` is first and `-` last so both are literal.
+	grep_pat='`[]a-zA-Z0-9_.(){}[-]*/[]a-zA-Z0-9_./(){}[-]+`'
+	grep_pat+='|`[]a-zA-Z0-9_.(){}[-]+\.'"($KNOWN_FILE_EXTENSIONS)"'`'
 	# Bare slash-separated tokens (no backticks required)
 	grep_pat+='|[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+'
 	# Bare extension-bearing names (no backticks required)

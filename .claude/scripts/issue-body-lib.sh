@@ -198,15 +198,64 @@ _issue_body_extract_paths() {
 	# would otherwise be read as the path "input/output", fail validation,
 	# and silently drop a legitimate follow-up.  Real follow-up bodies always
 	# wrap file paths in backticks, so this loses no genuine paths.
-	# Qualify only when path-like ('/') or extension-bearing.
+	# Qualify only when path-like ('/') or extension-bearing.  The char
+	# classes admit bracket/paren/brace segments so Next.js App Router paths
+	# ( `foo/[step]/page.tsx`, `app/(public)/login/page.tsx` ) are matched.
+	# In each class `]` is first and `-` last so both are literal.
 	# Literal backticks below are markdown delimiters, not substitution.
 	# shellcheck disable=SC2016
-	grep_pat='`[a-zA-Z0-9_.-]*/[a-zA-Z0-9_./-]+`'
-	grep_pat+='|`[a-zA-Z0-9_.-]+\.'"($ISSUE_BODY_KNOWN_EXTS)"'`'
+	grep_pat='`[]a-zA-Z0-9_.(){}[-]*/[]a-zA-Z0-9_./(){}[-]+`'
+	grep_pat+='|`[]a-zA-Z0-9_.(){}[-]+\.'"($ISSUE_BODY_KNOWN_EXTS)"'`'
 	printf '%s' "$desc" \
 		| grep -oE "$grep_pat" \
 		| sed 's/`//g' \
 		| sort -u
+}
+
+#
+# Resolves an extracted token against the repo: true (0) if the token itself
+# exists, or ANY ancestor directory exists.  Walking ancestors (not just the
+# immediate parent) lets a new file in a not-yet-existing subdirectory validate
+# so long as some ancestor is real (e.g. `app/api/register/route.ts` resolves
+# when `app/api/` exists but `app/api/register/` does not yet).
+#
+# Arguments:
+#   $1 - extracted path token
+#   $2 - repo root
+# Returns:
+#   0 if the token or an ancestor directory exists, 1 otherwise
+#
+_issue_body_path_resolves() {
+	local path="$1" repo_root="$2" parent
+	[[ -e "$repo_root/$path" ]] && return 0
+	parent="$path"
+	while [[ "$parent" == */* ]]; do
+		parent="${parent%/*}"
+		[[ -z "$parent" ]] && break
+		[[ -d "$repo_root/$parent" ]] && return 0
+	done
+	return 1
+}
+
+#
+# Classifies an extracted token as a repo path (0) or prose (1).  A token
+# counts as a repo path only if it bears a known file extension OR resolves on
+# disk.  This demotes extension-less non-resolving tokens — HTTP routes like
+# `/api/register` and bare `/word` tokens like `/login` — to prose, so they
+# neither raise a false "unresolved path" error nor satisfy the ≥1-path
+# requirement.  Extension-less real references (e.g. a `.claude/scripts/`
+# directory) still count via the "resolves on disk" branch.
+#
+# Arguments:
+#   $1 - extracted path token
+#   $2 - repo root
+# Returns:
+#   0 if the token is a repo path, 1 if it is prose
+#
+_issue_body_is_repo_path() {
+	local token="$1" repo_root="$2"
+	[[ "$token" =~ \.(${ISSUE_BODY_KNOWN_EXTS})$ ]] && return 0
+	_issue_body_path_resolves "$token" "$repo_root"
 }
 
 #
@@ -247,15 +296,28 @@ _issue_body_task_complexity() {
 #
 # Arguments:
 #   $1 - task description string
+#   $2 - repo root (optional).  When given, only tokens that classify as repo
+#        paths (known extension OR resolve on disk) are counted, so prose
+#        tokens like `/api/register` or `/login` do not satisfy the ≥1-path
+#        requirement.  When omitted, every extracted token is counted (legacy
+#        behaviour for callers with no repo context).
 # Outputs:
 #   Distinct path count (integer) on stdout
 #
 _issue_body_task_path_count() {
 	local desc="$1"
-	local stripped
+	local repo_root="${2:-}"
+	local stripped path count=0
 	stripped=$(printf '%s' "$desc" \
-		| sed -E 's/(`[A-Za-z0-9_./-]+):[A-Za-z0-9_.,-]*(`)/\1\2/g')
-	_issue_body_extract_paths "$stripped" | grep -c '.' || true
+		| sed -E 's/(`[]A-Za-z0-9_./(){}[-]+):[A-Za-z0-9_.,-]*(`)/\1\2/g')
+	while IFS= read -r path; do
+		[[ -z "$path" ]] && continue
+		if [[ -n "$repo_root" ]]; then
+			_issue_body_is_repo_path "$path" "$repo_root" || continue
+		fi
+		count=$((count + 1))
+	done < <(_issue_body_extract_paths "$stripped")
+	printf '%s' "$count"
 }
 
 #
@@ -455,7 +517,7 @@ lint_task_lines() {
 	local bt='`'
 	local re_bare_agent="^- (\[ \] )?${bt}([^${bt}]+)${bt} (.+)\$"
 
-	local line agent desc remapped path parent unresolved_path
+	local line agent desc remapped path unresolved_path
 	while IFS= read -r line; do
 		[[ -z "$line" ]] && continue
 		# Checked [x] tasks are complete; the parser skips them, so does lint.
@@ -496,16 +558,14 @@ lint_task_lines() {
 			continue
 		fi
 
-		# Criterion-3 mirror: every referenced path must resolve.
+		# Criterion-3 mirror: every referenced repo path must resolve.  Prose
+		# tokens (extension-less and non-resolving, e.g. `/api/register`) are
+		# skipped; resolution walks ancestor directories.
 		unresolved_path=""
 		while IFS= read -r path; do
 			[[ -z "$path" ]] && continue
-			if [[ "$path" == */* ]]; then
-				parent="${path%/*}"
-			else
-				parent="."
-			fi
-			if [[ ! -e "$repo_root/$path" && ! -d "$repo_root/$parent" ]]; then
+			_issue_body_is_repo_path "$path" "$repo_root" || continue
+			if ! _issue_body_path_resolves "$path" "$repo_root"; then
 				unresolved_path="$path"
 				break
 			fi
@@ -566,7 +626,7 @@ assert_issue_valid() {
 
 	# Criteria 2, 3, 6 & 7: agents resolve, path suffixes resolve, granularity,
 	# and every open task carries at least one file path.
-	local agent desc remapped path parent complexity path_count
+	local agent desc remapped path complexity path_count
 	local -i s_count=0 nons_count=0
 	while IFS=$'\t' read -r agent desc; do
 		[[ -z "$agent" ]] && continue
@@ -578,24 +638,25 @@ assert_issue_valid() {
 			errors+=("unknown agent: $agent")
 		fi
 
-		# Criterion 3: every referenced path resolves.
+		# Criterion 3: every referenced repo path resolves.  A token counts as
+		# a repo path only if it bears a known extension or resolves on disk;
+		# extension-less non-resolving tokens (HTTP routes like /api/register,
+		# bare /word) are prose and are neither resolution-checked here nor
+		# counted below.  Resolution walks ancestor directories, so a new file
+		# in a new subdirectory validates when any ancestor exists.
 		while IFS= read -r path; do
 			[[ -z "$path" ]] && continue
-			if [[ "$path" == */* ]]; then
-				parent="${path%/*}"
-			else
-				parent="."
-			fi
-			if [[ ! -e "$repo_root/$path" \
-				&& ! -d "$repo_root/$parent" ]]; then
+			_issue_body_is_repo_path "$path" "$repo_root" || continue
+			if ! _issue_body_path_resolves "$path" "$repo_root"; then
 				errors+=("unresolved path: $path")
 			fi
 		done < <(_issue_body_extract_paths "$desc")
 
 		# Distinct file-path count (":Lnn"-suffix aware — reuses #581's
 		# _issue_body_task_path_count so a lone `file.ts:L10-40` still counts as
-		# one path).  Computed once and shared by criteria 7 and 6.
-		path_count=$(_issue_body_task_path_count "$desc")
+		# one path).  repo_root is passed so prose tokens do not satisfy the
+		# ≥1-path requirement.  Computed once and shared by criteria 7 and 6.
+		path_count=$(_issue_body_task_path_count "$desc" "$repo_root")
 
 		# Criterion 7: every open task must reference at least one file path.
 		# A task with zero path tokens forces the implement stage to scan the

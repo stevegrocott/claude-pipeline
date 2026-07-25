@@ -121,6 +121,88 @@ valid_body() {
 	[ "$status" -eq 0 ]
 }
 
+# --- Issue #600: App Router / new-dir paths, API-route & bare /word tokens ---
+
+@test "assert_issue_valid: accepts a bracketed App Router path ([step]/page.tsx)" {
+	# Defect 1 — the extractor char class must admit '[' ']' segments so the
+	# whole backtick token is not silently dropped.  Ancestor exists → resolves.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/apps/frontend/src/app"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Add the step page — \`apps/frontend/src/app/onboarding/[step]/page.tsx\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: accepts a parenthesised route-group path ((public)/login/page.tsx)" {
+	# Defect 1 — '(' ')' route-group segments must match too.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/apps/frontend/src/app"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Add the login page — \`apps/frontend/src/app/(public)/login/page.tsx\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: a backticked API-route token does not raise 'unresolved path'" {
+	# Defect 2 — '/api/register' is extension-less and non-resolving → prose,
+	# not a repo path.  The task still carries a real path so the body is valid.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/apps/frontend/src/app"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Wire the handler — \`apps/frontend/src/app/register.ts\` posts to \`/api/register\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"unresolved path"* ]]
+}
+
+@test "assert_issue_valid: a bare /word token does NOT satisfy the >=1-path requirement" {
+	# Defect 3 — '/login' must be treated as prose, so a task whose only
+	# path-like token is '/login' fails criterion 7 instead of silently passing.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Redirect users to \`/login\` after sign-out
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"task has no file path"* ]]
+}
+
+@test "assert_issue_valid: accepts a new file in a not-yet-existing subdir when an ancestor exists" {
+	# Defect 4 — resolution walks ancestors: 'app/api/' exists but
+	# 'app/api/register/' does not yet, and the new file must still validate.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/apps/frontend/src/app/api"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Add the route handler — \`apps/frontend/src/app/api/register/route.ts\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
 @test "assert_issue_valid: accepts the default agent" {
 	local body
 	body="## Implementation Tasks
