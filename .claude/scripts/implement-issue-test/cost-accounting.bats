@@ -289,6 +289,76 @@ _setup_orchestrator_env() {
 }
 
 # =============================================================================
+# RECONCILIATION — summed per-stage cost vs cost_summary.total_cost_usd (±5%)
+# =============================================================================
+#
+# Issue #617: cost_summary under-reported run cost by ~51% because failed and
+# triage stages never had estimated_cost recorded on them, so the rollup
+# silently excluded exactly the spend #580 existed to make visible. This is
+# the regression guard called for by #617's acceptance criteria: sum whatever
+# estimated_cost every .stages[] entry carries (regardless of status) and
+# fail loudly — naming both figures and the percent drift — if that sum
+# diverges from cost_summary.total_cost_usd by more than the tolerance.
+
+# Sums .stages[*].estimated_cost in $1 (a metrics.json/status.json-shaped
+# file) and fails loudly if that sum diverges from .cost_summary.total_cost_usd
+# by more than $2 percent (default 5).
+assert_cost_reconciles() {
+	local metrics_file="$1" tolerance_pct="${2:-5}"
+	local stage_sum summary_total pct
+	stage_sum=$(jq -r '[.stages[]?.estimated_cost // 0] | add // 0' "$metrics_file")
+	summary_total=$(jq -r '.cost_summary.total_cost_usd // 0' "$metrics_file")
+	pct=$(awk -v a="$stage_sum" -v b="$summary_total" \
+		'BEGIN { d = a - b; if (d < 0) d = -d; base = (a == 0) ? 1 : a; printf "%.4f", (d / base) * 100 }')
+
+	awk -v pct="$pct" -v tol="$tolerance_pct" 'BEGIN { exit !(pct <= tol) }' \
+		|| fail "cost_summary.total_cost_usd ($summary_total) drifts ${pct}% from the summed per-stage estimated_cost ($stage_sum) — exceeds the ±${tolerance_pct}% reconciliation tolerance"
+}
+
+@test "cost_summary reconciles with summed per-stage cost within 5%, including a failed stage and triage" {
+	_setup_orchestrator_env
+	init_status
+	# Mirrors the issue #617 ground-truth shape: a failed task stage and the
+	# triage stage each carry their own estimated_cost, not just the
+	# successfully completed stages.
+	jq '.stages.triage = {status: "completed", estimated_cost: 0.4479} |
+	    .stages.implement_task_1 = {status: "completed", estimated_cost: 0.9562} |
+	    .stages.implement_task_2 = {status: "error", estimated_cost: 1.3836} |
+	    .stages.implement_task_3 = {status: "error", estimated_cost: 2.0973} |
+	    .stages.pr = {status: "completed", estimated_cost: 0.4144}' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	export_metrics
+
+	assert_cost_reconciles "$LOG_BASE/metrics.json"
+}
+
+@test "reconciliation check fails loudly when cost_summary drifts more than 5% from summed per-stage cost" {
+	_setup_orchestrator_env
+	init_status
+	jq '.stages.triage = {status: "completed", estimated_cost: 0.4479} |
+	    .stages.implement_task_1 = {status: "completed", estimated_cost: 0.9562} |
+	    .stages.implement_task_2 = {status: "error", estimated_cost: 1.3836} |
+	    .stages.implement_task_3 = {status: "error", estimated_cost: 2.0973} |
+	    .stages.pr = {status: "completed", estimated_cost: 0.4144}' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	export_metrics
+
+	# Reproduce the #617 defect directly on metrics.json: cost_summary only
+	# counted the non-failed stages (0.4479 + 0.9562 + 0.4144 = 1.8185),
+	# ~51% below the full per-stage sum (5.2994) computed above — the same
+	# under-report ratio the issue measured on the real run.
+	jq '.cost_summary.total_cost_usd = 1.8185' \
+		"$LOG_BASE/metrics.json" > "$LOG_BASE/metrics.json.tmp" && mv "$LOG_BASE/metrics.json.tmp" "$LOG_BASE/metrics.json"
+
+	run assert_cost_reconciles "$LOG_BASE/metrics.json"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"drifts"* ]]
+	[[ "$output" == *"reconciliation tolerance"* ]]
+}
+
+# =============================================================================
 # BATCH-LEVEL cost_summary ROLLUP (batch-orchestrator.sh)
 # =============================================================================
 #
