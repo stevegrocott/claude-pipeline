@@ -8,6 +8,12 @@
 # completed the abandoned work but never updated the task's own status in
 # status.json).
 #
+# Also covers issue #618 (same #620 bug report): the flip side of the #616
+# fix. Branch-evidence re-evaluation must not become a rubber stamp — a task
+# whose declared path was genuinely never touched on the branch has to keep
+# blocking the merge, and the block reason must name that task specifically
+# rather than only reporting a count (#620 AC2, AC3, AC5).
+#
 
 load 'helpers/test-helper.bash'
 
@@ -179,6 +185,81 @@ _run_merge_gate() {
 	[ -z "$blocked_reason" ]
 	[ -z "$block_kind" ]
 	[ ${#DEGRADED_STAGES[@]} -eq 0 ]
+}
+
+@test "#618 regression: task with a declared path never modified on the branch still blocks, named in the reason" {
+	# PR #618 (issue #615) task/stage data, reproduced from the #620 bug report.
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "version field in marketplace entry", status: "failed",
+		 files: ["marketplace.json"]},
+		{id: 2, description: "README install section", status: "failed",
+		 files: ["README.md"]},
+		{id: 3, description: "bats version-match coverage", status: "completed",
+		 files: ["tests/marketplace-version-match.bats"]}
+	]')
+	set_tasks "$tasks_json"
+
+	# Ground truth #618 reported: task 1's deliverable landed despite being
+	# recorded failed, task 3 genuinely completed, and task 2's declared path
+	# (README.md) was never touched on the branch — the one true gap.
+	mkdir -p tests
+	echo '{"version": "0.3.0"}' > marketplace.json
+	echo "# bats coverage" > tests/marketplace-version-match.bats
+	git add marketplace.json tests
+	git commit -q -m "implement #615 (partial)"
+
+	local task_count completed_tasks
+	task_count=$(jq '(.tasks // []) | length' "$STATUS_FILE")
+	completed_tasks=$(jq '[(.tasks // [])[] | select(.status == "completed")] | length' "$STATUS_FILE")
+	[ "$task_count" -eq 3 ]
+	[ "$completed_tasks" -eq 1 ]
+
+	# Branch-evidence re-evaluation (the #620 fix): task 1 gains evidence
+	# (marketplace.json was touched); task 2 gains none (README.md was not)
+	# and must remain an unresolved gap, named by id and description.
+	local verified_completed=$completed_tasks
+	local -a unverified_tasks=()
+	local id status desc
+	while IFS=$'\t' read -r id status; do
+		[[ "$status" == "failed" ]] || continue
+		local -a files=()
+		while IFS= read -r f; do
+			files+=("$f")
+		done < <(jq -r --argjson id "$id" '(.tasks[] | select(.id == $id)).files[]' "$STATUS_FILE")
+		if _task_has_file_evidence "$BASE_BRANCH" "${files[@]}"; then
+			verified_completed=$((verified_completed + 1))
+		else
+			desc=$(jq -r --argjson id "$id" '(.tasks[] | select(.id == $id)).description' "$STATUS_FILE")
+			unverified_tasks+=("task ${id} (${desc})")
+		fi
+	done < <(jq -r '(.tasks // [])[] | [.id, .status] | @tsv' "$STATUS_FILE")
+
+	[ "$verified_completed" -eq 2 ]
+	[ "${#unverified_tasks[@]}" -eq 1 ]
+	[[ "${unverified_tasks[0]}" == "task 2 (README install section)" ]]
+
+	# Replay the orchestrator's PARTIAL-COMPLETION GATE (issue #577) using the
+	# branch-verified count, naming the still-unresolved task in the reason
+	# (#620 AC3) rather than reporting only a count.
+	if (( verified_completed < task_count )); then
+		DEGRADED_STAGES+=("implement:partial:${verified_completed}/${task_count}")
+		local reason
+		reason="Partial implementation: ${verified_completed}/${task_count} tasks completed (implement:partial:${verified_completed}/${task_count}); lacking file evidence: $(IFS=,; echo "${unverified_tasks[*]}")."
+		jq --arg reason "$reason" \
+			'.merge_blocked_reason = (.merge_blocked_reason // $reason)' \
+			"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+	fi
+
+	local gate_result blocked_reason block_kind
+	gate_result=$(_run_merge_gate)
+	blocked_reason="${gate_result%%$'\x1e'*}"
+	block_kind="${gate_result#*$'\x1e'}"
+
+	[ -n "$blocked_reason" ]
+	[[ "$blocked_reason" == "Partial implementation:"* ]]
+	[[ "$blocked_reason" == *"task 2 (README install section)"* ]]
+	[ "$block_kind" == "partial" ]
 }
 
 @test "sanity: #616's raw stage status (no branch-evidence re-evaluation) does block" {
