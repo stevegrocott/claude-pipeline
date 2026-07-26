@@ -2305,6 +2305,14 @@ run_stage() {
     # fix/fix-review-* gets a dedicated sonnet cap (env: MAX_TURNS_FIX_REVIEW,
     # default 20) — targeted corrections, less scope than implement/review.
     # pr/pr-review/research turn limits are unchanged.
+    # One-shot task-description length hint, set by the task-launch site
+    # immediately before calling run_stage.  Consumed and cleared here so a
+    # stale value can never raise the budget of an unrelated later stage.
+    local _stage_desc_len="${_RUN_STAGE_DESC_LEN:-0}"
+    local _promote_chars="${TASK_DESC_PROMOTE_CHARS:-200}"
+    unset _RUN_STAGE_DESC_LEN
+    [[ "$_stage_desc_len" =~ ^[0-9]+$ ]] || _stage_desc_len=0
+
     local -a turns_args=()
     local _matched_prefix _inherent_tier
     _matched_prefix=$(_match_stage_prefix "$stage_name") || true
@@ -2334,6 +2342,16 @@ run_stage() {
         if [[ "$complexity" == "M" || "$complexity" == "L" ]]; then
             turns_args=(--max-turns 40)
             log "  Max turns: 40 (sonnet with M/L complexity)"
+        elif (( _stage_desc_len > _promote_chars )); then
+            # Oversized (S) task — almost certainly mis-sized.  18 of 30
+            # recorded max-turns failures died at exactly this 25-turn cap.
+            # Raise ONLY the turn budget to the M/L value; task_size itself is
+            # deliberately left at S because size also drives review attempts,
+            # the quality loop, model routing and docs skipping — promoting it
+            # would re-introduce the Opus/quality cost that issue #579 removed.
+            turns_args=(--max-turns 40)
+            log "  Max turns: 40 (sonnet S-complexity, oversized description:" \
+                "${_stage_desc_len} chars > ${_promote_chars}, env: TASK_DESC_PROMOTE_CHARS)"
         else
             turns_args=(--max-turns 25)
             log "  Max turns: 25 (sonnet with S/empty complexity)"
@@ -4903,6 +4921,11 @@ Commit your changes with a descriptive message."
 				"timeout ${current_timeout}s"
 		fi
 
+		# Hand run_stage the task-description length so an oversized (S)
+		# task gets the M/L turn budget instead of dying at 25 turns.
+		# run_stage runs in a command substitution (subshell), so its own
+		# unset cannot reach us — clear it here too.
+		_RUN_STAGE_DESC_LEN=${#task_desc}
 		if [[ -n "$current_model" ]]; then
 			impl_result=$(run_stage \
 				"implement-task-$task_id" \
@@ -4917,6 +4940,7 @@ Commit your changes with a descriptive message."
 				"implement-issue-implement.json" \
 				"$task_agent" "$task_size")
 		fi
+		unset _RUN_STAGE_DESC_LEN
 		_halt_if_budget_exceeded
 
 		local impl_status
