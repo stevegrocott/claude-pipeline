@@ -186,13 +186,47 @@ resolve_skill_src() {
     fi
 }
 
+# Subdirectories bundled alongside the top-level scripts. Kept in lockstep
+# with PARITY_SUBDIRS in
+# .claude/scripts/implement-issue-test/test-bundle-parity.bats — both lists
+# must name the same directories or the generator and the guard silently
+# diverge on scope again (issue #623).
+BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)
+
+# Regenerate one directory level of the bundle: copy every file in $src_dir
+# matching $pattern that is missing/stale in $dst_dir, and remove files in
+# $dst_dir with no canonical counterpart. $label prefixes progress output
+# (e.g. "platform/").
+_bundle_scripts_dir() {
+    local src_dir="$1" dst_dir="$2" label="$3" pattern="$4"
+    local existing base canonical
+
+    for existing in "$dst_dir"/$pattern; do
+        [[ -f "$existing" ]] || continue
+        base=$(basename "$existing")
+        if [[ ! -f "$src_dir/$base" ]]; then
+            rm "$existing"
+            echo "  REMOVE $label$base (no longer in .claude/scripts/)"
+        fi
+    done
+
+    for canonical in "$src_dir"/$pattern; do
+        [[ -f "$canonical" ]] || continue
+        base=$(basename "$canonical")
+        if [[ -f "$dst_dir/$base" ]] && \
+            diff -q "$canonical" "$dst_dir/$base" > /dev/null 2>&1; then
+            continue
+        fi
+        cp "$canonical" "$dst_dir/$base"
+        echo "  BUNDLE $label$base"
+    done
+}
+
 # Regenerate the bundled plugin script tree from the canonical .claude/scripts/
 # tree (issue #623) — the bundle is PRODUCED, not hand-edited. Copies every
-# canonical top-level *.sh into the bundle and removes bundled *.sh with no
-# canonical counterpart, so the two trees never silently drift again. Scoped
-# to top-level *.sh only, matching the parity check in
-# .claude/scripts/implement-issue-test/test-bundle-parity.bats — subdirectories
-# (platform/, prompts/, schemas/) are synced separately and untouched here.
+# canonical top-level *.sh plus every file under platform/, prompts/, and
+# schemas/ into the bundle, and removes bundled files with no canonical
+# counterpart, so the two trees never silently drift again.
 bundle_scripts() {
     local src="$PIPELINE_DIR/scripts"
     local dst="$BUNDLE_SCRIPTS_DIR"
@@ -204,27 +238,16 @@ bundle_scripts() {
 
     mkdir -p "$dst"
 
-    echo "Regenerating bundle: .claude/scripts/*.sh -> plugins/pipeline-core/scripts/"
+    echo "Regenerating bundle: .claude/scripts/ -> plugins/pipeline-core/scripts/"
     echo ""
 
-    local bundled base canonical
-    for bundled in "$dst"/*.sh; do
-        [[ -f "$bundled" ]] || continue
-        base=$(basename "$bundled")
-        if [[ ! -f "$src/$base" ]]; then
-            rm "$bundled"
-            echo "  REMOVE $base (no longer in .claude/scripts/)"
-        fi
-    done
+    _bundle_scripts_dir "$src" "$dst" "" "*.sh"
 
-    for canonical in "$src"/*.sh; do
-        [[ -f "$canonical" ]] || continue
-        base=$(basename "$canonical")
-        if [[ -f "$dst/$base" ]] && diff -q "$canonical" "$dst/$base" > /dev/null 2>&1; then
-            continue
-        fi
-        cp "$canonical" "$dst/$base"
-        echo "  BUNDLE $base"
+    local sub
+    for sub in "${BUNDLE_SCRIPT_SUBDIRS[@]}"; do
+        [[ -d "$src/$sub" ]] || continue
+        mkdir -p "$dst/$sub"
+        _bundle_scripts_dir "$src/$sub" "$dst/$sub" "$sub/" "*"
     done
 
     echo ""

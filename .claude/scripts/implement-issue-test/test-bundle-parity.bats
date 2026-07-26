@@ -19,34 +19,64 @@ load 'helpers/test-helper.bash'
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUNDLE_DIR="$REPO_ROOT/plugins/pipeline-core/scripts"
 
-@test "bundle parity: every .claude/scripts/*.sh matches its plugins/pipeline-core/scripts counterpart" {
+# Subdirectories checked in addition to top-level *.sh. Kept in lockstep with
+# BUNDLE_SCRIPT_SUBDIRS in sync.sh's bundle_scripts() — both lists must name
+# the same directories or the generator and this guard silently diverge on
+# scope again. platform/ is where PR #624's drift shipped, so it must stay
+# covered here, not just at the top level.
+PARITY_SUBDIRS=(platform prompts schemas)
+
+# Print, one per line, every file under $1 that this guard is responsible
+# for: top-level *.sh, plus every file (any extension) under each of
+# PARITY_SUBDIRS, as a path relative to $1.
+_parity_relpaths() {
+	local root="$1"
+	local script sub
+
+	for script in "$root"/*.sh; do
+		[[ -f "$script" ]] || continue
+		printf '%s\n' "${script#"$root"/}"
+	done
+
+	for sub in "${PARITY_SUBDIRS[@]}"; do
+		[[ -d "$root/$sub" ]] || continue
+		while IFS= read -r script; do
+			printf '%s\n' "${script#"$root"/}"
+		done < <(find "$root/$sub" -type f | sort)
+	done
+}
+
+@test "bundle parity: every canonical script matches its plugins/pipeline-core/scripts counterpart" {
 	[[ -d "$BUNDLE_DIR" ]] || fail "bundle directory not found: $BUNDLE_DIR"
 
-	local report="" script base counterpart pair_diff
-	for script in "$SCRIPT_DIR"/*.sh; do
-		base=$(basename "$script")
-		counterpart="$BUNDLE_DIR/$base"
+	local report="" rel canonical counterpart pair_diff
+	while IFS= read -r rel; do
+		canonical="$SCRIPT_DIR/$rel"
+		counterpart="$BUNDLE_DIR/$rel"
 
 		if [[ ! -f "$counterpart" ]]; then
-			report+=$'\n'"MISSING: $base has no counterpart in plugins/pipeline-core/scripts/"
+			report+=$'\n'"MISSING: $rel has no counterpart in plugins/pipeline-core/scripts/"
 			continue
 		fi
 
-		diff -q "$script" "$counterpart" >/dev/null 2>&1 && continue
+		diff -q "$canonical" "$counterpart" >/dev/null 2>&1 && continue
 
-		pair_diff="$(diff -u "$counterpart" "$script")" || true
-		report+=$'\n'"DIFF: $base"$'\n'"$pair_diff"
-	done
+		pair_diff="$(diff -u "$counterpart" "$canonical")" || true
+		report+=$'\n'"DIFF: $rel"$'\n'"$pair_diff"
+	done < <(_parity_relpaths "$SCRIPT_DIR")
 
-	[[ -z "$report" ]] || fail "canonical/bundle drift detected — port the missing side by hand:$report"
+	local msg="canonical/bundle drift detected — run ./sync.sh bundle to"
+	msg+=" regenerate the bundle from canonical, then review and commit"
+	msg+=" the result:$report"
+	[[ -z "$report" ]] || fail "$msg"
 }
 
-@test "bundle parity: every plugins/pipeline-core/scripts/*.sh has a canonical counterpart" {
-	local script base
-	for script in "$BUNDLE_DIR"/*.sh; do
-		base=$(basename "$script")
-		[[ -f "$SCRIPT_DIR/$base" ]] || fail "bundled script $base has no canonical counterpart in .claude/scripts/"
-	done
+@test "bundle parity: every bundled script has a canonical counterpart" {
+	local rel
+	while IFS= read -r rel; do
+		[[ -f "$SCRIPT_DIR/$rel" ]] || \
+			fail "bundled file $rel has no canonical counterpart in .claude/scripts/"
+	done < <(_parity_relpaths "$BUNDLE_DIR")
 }
 
 # =============================================================================

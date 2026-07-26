@@ -1,0 +1,65 @@
+name: Bundle Parity
+
+# Guards the two hand-edited copies of every pipeline script — .claude/scripts/
+# (this repo's own pipeline) and plugins/pipeline-core/scripts/ (what
+# consumers install via the plugin bundle) — from silently drifting apart
+# (issue #623). Runs on every push/PR that touches either tree so a change
+# made only to one side fails before it can be tagged (AC5), independent of
+# skill-golden.yml's decide-*/schemas/skills-scoped triggers.
+#
+# sync.sh and tests/sync-bundle.bats are in the trigger set too: sync.sh is
+# the generator that produces the bundle, and its BUNDLE_SCRIPT_SUBDIRS list
+# must stay in lockstep with the guard's PARITY_SUBDIRS, so a change to
+# either side has to re-run both suites.
+#
+# (Paths are duplicated rather than shared via a YAML anchor — the Actions
+# workflow parser does not reliably support anchors/aliases.)
+on:
+  push:
+    paths:
+      - '.claude/scripts/**'
+      - 'plugins/pipeline-core/scripts/**'
+      - 'sync.sh'
+      - 'tests/sync-bundle.bats'
+      - '.github/workflows/bundle-parity.yml'
+  pull_request:
+    paths:
+      - '.claude/scripts/**'
+      - 'plugins/pipeline-core/scripts/**'
+      - 'sync.sh'
+      - 'tests/sync-bundle.bats'
+      - '.github/workflows/bundle-parity.yml'
+
+jobs:
+  bundle-parity:
+    name: Bundle Parity & Syntax
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bats
+
+      - name: Run bundle parity + bash -n guard
+        run: bats .claude/scripts/implement-issue-test/test-bundle-parity.bats
+
+      - name: Run bundle generator tests
+        run: bats tests/sync-bundle.bats
+
+      # The bundle is PRODUCED, not hand-edited: regenerating it from the
+      # canonical tree must be a no-op on a correct commit. This catches a
+      # bundle-only edit that happens to keep the trees byte-identical only
+      # because both sides were edited inconsistently.
+      - name: Verify bundle is regenerable (sync.sh bundle is a no-op)
+        run: |
+          ./sync.sh bundle
+          if ! git diff --quiet; then
+            echo "::error::Bundle is not regenerable from .claude/scripts/. Run './sync.sh bundle' and commit the result."
+            git --no-pager diff --stat
+            exit 1
+          fi

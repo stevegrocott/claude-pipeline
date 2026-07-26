@@ -55,19 +55,30 @@ source "$SCRIPT_DIR/claude-usage.sh"
 source "$SCRIPT_DIR/prompts/triage-prompt.sh"
 # shellcheck source=resolve-pipeline-root.sh
 source "$SCRIPT_DIR/resolve-pipeline-root.sh"
+
+# Resolve the consumer repo's platform.sh via resolve_consumer_file() (checks
+# $PIPELINE_CONFIG_DIR, <repo-root>/.claude/config/, then the legacy
+# repo-local fallback). Loud-abort rather than silently continuing with no
+# platform config — the orchestrator's defaults are meaningless without it.
 PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
     echo "FATAL: platform.sh not found (checked \$PIPELINE_CONFIG_DIR," \
         "<repo-root>/.claude/config/, and the legacy fallback)." \
         "Cannot continue without consumer platform config." >&2
     exit 1
 }
-# shellcheck disable=SC1090
+# shellcheck disable=SC1090  # path resolved at runtime by resolve_consumer_file
 source "$PLATFORM_SH_FILE"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
-# Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work regardless of CWD
+# Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work
+# regardless of CWD. Anchor against the CONSUMER repo root (git toplevel,
+# falling back to $PWD), matching resolve_consumer_file()'s own anchor —
+# not the plugin bundle path, since the context file lives in the consumer
+# repo alongside platform.sh.
 if [[ -n "${PLATFORM_CONTEXT_FILE:-}" && "${PLATFORM_CONTEXT_FILE}" != /* ]]; then
-    PLATFORM_CONTEXT_FILE="$(cd "$SCRIPT_DIR/../.." && pwd)/$PLATFORM_CONTEXT_FILE"
+    CONSUMER_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+    CONSUMER_ROOT="${CONSUMER_ROOT:-$PWD}"
+    PLATFORM_CONTEXT_FILE="$CONSUMER_ROOT/$PLATFORM_CONTEXT_FILE"
 fi
 
 # Read project context file for agent prompt injection

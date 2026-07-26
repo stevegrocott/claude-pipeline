@@ -1,16 +1,19 @@
 #!/usr/bin/env bats
 #
 # tests/sync-bundle.bats
-# `sync.sh bundle` regenerates plugins/pipeline-core/scripts/*.sh from
-# .claude/scripts/*.sh (issue #623 task 4) — the bundle is PRODUCED from the
+# `sync.sh bundle` regenerates plugins/pipeline-core/scripts/ from
+# .claude/scripts/ (issue #623 task 4) — the bundle is PRODUCED from the
 # canonical tree rather than hand-edited, so drift like the one that shipped
 # v0.3.0 without the #619 turn-budget fix can't happen silently.
 #
 # Runs against a fake temp repo (a copy of sync.sh plus fake .claude/scripts
-# and plugins/pipeline-core/scripts trees) rather than the real repo, since
-# the real bundle currently carries an unported #614 fix in
-# implement-issue-orchestrator.sh (issue #623 task 2) that a live run would
-# incorrectly wipe out.
+# and plugins/pipeline-core/scripts trees) rather than the real repo, so the
+# generator's copy/overwrite/remove behaviour can be asserted against known
+# fixtures without depending on — or mutating — real repo content.
+#
+# The two trees are reconciled as of issue #623 task 2, so a live
+# `./sync.sh bundle` is a safe no-op; test-bundle-parity.bats is the guard
+# that keeps it that way.
 #
 
 bats_require_minimum_version 1.5.0
@@ -48,6 +51,40 @@ teardown() {
 	awk '/^[[:space:]]+bundle\)/{f=1} f{print} /^[[:space:]]+;;/{f=0}' \
 		"$SYNC_SH" | grep -q 'bundle_scripts' || {
 		printf 'FAIL: bundle) case does not call bundle_scripts\n' >&2
+		return 1
+	}
+}
+
+# The generator (sync.sh) and the drift guard (test-bundle-parity.bats) each
+# carry their own list of bundled subdirectories. If they disagree, the
+# generator regenerates a directory the guard never checks (or vice versa) and
+# drift goes silent again — exactly the #623 failure mode. Comments alone
+# don't enforce that, so assert the two lists are byte-identical.
+@test "bundle subdir list matches the parity guard's subdir list" {
+	local parity_bats bundle_list parity_list
+	parity_bats="$REPO_ROOT/.claude/scripts/implement-issue-test"
+	parity_bats+="/test-bundle-parity.bats"
+
+	[[ -f "$parity_bats" ]] || {
+		printf 'FAIL: parity guard not found: %s\n' "$parity_bats" >&2
+		return 1
+	}
+
+	bundle_list=$(sed -n 's/^BUNDLE_SCRIPT_SUBDIRS=(\(.*\))$/\1/p' "$SYNC_SH")
+	parity_list=$(sed -n 's/^PARITY_SUBDIRS=(\(.*\))$/\1/p' "$parity_bats")
+
+	[[ -n "$bundle_list" ]] || {
+		printf 'FAIL: BUNDLE_SCRIPT_SUBDIRS not found in sync.sh\n' >&2
+		return 1
+	}
+	[[ -n "$parity_list" ]] || {
+		printf 'FAIL: PARITY_SUBDIRS not found in %s\n' "$parity_bats" >&2
+		return 1
+	}
+
+	[[ "$bundle_list" == "$parity_list" ]] || {
+		printf 'FAIL: subdir lists diverged\n  sync.sh:  %s\n  parity:   %s\n' \
+			"$bundle_list" "$parity_list" >&2
 		return 1
 	}
 }
