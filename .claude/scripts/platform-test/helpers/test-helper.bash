@@ -29,20 +29,31 @@ setup_test_env() {
 
     # -----------------------------------------------------------------
     # Create a mock platform.sh config in the location the platform
-    # scripts expect: ../../config/platform.sh relative to SCRIPT_DIR.
-    # Instead of modifying the real config we override the sourcing by
-    # placing a shim config alongside the real platform scripts.
-    # The platform scripts do:
+    # scripts resolve to. The platform scripts do:
     #   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    #   source "$SCRIPT_DIR/../../config/platform.sh"
-    # So we create $TEST_TMP/config/platform.sh and symlink the scripts
-    # into $TEST_TMP/scripts/platform/ so the relative path resolves.
+    #   source "$SCRIPT_DIR/../resolve-pipeline-root.sh"
+    #   PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)"
+    # resolve_consumer_file's lookups are:
+    #   1. $PIPELINE_CONFIG_DIR/<rel>
+    #   2. <git-toplevel-or-PWD>/.claude/config/<rel>
+    #   3. <lib-dir>/../config/<rel>
+    # Lookup 3 would land on $TEST_TMP/config/platform.sh, but the suite
+    # runs with CWD inside this repo, so lookup 2 wins first and resolves
+    # the REAL .claude/config/platform.sh — silently shadowing the mock
+    # and leaving JIRA_* unset. Pin lookup 1 at the fixture so resolution
+    # is deterministic regardless of where bats is invoked from.
     # -----------------------------------------------------------------
     mkdir -p "$TEST_TMP/scripts/platform"
     mkdir -p "$TEST_TMP/config"
 
     # Copy all platform scripts to the temp location
     cp "$SCRIPT_DIR"/*.sh "$TEST_TMP/scripts/platform/"
+
+    # The resolver library the platform scripts source (one level up)
+    cp "$SCRIPT_DIR/../resolve-pipeline-root.sh" "$TEST_TMP/scripts/"
+
+    # Pin config resolution at the fixture (lookup 1 beats lookups 2 and 3)
+    export PIPELINE_CONFIG_DIR="$TEST_TMP/config"
 
     # Set default platform config values
     export TRACKER="github"

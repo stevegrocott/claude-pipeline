@@ -2,8 +2,16 @@
 # Usage: comment-issue.sh <issue-number-or-key> "Comment body" [repo]
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PLATFORM_CONFIG="$SCRIPT_DIR/../../config/platform.sh"
-if [[ -f "$PLATFORM_CONFIG" ]]; then source "$PLATFORM_CONFIG"; fi
+# shellcheck source=../resolve-pipeline-root.sh
+source "$SCRIPT_DIR/../resolve-pipeline-root.sh"
+PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
+    echo "FATAL: platform.sh not found (checked \$PIPELINE_CONFIG_DIR," \
+        "<repo-root>/.claude/config/, and the legacy fallback)." \
+        "Cannot continue without consumer platform config." >&2
+    exit 1
+}
+# shellcheck disable=SC1090
+source "$PLATFORM_SH_FILE"
 
 ISSUE="$1" COMMENT="$2" REPO_ARG="${3:-}"
 

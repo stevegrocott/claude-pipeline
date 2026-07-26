@@ -53,7 +53,16 @@ source "$SCRIPT_DIR/model-config.sh"
 source "$SCRIPT_DIR/claude-usage.sh"
 # shellcheck source=prompts/triage-prompt.sh
 source "$SCRIPT_DIR/prompts/triage-prompt.sh"
-source "$SCRIPT_DIR/../config/platform.sh"
+# shellcheck source=resolve-pipeline-root.sh
+source "$SCRIPT_DIR/resolve-pipeline-root.sh"
+PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
+    echo "FATAL: platform.sh not found (checked \$PIPELINE_CONFIG_DIR," \
+        "<repo-root>/.claude/config/, and the legacy fallback)." \
+        "Cannot continue without consumer platform config." >&2
+    exit 1
+}
+# shellcheck disable=SC1090
+source "$PLATFORM_SH_FILE"
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
 # Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work regardless of CWD

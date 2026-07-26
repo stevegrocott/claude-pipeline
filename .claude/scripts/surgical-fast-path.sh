@@ -26,10 +26,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_DIR="${SCHEMA_DIR:-$SCRIPT_DIR/schemas}"
 
-if [[ -f "$SCRIPT_DIR/../config/platform.sh" ]]; then
-    # shellcheck disable=SC1091
-    source "$SCRIPT_DIR/../config/platform.sh"
-fi
+# shellcheck source=resolve-pipeline-root.sh
+source "$SCRIPT_DIR/resolve-pipeline-root.sh"
+PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
+    echo "FATAL: platform.sh not found (checked \$PIPELINE_CONFIG_DIR," \
+        "<repo-root>/.claude/config/, and the legacy fallback)." \
+        "Cannot continue without consumer platform config." >&2
+    exit 1
+}
+# shellcheck disable=SC1090
+source "$PLATFORM_SH_FILE"
 if [[ -f "$SCRIPT_DIR/model-config.sh" ]]; then
     # shellcheck disable=SC1091
     source "$SCRIPT_DIR/model-config.sh"

@@ -556,3 +556,38 @@ MAP
 	[ "$status" -ne 0 ] \
 		|| { echo "CLAUDE_PLUGIN_ROOT used in a skill (use a pipeline-core-* bin instead):" >&2; echo "$output" >&2; return 1; }
 }
+
+@test "bundle: no bundled script hardcodes ../config/platform.sh" {
+	local scripts_dir="$REPO_ROOT/plugins/pipeline-core/scripts"
+	[ -d "$scripts_dir" ] || skip "bundle scripts not present"
+
+	# The bundle ships no config/ dir, so "$SCRIPT_DIR/../config/platform.sh"
+	# resolves inside the plugin cache and misses. The unguarded form errors;
+	# the [[ -f ]]-guarded form fails open, leaving TRACKER, GIT_CLI,
+	# DEPLOY_VERIFY_CMD and the MAX_* caps unset instead of defaulted — a
+	# silent deploy-verify skip. Everything must route through
+	# resolve_consumer_file() instead.
+	run grep -rnE 'SCRIPT_DIR/(\.\./)+config/platform\.sh' \
+		--include='*.sh' "$scripts_dir"
+	[ "$status" -ne 0 ] \
+		|| { echo "hardcoded platform.sh source in bundled script(s):" >&2; echo "$output" >&2; return 1; }
+}
+
+@test "bundle: platform scripts resolve config and abort loudly when it is missing" {
+	local rd="$REPO_ROOT/plugins/pipeline-core/scripts/platform/read-issue.sh"
+	[ -f "$rd" ] || skip "read-issue.sh not present"
+
+	grep -q 'resolve_consumer_file platform.sh' "$rd" \
+		|| { echo "read-issue.sh does not use resolve_consumer_file" >&2; return 1; }
+
+	# In an isolated non-git dir with no override and no reachable
+	# .claude/config/platform.sh, all three lookup paths must miss and the
+	# script must exit non-zero naming platform.sh — never continue unset.
+	run env -u PIPELINE_CONFIG_DIR -u CLAUDE_PLUGIN_ROOT \
+		bash -c 'cd "$1" && exec "$2" 123' _ "$TEST_TMP" "$rd"
+
+	[ "$status" -ne 0 ] \
+		|| { echo "expected non-zero exit when platform.sh unresolvable, got 0: $output" >&2; return 1; }
+	[[ "$output" == *"platform.sh"* ]] \
+		|| { echo "expected FATAL platform.sh message, got: $output" >&2; return 1; }
+}
