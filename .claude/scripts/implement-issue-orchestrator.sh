@@ -5772,6 +5772,9 @@ Commit your changes with a descriptive message."
 					"timeout ${current_timeout}s"
 			fi
 
+			# Oversized-(S) turn-budget hint; cleared after because
+			# run_stage runs in a subshell and cannot unset it for us.
+			_RUN_STAGE_DESC_LEN=${#tdesc}
 			if [[ -n "$current_model" ]]; then
 				impl_result=$(run_stage \
 					"implement-task-$tid" \
@@ -5787,6 +5790,7 @@ Commit your changes with a descriptive message."
 					"implement-issue-implement.json" \
 					"$tagent" "$tsize")
 			fi
+			unset _RUN_STAGE_DESC_LEN
 			_halt_if_budget_exceeded
 
 			local impl_status
