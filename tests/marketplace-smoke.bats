@@ -353,9 +353,9 @@ JSON
 @test "real repo: marketplace.json pipeline-core version matches plugin.json" {
 	local mkt core
 	mkt="$(_find_marketplace "$REPO_ROOT")" \
-		|| skip "marketplace.json not created yet (issue #571 task 1)"
+		|| skip "marketplace.json not found"
 	core="$(_find_plugin_core "$REPO_ROOT")" \
-		|| skip "plugins/pipeline-core not created yet (issue #571 tasks 1-2)"
+		|| skip "plugins/pipeline-core not found"
 
 	local mkt_version
 	mkt_version="$(jq -r '.plugins[] | select(.name == "pipeline-core") | .version // empty' "$mkt")"
