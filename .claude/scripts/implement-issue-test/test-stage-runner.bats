@@ -1306,6 +1306,67 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Oversized S-task turn-budget promotion.
+#
+# An (S)-marked task whose description exceeds TASK_DESC_PROMOTE_CHARS is
+# very likely mis-sized: 18 of 30 recorded max-turns failures died at exactly
+# the 25-turn S cap.  Raise ONLY the turn budget to the M/L value — task_size
+# itself is deliberately NOT promoted, because size also drives review
+# attempts, the quality loop, model routing and docs skipping (issue #579
+# cost policy).
+# -----------------------------------------------------------------------------
+
+@test "run_stage raises S-complexity turn budget when task description is oversized" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    _RUN_STAGE_DESC_LEN=250
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    grep -q "Max turns: 40 (sonnet S-complexity, oversized description" "$LOG_FILE" || \
+        fail "Expected raised turn budget for oversized S task. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage keeps the 25-turn S budget for a normally-sized description" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    _RUN_STAGE_DESC_LEN=120
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    grep -q "Max turns: 25 (sonnet with S/empty complexity)" "$LOG_FILE" || \
+        fail "Expected unchanged 25-turn budget. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage clears the description-length hint so it cannot leak to later stages" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    timeout() {
+        shift; shift; shift; shift
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    _RUN_STAGE_DESC_LEN=250
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    [[ -z "${_RUN_STAGE_DESC_LEN:-}" ]] || \
+        fail "_RUN_STAGE_DESC_LEN leaked after run_stage: '${_RUN_STAGE_DESC_LEN}'"
+
+    : > "$LOG_FILE"
+    run_stage "implement-task-2" "prompt" "test-schema.json" "" "S" "" "sonnet"
+    grep -q "Max turns: 25 (sonnet with S/empty complexity)" "$LOG_FILE" || \
+        fail "Second stage inherited the raised budget. Log: $(cat "$LOG_FILE")"
+}
+
+# -----------------------------------------------------------------------------
 # pr / pr-review budgets are intentionally unchanged by the stage-type-aware
 # override — verify they still get their original caps (10 / 10) and that the
 # new MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect them.
