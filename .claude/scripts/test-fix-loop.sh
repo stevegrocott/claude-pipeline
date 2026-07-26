@@ -22,7 +22,16 @@ set -uo pipefail  # Note: not -e, we handle errors explicitly
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../config/platform.sh"
+# shellcheck source=resolve-pipeline-root.sh
+source "$SCRIPT_DIR/resolve-pipeline-root.sh"
+PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
+    echo "FATAL: platform.sh not found (checked \$PIPELINE_CONFIG_DIR," \
+        "<repo-root>/.claude/config/, and the legacy fallback)." \
+        "Cannot continue without consumer platform config." >&2
+    exit 1
+}
+# shellcheck disable=SC1090
+source "$PLATFORM_SH_FILE"
 source "$SCRIPT_DIR/model-config.sh"
 
 # Limits

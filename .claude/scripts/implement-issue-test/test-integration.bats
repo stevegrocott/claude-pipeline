@@ -1053,11 +1053,33 @@ teardown() {
 # PLATFORM CONFIG SOURCING
 # =============================================================================
 
-@test "orchestrator sources platform config" {
+@test "orchestrator sources platform config via the consumer resolver" {
     local script_content
     script_content=$(cat "$ORCHESTRATOR_SCRIPT")
 
-    [[ "$script_content" == *'source "$SCRIPT_DIR/../config/platform.sh"'* ]]
+    # Must resolve platform.sh through resolve_consumer_file, NOT by hardcoding
+    # "$SCRIPT_DIR/../config/platform.sh" — that path does not exist inside the
+    # plugin bundle, which ships no config/ dir, so consumers silently got an
+    # unset TRACKER / DEPLOY_VERIFY_CMD / MAX_* set.
+    [[ "$script_content" == *'resolve_consumer_file platform.sh'* ]]
+    [[ "$script_content" != *'source "$SCRIPT_DIR/../config/platform.sh"'* ]]
+}
+
+@test "no pipeline script hardcodes ../config/platform.sh" {
+    local offenders=""
+    local d
+    for d in "$SCRIPT_DIR" "$SCRIPT_DIR/platform"; do
+        [[ -d "$d" ]] || continue
+        local f
+        for f in "$d"/*.sh; do
+            [[ -f "$f" ]] || continue
+            [[ "$(basename "$f")" == "resolve-pipeline-root.sh" ]] && continue
+            if grep -q 'SCRIPT_DIR/\.\./config/platform\.sh\|SCRIPT_DIR/\.\./\.\./config/platform\.sh' "$f"; then
+                offenders+=" $(basename "$f")"
+            fi
+        done
+    done
+    [[ -z "$offenders" ]] || fail "hardcoded platform.sh source in:$offenders"
 }
 
 @test "orchestrator sets PLATFORM_DIR" {
