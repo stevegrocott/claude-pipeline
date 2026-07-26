@@ -362,6 +362,46 @@ JSON
 		|| { echo "resolved wrong: got '$output' want '$scripts_dir/$rel'" >&2; return 1; }
 }
 
+@test "bundle: resolve_consumer_file resolves platform.sh from a clean consumer repo root (PWD fallback)" {
+	local resolver="$REPO_ROOT/plugins/pipeline-core/scripts/resolve-pipeline-root.sh"
+	[ -f "$resolver" ] || { echo "resolver missing: $resolver" >&2; return 1; }
+
+	local consumer="$TEST_TMP/consumer"
+	mkdir -p "$consumer/.claude/config"
+	printf '#!/usr/bin/env bash\n' > "$consumer/.claude/config/platform.sh"
+
+	# No git repo at $consumer and no PIPELINE_CONFIG_DIR override, so
+	# resolution can only succeed via resolve_consumer_file()'s $PWD fallback
+	# (path 2) — the consumer repo root when `git rev-parse` finds no toplevel.
+	run env -u PIPELINE_CONFIG_DIR -u CLAUDE_PLUGIN_ROOT bash -c '
+		cd "$1" || exit 1
+		source "$2"
+		resolve_consumer_file platform.sh
+	' _ "$consumer" "$resolver"
+
+	[ "$status" -eq 0 ] || { echo "resolve_consumer_file failed: $output" >&2; return 1; }
+	[ "$output" = "$consumer/.claude/config/platform.sh" ] \
+		|| { echo "resolved wrong: got '$output' want" \
+			"'$consumer/.claude/config/platform.sh'" >&2; return 1; }
+}
+
+@test "bundle: implement-issue-orchestrator.sh loud-aborts when platform.sh cannot be resolved" {
+	local orch="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+	[ -f "$orch" ] || { echo "orchestrator missing: $orch" >&2; return 1; }
+
+	# Isolated, non-git tmp dir with no PIPELINE_CONFIG_DIR override and no
+	# reachable .claude/config/platform.sh — all three resolve_consumer_file()
+	# lookup paths must miss, and the orchestrator must abort loudly instead
+	# of silently continuing with no platform config (issue #614 AC1/AC4).
+	run env -u PIPELINE_CONFIG_DIR -u CLAUDE_PLUGIN_ROOT \
+		bash -c 'cd "$1" && exec "$2"' _ "$TEST_TMP" "$orch"
+
+	[ "$status" -ne 0 ] \
+		|| { echo "expected non-zero exit, got 0: $output" >&2; return 1; }
+	[[ "$output" == *"platform.sh"* ]] \
+		|| { echo "expected FATAL platform.sh message, got: $output" >&2; return 1; }
+}
+
 # ===========================================================================
 # bin entrypoints — self-locating wrappers on the Bash-tool PATH (issue #599 Task 5)
 #
