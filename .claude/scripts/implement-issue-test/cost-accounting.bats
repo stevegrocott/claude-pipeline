@@ -359,6 +359,51 @@ assert_cost_reconciles() {
 }
 
 # =============================================================================
+# FAILED-STAGE COST — bail path must still persist cost onto the stage
+# =============================================================================
+#
+# Issue #617: the reconciliation tests above hand-craft a status.json with
+# estimated_cost already present on the "error" stages, which only proves
+# export_metrics'"'"'s rollup is status-agnostic (it always was). It does not
+# prove a real failing run ever gets that estimated_cost onto the stage entry
+# in the first place. In production a failing run_stage attempt is routed
+# through _apply_stage_action's "bail" branch, which calls set_stage_failed
+# with only the stage name + error_kind — never the stage_result's
+# tokens/cost, unlike the "accept" branch which threads tokens/cost onto the
+# stage via _stage_acc_add. This is the actual source of #617's ~51%
+# under-report: a bailed stage's own spend never reaches cost_summary. This
+# test drives the real bail path end-to-end and must fail until that gap is
+# closed.
+
+@test "a stage that bails still persists its cost so cost_summary includes it" {
+	_setup_orchestrator_env
+	init_status
+	set_stage_started "implement_task_2"
+
+	local stage_result
+	stage_result=$(jq -n '{
+		status: "error",
+		error_kind: "error_max_turns",
+		tokens: {input_tokens: 500000, output_tokens: 200000,
+		         cache_creation_input_tokens: 0, cache_read_input_tokens: 0},
+		cost: {reported_usd: 1.3836, computed_usd: 1.3836, estimated_usd: 1.3836}
+	}')
+
+	_RUN_STAGE_NAME="implement_task_2"
+	run _apply_stage_action "$stage_result" "bail" "max turns exceeded"
+	[ "$status" -eq 1 ]
+
+	export_metrics
+
+	local stage_status total_cost
+	stage_status=$(jq -r '.stages.implement_task_2.status' "$LOG_BASE/metrics.json")
+	total_cost=$(jq -r '.cost_summary.total_cost_usd' "$LOG_BASE/metrics.json")
+	[ "$stage_status" = "error" ]
+	assert_cost_equals "$total_cost" "1.3836" \
+		"a bailed stage's cost must still reach cost_summary.total_cost_usd"
+}
+
+# =============================================================================
 # BATCH-LEVEL cost_summary ROLLUP (batch-orchestrator.sh)
 # =============================================================================
 #
