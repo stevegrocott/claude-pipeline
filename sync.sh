@@ -21,6 +21,10 @@ PIPELINE_DIR="$SCRIPT_DIR/.claude"
 # as a fallback so plugin-hosted skill docs still propagate to consumers'
 # .claude/skills/ until they adopt the plugin marketplace directly.
 PLUGIN_SKILLS_DIR="$SCRIPT_DIR/plugins/pipeline-core/skills"
+# Bundled plugin script tree — what consumers install. Hand-editing this tree
+# is how it drifts from .claude/scripts/ (issue #623); `bundle` regenerates
+# it instead.
+BUNDLE_SCRIPTS_DIR="$SCRIPT_DIR/plugins/pipeline-core/scripts"
 
 # ---------------------------------------------------------------------------
 # Core files — synced between pipeline and projects.
@@ -93,15 +97,17 @@ usage() {
 Usage: ./sync.sh <command> <project-path>
 
 Commands:
-  to   <path>   Push core pipeline files TO a project's .claude/
-  from <path>   Pull core pipeline fixes FROM a project's .claude/
-  diff <path>   Show differences between pipeline and project core files
-  list          List all core files that get synced
+  to     <path>   Push core pipeline files TO a project's .claude/
+  from   <path>   Pull core pipeline fixes FROM a project's .claude/
+  diff   <path>   Show differences between pipeline and project core files
+  bundle          Regenerate plugins/pipeline-core/scripts/ from .claude/scripts/
+  list            List all core files that get synced
 
 Examples:
-  ./sync.sh to   ~/Projects/allied-universal-assign
-  ./sync.sh from ~/Projects/allied-universal-assign
-  ./sync.sh diff ~/Projects/allied-universal-assign
+  ./sync.sh to     ~/Projects/allied-universal-assign
+  ./sync.sh from   ~/Projects/allied-universal-assign
+  ./sync.sh diff   ~/Projects/allied-universal-assign
+  ./sync.sh bundle
 USAGE
     exit 1
 }
@@ -178,6 +184,51 @@ resolve_skill_src() {
     elif [[ "$base" == "$PIPELINE_DIR" && -d "$PLUGIN_SKILLS_DIR/$skill" ]]; then
         printf '%s' "$PLUGIN_SKILLS_DIR/$skill"
     fi
+}
+
+# Regenerate the bundled plugin script tree from the canonical .claude/scripts/
+# tree (issue #623) — the bundle is PRODUCED, not hand-edited. Copies every
+# canonical top-level *.sh into the bundle and removes bundled *.sh with no
+# canonical counterpart, so the two trees never silently drift again. Scoped
+# to top-level *.sh only, matching the parity check in
+# .claude/scripts/implement-issue-test/test-bundle-parity.bats — subdirectories
+# (platform/, prompts/, schemas/) are synced separately and untouched here.
+bundle_scripts() {
+    local src="$PIPELINE_DIR/scripts"
+    local dst="$BUNDLE_SCRIPTS_DIR"
+
+    if [[ ! -d "$src" ]]; then
+        echo "ERROR: $src does not exist." >&2
+        exit 1
+    fi
+
+    mkdir -p "$dst"
+
+    echo "Regenerating bundle: .claude/scripts/*.sh -> plugins/pipeline-core/scripts/"
+    echo ""
+
+    local bundled base canonical
+    for bundled in "$dst"/*.sh; do
+        [[ -f "$bundled" ]] || continue
+        base=$(basename "$bundled")
+        if [[ ! -f "$src/$base" ]]; then
+            rm "$bundled"
+            echo "  REMOVE $base (no longer in .claude/scripts/)"
+        fi
+    done
+
+    for canonical in "$src"/*.sh; do
+        [[ -f "$canonical" ]] || continue
+        base=$(basename "$canonical")
+        if [[ -f "$dst/$base" ]] && diff -q "$canonical" "$dst/$base" > /dev/null 2>&1; then
+            continue
+        fi
+        cp "$canonical" "$dst/$base"
+        echo "  BUNDLE $base"
+    done
+
+    echo ""
+    echo "Done. Bundle regenerated from .claude/scripts/."
 }
 
 # Strip <!-- STACK-SPECIFIC: --> from line 1 of consumer agent files.
@@ -434,6 +485,10 @@ case "$COMMAND" in
         echo ""
         echo "Universal skills:"
         diff_skills "$PIPELINE_DIR" "$PROJECT_DIR"
+        ;;
+
+    bundle)
+        bundle_scripts
         ;;
 
     list)
