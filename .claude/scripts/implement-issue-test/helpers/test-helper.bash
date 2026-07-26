@@ -364,6 +364,53 @@ assert_not_empty() {
     return 0
 }
 
+# Sums .stages[*].estimated_cost in $1 (a metrics.json/status.json-shaped
+# file) and fails loudly if that sum diverges from .cost_summary.total_cost_usd
+# by more than $2 percent (default 5). Shared by cost-accounting.bats and any
+# batch-level metrics reconciliation checks.
+assert_cost_reconciles() {
+    local metrics_file="$1" tolerance_pct="${2:-5}"
+    local stage_sum summary_total pct
+
+    # A jq failure (malformed metrics.json, a non-object .stages[] entry)
+    # must surface as a parse error, not as an empty string awk silently
+    # coerces to 0 and reports as a bogus "drifts 100%". `fail` only
+    # returns 1, so each check must return explicitly.
+    stage_sum=$(jq -r '[.stages[]?.estimated_cost // 0] | add // 0' \
+        "$metrics_file") || {
+        fail "assert_cost_reconciles: cannot parse .stages[] estimated_cost from $metrics_file"
+        return 1
+    }
+    summary_total=$(jq -r '.cost_summary.total_cost_usd // 0' \
+        "$metrics_file") || {
+        fail "assert_cost_reconciles: cannot parse .cost_summary.total_cost_usd from $metrics_file"
+        return 1
+    }
+    if [[ -z "$stage_sum" || -z "$summary_total" ]]; then
+        fail "assert_cost_reconciles: empty cost figures from $metrics_file (stage_sum='$stage_sum' summary_total='$summary_total')"
+        return 1
+    fi
+
+    # Scale drift by the LARGER of the two figures. Using the stage sum
+    # alone lets a total rollup failure (stage_sum 0) pass whenever
+    # summary_total is small, because the old `base = 1` fallback made any
+    # value under 0.05 look like sub-5% drift.
+    pct=$(awk -v a="$stage_sum" -v b="$summary_total" \
+        'BEGIN {
+            d = a - b; if (d < 0) d = -d
+            base = (a > b) ? a : b
+            if (base == 0) { print "0.0000"; exit }
+            printf "%.4f", (d / base) * 100
+        }')
+
+    if ! awk -v pct="$pct" -v tol="$tolerance_pct" \
+        'BEGIN { exit !(pct <= tol) }'; then
+        fail "cost_summary.total_cost_usd ($summary_total) drifts ${pct}% from the summed per-stage estimated_cost ($stage_sum) — exceeds the ±${tolerance_pct}% reconciliation tolerance"
+        return 1
+    fi
+    return 0
+}
+
 # =============================================================================
 # SOURCE SCRIPT FUNCTIONS
 # =============================================================================

@@ -300,20 +300,9 @@ _setup_orchestrator_env() {
 # fail loudly — naming both figures and the percent drift — if that sum
 # diverges from cost_summary.total_cost_usd by more than the tolerance.
 
-# Sums .stages[*].estimated_cost in $1 (a metrics.json/status.json-shaped
-# file) and fails loudly if that sum diverges from .cost_summary.total_cost_usd
-# by more than $2 percent (default 5).
-assert_cost_reconciles() {
-	local metrics_file="$1" tolerance_pct="${2:-5}"
-	local stage_sum summary_total pct
-	stage_sum=$(jq -r '[.stages[]?.estimated_cost // 0] | add // 0' "$metrics_file")
-	summary_total=$(jq -r '.cost_summary.total_cost_usd // 0' "$metrics_file")
-	pct=$(awk -v a="$stage_sum" -v b="$summary_total" \
-		'BEGIN { d = a - b; if (d < 0) d = -d; base = (a == 0) ? 1 : a; printf "%.4f", (d / base) * 100 }')
-
-	awk -v pct="$pct" -v tol="$tolerance_pct" 'BEGIN { exit !(pct <= tol) }' \
-		|| fail "cost_summary.total_cost_usd ($summary_total) drifts ${pct}% from the summed per-stage estimated_cost ($stage_sum) — exceeds the ±${tolerance_pct}% reconciliation tolerance"
-}
+# assert_cost_reconciles() lives in helpers/test-helper.bash alongside the
+# other shared assertion helpers (it is also useful for batch-level metrics
+# reconciliation, not just this file).
 
 @test "cost_summary reconciles with summed per-stage cost within 5%, including a failed stage and triage" {
 	_setup_orchestrator_env
@@ -347,8 +336,11 @@ assert_cost_reconciles() {
 
 	# Reproduce the #617 defect directly on metrics.json: cost_summary only
 	# counted the non-failed stages (0.4479 + 0.9562 + 0.4144 = 1.8185),
-	# ~51% below the full per-stage sum (5.2994) computed above — the same
-	# under-report ratio the issue measured on the real run.
+	# ~65.7% below the full per-stage sum (5.2994) computed above. This
+	# test's stage costs are synthetic, not the issue's real-run figures, so
+	# the drift percentage differs from the ~51% measured there — what's
+	# reproduced is the same defect shape: failed and triage stages silently
+	# excluded from the rollup.
 	jq '.cost_summary.total_cost_usd = 1.8185' \
 		"$LOG_BASE/metrics.json" > "$LOG_BASE/metrics.json.tmp" && mv "$LOG_BASE/metrics.json.tmp" "$LOG_BASE/metrics.json"
 
@@ -364,7 +356,7 @@ assert_cost_reconciles() {
 #
 # Issue #617: the reconciliation tests above hand-craft a status.json with
 # estimated_cost already present on the "error" stages, which only proves
-# export_metrics'"'"'s rollup is status-agnostic (it always was). It does not
+# export_metrics's rollup is status-agnostic (it always was). It does not
 # prove a real failing run ever gets that estimated_cost onto the stage entry
 # in the first place. In production a failing run_stage attempt is routed
 # through _apply_stage_action's "bail" branch, which calls set_stage_failed
@@ -378,6 +370,13 @@ assert_cost_reconciles() {
 @test "a stage that bails still persists its cost so cost_summary includes it" {
 	_setup_orchestrator_env
 	init_status
+	# Pin check_run_budget's ceilings to their documented disabled state (0 —
+	# see orchestrator.sh's check_run_budget) so this test exercises the bail
+	# path regardless of what that default happens to be elsewhere. If it
+	# ever flips, an unpinned test would silently start exercising the
+	# budget_exceeded path instead.
+	export MAX_RUN_TOKENS=0
+	export MAX_RUN_COST_USD=0
 	set_stage_started "implement_task_2"
 
 	local stage_result
