@@ -4509,6 +4509,41 @@ _extract_task_files_from_desc() {
 		| sort -u
 }
 
+# task_files_modified_on_branch() — branch-evidence check for the merge gate
+# (issue #616/#618/#620).
+#
+# Given a task's declared file paths, reports whether ANY of them were
+# added, modified, or deleted on the feature branch relative to base_branch.
+# Used to verify a task's deliverable actually landed on the branch,
+# independent of what a stage recorded as its status — a stage that exits
+# error_max_turns is recorded "failed" even when a later stage (e.g.
+# fix-pr-review) completed the work, so status alone cannot be trusted.
+#
+# Arguments:
+#   $1   - base branch name to diff against (e.g. "main")
+#   $2.. - one or more file paths declared by the task (task.affected_files)
+# Returns:
+#   0 (true)  - at least one declared path appears in the branch diff
+#   1 (false) - none of the declared paths appear in the diff, no paths
+#               were given, or the diff could not be computed
+task_files_modified_on_branch() {
+	local base_branch="$1"
+	shift
+
+	(($# > 0)) || return 1
+
+	local diff_out
+	diff_out=$(git diff --name-only "${base_branch}...HEAD" 2>/dev/null) || return 1
+	[[ -n "$diff_out" ]] || return 1
+
+	local f
+	for f in "$@"; do
+		[[ -n "$f" ]] || continue
+		grep -Fqx "$f" <<< "$diff_out" && return 0
+	done
+	return 1
+}
+
 # Groups tasks into parallelizable batches by detecting file-level conflicts.
 #
 # Tasks whose file sets do not overlap are placed in the same batch and can
