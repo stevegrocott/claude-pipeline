@@ -79,6 +79,79 @@ git diff HEAD~1 -- .claude/agents/ .claude/skills/ .claude/config/
 
 **New upstream templates?** If upstream adds new stack-specific files, copy them to `.claude/local/` and customize — `apply-local.sh` will keep them applied.
 
+## Installing pipeline-core as a Plugin
+
+The Quick Start above copies `.claude/` into your project. The alternative is to
+install `pipeline-core` through Claude Code's plugin system, which keeps the
+orchestrator, platform scripts, hooks and schemas in a versioned bundle rather
+than vendored into each consumer repo.
+
+This repo is public, so no auth or token is needed.
+
+### Remove any existing directory registration first
+
+**This step is not optional if you have ever used a local checkout of this repo.**
+A marketplace registered as a `directory` source takes precedence, and
+`extraKnownMarketplaces` in `.claude/settings.json` will **not** override it — the
+github source is silently ignored and you keep running the dev working tree.
+
+Check what is currently registered:
+
+```bash
+jq '.["claude-pipeline"].source' ~/.claude/plugins/known_marketplaces.json
+```
+
+A directory registration looks like this — note it points straight at a working tree:
+
+```json
+{ "source": "directory", "path": "/Users/you/projects/claude-pipeline" }
+```
+
+If you see that, remove it before continuing. Run this **inside an active Claude
+Code session**:
+
+```
+/plugin marketplace remove claude-pipeline
+```
+
+### Add the marketplace and install
+
+```
+/plugin marketplace add stevegrocott/claude-pipeline
+/plugin install pipeline-core@claude-pipeline
+/reload-plugins
+```
+
+### Verify it resolved to the cache, not a working tree
+
+```bash
+command -v pipeline-core-implement
+```
+
+The path must be under `~/.claude/plugins/cache/claude-pipeline/pipeline-core/<version>/`.
+If it points into a local checkout (e.g. `/Users/you/projects/claude-pipeline/...`),
+a directory registration is still winning — go back and remove it.
+
+### Version pinning
+
+`.claude-plugin/marketplace.json` declares a `version` for the `pipeline-core`
+entry, and it is asserted against `plugins/pipeline-core/.claude-plugin/plugin.json`
+by `tests/marketplace-smoke.bats`, so the two cannot drift silently.
+
+> **Pinning is not yet resolvable.** This repo currently carries **no git tags**, so a
+> github-source install tracks the default branch's HEAD — you get whatever landed
+> last, and the declared `version` is descriptive rather than something you can pin
+> to. Tagging a release is what makes a version resolvable; until then, treat plugin
+> installs as tracking `main`.
+
+### What changes about the developer loop
+
+Installing from the github source ends live-editing. Changes in a local checkout of
+this repo no longer reach consumers — they must be committed, pushed, and
+re-installed. That is the point (it is what makes installs reproducible off one
+machine), but it is a real change if you have been developing against a directory
+registration.
+
 ## What's Inside
 
 - **38 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
