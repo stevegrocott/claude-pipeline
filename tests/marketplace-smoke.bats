@@ -78,6 +78,27 @@ _validate_marketplace() {
 	fi
 }
 
+_validate_marketplace_version() {
+	local mkt="$1"
+	local core="$2"
+	local mkt_version manifest_version
+	mkt_version="$(jq -r '.plugins[] | select(.name == "pipeline-core") | .version // empty' "$mkt")"
+	manifest_version="$(jq -r '.version // empty' "$core/.claude-plugin/plugin.json")"
+
+	if [[ -z "$mkt_version" ]]; then
+		echo "marketplace.json pipeline-core entry has no version: $mkt" >&2
+		return 1
+	fi
+	if [[ -z "$manifest_version" ]]; then
+		echo "plugin.json has no version: $core/.claude-plugin/plugin.json" >&2
+		return 1
+	fi
+	if [[ "$mkt_version" != "$manifest_version" ]]; then
+		echo "marketplace version ($mkt_version) != plugin.json version ($manifest_version)" >&2
+		return 1
+	fi
+}
+
 _validate_skills() {
 	local core="$1"
 	local skills_dir="$core/skills"
@@ -166,7 +187,7 @@ _build_scaffold() {
 {
   "name": "claude-pipeline",
   "plugins": [
-    { "name": "pipeline-core", "source": "./plugins/pipeline-core" }
+    { "name": "pipeline-core", "source": "./plugins/pipeline-core", "version": "0.0.0" }
   ]
 }
 JSON
@@ -237,6 +258,17 @@ JSON
 	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
 
+@test "synthetic scaffold: marketplace version matches plugin.json version" {
+	_build_scaffold "$TEST_TMP"
+
+	local mkt core
+	mkt="$(_find_marketplace "$TEST_TMP")"
+	core="$(_find_plugin_core "$TEST_TMP")"
+
+	run _validate_marketplace_version "$mkt" "$core"
+	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
 # ===========================================================================
 # Synthetic scaffold — negative paths (the validators must actually fail)
 # ===========================================================================
@@ -269,6 +301,17 @@ JSON
 	run _validate_hooks "$core"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"not executable"* ]]
+}
+
+@test "synthetic scaffold (broken): marketplace version drifted from plugin.json fails" {
+	_build_scaffold "$TEST_TMP"
+	local core="$TEST_TMP/plugins/pipeline-core"
+	local mkt="$TEST_TMP/.claude-plugin/marketplace.json"
+	jq '.plugins[0].version = "9.9.9"' "$mkt" > "$mkt.tmp" && mv "$mkt.tmp" "$mkt"
+
+	run _validate_marketplace_version "$mkt" "$core"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"9.9.9"* ]]
 }
 
 @test "synthetic scaffold (broken): marketplace without pipeline-core fails" {
@@ -304,6 +347,22 @@ JSON
 	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 
 	run _validate_hooks "$core"
+	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
+@test "real repo: marketplace.json pipeline-core version matches plugin.json" {
+	local mkt core
+	mkt="$(_find_marketplace "$REPO_ROOT")" \
+		|| skip "marketplace.json not found"
+	core="$(_find_plugin_core "$REPO_ROOT")" \
+		|| skip "plugins/pipeline-core not found"
+
+	local mkt_version
+	mkt_version="$(jq -r '.plugins[] | select(.name == "pipeline-core") | .version // empty' "$mkt")"
+	[[ -n "$mkt_version" ]] \
+		|| skip "marketplace.json pipeline-core entry has no version yet (issue #615 task 1)"
+
+	run _validate_marketplace_version "$mkt" "$core"
 	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
 
