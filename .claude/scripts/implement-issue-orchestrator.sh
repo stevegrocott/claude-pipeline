@@ -2191,6 +2191,57 @@ _epoch_ms() {
     fi
 }
 
+# _extract_cli_envelope <raw-stage-output>
+#
+# Isolate the CLI's JSON result envelope from a stage's stdout (issue #646).
+#
+# The CLI can print a notice BEFORE the envelope on the same stream. The case
+# that broke the first plugin-based consumer run was the untrusted-workspace
+# warning:
+#
+#   Ignoring 9 permissions.allow entries from .claude/settings.json: this
+#   workspace has not been trusted. ...
+#   {"is_error":false,...,"structured_output":{...}}
+#
+# Feeding that to jq fails, so a stage that succeeded is recorded
+# no_structured_output. On the claude-spend #64 run this failed the test and
+# docs stages and then discarded a PR the pr stage had actually created.
+#
+# Takes the LAST complete top-level object, not the first: the notice text can
+# itself contain JSON-looking fragments, and the envelope is always last.
+#
+# Arguments:
+#   $1 - raw stage output
+# Outputs:
+#   The envelope JSON on stdout, or nothing when the stream holds no object
+# Returns:
+#   0 always — an empty result is the caller's "no envelope" signal, matching
+#   the existing `// empty` extraction style
+_extract_cli_envelope() {
+    local raw="$1"
+    [[ -n "$raw" ]] || return 0
+
+    # Fast path: the whole stream is the envelope. This is the common case and
+    # avoids a per-line jq spawn on large outputs.
+    if printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        printf '%s' "$raw"
+        return 0
+    fi
+
+    local line found=""
+    while IFS= read -r line; do
+        # Only consider lines that begin an object, so prose mentioning JSON
+        # is skipped without paying for a jq call.
+        [[ "$line" == '{'* ]] || continue
+        if printf '%s' "$line" | jq -e 'type == "object"' >/dev/null 2>&1; then
+            found="$line"
+        fi
+    done <<< "$raw"
+
+    [[ -n "$found" ]] || return 0
+    printf '%s' "$found"
+}
+
 # Extract permission_denials tool_name array from raw CLI output as a JSON
 # array. Returns "[]" when absent, malformed, or jq fails.
 _extract_denials() {
@@ -2679,6 +2730,18 @@ run_stage() {
 
     printf '%s\n' "=== $stage_name output ===" >> "$stage_log"
     printf '%s\n' "$output" >> "$stage_log"
+
+    # Every jq below parses _envelope, not output (issue #646). The CLI can
+    # print a notice ahead of its JSON envelope — the untrusted-workspace
+    # permissions warning is the known case — and jq over the raw stream then
+    # fails, recording a successful stage as no_structured_output.
+    #
+    # $output deliberately stays raw: the stage log above and the diagnostic
+    # dumps below are where that notice is visible, and it is the thing that
+    # explains the failure to whoever reads them.
+    local _envelope
+    _envelope=$(_extract_cli_envelope "$output")
+    [[ -n "$_envelope" ]] || _envelope="$output"
     printf '%s\n' "=== exit code: $exit_code ===" >> "$stage_log"
 
     # Parse token usage and reported cost from the CLI's JSON envelope
@@ -2693,7 +2756,7 @@ run_stage() {
     # The agent may have produced valid output before the timeout killed the CLI.
     if (( exit_code == 124 )); then
         local timeout_structured
-        timeout_structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
+        timeout_structured=$(printf '%s' "$_envelope" | jq -c '.structured_output // empty' 2>/dev/null)
         if [[ -n "$timeout_structured" ]]; then
             log "WARN: Stage $stage_name timed out after ${stage_timeout}s but produced structured output — using it"
             local _sr
@@ -2710,7 +2773,7 @@ run_stage() {
         # Fallback: if no structured output, try .result text wrapping
         # (same pattern as lines 936-944)
         local timeout_fallback_result
-        timeout_fallback_result=$(printf '%s' "$output" | jq -c '
+        timeout_fallback_result=$(printf '%s' "$_envelope" | jq -c '
             select(.is_error == false and .result != null) |
             {status: "success", summary: .result}
         ' 2>/dev/null)
@@ -2799,6 +2862,14 @@ run_stage() {
         output=$(< "$_retry_out_tmp")
         rm -f "$_retry_out_tmp"
 
+        # Re-normalise: the retry is a fresh CLI invocation and can carry the
+        # same leading notice as the first attempt (#646). Without this the
+        # retry's valid envelope is unparseable and a stage that succeeded on
+        # retry is still recorded failed — which is how claude-spend #64
+        # created PR #80 and then reported "PR creation failed" with pr=none.
+        _envelope=$(_extract_cli_envelope "$output")
+        [[ -n "$_envelope" ]] || _envelope="$output"
+
         # Re-extract usage — output now reflects the retry attempt, not the
         # original (likely-zeroed) timed-out attempt captured above.
         _stage_usage=$(_extract_usage "$output")
@@ -2831,24 +2902,24 @@ run_stage() {
 
     # Detect max-turns exhaustion
     local output_subtype
-    output_subtype=$(printf '%s' "$output" | jq -r '.subtype // empty' 2>/dev/null)
+    output_subtype=$(printf '%s' "$_envelope" | jq -r '.subtype // empty' 2>/dev/null)
 
     # Detect permission denials early (needed for structured-error classification)
     # Produces a comma-joined string for human-readable log_warn messages below.
     local _permission_denials
-    _permission_denials=$(_extract_denials "$output" \
+    _permission_denials=$(_extract_denials "$_envelope" \
         | jq -r 'select(length > 0) | join(", ")' 2>/dev/null || true)
 
     # Extract structured output from the run
     local structured
-    structured=$(printf '%s' "$output" | jq -c '.structured_output // empty' 2>/dev/null)
+    structured=$(printf '%s' "$_envelope" | jq -c '.structured_output // empty' 2>/dev/null)
 
     # .result fallback — build (with field extraction) when .structured_output
     # is absent but the CLI returned a text result.
     local _fallback_result=""
     if [[ -z "$structured" ]]; then
         local _basic_fallback
-        _basic_fallback=$(printf '%s' "$output" | jq -c '
+        _basic_fallback=$(printf '%s' "$_envelope" | jq -c '
             select(.is_error == false and .result != null) |
             {status: "success", summary: .result}
         ' 2>/dev/null)
@@ -2856,7 +2927,7 @@ run_stage() {
         if [[ -n "$_basic_fallback" ]]; then
             log "WARNING: No .structured_output from $stage_name — using .result fallback"
             local result_text
-            result_text=$(printf '%s' "$output" \
+            result_text=$(printf '%s' "$_envelope" \
                 | jq -r '.result // empty' 2>/dev/null)
 
             _fallback_result="$_basic_fallback"
@@ -3122,15 +3193,22 @@ for m in re.finditer(r'\[\s*\{', t):
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' \
                 "=== escalation exit code: $_esc_exit_code ===" >> "$stage_log"
+
+            # Third capture point, same reasoning as the first two (#646): the
+            # escalated call is a fresh CLI invocation and can carry its own
+            # leading notice. _envelope must track the attempt being parsed, or
+            # the fallback below reads the previous attempt's JSON.
+            _envelope=$(_extract_cli_envelope "$output")
+            [[ -n "$_envelope" ]] || _envelope="$output"
             (( _esc_exit_code != 0 )) && \
                 log_warn "escalation CLI exited $_esc_exit_code"
 
             # Extract output from the escalated run
             local _esc_structured
-            _esc_structured=$(printf '%s' "$output" \
+            _esc_structured=$(printf '%s' "$_envelope" \
                 | jq -c '.structured_output // empty' 2>/dev/null)
             if [[ -z "$_esc_structured" ]]; then
-                _esc_structured=$(printf '%s' "$output" | jq -c '
+                _esc_structured=$(printf '%s' "$_envelope" | jq -c '
                     select(.is_error == false and .result != null) |
                     {status: "success", summary: .result}
                 ' 2>/dev/null)
@@ -3270,7 +3348,7 @@ for m in re.finditer(r'\[\s*\{', t):
             _retry_structured=$(printf '%s' "$output" \
                 | jq -c '.structured_output // empty' 2>/dev/null)
             if [[ -z "$_retry_structured" ]]; then
-                _retry_structured=$(printf '%s' "$output" | jq -c '
+                _retry_structured=$(printf '%s' "$_envelope" | jq -c '
                     select(.is_error == false and .result != null) |
                     {status: "success", summary: .result}
                 ' 2>/dev/null)
