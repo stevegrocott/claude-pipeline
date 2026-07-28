@@ -3,8 +3,15 @@
 # block-gh-issue-create.sh — PreToolUse(Bash) guard.
 #
 # Hard-blocks any agent Bash command that invokes `gh issue create`
-# directly, forcing all issue creation through create-followup-issue.sh /
-# platform/create-issue.sh, which run `assert_issue_valid` fail-closed.
+# directly, forcing all issue creation through the pipeline-core plugin
+# entrypoints — pipeline-core-create-followup-issue and
+# "$(pipeline-core-platform-dir)"/create-issue.sh — which run
+# `assert_issue_valid` fail-closed.
+#
+# The message names the PLUGIN entrypoints, not .claude/scripts/ wrappers
+# (issue #632): a consumer on the plugin has no .claude/scripts/ — the
+# migration removed it — so naming those paths sends the blocked model to a
+# path that does not exist in its repo.
 #
 # Rationale: #501 made "never call gh issue create" a SKILL instruction and
 # #513 removed the permission friction that drove the fallback, but neither
@@ -12,12 +19,12 @@
 # `gh issue create` with an unvalidated (prose) body, producing malformed
 # issues that stall the pipeline. This hook makes that impossible.
 #
-# Why this does NOT block the legitimate scripts:
+# Why this does NOT block the legitimate entrypoints:
 #   PreToolUse(Bash) fires on the command the AGENT runs. When the agent runs
-#   `.claude/scripts/create-followup-issue.sh ...`, that is the command the
-#   hook inspects; the script's INTERNAL `gh issue create` runs as a
-#   subprocess of the script, never as a Bash-tool call, so the hook never
-#   sees it. Only a direct agent `gh issue create` is matched.
+#   `pipeline-core-create-followup-issue ...`, that is the command the hook
+#   inspects; the script's INTERNAL `gh issue create` runs as a subprocess of
+#   the script, never as a Bash-tool call, so the hook never sees it. Only a
+#   direct agent `gh issue create` is matched.
 #
 # Code is passed via `python3 -c` (not a heredoc) so the hook's stdin remains
 # the PreToolUse JSON payload. Exit 2 blocks (stderr surfaced to the model);
@@ -49,10 +56,11 @@ pattern = re.compile(
     r"gh\s+issue\s+create\b")
 if pattern.search(cmd):
     sys.stderr.write(
-        "BLOCKED: direct gh issue create is prohibited. Create issues via "
-        ".claude/scripts/create-followup-issue.sh (follow-ups) or "
-        ".claude/scripts/platform/create-issue.sh — they run assert_issue_valid "
-        "fail-closed so every issue has parseable tasks + acceptance criteria. "
+        "BLOCKED: direct gh issue create is prohibited. Create issues via the "
+        "pipeline-core plugin entrypoints: pipeline-core-create-followup-issue "
+        "(follow-ups) or \"$(pipeline-core-platform-dir)\"/create-issue.sh — "
+        "they run assert_issue_valid fail-closed so every issue has parseable "
+        "tasks + acceptance criteria. "
         "See plugins/pipeline-core/skills/process-pr/SKILL.md Step 4g.\n")
     sys.exit(2)
 sys.exit(0)
