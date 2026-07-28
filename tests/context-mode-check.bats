@@ -316,15 +316,43 @@ FILTER_MOCK
 
 @test "(k) bats not in PATH → exit 2" {
 	_remove_bats
-	# Use `env PATH=...` to restrict the subprocess PATH so the system bats
-	# (e.g. /opt/homebrew/bin/bats) is not visible, while keeping /bin and
-	# /usr/bin so bash and builtins work correctly.
-	run env PATH="$TEST_TMP/bin:/bin:/usr/bin" \
+
+	# The sandbox must contain no `bats` at all.  Keeping /bin and /usr/bin on
+	# PATH only works where the platform installs bats elsewhere — true for
+	# Homebrew (/opt/homebrew/bin), false on Debian/Ubuntu where
+	# `apt-get install bats` lands it in /usr/bin, which is why this test was
+	# green locally and red in CI (issue #644).  Dropping /usr/bin is not an
+	# option either: on Debian /bin is a symlink to /usr/bin, so removing one
+	# removes bash too.  Instead build a bin dir holding exactly the binaries
+	# the script needs, and nothing else.
+	local sandbox="$TEST_TMP/nobats-bin"
+	mkdir -p "$sandbox"
+	local tool src
+	for tool in bash cat dirname grep; do
+		src=$(command -v "$tool") || {
+			printf 'FAIL: sandbox prerequisite missing: %s\n' "$tool" >&2
+			return 1
+		}
+		ln -sf "$src" "$sandbox/$tool"
+	done
+
+	# Sanity: the sandbox genuinely has no bats, whatever the host layout.
+	[[ ! -e "$sandbox/bats" ]] || {
+		printf 'FAIL: sandbox unexpectedly contains bats\n' >&2
+		return 1
+	}
+
+	run env PATH="$TEST_TMP/bin:$sandbox" \
 		bash "$SCRIPT_UNDER_TEST" \
 		--bats-dir "$TEST_TMP/bats-dir"
 	[ "$status" -eq 2 ]
 	[[ "$output" == *"FAIL"* ]]
-	[[ "$output" == *"bats not found"* ]]
+	# Assert the specific reason, so a missing sandbox binary cannot
+	# masquerade as this assertion passing (AC4).
+	[[ "$output" == *"bats not found"* ]] || {
+		printf 'FAIL: expected "bats not found", got:\n%s\n' "$output" >&2
+		return 1
+	}
 }
 
 @test "(l) --bats-dir path does not exist → exit 2" {
