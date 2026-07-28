@@ -4563,6 +4563,76 @@ _extract_tasks_section() {
 	'
 }
 
+# Reads one backtick-delimited task annotation out of a task description
+# (issue #634).
+#
+# Annotations are written inline in the description — never as a new bullet
+# shape — so BOTH mirrored parsers (_parse_task_lines here and
+# _issue_body_parse_tasks in issue-body-lib.sh) keep matching the same lines
+# and keep emitting byte-identical descriptions.  Nothing is stripped: the
+# annotation stays in the description the specialist agent is handed, and the
+# parser-parity contract (section / count / descriptions) is untouched.
+#
+#   `deliverable:<kind>:<ref>`   a NON-COMMIT deliverable (see
+#                                verify_task_deliverable)
+#   `depends-on:<id>[,<id>...]`  inter-task dependency (see
+#                                compute_task_batches)
+#
+# Arguments:
+#   $1 - task description
+#   $2 - annotation key ("deliverable" / "depends-on")
+# Outputs:
+#   The annotation value on stdout, whitespace-trimmed
+# Returns:
+#   0 when the annotation is present, 1 otherwise
+#
+_task_annotation() {
+	local desc="$1"
+	local key="$2"
+	# Backtick-bearing regex must live in a variable — bash cannot escape a
+	# backtick inside an inline [[ =~ ]] pattern reliably.
+	local bt='`'
+	local re="${bt}${key}:([^${bt}]+)${bt}"
+	[[ "$desc" =~ $re ]] || return 1
+	local val="${BASH_REMATCH[1]}"
+	val="${val#"${val%%[![:space:]]*}"}"
+	val="${val%"${val##*[![:space:]]}"}"
+	printf '%s' "$val"
+}
+
+# Normalises a `depends-on:` annotation value into a JSON array of task ids.
+#
+# Non-numeric tokens are dropped rather than propagated, so a typo degrades to
+# "no declared dependency" (which is the pre-#634 behaviour) instead of
+# poisoning the batch plan with an unresolvable id.
+#
+# Arguments:
+#   $1 - raw annotation value (e.g. "1, 2")
+# Outputs:
+#   JSON array on stdout (e.g. "[1,2]"; "[]" when nothing parses)
+#
+_parse_depends_on() {
+	local raw="${1:-}"
+	local -a toks=()
+	IFS=', ' read -r -a toks <<< "$raw"
+
+	local -a ids=()
+	local tok
+	for tok in "${toks[@]+"${toks[@]}"}"; do
+		[[ "$tok" =~ ^[0-9]+$ ]] || continue
+		ids+=("$tok")
+	done
+
+	if ((${#ids[@]} == 0)); then
+		printf '[]'
+		return 0
+	fi
+
+	local joined
+	joined=$(printf ',%s' "${ids[@]}")
+	printf '[%s]' "${joined#,}"
+}
+
 _parse_task_lines() {
 	local tasks_section="$1"
 
@@ -4652,13 +4722,29 @@ _parse_task_lines() {
 			log_warn "No file path in task (scans codebase blind): $line"
 		fi
 
+		# Optional task annotations (issue #634).  Both fields are emitted
+		# ONLY when the task actually declares them, so an unannotated task
+		# produces the exact object shape it produced before this change —
+		# existing issue bodies parse to byte-identical task JSON.
+		local task_deliverable task_depends
+		task_deliverable=$(_task_annotation "$desc" "deliverable") \
+			|| task_deliverable=""
+		local task_depends_raw
+		task_depends_raw=$(_task_annotation "$desc" "depends-on") \
+			|| task_depends_raw=""
+		task_depends=$(_parse_depends_on "$task_depends_raw")
+
 		task_id=$((task_id + 1))
 		# Store task for now; affected_files will be attached in the second pass.
 		tasks_json=$(printf '%s' "$tasks_json" | jq \
 			--argjson id "$task_id" \
 			--arg desc "$desc" \
 			--arg agent "$agent" \
-			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0, affected_files: []}]')
+			--arg deliverable "$task_deliverable" \
+			--argjson depends "$task_depends" \
+			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0, affected_files: []}
+			      + (if $deliverable == "" then {} else {deliverable: $deliverable} end)
+			      + (if ($depends | length) == 0 then {} else {depends_on: $depends} end)]')
 
 	done <<< "$tasks_section"
 
@@ -5271,6 +5357,214 @@ revalidate_partial_block_against_branch() {
 	sync_status_to_log
 }
 
+# =============================================================================
+# NON-COMMIT TASK DELIVERABLES (issue #634)
+#
+# Task success is otherwise inferred from commits landing on the branch: the
+# no-op guard in execute_batch_parallel() marks a task failed when its
+# worktree branch is empty, the 0-commits guardrails abort the run, and the
+# PARTIAL-COMPLETION GATE turns a shortfall into a merge block.  All correct
+# for a task that was SUPPOSED to write code.
+#
+# Some tasks legitimately produce no commit — a spike whose deliverable is a
+# ruling posted as an issue comment, for instance.  For those the count is
+# accurate and the interpretation is wrong.  A task may therefore declare its
+# deliverable in the issue body:
+#
+#   `deliverable:comment:<marker>`  an issue comment containing <marker>
+#   `deliverable:file:<path>`       a non-empty file at <path>
+#
+# The declared artefact is VERIFIED, never assumed.  This is deliberate: the
+# stated risk of the feature is that a task marked non-committing which should
+# have produced code passes silently.  Verification closes that both ways —
+# an unverified artefact is never promoted, and a task a stage recorded
+# "completed" is DEMOTED when its declared artefact does not exist.
+# =============================================================================
+
+# Emits every comment body on the current issue, one per line.
+#
+# Split out from verify_task_deliverable() so the verification logic is
+# testable without a tracker, and so an unsupported tracker fails loudly
+# rather than silently verifying nothing.
+#
+# Globals:
+#   ISSUE_NUMBER, TRACKER
+# Outputs:
+#   Comment bodies on stdout
+# Returns:
+#   0 on a successful fetch, 1 when the tracker cannot be queried
+#
+_fetch_issue_comment_bodies() {
+	case "${TRACKER:-github}" in
+		github)
+			gh issue view "$ISSUE_NUMBER" --json comments \
+				--jq '.comments[]?.body' 2>/dev/null
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+# Verifies that a task's declared non-commit artefact actually exists.
+#
+# Arguments:
+#   $1 - deliverable spec ("comment:<marker>" or "file:<path>")
+# Returns:
+#   0 when the artefact is present, 1 otherwise
+#
+# Fails closed on every ambiguous input — an unrecognised kind, a markerless
+# "comment" (which would match any comment the pipeline itself posted), an
+# unreachable tracker, or a missing/empty file.  A task can only be credited
+# for an artefact that can be pointed at.
+#
+verify_task_deliverable() {
+	local spec="${1:-}"
+
+	case "$spec" in
+		comment:?*)
+			local marker="${spec#comment:}"
+			local bodies
+			if ! bodies=$(_fetch_issue_comment_bodies); then
+				log_warn "Deliverable verification: cannot read comments for" \
+					"issue #$ISSUE_NUMBER (tracker=${TRACKER:-github}) —" \
+					"treating '$spec' as unverified."
+				return 1
+			fi
+			grep -qF -- "$marker" <<< "$bodies"
+			;;
+		file:?*)
+			local artefact_path="${spec#file:}"
+			[[ -s "$artefact_path" ]]
+			;;
+		*)
+			log_warn "Deliverable verification: unrecognised deliverable" \
+				"'$spec' — expected 'comment:<marker>' or 'file:<path>'." \
+				"Treating the task as unverified."
+			return 1
+			;;
+	esac
+}
+
+# Re-judges every task that declared a non-commit deliverable on its artefact
+# rather than on commits (issue #634).
+#
+# Promotes a task the commit-based verdict recorded failed when its declared
+# artefact verifies, and demotes a task recorded completed when it does not.
+# Runs BEFORE the 0-commits guardrail and the PARTIAL-COMPLETION GATE so
+# $completed_tasks — and everything downstream that reads it — reflects
+# declared artefacts as well as branch content.
+#
+# Globals:
+#   STATUS_FILE - read tasks from and write re-judged statuses to
+# Outputs:
+#   The NET change to the caller's completed-task count on stdout (may be
+#   negative when artefacts are missing) — add it to $completed_tasks.
+#
+reconcile_noncommit_tasks_with_deliverables() {
+	local delta=0
+
+	if [[ ! -f "$STATUS_FILE" ]]; then
+		printf '%s\n' "$delta"
+		return 0
+	fi
+
+	local rows
+	rows=$(jq -r '(.tasks // [])[]
+		| select((.deliverable // "") != "")
+		| "\(.id)\t\(.status // "")\t\(.deliverable)"' \
+		"$STATUS_FILE" 2>/dev/null)
+
+	if [[ -z "$rows" ]]; then
+		printf '%s\n' "$delta"
+		return 0
+	fi
+
+	local nc_id nc_status nc_spec nc_new_status nc_step
+	while IFS=$'\t' read -r nc_id nc_status nc_spec; do
+		[[ -n "$nc_id" ]] || continue
+		if [[ ! "$nc_id" =~ ^-?[0-9]+$ ]]; then
+			log_warn "reconcile_noncommit_tasks_with_deliverables:" \
+				"skipping task with non-numeric id '$nc_id'"
+			continue
+		fi
+
+		if verify_task_deliverable "$nc_spec"; then
+			if [[ "$nc_status" == "completed" ]]; then
+				continue
+			fi
+			nc_new_status="completed"
+			nc_step=1
+			log "Task $nc_id declared a non-commit deliverable ($nc_spec)" \
+				"and the artefact is present — recording completed" \
+				"(was '$nc_status'; no commit is expected for this task)."
+		else
+			if [[ "$nc_status" != "completed" ]]; then
+				continue
+			fi
+			nc_new_status="failed"
+			nc_step=-1
+			log_warn "Task $nc_id was recorded completed but its declared" \
+				"non-commit deliverable ($nc_spec) cannot be found —" \
+				"recording failed."
+		fi
+
+		if jq --argjson id "$nc_id" \
+			--arg st "$nc_new_status" \
+			'(.tasks[] | select(.id == $id)).status = $st |
+			 (.tasks[] | select(.id == $id)).deliverable_verified =
+				($st == "completed") |
+			 .last_update = (now | todate)' \
+			"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+			&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"; then
+			sync_status_to_log
+			delta=$((delta + nc_step))
+		else
+			log_warn "reconcile_noncommit_tasks_with_deliverables:" \
+				"failed to persist the verdict for task $nc_id" \
+				"— leaving its recorded status unchanged"
+			rm -f "${STATUS_FILE}.tmp"
+		fi
+	done <<< "$rows"
+
+	printf '%s\n' "$delta"
+}
+
+# True when EVERY planned task declared a non-commit deliverable and every one
+# of those artefacts verified (issue #634).
+#
+# This is the only condition under which "0 commits ahead of base" is the
+# designed outcome rather than a merge-back failure, so it is the sole escape
+# from the 0-commits abort.  A single ordinary code task in the issue makes it
+# false — a mixed issue keeps the guardrail.
+#
+# Must run AFTER reconcile_noncommit_tasks_with_deliverables(), which is what
+# makes "declared and completed" equivalent to "declared and verified".
+#
+# Globals:
+#   STATUS_FILE
+# Returns:
+#   0 when every task is a verified non-commit deliverable, 1 otherwise
+#
+all_tasks_are_verified_noncommit() {
+	[[ -f "$STATUS_FILE" ]] || return 1
+
+	local nc_total nc_declared nc_verified
+	nc_total=$(jq '(.tasks // []) | length' "$STATUS_FILE" 2>/dev/null) || return 1
+	[[ "$nc_total" =~ ^[0-9]+$ ]] || return 1
+	((nc_total > 0)) || return 1
+
+	nc_declared=$(jq '[(.tasks // [])[]
+		| select((.deliverable // "") != "")] | length' \
+		"$STATUS_FILE" 2>/dev/null) || return 1
+	nc_verified=$(jq '[(.tasks // [])[]
+		| select((.deliverable // "") != "" and .status == "completed")]
+		| length' "$STATUS_FILE" 2>/dev/null) || return 1
+	[[ "$nc_declared" =~ ^[0-9]+$ && "$nc_verified" =~ ^[0-9]+$ ]] || return 1
+
+	((nc_declared == nc_total && nc_verified == nc_total))
+}
+
 # Groups tasks into parallelizable batches by detecting file-level conflicts.
 #
 # Tasks whose file sets do not overlap are placed in the same batch and can
@@ -5322,10 +5616,21 @@ compute_task_batches() {
 
 	# Build file sets for each task (parallel arrays, 0-based index)
 	local -a task_files
+	# Declared inter-task dependencies (issue #634), parallel arrays too:
+	# task_ids[i] is the task's own id, task_deps[i] the space-separated ids
+	# it declared `depends-on:` for.
+	local -a task_ids
+	local -a task_deps
 	local i
 	for ((i = 0; i < task_count; i++)); do
 		local desc
 		desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
+
+		task_ids[$i]=$(printf '%s' "$tasks_json" \
+			| jq -r ".[$i].id // $((i + 1))")
+		task_deps[$i]=$(printf '%s' "$tasks_json" \
+			| jq -r ".[$i].depends_on // [] | map(tostring) | join(\" \")" \
+			2>/dev/null)
 
 		# Primary: use explicit affected_files from task JSON if available
 		local af_json
@@ -5378,6 +5683,37 @@ compute_task_batches() {
 	for ((i = 0; i < task_count; i++)); do
 		local my_files="${task_files[$i]:-}"
 		local b=0
+
+		# Declared-dependency floor (issue #634).  File-conflict detection
+		# alone cannot express "decide, THEN apply": a spike and the task
+		# that consumes its ruling usually touch different files, so both
+		# land in batch 1 and the dependent runs in parallel with the
+		# decision it is waiting on.  Starting the search above every
+		# dependency's batch serialises them without weakening the conflict
+		# check, which still runs from this floor upward.
+		local -a my_deps=()
+		IFS=' ' read -r -a my_deps <<< "${task_deps[$i]:-}"
+		local dep_id dep_found j
+		for dep_id in "${my_deps[@]+"${my_deps[@]}"}"; do
+			[[ -n "$dep_id" ]] || continue
+			dep_found=0
+			for ((j = 0; j < i; j++)); do
+				if [[ "${task_ids[$j]:-}" == "$dep_id" ]]; then
+					dep_found=1
+					if ((task_batch_idx[j] + 1 > b)); then
+						b=$((task_batch_idx[j] + 1))
+					fi
+					break
+				fi
+			done
+			if ((dep_found == 0)); then
+				log_warn "Task ${task_ids[$i]:-$((i + 1))} declares" \
+					"depends-on:${dep_id}, which is not an earlier task" \
+					"— ignoring. A dependency must be listed BEFORE its" \
+					"dependent in the Implementation Tasks section."
+			fi
+		done
+
 		local placed=0
 		while [[ $placed -eq 0 && $b -lt 1000 ]]; do
 			local conflict=0
@@ -9072,6 +9408,24 @@ $impl_summary" "$tagent"
             "$completed_tasks/$task_count tasks" \
             "completed (with per-task quality loops)."
 
+        # -----------------------------------------------------------------
+        # NON-COMMIT DELIVERABLE RE-JUDGEMENT (issue #634)
+        # A task that declared `deliverable:...` is judged on its artefact,
+        # not on commits: the commit-based verdict recorded it failed simply
+        # because its worktree branch was empty, which for this kind of task
+        # is the designed outcome. Runs BEFORE the 0-commits guardrail and
+        # the PARTIAL-COMPLETION GATE so both see the artefact verdict.
+        # The delta can be negative — a task recorded completed whose
+        # declared artefact is absent is demoted rather than trusted.
+        # -----------------------------------------------------------------
+        local _noncommit_delta
+        _noncommit_delta=$(reconcile_noncommit_tasks_with_deliverables)
+        [[ "$_noncommit_delta" =~ ^-?[0-9]+$ ]] || _noncommit_delta=0
+        completed_tasks=$((completed_tasks + _noncommit_delta))
+        if (( completed_tasks < 0 )); then
+            completed_tasks=0
+        fi
+
         # Guardrail: abort if no tasks completed but tasks were expected.
         # Guard: if the branch has commits ahead of base (from a prior run or
         # partial work), continue to PR creation instead of aborting.
@@ -9226,6 +9580,22 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
         if (( commits_ahead > 0 )); then
             log "Branch has $commits_ahead commit(s) ahead of" \
                 "$BASE_BRANCH — continuing."
+        elif all_tasks_are_verified_noncommit; then
+            # Issue #634: every planned task declared a non-commit deliverable
+            # and every declared artefact verified, so 0 commits is what the
+            # issue asked for — not a failed worktree merge-back. There is
+            # nothing to open a PR for, so terminate on the existing no-PR
+            # success path (already_implemented is the state the batch
+            # orchestrator already maps to "done, nothing to merge") instead
+            # of aborting the run.
+            log "All $task_count task(s) declared a non-commit deliverable" \
+                "and every declared artefact was verified — 0 commits is the" \
+                "expected outcome; finishing without a PR."
+            comment_issue "Implementation: Non-Commit Deliverable" \
+                "✅ Every implementation task for this issue declared a non-commit deliverable, and each declared artefact was verified. No code changes were required, so no pull request is opened." \
+                "default"
+            set_final_state "already_implemented"
+            exit 0
         else
             log_error "ABORT: Implementation stage completed but branch has 0 commits ahead of $BASE_BRANCH." \
                 "Worktree merge-back likely failed. Check orchestrator log for merge errors."
