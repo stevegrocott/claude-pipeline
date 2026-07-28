@@ -4538,17 +4538,37 @@ _extract_task_files_from_desc() {
 #   - NUL-delimited output cannot round-trip through a `$()` capture (bash
 #     command substitution truncates at the first NUL byte), so the diff is
 #     consumed directly off a process substitution instead of a variable.
+#
+# Declared paths are normalised to the repo-root-relative form git emits
+# before comparison (issue #620 review): leading `./` segments and a leading
+# `/` are stripped, so a task declaring `./src/app.ts` or `/src/app.ts`
+# still matches git's `src/app.ts`.  _extract_task_files_from_desc() pulls
+# tokens straight out of prose, where either rooting is common.  Matching
+# stays whole-path exact after normalisation — a declared path that is only
+# a substring of a changed path is still not evidence.
 task_files_modified_on_branch() {
 	local base_branch="$1"
 	shift
 
 	(($# > 0)) || return 1
 
+	# Normalise once up front rather than per diff entry.
+	local -a wants=()
+	local raw
+	for raw in "$@"; do
+		[[ -n "$raw" ]] || continue
+		while [[ "$raw" == ./* ]]; do
+			raw="${raw#./}"
+		done
+		raw="${raw#/}"
+		[[ -n "$raw" ]] && wants+=("$raw")
+	done
+	((${#wants[@]} > 0)) || return 1
+
 	local found=1
 	local f want
 	while IFS= read -r -d '' f; do
-		for want in "$@"; do
-			[[ -n "$want" ]] || continue
+		for want in "${wants[@]}"; do
 			if [[ "$f" == "$want" ]]; then
 				found=0
 				break 2
@@ -4602,6 +4622,11 @@ reconcile_failed_tasks_with_branch_evidence() {
 	local recon_id
 	while IFS= read -r recon_id; do
 		[[ -n "$recon_id" ]] || continue
+		if [[ ! "$recon_id" =~ ^-?[0-9]+$ ]]; then
+			log_warn "reconcile_failed_tasks_with_branch_evidence:" \
+				"skipping task with non-numeric id '$recon_id'"
+			continue
+		fi
 
 		local recon_desc recon_affected recon_attempts
 		recon_desc=$(jq -r --argjson id "$recon_id" \
@@ -4633,7 +4658,19 @@ reconcile_failed_tasks_with_branch_evidence() {
 			&& task_files_modified_on_branch "$base_branch" "${recon_files[@]}"; then
 			log "Task $recon_id recorded failed but declared file(s) present" \
 				"vs $base_branch — reconciling to completed: ${recon_files[*]}"
-			update_task "$recon_id" "completed" "$recon_attempts"
+			# Status-only write (issue #620 review): update_task() also stamps
+			# .current_task, which would rewind it to this reconciled task
+			# during gate-time re-evaluation. reconciled_from preserves the
+			# raw stage verdict (issue #617) instead of discarding it, so both
+			# the original and reconciled status stay auditable.
+			jq --argjson id "$recon_id" \
+			   --argjson attempts "$recon_attempts" \
+			   '(.tasks[] | select(.id == $id)).status = "completed" |
+			    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
+			    (.tasks[] | select(.id == $id)).review_attempts = $attempts |
+			    .last_update = (now | todate)' \
+			   "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+			sync_status_to_log
 			reconciled=$((reconciled + 1))
 		else
 			log "Task $recon_id remains failed —" \
@@ -4642,6 +4679,45 @@ reconcile_failed_tasks_with_branch_evidence() {
 	done <<< "$recon_ids"
 
 	printf '%s\n' "$reconciled"
+}
+
+# _lacking_evidence_summary() — formats every task still marked "failed" in
+# $STATUS_FILE into a human-readable list for merge_blocked_reason (#620
+# task 3), so a block names the specific tasks lacking file evidence rather
+# than only reporting a count (AC3). Callers run this only after
+# reconcile_failed_tasks_with_branch_evidence() has already promoted every
+# task it could find evidence for — any task still "failed" at that point is
+# a genuine gap.
+#
+# Example output: "task 2 (README install section) [README.md]"
+# Multiple tasks are joined with "; ". Empty output when no task is failed.
+#
+# Globals:
+#   STATUS_FILE - read tasks from
+_lacking_evidence_summary() {
+	[[ -f "$STATUS_FILE" ]] || return 0
+
+	local -a lacking_parts=()
+	local lacking_entry
+	while IFS= read -r lacking_entry; do
+		[[ -n "$lacking_entry" ]] && lacking_parts+=("$lacking_entry")
+	done < <(jq -r '
+		(.tasks // [])[] | select(.status == "failed")
+		| "task \(.id // "?") (\(.description // "no description"))"
+			+ (if ((.affected_files // []) | length) > 0
+				then " [\((.affected_files // []) | join(", "))]"
+				else "" end)
+	' "$STATUS_FILE" 2>/dev/null)
+
+	local lacking_summary="" lacking_part
+	for lacking_part in "${lacking_parts[@]+"${lacking_parts[@]}"}"; do
+		if [[ -z "$lacking_summary" ]]; then
+			lacking_summary="$lacking_part"
+		else
+			lacking_summary="${lacking_summary}; ${lacking_part}"
+		fi
+	done
+	printf '%s' "$lacking_summary"
 }
 
 # revalidate_partial_block_against_branch() — gate-time convergence-verdict
@@ -4679,9 +4755,18 @@ revalidate_partial_block_against_branch() {
 	[[ "$reval_total" =~ ^[0-9]+$ ]] || reval_total=0
 	((reval_total > 0)) || return 0
 
+	# Raw stage verdict — the completed count as this gate found it, before
+	# this pass re-checks the branch (#620 task 3: recorded alongside the
+	# branch-verified verdict below so a block's reason shows both).
+	local reval_raw_completed
+	reval_raw_completed=$(jq '[(.tasks // [])[] | select(.status == "completed")] | length' \
+		"$STATUS_FILE" 2>/dev/null) || reval_raw_completed=0
+	[[ "$reval_raw_completed" =~ ^[0-9]+$ ]] || reval_raw_completed=0
+
 	local reval_reconciled
 	reval_reconciled=$(reconcile_failed_tasks_with_branch_evidence "$base_branch")
 
+	# Branch-verified verdict — the completed count after reconciliation.
 	local reval_completed
 	reval_completed=$(jq '[(.tasks // [])[] | select(.status == "completed")] | length' \
 		"$STATUS_FILE" 2>/dev/null) || reval_completed=0
@@ -4702,7 +4787,11 @@ revalidate_partial_block_against_branch() {
 		log "Gate re-evaluation: ${reval_completed}/${reval_total} task(s) evidenced" \
 			"on the branch (${reval_reconciled} reconciled here) —" \
 			"partial merge block stands."
-		jq --arg reason "Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total})." \
+		local reval_lacking
+		reval_lacking=$(_lacking_evidence_summary)
+		local reval_reason
+		reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking file evidence: ${reval_lacking}}."
+		jq --arg reason "$reval_reason" \
 			'if ((.merge_blocked_reason // "")
 					| (. == "" or startswith("Partial implementation:")))
 			 then .merge_blocked_reason = $reason
@@ -8411,6 +8500,12 @@ $impl_summary" "$tagent"
         # the failed-task comment) — reflects branch content rather than
         # stale per-stage bookkeeping.
         # -----------------------------------------------------------------
+        # Raw stage verdict — the completed count as the task loop above
+        # recorded it, before branch-evidence reconciliation runs (#620 task
+        # 3: recorded alongside the branch-verified verdict below so a block
+        # states both, not just the reconciled count).
+        local _raw_completed_tasks=$completed_tasks
+
         local _reconciled_count
         _reconciled_count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
         # Guard the arithmetic: a non-numeric capture (helper unavailable, jq
@@ -8439,8 +8534,14 @@ $impl_summary" "$tagent"
             # Persist a merge-block reason so a standalone process-pr or a
             # resumed run honours the gate from status.json too.  Use // to
             # avoid clobbering a reason a prior gate (e.g. convergence) set.
+            # Names both verdicts (#620 task 3): the raw stage-reported count
+            # and the branch-verified count, plus the specific tasks still
+            # lacking file evidence, not just a bare count (AC3).
             if [[ -f "$STATUS_FILE" ]]; then
-                jq --arg reason "Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count})." \
+                local _lacking_evidence _reason
+                _lacking_evidence=$(_lacking_evidence_summary)
+                _reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking file evidence: ${_lacking_evidence}}."
+                jq --arg reason "$_reason" \
                    '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)' \
                    "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
                 sync_status_to_log
