@@ -444,6 +444,82 @@ JSON
 			"'$consumer/.claude/config/platform.sh'" >&2; return 1; }
 }
 
+@test "bundle: issue-body-lib validates a body naming an agent defined only in a consumer's .claude/agents/ (no ISSUE_BODY_AGENTS_DIR override)" {
+	local lib="$REPO_ROOT/plugins/pipeline-core/scripts/issue-body-lib.sh"
+	[ -f "$lib" ] || skip "bundle issue-body-lib.sh not present"
+
+	# Consumer repo that ships an agent the bundle itself never ships
+	# (plugins/pipeline-core/agents/ does not exist — issue #631).
+	local consumer="$TEST_TMP/consumer"
+	mkdir -p "$consumer/.claude/agents" "$consumer/src"
+	git -C "$consumer" init -q
+	printf '# Consumer-only agent\n' \
+		> "$consumer/.claude/agents/consumer-only-agent.md"
+	: > "$consumer/src/widget.sh"
+
+	local body
+	body=$(cat <<'BODY'
+## Implementation Tasks
+
+- [ ] `[consumer-only-agent]` **(S)** Do the thing — `src/widget.sh`
+
+## Acceptance Criteria
+
+- AC1: it works
+BODY
+)
+
+	# Sourced straight from the bundle path, cwd inside the consumer repo,
+	# no ISSUE_BODY_AGENTS_DIR override — this is the exact reproduction
+	# from issue #631 ("from bundle, no override: unknown agent").
+	run env -u ISSUE_BODY_AGENTS_DIR -u PIPELINE_CONFIG_DIR -u CLAUDE_PLUGIN_ROOT \
+		bash -c '
+			cd "$1" || exit 1
+			source "$2"
+			assert_issue_valid "$3"
+		' _ "$consumer" "$lib" "$body"
+
+	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
+@test "bundle-relative regression: an agent defined only in a consumer .claude/agents/ fails validation when no consumer dir is reachable" {
+	local lib="$REPO_ROOT/plugins/pipeline-core/scripts/issue-body-lib.sh"
+	[ -f "$lib" ] || skip "bundle issue-body-lib.sh not present"
+
+	# Isolated, non-git tmp dir with no .claude/agents/ anywhere reachable —
+	# reproduces the pre-fix bug where the agents dir resolved
+	# bundle-relative (plugins/pipeline-core/agents/, which the bundle never
+	# ships), so a consumer-only agent must still be rejected. Guards against
+	# a "resolver failure silently degrades to always-valid" regression.
+	local isolated="$TEST_TMP/isolated"
+	mkdir -p "$isolated/src"
+	: > "$isolated/src/widget.sh"
+
+	local body
+	body=$(cat <<'BODY'
+## Implementation Tasks
+
+- [ ] `[consumer-only-agent]` **(S)** Do the thing — `src/widget.sh`
+
+## Acceptance Criteria
+
+- AC1: it works
+BODY
+)
+
+	run env -u ISSUE_BODY_AGENTS_DIR -u PIPELINE_CONFIG_DIR -u CLAUDE_PLUGIN_ROOT \
+		bash -c '
+			cd "$1" || exit 1
+			source "$2"
+			assert_issue_valid "$3"
+		' _ "$isolated" "$lib" "$body"
+
+	[ "$status" -ne 0 ] \
+		|| { echo "expected failure (no consumer agents dir reachable), got success: $output" >&2; return 1; }
+	[[ "$output" == *"unknown agent: consumer-only-agent"* ]] \
+		|| { echo "expected 'unknown agent' diagnostic, got: $output" >&2; return 1; }
+}
+
 @test "bundle: implement-issue-orchestrator.sh loud-aborts when platform.sh cannot be resolved" {
 	local orch="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
 	[ -f "$orch" ] || { echo "orchestrator missing: $orch" >&2; return 1; }
