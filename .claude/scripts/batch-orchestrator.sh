@@ -1099,6 +1099,22 @@ validate_issue_for_processing() {
 				[[ -n "$diag_line" ]] && \
 					log_warn "Preflight #$issue_num: $diag_line"
 			done <<< "$valid_errs"
+			# Distinguish an unresolvable agents dir from a genuinely
+			# malformed body (issue #631 AC3): if every diagnostic is an
+			# "unknown agent" error AND the agents dir itself never
+			# resolved, the body is fine — the environment can't see the
+			# consumer's .claude/agents/. Enrichment cannot fix that, so
+			# skip immediately with a distinct reason naming the real
+			# cause instead of misleadingly blaming the body.
+			if ! printf '%s' "$valid_errs" \
+				| grep -qvE '^unknown agent: |^[[:space:]]*$' \
+				&& ! issue_body_agents_dir_resolved; then
+				log_warn "Preflight #$issue_num: agents directory" \
+					"unresolvable — cannot validate agent names" \
+					"(body itself is not malformed)"
+				_SKIP_REASON="agents directory unresolvable (not a malformed body)"
+				return 1
+			fi
 			if [[ "$ENRICH_FOLLOWUPS" == true ]] \
 				&& printf '%s' "$body" \
 					| grep -q '<!-- pipeline-autocreated -->'; then

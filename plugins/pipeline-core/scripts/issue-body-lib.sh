@@ -33,7 +33,8 @@
 #       and returns 1 otherwise.
 #
 # Configuration (environment overrides, mainly for testing):
-#   ISSUE_BODY_AGENTS_DIR   agents directory (default: <lib>/../agents)
+#   ISSUE_BODY_AGENTS_DIR   agents directory (default: resolve_consumer_dir
+#                           agents — see resolve-pipeline-root.sh)
 #   ISSUE_BODY_REPO_ROOT    repo root for path resolution (default: .)
 #   DEPLOY_VERIFY_CMD       deploy verification gate (see criterion 5)
 #
@@ -83,6 +84,47 @@ _issue_body_lib_dir() {
 	local src="${BASH_SOURCE[0]}"
 	local dir="${src%/*}"
 	(cd "$dir" 2>/dev/null && pwd)
+}
+
+# Source resolve-pipeline-root.sh for resolve_consumer_dir() (issue #631 —
+# the consumer's .claude/agents/ dir, not a never-shipped bundle-relative
+# path). Idempotent via that library's own source guard, so this is a no-op
+# when a caller (e.g. batch-orchestrator.sh) already sourced it first.
+# shellcheck source=resolve-pipeline-root.sh
+source "$(_issue_body_lib_dir)/resolve-pipeline-root.sh"
+
+#
+# Resolves the agents directory used for agent-name validation.
+# ISSUE_BODY_AGENTS_DIR remains an explicit override; otherwise resolution
+# defers to resolve_consumer_dir() (override → consumer repo root →
+# bundle-relative legacy fallback — see resolve-pipeline-root.sh).
+#
+# Outputs:
+#   Resolved agents directory path on stdout (empty on a total miss)
+# Returns:
+#   0 if a directory was resolved, 1 if none could be located
+#
+_issue_body_agents_dir() {
+	if [[ -n "${ISSUE_BODY_AGENTS_DIR:-}" ]]; then
+		printf '%s' "$ISSUE_BODY_AGENTS_DIR"
+		return 0
+	fi
+	resolve_consumer_dir agents
+}
+
+#
+# Reports whether the agents directory used above actually resolved to an
+# existing directory. Lets callers (batch-orchestrator.sh) distinguish "the
+# agents dir itself is unresolvable" from "the body names a genuinely
+# unknown agent" when assert_issue_valid fails (issue #631 AC3).
+#
+# Returns:
+#   0 if the agents directory resolved to an existing directory, 1 otherwise
+#
+issue_body_agents_dir_resolved() {
+	local agents_dir
+	agents_dir="$(_issue_body_agents_dir)"
+	[[ -n "$agents_dir" && -d "$agents_dir" ]]
 }
 
 #
@@ -149,7 +191,7 @@ _infer_agent_from_path() {
 
 	# Degrade to "default" when the inferred agent has no local .md definition.
 	local agents_dir
-	agents_dir="${ISSUE_BODY_AGENTS_DIR:-$(_issue_body_lib_dir)/../agents}"
+	agents_dir="$(_issue_body_agents_dir)"
 	if [[ ! -f "${agents_dir}/${candidate}.md" ]]; then
 		candidate="default"
 	fi
@@ -162,7 +204,8 @@ _infer_agent_from_path() {
 # the .claude/agents/*.md definitions.
 #
 valid_agents() {
-	local agents_dir="${ISSUE_BODY_AGENTS_DIR:-$(_issue_body_lib_dir)/../agents}"
+	local agents_dir
+	agents_dir="$(_issue_body_agents_dir)"
 	local file name
 
 	for file in "$agents_dir"/*.md; do
