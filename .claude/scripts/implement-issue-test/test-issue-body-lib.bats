@@ -1262,3 +1262,42 @@ Task 2: test the thing
 	run assert_issue_valid "$(valid_body)"
 	[ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Issue #634 — criterion 7 exemption for declared NON-COMMIT deliverables
+#
+# assert_issue_valid is fail-closed at issue creation, so a task whose
+# deliverable is an issue comment could not be authored at all while
+# criterion 7 demanded a file path from every open task.  The exemption is
+# narrow: it fires only for a task that declares `deliverable:...`, so it can
+# only widen what the gate accepts — no body that validated before this
+# change stops validating.
+# =============================================================================
+
+@test "#634 assert_issue_valid: accepts a comment-only task that names no file path" {
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Post the routing ruling as an issue comment — \`deliverable:comment:ruling-634\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "#634 assert_issue_valid: still rejects an unannotated task with no file path" {
+	# Regression guard: the exemption must not disarm criterion 7 generally.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Do something unspecified
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"task has no file path"* ]]
+}

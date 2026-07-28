@@ -462,6 +462,31 @@ _issue_body_tasks_section() {
 	return 0
 }
 
+# Reads a task's declared NON-COMMIT deliverable out of its description
+# (issue #634) — the library mirror of _task_annotation() in
+# implement-issue-orchestrator.sh.
+#
+# The annotation is written INLINE in the description, never as a new bullet
+# shape, so neither mirrored parser needs a new line pattern and both keep
+# emitting byte-identical descriptions. This helper therefore reads the same
+# text both parsers already produce; it is used only by assert_issue_valid's
+# criterion-7 exemption.
+#
+# Arguments:
+#   $1 - task description
+# Outputs:
+#   The deliverable spec on stdout (empty when the task declares none)
+#
+_issue_body_task_deliverable() {
+	local desc="$1"
+	# Backtick-bearing regex must live in a variable — bash cannot escape a
+	# backtick inside an inline [[ =~ ]] pattern reliably.
+	local bt='`'
+	local re="${bt}deliverable:([^${bt}]+)${bt}"
+	[[ "$desc" =~ $re ]] || return 0
+	printf '%s' "${BASH_REMATCH[1]}"
+}
+
 _issue_body_parse_tasks() {
 	local body="$1"
 
@@ -716,7 +741,16 @@ assert_issue_valid() {
 		# codebase blind — the #1 token sink the explore skill warns about.
 		# The parser already skips checked [x] tasks, so only OPEN tasks are
 		# gated here; the diagnostic names the offending task.
-		if (( path_count == 0 )); then
+		#
+		# Exemption (issue #634): a task that declares a NON-COMMIT
+		# deliverable — `deliverable:comment:<marker>` — has no file to name;
+		# its artefact is the marker, and the orchestrator verifies that
+		# artefact instead of branch content. The exemption is narrow by
+		# construction: it only widens what the gate accepts, so every body
+		# that validated before this change still validates, and a task with
+		# no annotation is gated exactly as before.
+		if (( path_count == 0 )) \
+			&& [[ -z "$(_issue_body_task_deliverable "$desc")" ]]; then
 			errors+=("task has no file path: ${desc}")
 		fi
 

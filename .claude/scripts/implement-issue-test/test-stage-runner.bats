@@ -1009,6 +1009,115 @@ teardown() {
 }
 
 # =============================================================================
+# S-COMPLEXITY UNCAPPED RETRY — error_max_turns (issue #637)
+#
+# An S task at sonnet must NOT be promoted to opus (issue #579), but it must
+# still get the cap-lift that the escalation path provides: exactly one
+# same-model retry with no --max-turns, and a second exhaustion is terminal.
+# =============================================================================
+
+@test "run_stage retries an S task at sonnet with no max-turns cap after error_max_turns" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || \
+        fail "Expected 2 claude calls (one uncapped retry), got $final_count"
+
+    local first_call_args second_call_args
+    first_call_args=$(cat "$TEST_TMP/call-1-args.txt" 2>/dev/null)
+    second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
+    [[ "$first_call_args" == *"--max-turns"* ]] || \
+        fail "First attempt should be capped. Args: $first_call_args"
+    [[ "$second_call_args" != *"--max-turns"* ]] || \
+        fail "Uncapped retry must omit --max-turns. Args: $second_call_args"
+    [[ "$second_call_args" == *"--model sonnet"* ]] || \
+        fail "Retry must stay at sonnet. Args: $second_call_args"
+    [[ "$second_call_args" != *"--model opus"* ]] || \
+        fail "S task must never be escalated to opus (#579). Args: $second_call_args"
+}
+
+@test "run_stage fails an S task after a second error_max_turns on the uncapped retry" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+    }
+    export -f timeout
+    export counter_file
+
+    run run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+    [ "$status" -eq 1 ] || \
+        fail "Second exhaustion must be terminal, got status $status. Out: $output"
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || \
+        fail "Expected exactly 2 claude calls, got $final_count"
+
+    local sr err_kind st
+    sr=$(printf '%s\n' "$output" | grep '^{' | tail -1)
+    st=$(printf '%s' "$sr" | jq -r '.status')
+    err_kind=$(printf '%s' "$sr" | jq -r '.error_kind')
+    [ "$st" = "error" ] || \
+        fail "Expected error stage_result after second exhaustion, got: $sr"
+    [ "$err_kind" = "max_turns_exhausted_at_ceiling" ] || \
+        fail "Expected max_turns error_kind, got: $err_kind ($sr)"
+}
+
+@test "TASK_DESC_PROMOTE_CHARS default sits below the explore skill's description limit" {
+    local repo_root explore_skill orch
+    repo_root=$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)
+    orch="$repo_root/.claude/scripts/implement-issue-orchestrator.sh"
+
+    explore_skill="$repo_root/plugins/pipeline-core/skills/explore/SKILL.md"
+    [[ -f "$explore_skill" ]] || \
+        explore_skill="$repo_root/.claude/skills/explore/SKILL.md"
+    [[ -f "$explore_skill" ]] || \
+        fail "explore SKILL.md not found — cannot pin the threshold pair"
+
+    local skill_limit promote_default
+    skill_limit=$(grep -oE 'under ~?[0-9]+ characters' "$explore_skill" \
+        | grep -oE '[0-9]+' | head -1)
+    promote_default=$(grep -oE 'TASK_DESC_PROMOTE_CHARS:-[0-9]+' "$orch" \
+        | grep -oE '[0-9]+' | head -1)
+
+    [[ -n "$skill_limit" ]] || \
+        fail "Could not read the explore skill's character limit"
+    [[ -n "$promote_default" ]] || \
+        fail "Could not read the TASK_DESC_PROMOTE_CHARS default"
+
+    (( promote_default < skill_limit )) || \
+        fail "TASK_DESC_PROMOTE_CHARS default ($promote_default) must sit below the explore skill's ~${skill_limit}-char rule, or a correctly-authored task can never be promoted"
+}
+
+# =============================================================================
 # MODEL ESCALATION — structured_error
 # =============================================================================
 
