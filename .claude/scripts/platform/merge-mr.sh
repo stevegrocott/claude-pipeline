@@ -94,7 +94,17 @@ wait_for_mergeable() {
         rollup=$(jq -c '.statusCheckRollup // []' <<<"$json" 2>/dev/null || echo "[]")
 
         if _has_concluded_check_failure "$rollup"; then
-          echo "PR #$pr has a check that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
+          local failed_check
+          failed_check=$(jq -r '
+            [.[]? |
+              if .__typename == "CheckRun" then
+                (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
+              else
+                (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
+              end
+            ] | first // "unknown check"
+          ' <<<"$rollup" 2>/dev/null || echo "unknown check")
+          echo "PR #$pr has check \"$failed_check\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
           return 1
         fi
 
