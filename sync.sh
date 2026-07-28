@@ -21,6 +21,10 @@ PIPELINE_DIR="$SCRIPT_DIR/.claude"
 # as a fallback so plugin-hosted skill docs still propagate to consumers'
 # .claude/skills/ until they adopt the plugin marketplace directly.
 PLUGIN_SKILLS_DIR="$SCRIPT_DIR/plugins/pipeline-core/skills"
+# Bundled plugin script tree — what consumers install. Hand-editing this tree
+# is how it drifts from .claude/scripts/ (issue #623); `bundle` regenerates
+# it instead.
+BUNDLE_SCRIPTS_DIR="$SCRIPT_DIR/plugins/pipeline-core/scripts"
 
 # ---------------------------------------------------------------------------
 # Core files — synced between pipeline and projects.
@@ -93,15 +97,17 @@ usage() {
 Usage: ./sync.sh <command> <project-path>
 
 Commands:
-  to   <path>   Push core pipeline files TO a project's .claude/
-  from <path>   Pull core pipeline fixes FROM a project's .claude/
-  diff <path>   Show differences between pipeline and project core files
-  list          List all core files that get synced
+  to     <path>   Push core pipeline files TO a project's .claude/
+  from   <path>   Pull core pipeline fixes FROM a project's .claude/
+  diff   <path>   Show differences between pipeline and project core files
+  bundle          Regenerate plugins/pipeline-core/scripts/ from .claude/scripts/
+  list            List all core files that get synced
 
 Examples:
-  ./sync.sh to   ~/Projects/allied-universal-assign
-  ./sync.sh from ~/Projects/allied-universal-assign
-  ./sync.sh diff ~/Projects/allied-universal-assign
+  ./sync.sh to     ~/Projects/allied-universal-assign
+  ./sync.sh from   ~/Projects/allied-universal-assign
+  ./sync.sh diff   ~/Projects/allied-universal-assign
+  ./sync.sh bundle
 USAGE
     exit 1
 }
@@ -178,6 +184,74 @@ resolve_skill_src() {
     elif [[ "$base" == "$PIPELINE_DIR" && -d "$PLUGIN_SKILLS_DIR/$skill" ]]; then
         printf '%s' "$PLUGIN_SKILLS_DIR/$skill"
     fi
+}
+
+# Subdirectories bundled alongside the top-level scripts. Kept in lockstep
+# with PARITY_SUBDIRS in
+# .claude/scripts/implement-issue-test/test-bundle-parity.bats — both lists
+# must name the same directories or the generator and the guard silently
+# diverge on scope again (issue #623).
+BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)
+
+# Regenerate one directory level of the bundle: copy every file in $src_dir
+# matching $pattern that is missing/stale in $dst_dir, and remove files in
+# $dst_dir with no canonical counterpart. $label prefixes progress output
+# (e.g. "platform/").
+_bundle_scripts_dir() {
+    local src_dir="$1" dst_dir="$2" label="$3" pattern="$4"
+    local existing base canonical
+
+    for existing in "$dst_dir"/$pattern; do
+        [[ -f "$existing" ]] || continue
+        base=$(basename "$existing")
+        if [[ ! -f "$src_dir/$base" ]]; then
+            rm "$existing"
+            echo "  REMOVE $label$base (no longer in .claude/scripts/)"
+        fi
+    done
+
+    for canonical in "$src_dir"/$pattern; do
+        [[ -f "$canonical" ]] || continue
+        base=$(basename "$canonical")
+        if [[ -f "$dst_dir/$base" ]] && \
+            diff -q "$canonical" "$dst_dir/$base" > /dev/null 2>&1; then
+            continue
+        fi
+        cp "$canonical" "$dst_dir/$base"
+        echo "  BUNDLE $label$base"
+    done
+}
+
+# Regenerate the bundled plugin script tree from the canonical .claude/scripts/
+# tree (issue #623) — the bundle is PRODUCED, not hand-edited. Copies every
+# canonical top-level *.sh plus every file under platform/, prompts/, and
+# schemas/ into the bundle, and removes bundled files with no canonical
+# counterpart, so the two trees never silently drift again.
+bundle_scripts() {
+    local src="$PIPELINE_DIR/scripts"
+    local dst="$BUNDLE_SCRIPTS_DIR"
+
+    if [[ ! -d "$src" ]]; then
+        echo "ERROR: $src does not exist." >&2
+        exit 1
+    fi
+
+    mkdir -p "$dst"
+
+    echo "Regenerating bundle: .claude/scripts/ -> plugins/pipeline-core/scripts/"
+    echo ""
+
+    _bundle_scripts_dir "$src" "$dst" "" "*.sh"
+
+    local sub
+    for sub in "${BUNDLE_SCRIPT_SUBDIRS[@]}"; do
+        [[ -d "$src/$sub" ]] || continue
+        mkdir -p "$dst/$sub"
+        _bundle_scripts_dir "$src/$sub" "$dst/$sub" "$sub/" "*"
+    done
+
+    echo ""
+    echo "Done. Bundle regenerated from .claude/scripts/."
 }
 
 # Strip <!-- STACK-SPECIFIC: --> from line 1 of consumer agent files.
@@ -434,6 +508,10 @@ case "$COMMAND" in
         echo ""
         echo "Universal skills:"
         diff_skills "$PIPELINE_DIR" "$PROJECT_DIR"
+        ;;
+
+    bundle)
+        bundle_scripts
         ;;
 
     list)
