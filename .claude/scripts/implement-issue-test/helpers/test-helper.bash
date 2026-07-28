@@ -365,6 +365,64 @@ assert_not_empty() {
 }
 
 # =============================================================================
+# HARD ASSERTIONS (expect_*)
+#
+# BATS does not abort a test body on a bare failing command — only the FINAL
+# command's exit status decides pass/fail.  Verified with bats 1.13:
+#
+#     @test "intermediate failing assertion" {
+#         [[ "abc" == "xyz" ]]   # <- returns 1, silently ignored
+#         [[ "abc" == "abc" ]]
+#     }                          # -> reported "ok"
+#
+# So every assertion except the last is inert when written as a bare
+# `[[ ... ]]`, and the `return 1`-style assert_* helpers above have the same
+# problem for the same reason.  The expect_* helpers below `exit 1` instead,
+# which terminates the test's subshell and is reported as a failure, so a test
+# can assert as many times as it needs without any of them being dropped.
+# Prefer these over bare `[[ ... ]]` in any test that asserts more than once.
+# =============================================================================
+
+# expect_glob <actual> <pattern> [label]
+# Fail unless <actual> matches the bash glob <pattern>.  The pattern is left
+# unquoted at the match site, so *, ?, and [...] are wildcards.
+expect_glob() {
+    local actual="$1"
+    local pattern="$2"
+    local label="${3:-value should match pattern}"
+
+    if [[ "$actual" != $pattern ]]; then
+        printf 'FAIL: %s\n  expected pattern: %s\n  actual:           %s\n' \
+            "$label" "$pattern" "$actual" >&2
+        exit 1
+    fi
+}
+
+# expect_ok <label> <command...>
+# Fail unless <command> exits 0.
+expect_ok() {
+    local label="$1"
+    shift
+
+    if ! "$@"; then
+        printf 'FAIL: %s\n  expected success from: %s\n' "$label" "$*" >&2
+        exit 1
+    fi
+}
+
+# expect_not_ok <label> <command...>
+# Fail unless <command> exits non-zero.
+expect_not_ok() {
+    local label="$1"
+    shift
+
+    if "$@"; then
+        printf 'FAIL: %s\n  expected failure from: %s\n' "$label" "$*" >&2
+        exit 1
+    fi
+}
+
+# =============================================================================
 # SOURCE SCRIPT FUNCTIONS
 # =============================================================================
 

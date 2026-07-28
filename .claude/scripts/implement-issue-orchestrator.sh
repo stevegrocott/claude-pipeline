@@ -4526,22 +4526,200 @@ _extract_task_files_from_desc() {
 #   0 (true)  - at least one declared path appears in the branch diff
 #   1 (false) - none of the declared paths appear in the diff, no paths
 #               were given, or the diff could not be computed
+#
+# Uses `-z --no-renames` rather than `--name-only` piped through `grep -Fqx`:
+#   - `-z` NUL-delimits the output AND prints paths unquoted/verbatim, so a
+#     non-ASCII or special-character path (which `core.quotePath=true`, the
+#     default, would otherwise octal-escape) still compares equal.
+#   - `--no-renames` reports a renamed file as its pre-rename (deleted) and
+#     post-rename (added) paths individually rather than collapsing them into
+#     one "old => new" entry, so a task declaring the pre-rename path is still
+#     recognised as evidenced.
+#   - NUL-delimited output cannot round-trip through a `$()` capture (bash
+#     command substitution truncates at the first NUL byte), so the diff is
+#     consumed directly off a process substitution instead of a variable.
 task_files_modified_on_branch() {
 	local base_branch="$1"
 	shift
 
 	(($# > 0)) || return 1
 
-	local diff_out
-	diff_out=$(git diff --name-only "${base_branch}...HEAD" 2>/dev/null) || return 1
-	[[ -n "$diff_out" ]] || return 1
+	local found=1
+	local f want
+	while IFS= read -r -d '' f; do
+		for want in "$@"; do
+			[[ -n "$want" ]] || continue
+			if [[ "$f" == "$want" ]]; then
+				found=0
+				break 2
+			fi
+		done
+	done < <(git diff -z --no-renames --name-only \
+		"${base_branch}...HEAD" 2>/dev/null)
 
-	local f
-	for f in "$@"; do
-		[[ -n "$f" ]] || continue
-		grep -Fqx "$f" <<< "$diff_out" && return 0
+	return "$found"
+}
+
+# reconcile_failed_tasks_with_branch_evidence() — convergence-verdict
+# re-evaluation (issue #616/#618/#620 task 2).
+#
+# A task recorded "failed" by its own stage may still have shipped its
+# deliverable: a later stage (e.g. fix-pr-review-iterN) can complete the
+# abandoned work without ever touching the original task's status, so
+# `.tasks[].status` alone cannot be trusted as the convergence verdict
+# (issue #616). This walks every task currently marked "failed" in
+# $STATUS_FILE, gathers its declared file paths — preferring the
+# task's recorded `affected_files`, falling back to
+# `_extract_task_files_from_desc()` on its description when that is empty
+# (the same source compute_task_batches() already relies on) — and checks
+# them against the branch diff via task_files_modified_on_branch() (task 1).
+# A task with matching branch evidence is promoted to "completed" via
+# update_task(); a task with no declared files, or none of them evidenced
+# on the branch, is left "failed" so a genuine gap (issue #618) still
+# blocks the merge.
+#
+# Arguments:
+#   $1 - base branch name to diff against (e.g. "main")
+# Globals:
+#   STATUS_FILE - read tasks from and (via update_task) write reconciled
+#                 statuses to
+# Outputs:
+#   The number of tasks reconciled (promoted from "failed" to "completed")
+#   on stdout — add this to the caller's completed-task count.
+reconcile_failed_tasks_with_branch_evidence() {
+	local base_branch="$1"
+	local reconciled=0
+
+	if [[ ! -f "$STATUS_FILE" ]]; then
+		printf '%s\n' "$reconciled"
+		return 0
+	fi
+
+	local recon_ids
+	recon_ids=$(jq -r '(.tasks // [])[] | select(.status == "failed") | .id' \
+		"$STATUS_FILE" 2>/dev/null)
+
+	local recon_id
+	while IFS= read -r recon_id; do
+		[[ -n "$recon_id" ]] || continue
+
+		local recon_desc recon_affected recon_attempts
+		recon_desc=$(jq -r --argjson id "$recon_id" \
+			'(.tasks[] | select(.id == $id)).description // ""' \
+			"$STATUS_FILE" 2>/dev/null)
+		recon_affected=$(jq -r --argjson id "$recon_id" \
+			'(.tasks[] | select(.id == $id)).affected_files // [] | .[]' \
+			"$STATUS_FILE" 2>/dev/null)
+		# update_task() rewrites review_attempts unconditionally, so carry the
+		# recorded value through rather than resetting a reconciled task's
+		# review history to 0.
+		recon_attempts=$(jq -r --argjson id "$recon_id" \
+			'(.tasks[] | select(.id == $id)).review_attempts // 0' \
+			"$STATUS_FILE" 2>/dev/null)
+		[[ "$recon_attempts" =~ ^[0-9]+$ ]] || recon_attempts=0
+
+		local -a recon_files=()
+		if [[ -n "$recon_affected" ]]; then
+			while IFS= read -r recon_f; do
+				[[ -n "$recon_f" ]] && recon_files+=("$recon_f")
+			done <<< "$recon_affected"
+		else
+			while IFS= read -r recon_f; do
+				[[ -n "$recon_f" ]] && recon_files+=("$recon_f")
+			done < <(_extract_task_files_from_desc "$recon_desc")
+		fi
+
+		if ((${#recon_files[@]} > 0)) \
+			&& task_files_modified_on_branch "$base_branch" "${recon_files[@]}"; then
+			log "Task $recon_id recorded failed but declared file(s) present" \
+				"vs $base_branch — reconciling to completed: ${recon_files[*]}"
+			update_task "$recon_id" "completed" "$recon_attempts"
+			reconciled=$((reconciled + 1))
+		else
+			log "Task $recon_id remains failed —" \
+				"no declared file evidence vs $base_branch"
+		fi
+	done <<< "$recon_ids"
+
+	printf '%s\n' "$reconciled"
+}
+
+# revalidate_partial_block_against_branch() — gate-time convergence-verdict
+# re-evaluation (issue #616/#620 task 2).
+#
+# The implement stage reconciles failed tasks against branch evidence as soon
+# as its task loop ends, but the #616 root cause is a *later* stage —
+# fix-pr-review-iterN, which succeeded on PR #616 — landing an abandoned
+# task's deliverable after that point, where the implement-stage
+# reconciliation can no longer see it. This re-runs
+# reconcile_failed_tasks_with_branch_evidence() immediately before the merge
+# gate reads its verdict, then rewrites the partial-completion bookkeeping
+# from the reconciled counts:
+#   - every stale implement:partial:* entry is dropped from DEGRADED_STAGES,
+#     and a fresh one appended only when tasks still lack file evidence;
+#   - a persisted "Partial implementation:" merge_blocked_reason is rewritten
+#     with the corrected counts, or cleared outright when every task is
+#     evidenced on the branch.
+# A persisted *convergence* reason is never touched — only a partial one — so
+# Gate A keeps precedence over Gate B exactly as before.
+#
+# Arguments:
+#   $1 - base branch name to diff against (e.g. "main")
+# Globals:
+#   DEGRADED_STAGES - implement:partial:* entries rewritten in place
+#   STATUS_FILE     - tasks re-read; merge_blocked_reason rewritten or cleared
+revalidate_partial_block_against_branch() {
+	local base_branch="$1"
+
+	[[ -f "$STATUS_FILE" ]] || return 0
+
+	local reval_total
+	reval_total=$(jq '(.tasks // []) | length' "$STATUS_FILE" 2>/dev/null) \
+		|| reval_total=0
+	[[ "$reval_total" =~ ^[0-9]+$ ]] || reval_total=0
+	((reval_total > 0)) || return 0
+
+	local reval_reconciled
+	reval_reconciled=$(reconcile_failed_tasks_with_branch_evidence "$base_branch")
+
+	local reval_completed
+	reval_completed=$(jq '[(.tasks // [])[] | select(.status == "completed")] | length' \
+		"$STATUS_FILE" 2>/dev/null) || reval_completed=0
+	[[ "$reval_completed" =~ ^[0-9]+$ ]] || reval_completed=0
+
+	# Drop stale implement:partial:* markers — they are recomputed below from
+	# the reconciled counts.
+	local -a reval_kept=()
+	local reval_entry
+	for reval_entry in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		[[ "$reval_entry" == implement:partial:* ]] && continue
+		reval_kept+=("$reval_entry")
 	done
-	return 1
+	DEGRADED_STAGES=("${reval_kept[@]+"${reval_kept[@]}"}")
+
+	if ((reval_completed < reval_total)); then
+		DEGRADED_STAGES+=("implement:partial:${reval_completed}/${reval_total}")
+		log "Gate re-evaluation: ${reval_completed}/${reval_total} task(s) evidenced" \
+			"on the branch (${reval_reconciled} reconciled here) —" \
+			"partial merge block stands."
+		jq --arg reason "Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total})." \
+			'if ((.merge_blocked_reason // "")
+					| (. == "" or startswith("Partial implementation:")))
+			 then .merge_blocked_reason = $reason
+			 else . end
+			 | .last_update = (now | todate)' \
+			"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+	else
+		log "Gate re-evaluation: all ${reval_total} task(s) evidenced on the branch" \
+			"(${reval_reconciled} reconciled here) —" \
+			"clearing stale partial merge block."
+		jq 'if ((.merge_blocked_reason // "") | startswith("Partial implementation:"))
+			 then .merge_blocked_reason = null
+			 else . end
+			 | .last_update = (now | todate)' \
+			"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+	fi
+	sync_status_to_log
 }
 
 # Groups tasks into parallelizable batches by detecting file-level conflicts.
@@ -8222,13 +8400,36 @@ $impl_summary" "$tagent"
         fi
 
         # -----------------------------------------------------------------
+        # BRANCH-EVIDENCE RECONCILIATION (issue #616/#618/#620 task 2)
+        # A task recorded "failed" by its own stage may still have shipped
+        # its deliverable — e.g. a later fix-pr-review-iterN stage completed
+        # the abandoned work but never touched the original task's status
+        # (the #616/#618 root cause). Re-check every "failed" task against
+        # branch evidence BEFORE computing the convergence verdict below, so
+        # $completed_tasks — and everything downstream that reads it (the
+        # PARTIAL-COMPLETION GATE, DEGRADED_STAGES, merge_blocked_reason,
+        # the failed-task comment) — reflects branch content rather than
+        # stale per-stage bookkeeping.
+        # -----------------------------------------------------------------
+        local _reconciled_count
+        _reconciled_count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+        # Guard the arithmetic: a non-numeric capture (helper unavailable, jq
+        # missing) would abort the expansion rather than degrade to "nothing
+        # reconciled".
+        [[ "$_reconciled_count" =~ ^[0-9]+$ ]] || _reconciled_count=0
+        completed_tasks=$((completed_tasks + _reconciled_count))
+
+        # -----------------------------------------------------------------
         # PARTIAL-COMPLETION GATE (issue #577)
         # When fewer tasks completed this run than were planned, this is a
         # partial delivery: record an implement:partial:<n>/<m> marker in
         # DEGRADED_STAGES (consulted by the merge gate below to block
         # auto-merge) and post an issue comment naming each failed task.
         # DEGRADED_STAGES is guarded against set -u unbound expansion at every
-        # read site, so appending here is safe.
+        # read site, so appending here is safe. $completed_tasks already
+        # reflects the branch-evidence reconciliation above, so this gate
+        # only fires for tasks with neither a "completed" status nor branch
+        # evidence for their declared files.
         # -----------------------------------------------------------------
         if (( completed_tasks < task_count )); then
             DEGRADED_STAGES+=("implement:partial:${completed_tasks}/${task_count}")
@@ -9081,6 +9282,19 @@ $complete_summary
     else
         set_stage_started "merge_pr"
         log "merge_pr: stage started"
+
+        # ---------------------------------------------------------------------
+        # BRANCH-EVIDENCE RE-EVALUATION AT GATE TIME (issue #616/#620 task 2)
+        # The implement stage already reconciled its failed tasks against the
+        # branch, but the #616 root cause is a later stage — fix-pr-review-iterN
+        # — landing an abandoned task's deliverable after that point. Re-run the
+        # reconciliation here, immediately before the gate below reads its
+        # verdict, so implement:partial markers and any persisted
+        # "Partial implementation:" reason reflect branch content at merge time
+        # rather than stale per-stage bookkeeping. A convergence reason is left
+        # untouched, so Gate A keeps precedence over Gate B.
+        # ---------------------------------------------------------------------
+        revalidate_partial_block_against_branch "$BASE_BRANCH"
 
         # ---------------------------------------------------------------------
         # MERGE GATE — refuse to auto-merge when the quality loop bailed via a
