@@ -320,6 +320,119 @@ resolve_skill_src() {
 # diverge on scope again (issue #623).
 BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)
 
+# ---------------------------------------------------------------------------
+# Hook bundling (issue #640). plugins/pipeline-core/hooks/scripts/ used to be
+# a hand-maintained copy of .claude/hooks/ with nothing enforcing agreement —
+# the same unguarded arrangement that let the script bundle ship a broken
+# release in #623. These three lists make hook scope EXPLICIT, and are kept
+# in lockstep with PARITY_BUNDLE_HOOKS / PARITY_PROJECT_LOCAL_HOOKS /
+# PARITY_PLUGIN_ONLY_HOOKS in
+# .claude/scripts/implement-issue-test/test-bundle-parity.bats, which fails
+# when the generator and the guard disagree.
+#
+# Not every hook in .claude/hooks/ belongs in a consumer's plugin install, so
+# bundling is an ALLOWLIST rather than a directory mirror. The not-shipped set
+# is named just as explicitly: a hook added here later and forgotten must show
+# up as an unclassified-hook test failure, not silently never ship.
+# ---------------------------------------------------------------------------
+
+# Pipeline-owned hooks that ship in the plugin. Each is a core pipeline
+# guardrail a consumer loses the moment it migrates off copied .claude/hooks/.
+BUNDLE_HOOKS=(
+    block-gh-issue-create.sh
+    pipeline-status-inject.sh
+    post-pr-simplify.sh
+    pre-commit-skill-validate.sh
+)
+
+# Hooks that deliberately do NOT ship:
+#   block-destructive-db-commands.sh  DB safety; not every consumer has a DB
+#   rtk-rewrite.sh                    routes commands through project tooling
+#   session-start.sh                  project-local session banner; unwired
+#   sync-reminder.sh                  RETIRED for plugin consumers — it exists
+#                                     to remind you to sync core pipeline
+#                                     changes back upstream, which is
+#                                     meaningless once the plugin IS the
+#                                     source of those files
+PROJECT_LOCAL_HOOKS=(
+    block-destructive-db-commands.sh
+    rtk-rewrite.sh
+    session-start.sh
+    sync-reminder.sh
+)
+
+# Hooks that live only in the bundle and have no .claude/hooks/ counterpart by
+# design. The regenerator must not delete these.
+PLUGIN_ONLY_HOOKS=(
+    scaffold-placeholder.sh
+)
+
+# True when $1 appears among the remaining arguments.
+_hook_listed() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        if [[ "$item" == "$needle" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Regenerate the bundled hook tree from the canonical .claude/hooks/ tree —
+# like the script bundle, this is PRODUCED, not hand-edited. Copies every hook
+# named in BUNDLE_HOOKS and removes anything else that is not explicitly
+# plugin-only, so the two trees cannot silently drift.
+bundle_hooks() {
+    local src="$PIPELINE_DIR/hooks"
+    local dst="${BUNDLE_SCRIPTS_DIR%/scripts}/hooks/scripts"
+
+    # No canonical hook tree to bundle from — nothing to regenerate. This is
+    # not fatal: the parity guard is what fails when an allowlisted hook has
+    # no canonical counterpart, so a missing tree surfaces there rather than
+    # aborting an otherwise valid script-bundle run.
+    if [[ ! -d "$src" ]]; then
+        return 0
+    fi
+
+    mkdir -p "$dst"
+
+    local existing base keep
+    for existing in "$dst"/*; do
+        [[ -f "$existing" ]] || continue
+        base=${existing##*/}
+
+        keep=0
+        if _hook_listed "$base" "${PLUGIN_ONLY_HOOKS[@]}"; then
+            keep=1
+        elif _hook_listed "$base" "${BUNDLE_HOOKS[@]}" && [[ -f "$src/$base" ]]; then
+            keep=1
+        fi
+
+        if ((keep == 0)); then
+            rm "$existing"
+            echo "  REMOVE hooks/$base (not an allowlisted pipeline hook)"
+        fi
+    done
+
+    local hook
+    for hook in "${BUNDLE_HOOKS[@]}"; do
+        if [[ ! -f "$src/$hook" ]]; then
+            echo "ERROR: allowlisted hook missing: $src/$hook" >&2
+            echo "       Fix BUNDLE_HOOKS or restore the hook." >&2
+            exit 1
+        fi
+        if [[ -f "$dst/$hook" ]] && \
+            diff -q "$src/$hook" "$dst/$hook" > /dev/null 2>&1; then
+            continue
+        fi
+        cp "$src/$hook" "$dst/$hook"
+        chmod +x "$dst/$hook"
+        echo "  BUNDLE hooks/$hook"
+    done
+}
+
 # Regenerate one directory level of the bundle: copy every file in $src_dir
 # matching $pattern that is missing/stale in $dst_dir, and remove files in
 # $dst_dir with no canonical counterpart. $label prefixes progress output
@@ -353,7 +466,8 @@ _bundle_scripts_dir() {
 # tree (issue #623) — the bundle is PRODUCED, not hand-edited. Copies every
 # canonical top-level *.sh plus every file under platform/, prompts/, and
 # schemas/ into the bundle, and removes bundled files with no canonical
-# counterpart, so the two trees never silently drift again.
+# counterpart, so the two trees never silently drift again. Also regenerates
+# the bundled hook tree from .claude/hooks/ via bundle_hooks() (issue #640).
 bundle_scripts() {
     local src="$PIPELINE_DIR/scripts"
     local dst="$BUNDLE_SCRIPTS_DIR"
@@ -377,8 +491,12 @@ bundle_scripts() {
         _bundle_scripts_dir "$src/$sub" "$dst/$sub" "$sub/" "*"
     done
 
+    # Hooks are part of the same bundle and are regenerated in the same pass,
+    # so `./sync.sh bundle` leaves no hand-maintained corner behind (#640).
+    bundle_hooks
+
     echo ""
-    echo "Done. Bundle regenerated from .claude/scripts/."
+    echo "Done. Bundle regenerated from .claude/scripts/ and .claude/hooks/."
 }
 
 # Strip <!-- STACK-SPECIFIC: --> from line 1 of consumer agent files.

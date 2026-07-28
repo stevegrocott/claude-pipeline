@@ -667,3 +667,221 @@ MAP
 	[[ "$output" == *"platform.sh"* ]] \
 		|| { echo "expected FATAL platform.sh message, got: $output" >&2; return 1; }
 }
+
+# ===========================================================================
+# Pipeline hooks ship in the plugin (issue #640). Migrating a consumer to
+# pipeline-core used to silently disable its guardrails: hooks.json registered
+# only scaffold-placeholder and post-pr-simplify, so the issue-body guard, the
+# status injector and the SKILL.md validator never reached a plugin consumer.
+# stevegrocott/beegee-farm-3 — the one already-migrated repo — ran a no-op
+# pre-commit-skill-validate.sh from the day it migrated, because the hook
+# resolved its validator to .claude/scripts/skill-validate.sh, a path the
+# migration removes, and then `[[ -f ... ]] || exit 0` failed open in silence.
+#
+# These tests drive the REAL bundled hook scripts with CLAUDE_PROJECT_DIR
+# pointed at a consumer tree that has NO .claude/scripts/ and NO .claude/hooks/,
+# and with CLAUDE_PLUGIN_ROOT unset (it is not set in the model's Bash-tool
+# shell — issue #599 Task 1 finding), which is the exact shape of a migrated
+# consumer.
+# ===========================================================================
+
+# Build a consumer repo that has adopted the plugin: a project dir with no
+# .claude/scripts/ and no .claude/hooks/ at all. Echoes the consumer root.
+_build_plugin_consumer() {
+	local root="$1/consumer"
+	mkdir -p "$root/.claude/skills" "$root/src"
+	printf '%s\n' '{}' > "$root/.claude/settings.json"
+	printf '%s\n' "$root"
+}
+
+# Echo a PreToolUse Write payload for $1 (file path) with body $2.
+_write_payload() {
+	python3 -c '
+import json, sys
+print(json.dumps({
+    "tool_name": "Write",
+    "tool_input": {"file_path": sys.argv[1], "content": sys.argv[2]},
+}))' "$1" "$2"
+}
+
+@test "plugin hooks: hooks.json registers the issue-creation, status and skill-validation guards" {
+	local core
+	core="$(_find_plugin_core "$REPO_ROOT")" \
+		|| skip "plugins/pipeline-core not created yet"
+	local manifest="$core/hooks/hooks.json"
+	[ -f "$manifest" ] || { echo "hooks.json not found: $manifest" >&2; return 1; }
+
+	jq empty "$manifest" 2>/dev/null \
+		|| { echo "hooks.json is not valid JSON: $manifest" >&2; return 1; }
+
+	# event:script pairs a plugin consumer must receive.
+	local -a required=(
+		"PreToolUse:block-gh-issue-create.sh"
+		"PreToolUse:pre-commit-skill-validate.sh"
+		"UserPromptSubmit:pipeline-status-inject.sh"
+	)
+
+	local entry event script missing=""
+	for entry in "${required[@]}"; do
+		event="${entry%%:*}"
+		script="${entry#*:}"
+		jq -e --arg e "$event" --arg s "$script" \
+			'.hooks[$e] // [] | map(.hooks[].command) | flatten
+			 | map(select(endswith($s))) | length > 0' \
+			"$manifest" >/dev/null 2>&1 \
+			|| missing+=$'\n'"  $event -> $script"
+	done
+
+	[ -z "$missing" ] \
+		|| { echo "hooks.json does not register:$missing" >&2; return 1; }
+
+	# Every registered command must resolve to a real executable script.
+	run _validate_hooks "$core"
+	[ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
+@test "plugin consumer: the bundled issue-creation guard blocks a direct gh issue create" {
+	local hook="$REPO_ROOT/plugins/pipeline-core/hooks/scripts/block-gh-issue-create.sh"
+	[ -f "$hook" ] \
+		|| { echo "bundled hook missing: $hook" >&2; return 1; }
+
+	local consumer
+	consumer="$(_build_plugin_consumer "$TEST_TMP")"
+
+	local payload
+	payload="$(python3 -c '
+import json
+print(json.dumps({
+    "tool_name": "Bash",
+    "tool_input": {"command": "gh issue create --title x --body y"},
+}))')"
+
+	run env -u CLAUDE_PLUGIN_ROOT CLAUDE_PROJECT_DIR="$consumer" \
+		bash -c 'cd "$1" && printf "%s" "$3" | "$2"' \
+		_ "$consumer" "$hook" "$payload"
+
+	[ "$status" -eq 2 ] \
+		|| { echo "expected exit 2 (blocked), got $status: $output" >&2; return 1; }
+}
+
+@test "plugin consumer: the bundled issue-creation guard allows the validated wrapper script" {
+	local hook="$REPO_ROOT/plugins/pipeline-core/hooks/scripts/block-gh-issue-create.sh"
+	[ -f "$hook" ] \
+		|| { echo "bundled hook missing: $hook" >&2; return 1; }
+
+	local consumer
+	consumer="$(_build_plugin_consumer "$TEST_TMP")"
+
+	local payload
+	payload="$(python3 -c '
+import json
+print(json.dumps({
+    "tool_name": "Bash",
+    "tool_input": {"command": "pipeline-core-create-issue --title x"},
+}))')"
+
+	run env -u CLAUDE_PLUGIN_ROOT CLAUDE_PROJECT_DIR="$consumer" \
+		bash -c 'cd "$1" && printf "%s" "$3" | "$2"' \
+		_ "$consumer" "$hook" "$payload"
+
+	[ "$status" -eq 0 ] \
+		|| { echo "expected exit 0 (allowed), got $status: $output" >&2; return 1; }
+}
+
+@test "plugin consumer: the bundled skill validator resolves from the plugin and BLOCKS invalid frontmatter" {
+	local hook="$REPO_ROOT/plugins/pipeline-core/hooks/scripts/pre-commit-skill-validate.sh"
+	[ -f "$hook" ] \
+		|| { echo "bundled hook missing: $hook" >&2; return 1; }
+	[ -f "$REPO_ROOT/plugins/pipeline-core/scripts/skill-validate.sh" ] \
+		|| { echo "bundle ships no skill-validate.sh" >&2; return 1; }
+
+	local consumer
+	consumer="$(_build_plugin_consumer "$TEST_TMP")"
+	[ ! -e "$consumer/.claude/scripts" ] \
+		|| { echo "consumer fixture must have no .claude/scripts/" >&2; return 1; }
+
+	# Frontmatter missing every schema-required field but name/description —
+	# skill-validate.sh rejects it, so the hook must exit 2.
+	local payload
+	payload="$(_write_payload "$consumer/.claude/skills/broken/SKILL.md" \
+		'---
+name: broken
+---
+
+Body.
+')"
+
+	run env -u CLAUDE_PLUGIN_ROOT -u SKILL_VALIDATE_SCRIPT \
+		CLAUDE_PROJECT_DIR="$consumer" \
+		bash -c 'cd "$1" && printf "%s" "$3" | "$2"' \
+		_ "$consumer" "$hook" "$payload"
+
+	# The beegee-farm-3 regression: status 0 here means the validator was
+	# never found and the hook failed open in silence.
+	[ "$status" -eq 2 ] \
+		|| { echo "expected exit 2 (blocked); got $status — validator did not resolve from the plugin bundle. output: $output" >&2; return 1; }
+	[[ "$output" == *"broken"* ]] \
+		|| { echo "expected the skill name in the block message, got: $output" >&2; return 1; }
+}
+
+@test "plugin consumer: the bundled skill validator ALLOWS valid frontmatter" {
+	local hook="$REPO_ROOT/plugins/pipeline-core/hooks/scripts/pre-commit-skill-validate.sh"
+	[ -f "$hook" ] \
+		|| { echo "bundled hook missing: $hook" >&2; return 1; }
+
+	local consumer
+	consumer="$(_build_plugin_consumer "$TEST_TMP")"
+
+	# Positive control — proves the previous test's exit 2 comes from the
+	# frontmatter being invalid, not from the hook blocking every SKILL.md.
+	local payload
+	payload="$(_write_payload "$consumer/.claude/skills/good-skill/SKILL.md" \
+		'---
+name: good-skill
+description: Use when the bundled validator must accept a well-formed skill
+inputs:
+  - name: target
+    type: string
+outputs:
+  - name: result
+    type: string
+side_effects:
+  - none
+composes:
+  - mcp-tools
+failure_modes:
+  - id: boom
+    mitigation: surface the error
+---
+
+Body.
+')"
+
+	run env -u CLAUDE_PLUGIN_ROOT -u SKILL_VALIDATE_SCRIPT \
+		CLAUDE_PROJECT_DIR="$consumer" \
+		bash -c 'cd "$1" && printf "%s" "$3" | "$2"' \
+		_ "$consumer" "$hook" "$payload"
+
+	[ "$status" -eq 0 ] \
+		|| { echo "expected exit 0 (allowed), got $status: $output" >&2; return 1; }
+}
+
+@test "plugin consumer: the bundled status injector reads the consumer status.json" {
+	local hook="$REPO_ROOT/plugins/pipeline-core/hooks/scripts/pipeline-status-inject.sh"
+	[ -f "$hook" ] \
+		|| { echo "bundled hook missing: $hook" >&2; return 1; }
+
+	local consumer
+	consumer="$(_build_plugin_consumer "$TEST_TMP")"
+	printf '%s\n' \
+		'{"state":"running","issue":"640","stage":"implement"}' \
+		> "$consumer/status.json"
+
+	run env -u CLAUDE_PLUGIN_ROOT CLAUDE_PROJECT_DIR="$consumer" \
+		bash -c 'cd "$1" && "$2" </dev/null' _ "$consumer" "$hook"
+
+	[ "$status" -eq 0 ] \
+		|| { echo "expected exit 0, got $status: $output" >&2; return 1; }
+	[[ "$output" == *"640"* ]] \
+		|| { echo "expected the running issue in the injected context, got: $output" >&2; return 1; }
+}
