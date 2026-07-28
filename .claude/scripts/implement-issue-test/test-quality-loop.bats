@@ -1809,3 +1809,160 @@ FAKE_EOF
     [ "$review_count" -le 2 ] || fail "Expected loop to exit after bail on iter 2, but review ran $review_count times"
 }
 
+# =============================================================================
+# FIX-STAGE SILENT NO-OP GUARD (issue #638)
+#
+# A fix-pr-review-iterN stage that does the work but exits without committing
+# used to be reported to the PR as a landed fix and then "pushed" as a no-op,
+# losing the edits.  See #620 / PR #628 iteration 2: a complete +270/-56 fix
+# across two files sat uncommitted while the stage posted a success comment.
+# =============================================================================
+
+# Helper: fresh git repo on a feature branch with one commit.
+_setup_fix_stage_repo() {
+    cd "$TEST_TMP" || return 1
+    rm -rf fixrepo
+    mkdir -p fixrepo
+    cd fixrepo || return 1
+    git init -q .
+    git checkout -q -b fix-branch
+    printf 'base\n' > src.ts
+    git add src.ts
+    git commit -q -m "initial"
+}
+
+# Helper: stub comment_pr so the posted comment titles are observable.
+_install_fix_stage_stubs() {
+    rm -f "$TEST_TMP/comments.log"
+
+    comment_pr() {
+        printf '%s\n' "$2" >> "$TEST_TMP/comments.log"
+    }
+}
+
+@test "verify_fix_stage_commit fails when the fix stage left changes uncommitted" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+
+    # The #620 failure mode: edits made, never committed.
+    printf 'fixed\n' >> src.ts
+    printf 'helper\n' > branch-evidence.ts
+
+    run verify_fix_stage_commit "fix-pr-review-iter-2" "$head_before"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"src.ts"* ]] || \
+        fail "failure must name the uncommitted path src.ts, got: $output"
+    [[ "$output" == *"branch-evidence.ts"* ]] || \
+        fail "failure must name untracked path branch-evidence.ts, got: $output"
+}
+
+@test "verify_fix_stage_commit accepts a clean tree with no new commit" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+
+    # Review findings already addressed — nothing to do, nothing dirty.
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 0 ]
+}
+
+@test "verify_fix_stage_commit accepts a stage that advanced the branch head" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+
+    printf 'fixed\n' >> src.ts
+    git add src.ts
+    git commit -q -m "apply review fixes"
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 0 ]
+}
+
+@test "_handle_fix_stage_result posts no success comment when work is uncommitted" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+
+    # Replay of #620 / PR #628 iteration 2: a complete fix (+270/-56 across two
+    # files) left in the working tree while the agent self-reports success.
+    local i
+    for ((i = 1; i <= 270; i++)); do
+        printf 'added %s\n' "$i" >> src.ts
+    done
+    printf 'branch evidence helper\n' > branch-evidence.ts
+
+    local fix_result
+    fix_result='{"status":"success","output":{"summary":"Addressed both reviewer findings"}}'
+
+    run _handle_fix_stage_result 628 2 "fix-branch" "$head_before" "$fix_result"
+
+    local comments=""
+    [[ -f "$TEST_TMP/comments.log" ]] && comments=$(< "$TEST_TMP/comments.log")
+
+    [ "$status" -eq 1 ]
+    [[ "$comments" != *"PR Review Fix (Iteration 2)"* ]] || \
+        fail "success comment must not be posted for an uncommitted fix"
+    [[ "$output" == *"src.ts"* ]] || \
+        fail "failure must name the uncommitted paths, got: $output"
+}
+
+@test "_handle_fix_stage_result posts the success comment for a committed fix" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+
+    printf 'fixed\n' >> src.ts
+    git add src.ts
+    git commit -q -m "apply review fixes"
+
+    local fix_result
+    fix_result='{"status":"success","output":{"summary":"Fixed the two findings"}}'
+
+    run _handle_fix_stage_result 628 3 "fix-branch" "$head_before" "$fix_result"
+
+    local comments=""
+    [[ -f "$TEST_TMP/comments.log" ]] && comments=$(< "$TEST_TMP/comments.log")
+
+    [ "$status" -eq 0 ]
+    [[ "$comments" == *"PR Review Fix (Iteration 3)"* ]] || \
+        fail "committed fix must post its success comment, got: $comments"
+}
+
+@test "main pushes to the PR only when the fix stage result is accepted" {
+    # The push lives in main's review loop; the guard's return code gates it,
+    # so an uncommitted fix can no longer trigger a no-op push.
+    local main_def
+    main_def=$(declare -f main)
+
+    local fix_block
+    fix_block=$(printf '%s' "$main_def" \
+        | awk '/if _handle_fix_stage_result/,/^ *fi$/')
+
+    [[ "$fix_block" == *"git push origin"* ]] || \
+        fail "push must sit inside the _handle_fix_stage_result success branch"
+    [[ "$fix_block" == *"did not land its changes"* ]] || \
+        fail "the failure branch must log that the changes did not land"
+}
+
+@test "_handle_fix_stage_result accepts a clean no-op without failing the stage" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+
+    # Findings already addressed: no commit, and nothing left in the tree.
+    local fix_result
+    fix_result='{"status":"success","output":{"summary":"Already addressed"}}'
+
+    run _handle_fix_stage_result 628 1 "fix-branch" "$head_before" "$fix_result"
+
+    [ "$status" -eq 0 ]
+}
+

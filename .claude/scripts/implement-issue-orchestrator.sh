@@ -7980,6 +7980,113 @@ _prior_merged_prs_for_issue() {
 	return 0
 }
 
+# Silent no-op guard for fix stages (issue #638).
+#
+# A fix-pr-review-iterN stage can self-report {"status":"success"} after doing
+# the whole fix in the working tree and never committing it.  The branch head
+# does not move, `git push` is a no-op, and the edits are lost — while the PR
+# gets a comment saying the fixes landed (#620 / PR #628 iteration 2 lost a
+# complete +270/-56 fix exactly this way).  This mirrors the task-stage guard
+# in execute_batch_parallel.
+#
+# The dirty-vs-clean distinction matters: a stage that produced no commit
+# because the review findings were already addressed is a genuine no-op and
+# must still pass.  Only a DIRTY tree with no commit is a lost fix.
+#
+# Arguments:
+#   $1 - stage label, for the log line
+#   $2 - branch head SHA captured before the stage ran
+# Returns:
+#   0 - head advanced, or clean tree with nothing to commit (genuine no-op)
+#   1 - work left uncommitted; the error names the uncommitted paths
+verify_fix_stage_commit() {
+	local stage_label="$1"
+	local head_before="$2"
+
+	local head_after
+	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
+
+	if [[ -n "$head_after" && "$head_after" != "$head_before" ]]; then
+		return 0
+	fi
+
+	local dirty
+	dirty=$(git status --porcelain 2>/dev/null || printf '')
+
+	if [[ -z "$dirty" ]]; then
+		log "$stage_label produced no commit and left a clean tree" \
+			"— accepting as a genuine no-op"
+		return 0
+	fi
+
+	# Porcelain v1 lines are "XY <path>"; renames read "R  old -> new".
+	local -a dirty_paths=()
+	local line
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		dirty_paths+=("${line:3}")
+	done <<< "$dirty"
+
+	log_error "$stage_label reported success but produced no commit" \
+		"while leaving changes in the working tree" \
+		"— marking failed (silent no-op guard)." \
+		"Uncommitted paths: ${dirty_paths[*]}"
+	return 1
+}
+
+# Post-fix-stage reporting for the PR review loop (issue #638).
+#
+# Verifies the stage actually committed before it is reported as applied, so a
+# stage that dropped its work can never post a success comment. The caller
+# pushes only when this returns 0.
+#
+# Arguments:
+#   $1 - PR number
+#   $2 - PR review iteration
+#   $3 - branch name
+#   $4 - branch head SHA captured before the fix stage ran
+#   $5 - fix stage result JSON
+# Returns:
+#   0 - fix committed, or a genuine no-op
+#   1 - fix left uncommitted; no success comment posted
+_handle_fix_stage_result() {
+	local pr_number="$1"
+	local pr_iteration="$2"
+	local branch="$3"
+	local head_before="$4"
+	local fix_result="$5"
+
+	local head_after
+	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
+
+	if ! verify_fix_stage_commit \
+		"fix-pr-review-iter-$pr_iteration" "$head_before"; then
+		comment_pr "$pr_number" \
+			"⚠️ PR Review Fix FAILED (Iteration $pr_iteration)" \
+			"The fix stage reported success but committed nothing while
+leaving changes in the working tree. The reported fixes have NOT landed on
+\`$branch\` — see the orchestrator log for the uncommitted paths." \
+			"$AGENT"
+		return 1
+	fi
+
+	# Genuine no-op: nothing landed, so there is no fix to report.
+	if [[ -z "$head_after" || "$head_after" == "$head_before" ]]; then
+		log "No commit from fix-pr-review-iter-$pr_iteration" \
+			"and a clean tree — skipping the fix comment"
+		return 0
+	fi
+
+	local fix_summary
+	fix_summary=$(printf '%s' "$fix_result" \
+		| jq -r '.output.summary // "Fixes applied"')
+
+	# Comment #12: PR Fix Result
+	comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" \
+		"$fix_summary" "$AGENT"
+	return 0
+}
+
 # =============================================================================
 # MAIN FLOW
 # =============================================================================
@@ -9514,21 +9621,27 @@ fi)
 
 Fix the issues and commit. Output a summary of fixes applied."
 
+            # Silent no-op guard (#638): remember where the branch was so a fix
+            # stage that never commits cannot be reported as applied.
+            local fix_head_before
+            fix_head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
+
             verify_on_feature_branch "$branch" || true
 
             local fix_result
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
             _halt_if_budget_exceeded
 
-            local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
-
-            # Comment #12: PR Fix Result
-            comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" "$fix_summary" "$AGENT"
-
-            # Push updates (quality loop skipped — re-review will catch remaining issues)
-            log "Pushing updates to PR..."
-            git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
+            # Comments only if a commit landed; fails loudly if the stage left
+            # its work uncommitted.
+            if _handle_fix_stage_result "$pr_number" "$pr_iteration" \
+                "$branch" "$fix_head_before" "$fix_result"; then
+                # Push updates (quality loop skipped — re-review will catch remaining issues)
+                log "Pushing updates to PR..."
+                git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
+            else
+                log_error "fix-pr-review-iter-$pr_iteration did not land its changes — re-reviewing unchanged branch"
+            fi
         fi
         done
 
