@@ -22,16 +22,22 @@ REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
 
 # Scripts and agents moved under plugins/pipeline-core/ in the plugin
 # migration (issue #571); before the git mv they live under .claude/.
-# Prefer the plugin root and fall back to the legacy layout.  Both layouts
-# keep scripts/ and agents/ as siblings, so _normalize_agent_name's
-# "${SCRIPT_DIR}/../agents/<name>.md" lookup resolves correctly either way.
+# Prefer the plugin root and fall back to the legacy layout for SCRIPTS.
+#
+# Agents are a different matter.  The old comment here asserted that "both
+# layouts keep scripts/ and agents/ as siblings", which is false: the plugin
+# bundle ships scripts, schemas, prompts and hooks but never an agents/ tree —
+# agents are consumer-owned and live in .claude/agents/ (issue #631).  Deriving
+# AGENTS_DIR from CORE_DIR therefore pointed at plugins/pipeline-core/agents,
+# which never exists, so every fixture precondition here failed and this suite
+# was red on main.  Agents always resolve to the repo's own .claude/agents/.
 if [[ -d "$REPO_ROOT/plugins/pipeline-core/scripts" ]]; then
 	CORE_DIR="$REPO_ROOT/plugins/pipeline-core"
 else
 	CORE_DIR="$REPO_ROOT/.claude"
 fi
 ORCHESTRATOR="$CORE_DIR/scripts/implement-issue-orchestrator.sh"
-AGENTS_DIR="$CORE_DIR/agents"
+AGENTS_DIR="$REPO_ROOT/.claude/agents"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown
@@ -41,9 +47,15 @@ setup() {
 	TEST_TMP=$(mktemp -d)
 	export TEST_TMP
 
-	# _normalize_agent_name resolves "${SCRIPT_DIR}/../agents/<name>.md", so
-	# SCRIPT_DIR must point at the real scripts directory (plugin or legacy).
-	export SCRIPT_DIR="$CORE_DIR/scripts"
+	# _normalize_agent_name resolves the agents dir via resolve_consumer_dir,
+	# falling back to "${SCRIPT_DIR}/../agents" (issue #631).  This suite
+	# extracts functions from the orchestrator alone, so resolve_consumer_dir
+	# — which lives in resolve-pipeline-root.sh — is not in scope and the
+	# fallback is what runs.  Point SCRIPT_DIR at the consumer-side scripts
+	# dir, the one layout where a sibling agents/ genuinely exists; pointing
+	# it at the bundle would resolve to plugins/pipeline-core/agents, which
+	# is never shipped.
+	export SCRIPT_DIR="$REPO_ROOT/.claude/scripts"
 	export SCRIPT_NAME="agent-name-normalization-test"
 
 	# Empty LOG_FILE → log/log_warn write only to stderr (no file needed).
@@ -71,6 +83,15 @@ _source_orchestrator_functions() {
 		/^log_warn\(\) \{$/,/^\}$/               { print; next }
 		/^_normalize_agent_name\(\) \{$/,/^\}$/  { print; next }
 		/^_parse_task_lines\(\) \{$/,/^\}$/      { print; next }
+		# Collaborators _parse_task_lines calls.  This list is hand-maintained,
+		# so a new helper added to the orchestrator surfaces here as
+		# "command not found" inside the extracted copy, malformed --argjson,
+		# and an empty agent — not as an obvious missing-function error.
+		# _extract_task_files_from_desc was already absent (5 failing tests);
+		# _task_annotation and _parse_depends_on arrived with issue #634.
+		/^_extract_task_files_from_desc\(\) \{$/,/^\}$/ { print; next }
+		/^_task_annotation\(\) \{$/,/^\}$/       { print; next }
+		/^_parse_depends_on\(\) \{$/,/^\}$/      { print; next }
 	' "$ORCHESTRATOR" > "$func_file"
 	# shellcheck disable=SC1090
 	source "$func_file"

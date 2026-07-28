@@ -4428,7 +4428,17 @@ compute_pipeline_profile() {
 #
 _normalize_agent_name() {
 	local name="$1"
-	local agents_dir="${SCRIPT_DIR}/../agents"
+	# Resolve the consumer's agents dir rather than <script-dir>/../agents
+	# (issue #631).  The bundle ships no agents/ tree, so a bundle-relative
+	# path resolves to nothing in a plugin-consuming repo and every project
+	# agent is treated as unknown.  #631 fixed this in issue-body-lib.sh but
+	# not here; the two sites in this file kept the old form, which is why
+	# tests/agent-name-normalization.bats has been red whenever it resolves
+	# CORE_DIR to the plugin.  Fall back to the legacy path so a repo without
+	# the resolver behaves exactly as before.
+	local agents_dir
+	agents_dir="$(resolve_consumer_dir agents 2>/dev/null)" \
+		|| agents_dir="${SCRIPT_DIR}/../agents"
 
 	# Allowlist of legacy→current agent-name mappings.
 	# Add future renames here; never delete old entries so that
@@ -9137,7 +9147,10 @@ $excerpt
         # Agent names are normalized by _parse_task_lines (legacy remapping +
         # "default" fallback), so warn only when the post-normalization name
         # is neither "default" nor a known local agent.
-        local agents_dir="$SCRIPT_DIR/../agents"
+        # Consumer-resolved, same reasoning as _normalize_agent_name (#631).
+        local agents_dir
+        agents_dir="$(resolve_consumer_dir agents 2>/dev/null)" \
+            || agents_dir="$SCRIPT_DIR/../agents"
         for ((i=0; i<task_count; i++)); do
             local check_agent
             check_agent=$(printf '%s' "$tasks_json" | jq -r ".[$i].agent")
