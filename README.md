@@ -1,14 +1,18 @@
 # Claude Pipeline
 
-> Forked from [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline) — a portable `.claude/` folder for structured Claude Code development workflows.
+> Structured Claude Code development workflows, distributed as the **`pipeline-core`** plugin.
 
-This fork modifies the pipeline to use **issues as the single source of truth** for plans and tasks. Instead of generating local plan files during implementation, plans are written to issues during a discovery phase and read back during implementation. Supports GitHub Issues and Jira (via ACLI), with GitHub and GitLab for git hosting.
+The pipeline uses **issues as the single source of truth** for plans and tasks. Rather than generating local plan files during implementation, plans are written to issues during a discovery phase and read back during implementation. Supports GitHub Issues and Jira (via ACLI), with GitHub and GitLab for git hosting.
 
-## Changes from Upstream
+**Install it as a plugin — see [Quick Start](#quick-start).** The orchestrator, platform scripts, hooks and schemas ship in a versioned bundle; you no longer copy a `.claude/` folder into each project.
+
+> Originally forked from [aaddrick/claude-pipeline](https://github.com/aaddrick/claude-pipeline), which is no longer maintained. This repository has diverged substantially and is developed independently.
+
+## How It Works
 
 ### Two-Phase Workflow
 
-The original pipeline runs 4 stages before implementation (setup → research → evaluate → plan) that generate local artifacts. This fork replaces that with a two-phase approach:
+Instead of running 4 artifact-generating stages before implementation (setup → research → evaluate → plan), the pipeline uses a two-phase approach:
 
 **Phase 1: Discovery (`/explore`)**
 ```
@@ -37,56 +41,49 @@ Reads the issue body → extracts tasks → implements → tests → reviews →
 
 ### Feature Branches (No Worktrees for Orchestration)
 
-The upstream pipeline uses git worktrees for isolation. This fork uses **feature branches** in the current working directory for orchestration, which is simpler. Git worktrees are optionally used for **parallel task execution within a batch** — tasks with non-overlapping file sets run in separate worktrees simultaneously and merge back to the feature branch.
+Orchestration runs on **feature branches** in the current working directory rather than git worktrees. Worktrees are used only for **parallel task execution within a batch** — tasks with non-overlapping file sets run in separate worktrees simultaneously and merge back to the feature branch.
 
 ## Quick Start
 
-```bash
-# 1. Copy the .claude folder into your project
-git clone https://github.com/stevegrocott/claude-pipeline.git .claude-pipeline-source
-cp -r .claude-pipeline-source/.claude .claude
-rm -rf .claude-pipeline-source
+Install `pipeline-core` through Claude Code's plugin system. This repo is public, so no auth or token is needed.
 
-# 2. Start Claude Code in your project
-claude
+Run these **inside an active Claude Code session**:
 
-# 3. Run the adaptation skill to customize for your codebase
-> /adapting-claude-pipeline
+```
+/plugin marketplace add stevegrocott/claude-pipeline
+/plugin install pipeline-core@claude-pipeline
+/reload-plugins
+```
+
+Then, in your project:
+
+```
+/adapting-claude-pipeline
 ```
 
 The adaptation skill walks you through a brainstorming session about your project and customizes the pipeline for your tech stack, platform configuration, E2E testing, and MCP tool availability.
 
-## Syncing Upstream Changes
+### What lands where
 
-Stack-specific files (agents, some skills, prompts) ship as **generic templates** in this repo. When you run `/adapting-claude-pipeline`, your customized versions are stored in `.claude/local/` (gitignored) and applied over the defaults.
+The plugin supplies the orchestrator, platform scripts, schemas, prompts and hooks. Three things stay **yours**, in your repo, and are never overwritten by an update:
 
-This means upstream pulls update the generic templates without touching your customizations. After pulling, re-apply your local overrides:
+| Path | Purpose |
+|---|---|
+| `.claude/config/platform.sh` | tracker, git host, test and deploy commands |
+| `.claude/config/context.md` | project context given to every stage |
+| `.claude/agents/*.md` | your stack's specialist agents |
+
+You do **not** need a `.claude/scripts/` directory — the plugin provides it. If you have one from an earlier vendored install, it is now redundant.
+
+### Verify it resolved to the cache, not a working tree
 
 ```bash
-# Pull upstream pipeline changes
-git fetch pipeline main
-git format-patch pipeline/main --stdout | git apply --check  # dry run
-git format-patch pipeline/main --stdout | git apply           # apply
-
-# Re-apply your local customizations on top
-.claude/scripts/apply-local.sh
-
-# Optional: review what upstream changed in templates
-git diff HEAD~1 -- .claude/agents/ .claude/skills/ .claude/config/
+command -v pipeline-core-implement
 ```
 
-**First time?** Run `/adapting-claude-pipeline` to create your `.claude/local/` customizations.
-
-**New upstream templates?** If upstream adds new stack-specific files, copy them to `.claude/local/` and customize — `apply-local.sh` will keep them applied.
-
-## Installing pipeline-core as a Plugin
-
-The Quick Start above copies `.claude/` into your project. The alternative is to
-install `pipeline-core` through Claude Code's plugin system, which keeps the
-orchestrator, platform scripts, hooks and schemas in a versioned bundle rather
-than vendored into each consumer repo.
-
-This repo is public, so no auth or token is needed.
+The path must be under `~/.claude/plugins/cache/claude-pipeline/pipeline-core/<version>/`.
+If it points into a local checkout (e.g. `/Users/you/projects/claude-pipeline/...`),
+a directory registration is winning — see below.
 
 ### Remove any existing directory registration first
 
@@ -107,62 +104,72 @@ A directory registration looks like this — note it points straight at a workin
 { "source": "directory", "path": "/Users/you/projects/claude-pipeline" }
 ```
 
-If you see that, remove it before continuing. Run this **inside an active Claude
-Code session**:
+If you see that, remove it and re-add from github:
 
 ```
 /plugin marketplace remove claude-pipeline
-```
-
-### Add the marketplace and install
-
-```
 /plugin marketplace add stevegrocott/claude-pipeline
+```
+
+### Versions
+
+Releases are tagged (`v0.4.0` and up). `.claude-plugin/marketplace.json` declares the
+`version` for the `pipeline-core` entry, asserted against
+`plugins/pipeline-core/.claude-plugin/plugin.json` by `tests/marketplace-smoke.bats`,
+so the two cannot drift silently.
+
+To take a newer release:
+
+```
+/plugin marketplace update claude-pipeline
 /plugin install pipeline-core@claude-pipeline
-/reload-plugins
 ```
 
-### Verify it resolved to the cache, not a working tree
+### Upgrading from a vendored `.claude/` install
 
-```bash
-command -v pipeline-core-implement
-```
+Earlier versions were installed by copying the `.claude/` folder into each project.
+If that is where you are:
 
-The path must be under `~/.claude/plugins/cache/claude-pipeline/pipeline-core/<version>/`.
-If it points into a local checkout (e.g. `/Users/you/projects/claude-pipeline/...`),
-a directory registration is still winning — go back and remove it.
+1. Enable the plugin as in [Quick Start](#quick-start).
+2. Keep `.claude/config/` and `.claude/agents/` — they are yours.
+3. Delete `.claude/scripts/` — the plugin supplies it, and a stale copy is confusing
+   rather than harmful (nothing reads it once the plugin is enabled).
+4. If your `.claude/settings.json` registers hooks the plugin now ships
+   (`pipeline-status-inject`, `block-gh-issue-create`, `pre-commit-skill-validate`,
+   `post-pr-simplify`), drop those registrations or they fire twice.
+5. Replace any `Bash(.claude/scripts/...)` permission entries with the
+   `Bash(pipeline-core-*:*)` equivalents.
 
-### Version pinning
+### Developing on the pipeline itself
 
-`.claude-plugin/marketplace.json` declares a `version` for the `pipeline-core`
-entry, and it is asserted against `plugins/pipeline-core/.claude-plugin/plugin.json`
-by `tests/marketplace-smoke.bats`, so the two cannot drift silently.
+Installing from the github source ends live-editing: changes in a local checkout no
+longer reach consumers until committed, pushed, tagged and re-installed. That is what
+makes installs reproducible off one machine, but it is a real change if you have been
+developing against a directory registration.
 
-> **Pinning is not yet resolvable.** This repo currently carries **no git tags**, so a
-> github-source install tracks the default branch's HEAD — you get whatever landed
-> last, and the declared `version` is descriptive rather than something you can pin
-> to. Tagging a release is what makes a version resolvable; until then, treat plugin
-> installs as tracking `main`.
-
-### What changes about the developer loop
-
-Installing from the github source ends live-editing. Changes in a local checkout of
-this repo no longer reach consumers — they must be committed, pushed, and
-re-installed. That is the point (it is what makes installs reproducible off one
-machine), but it is a real change if you have been developing against a directory
-registration.
+`.claude/scripts/` in *this* repo is the canonical tree; `plugins/pipeline-core/` is
+**generated** from it by `./sync.sh bundle` and guarded by
+`.claude/scripts/implement-issue-test/test-bundle-parity.bats`. Edit the canonical
+tree, regenerate, and commit both.
 
 ## What's Inside
 
-- **38 skills** covering discovery, process discipline, workflow automation, domain guidance, and meta/pipeline maintenance
-- **8 specialized agents** (backend/frontend developers, reviewers, validators, Playwright test developer, orchestration writer)
-- **12 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including format converters)
-- **2 hooks** for session initialization and post-PR simplification
+Shipped in the `pipeline-core` plugin bundle:
+
+- **23 skills** covering discovery, process discipline, workflow automation, and meta/pipeline maintenance
+- **11 platform wrapper scripts** for GitHub/GitLab/Jira abstraction (including format converters)
+- **5 hooks** — issue-body validation, pipeline status injection, skill-frontmatter validation, post-PR simplification, scaffold placeholder
 - **2 orchestration scripts** for batch issue processing and end-to-end implementation
-- **13 JSON schemas** for structured output at each pipeline stage
-- **42 BATS test files, 1,265 tests** across orchestrator and platform wrapper test suites
+- **25 JSON schemas** for structured output at each pipeline stage
 - **6 decision and validation scripts** (`decide-action.sh`, `decide-retry.sh`, `decide-model-fallback.sh`, `skill-validate.sh`, `skill-golden-lib.sh`, `skill-golden.sh`) bridging bash orchestration and skill-native policy evaluation
 - **Quality gates** at every stage: spec compliance, code quality, test validation, acceptance testing
+
+Supplied by your repo, never overwritten:
+
+- **Specialist agents** in `.claude/agents/` (this repo ships 9 as reference templates)
+- **Platform config** in `.claude/config/` — tracker, git host, test and deploy commands
+
+Tested by **82 BATS files / 2,403 tests** across the orchestrator, platform wrappers, and consumer-facing marketplace suites.
 
 ## Architecture
 
@@ -557,11 +564,11 @@ Test coverage includes: argument parsing, branch verification, comment helpers, 
 
 ## Philosophy
 
-This fork preserves the upstream's core philosophy while adding one key principle:
+One principle drives the design:
 
 **Issues are the single source of truth.** Plans, research, and task lists live in issues (GitHub Issues or Jira), not in local files. This prevents drift between what was planned and what the pipeline executes.
 
-Other preserved principles:
+Supporting principles:
 - **Skills are TDD for process documentation** — tested with subagents before deployment
 - **Agents should be specialized, not general** — each has clear scope boundaries
 - **Fix first, improve later** — pipeline changes happen after understanding the problem
