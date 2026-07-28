@@ -1257,3 +1257,81 @@ FIXTURE_EOF
 	[ "$(printf '%s' "$output" | jq -r '.output_tokens')" = "9" ]
 	[ "$(printf '%s' "$output" | jq -r '.total_cost_usd')" = "0" ]
 }
+
+# =============================================================================
+# ENVELOPE EXTRACTION WITH LEADING NON-JSON (issue #646)
+#
+# The CLI can emit notices on stdout BEFORE its JSON envelope — the
+# untrusted-workspace permissions warning being the case that broke the first
+# plugin-based consumer run. jq over the raw stream then fails and a
+# successful stage is recorded no_structured_output.
+# =============================================================================
+
+# The exact pollution observed on claude-spend run issue-64-20260728-234318.
+_polluted_output() {
+	printf '%s\n' 'Ignoring 9 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/Users/x/projects/y"].hasTrustDialogAccepted: true in /Users/x/.claude.json.'
+	printf '%s\n' '{"is_error":false,"result":"done","structured_output":{"status":"success","pr_number":80,"pr_url":"https://github.com/o/r/pull/80","error":null}}'
+}
+
+@test "(#646) envelope preceded by a warning line still parses" {
+	local out
+	out=$(_polluted_output)
+
+	local env
+	env=$(_extract_cli_envelope "$out")
+
+	local status_val
+	status_val=$(printf '%s' "$env" | jq -r '.structured_output.status // empty' 2>/dev/null)
+	[ "$status_val" = "success" ] || {
+		printf 'FAIL: expected structured_output.status=success, got: %s\n' "$status_val" >&2
+		return 1
+	}
+}
+
+@test "(#646) pr_number survives extraction from a polluted stream" {
+	local out
+	out=$(_polluted_output)
+
+	local pr
+	pr=$(_extract_cli_envelope "$out" | jq -r '.structured_output.pr_number // empty' 2>/dev/null)
+	[ "$pr" = "80" ] || {
+		printf 'FAIL: expected pr_number 80, got: %s\n' "$pr" >&2
+		return 1
+	}
+}
+
+@test "(#646) a clean envelope is unaffected" {
+	local out='{"is_error":false,"structured_output":{"status":"success"}}'
+	local got
+	got=$(_extract_cli_envelope "$out" | jq -r '.structured_output.status // empty' 2>/dev/null)
+	[ "$got" = "success" ] || {
+		printf 'FAIL: clean envelope regressed, got: %s\n' "$got" >&2
+		return 1
+	}
+}
+
+@test "(#646) output with no JSON at all yields nothing" {
+	local out
+	out=$(printf 'just a warning\nand another line\n')
+	local got
+	got=$(_extract_cli_envelope "$out" 2>/dev/null || true)
+	[ -z "$got" ] || {
+		printf 'FAIL: expected empty extraction, got: %s\n' "$got" >&2
+		return 1
+	}
+}
+
+@test "(#646) JSON embedded inside the warning text is not mistaken for the envelope" {
+	# The trust warning itself contains a JSON-looking fragment. The envelope
+	# is the last complete top-level object, not the first thing resembling one.
+	local out
+	out=$(printf '%s\n%s\n' \
+		'Note: set projects["/x"].hasTrustDialogAccepted: true — see {"example":"fragment"}' \
+		'{"is_error":false,"structured_output":{"status":"success","pr_number":99}}')
+	local pr
+	pr=$(_extract_cli_envelope "$out" | jq -r '.structured_output.pr_number // empty' 2>/dev/null)
+	[ "$pr" = "99" ] || {
+		printf 'FAIL: expected pr_number 99 from the real envelope, got: %s\n' "$pr" >&2
+		return 1
+	}
+}

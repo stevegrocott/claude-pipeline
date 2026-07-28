@@ -2526,3 +2526,40 @@ EOF
 	ql_tokens=$(jq -r '.stages.quality_loop.tokens // "absent"' "$STATUS_FILE")
 	[ "$ql_tokens" = "absent" ] || fail "quality_loop must not inherit spend, got '$ql_tokens'"
 }
+
+# =============================================================================
+# ENVELOPE EXTRACTION THROUGH run_stage (issue #646)
+#
+# The helper being correct does not prove run_stage uses it. These drive the
+# real stage path with a stream that carries a notice before the envelope —
+# the untrusted-workspace warning that broke the claude-spend #64 run.
+# =============================================================================
+
+@test "(#646) run_stage parses an envelope preceded by the untrusted-workspace warning" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    {
+        printf '%s\n' 'Ignoring 9 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog.'
+        printf '%s\n' '{"is_error":false,"result":"ok","structured_output":{"status":"success","summary":"did the thing"}}'
+    } > "$MOCK_CLAUDE_RESPONSE"
+
+    run run_stage "test" "prompt" "test-schema.json"
+    [ "$status" -eq 0 ] || {
+        printf 'FAIL: polluted stream should still succeed. output:\n%s\n' "$output" >&2
+        return 1
+    }
+    [[ "$output" != *"no_structured_output"* ]] || {
+        printf 'FAIL: recorded no_structured_output despite a valid envelope\n' >&2
+        return 1
+    }
+}
+
+@test "(#646) run_stage still fails when the stream carries no envelope at all" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    printf '%s\n' 'just a warning, no JSON anywhere' > "$MOCK_CLAUDE_RESPONSE"
+
+    run run_stage "test" "prompt" "test-schema.json"
+    [ "$status" -eq 1 ] || {
+        printf 'FAIL: a stream with no envelope must still fail\n' >&2
+        return 1
+    }
+}
