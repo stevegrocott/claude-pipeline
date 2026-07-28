@@ -56,12 +56,14 @@ setup() {
     unset MOCK_GIT_DIRTY MOCK_GIT_HOOK_FAILURE MOCK_GIT_PUSH_EXIT_CODE \
           MOCK_GIT_GREP_FILE_COUNT MOCK_GH_MERGE_STATE \
           MOCK_GH_MERGE_STATE_SEQ MOCK_GH_MERGE_STATE_CTR \
+          MOCK_GH_CHECK_ROLLUP \
           MOCK_GH_PR_CREATE_EXIT_CODE MOCK_GH_PR_MERGE_EXIT_CODE \
           MOCK_GIT_STASH_PUSH_EXIT_CODE MOCK_GIT_STASH_POP_EXIT_CODE \
           MOCK_GIT_POST_IMPL_FILES || true
     # Clear stash marker files left over from prior tests (per-test $TEST_TMP
     # is fresh, but be explicit for resume-style tests that re-enter setup).
-    rm -f "$TEST_TMP/git-stash-pushed" "$TEST_TMP/git-stash-popped" || true
+    rm -f "$TEST_TMP/git-stash-pushed" "$TEST_TMP/git-stash-popped" \
+          "$TEST_TMP/gh-pr-merge-called" || true
     unset FAST_PATH_MERGE_CHECK_ATTEMPTS FAST_PATH_MERGE_CHECK_DELAY || true
 
     # Default: zero retry delay so tests don't sleep.
@@ -282,7 +284,11 @@ if [[ "${1:-}" == "pr" ]]; then
                 state="${MOCK_GH_MERGE_STATE:-CLEAN}"
             fi
             if [[ "$json_field" == *mergeStateStatus* ]]; then
-                printf '{"mergeStateStatus":"%s"}\n' "$state"
+                # merge-mr.sh (the full path) requests mergeStateStatus and
+                # statusCheckRollup together; include the rollup so tests can
+                # distinguish a concluded check failure from a pending one.
+                printf '{"mergeStateStatus":"%s","statusCheckRollup":%s}\n' \
+                    "$state" "${MOCK_GH_CHECK_ROLLUP:-[]}"
             elif [[ "$json_field" == *number* ]]; then
                 printf '{"number":%s}\n' "$num"
             else
@@ -291,6 +297,9 @@ if [[ "${1:-}" == "pr" ]]; then
             exit 0
             ;;
         merge)
+            # Record that a merge was actually attempted so tests can assert
+            # a refused/waiting PR never reaches this call.
+            : > "$TEST_TMP/gh-pr-merge-called"
             exit "${MOCK_GH_PR_MERGE_EXIT_CODE:-0}"
             ;;
     esac
