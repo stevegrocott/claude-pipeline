@@ -1768,3 +1768,280 @@ _setup_parallel_stage_mocks() {
 		exit 1
 	}
 }
+
+# =============================================================================
+# Issue #634 — declared NON-COMMIT deliverables and INTER-TASK dependencies
+#
+# Two defects, both rooted in task metadata the issue body cannot express:
+#
+#   A. A task whose deliverable is an issue comment (not a commit) is counted
+#      a failure, because task success is inferred from commits landing on the
+#      branch.  It aborts the run when it is the only task, and merge-blocks
+#      the PR as "implement:partial" when it is one of several.
+#   B. A batch is launched in parallel with no way to declare that task N must
+#      be decided before task M runs, so a spike races the task that depends
+#      on its ruling.
+#
+# The syntax under test (both annotations are backtick-delimited and live
+# inside the task description, so BOTH mirrored parsers keep emitting
+# byte-identical descriptions):
+#
+#   `deliverable:comment:<marker>`  artefact is an issue comment containing
+#                                   <marker>
+#   `deliverable:file:<path>`       artefact is a file at <path>
+#   `depends-on:<id>[,<id>...]`     this task is serialised after <id>
+#
+# The key risk the issue names — "a task marked non-committing that SHOULD
+# have produced code would pass silently" — is covered by the negative tests:
+# an unverifiable artefact is never promoted, and a task the stage recorded
+# completed is DEMOTED when its declared artefact does not exist.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Parse-time: deliverable / depends-on annotations
+# -----------------------------------------------------------------------------
+
+@test "#634 _parse_task_lines: records a declared non-commit deliverable" {
+	cd "$TEST_TMP/repo" || exit 1
+	local section result deliverable
+	section='- [ ] `[bash-script-craftsman]` **(S)** Post the routing ruling — `deliverable:comment:ruling-634`'
+	result=$(_parse_task_lines "$section" 2>/dev/null)
+	deliverable=$(printf '%s' "$result" | jq -r '.[0].deliverable // ""')
+	expect_glob "$deliverable" 'comment:ruling-634' "deliverable annotation"
+}
+
+@test "#634 _parse_task_lines: records a declared inter-task dependency" {
+	cd "$TEST_TMP/repo" || exit 1
+	local section result deps
+	section=$(printf '%s\n' \
+		'- [ ] `[bash-script-craftsman]` **(S)** Decide — `deliverable:comment:r1`' \
+		'- [ ] `[bash-script-craftsman]` **(S)** Apply in `src/a.ts` — `depends-on:1`')
+	result=$(_parse_task_lines "$section" 2>/dev/null)
+	deps=$(printf '%s' "$result" | jq -c '.[1].depends_on // []')
+	# Compared with `test`, not expect_glob — "[1]" is a glob character class.
+	expect_ok "depends_on annotation" test "$deps" = '[1]'
+}
+
+@test "#634 _parse_task_lines: an unannotated task gains no new keys" {
+	cd "$TEST_TMP/repo" || exit 1
+	# assert_issue_valid must keep accepting existing bodies unchanged, so an
+	# ordinary task line must produce the SAME object it always did.
+	local section result keys
+	section='- [ ] `[bash-script-craftsman]` **(S)** Ordinary task in `src/a.ts`'
+	result=$(_parse_task_lines "$section" 2>/dev/null)
+	keys=$(printf '%s' "$result" | jq -r '.[0] | keys | join(",")')
+	expect_glob "$keys" 'affected_files,agent,description,id,review_attempts,status' \
+		"unannotated task object keys"
+}
+
+# -----------------------------------------------------------------------------
+# AC3 — a dependent task never shares a parallel batch with its predecessor
+# -----------------------------------------------------------------------------
+
+@test "#634 AC3 compute_task_batches: a dependent task is not in the same batch as the task it depends on" {
+	cd "$TEST_TMP/repo" || exit 1
+	# File sets do NOT overlap, so conflict detection alone puts both in
+	# batch 1 — i.e. the spike would run in parallel with the task that
+	# consumes its ruling.  The declared dependency must serialise them.
+	local tasks result b1 b2
+	tasks='[
+		{"id":1,"description":"Decide the rule","agent":"default"},
+		{"id":2,"description":"Apply the ruling in `src/apply.ts`","agent":"default","depends_on":[1]}
+	]'
+	result=$(compute_task_batches "$tasks" main 2>/dev/null)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	expect_ok "dependent batch must be strictly later" test "$b2" -gt "$b1"
+}
+
+@test "#634 compute_task_batches: a chain of dependencies serialises transitively" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result b1 b2 b3
+	tasks='[
+		{"id":1,"description":"Decide","agent":"default"},
+		{"id":2,"description":"Apply in `src/a.ts`","agent":"default","depends_on":[1]},
+		{"id":3,"description":"Verify in `src/b.ts`","agent":"default","depends_on":[2]}
+	]'
+	result=$(compute_task_batches "$tasks" main 2>/dev/null)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	b3=$(printf '%s' "$result" | jq '.[2].batch')
+	expect_ok "task 2 after task 1" test "$b2" -gt "$b1"
+	expect_ok "task 3 after task 2" test "$b3" -gt "$b2"
+}
+
+@test "#634 compute_task_batches: tasks without a declared dependency still share a batch" {
+	cd "$TEST_TMP/repo" || exit 1
+	# Regression guard: the dependency floor must not serialise everything.
+	local tasks result b1 b2
+	tasks='[
+		{"id":1,"description":"Modify `src/alpha.ts`","agent":"default"},
+		{"id":2,"description":"Modify `src/beta.ts`","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main 2>/dev/null)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	expect_glob "$b1" "$b2" "independent tasks share a batch"
+}
+
+# -----------------------------------------------------------------------------
+# Artefact verification — the "would pass silently" guard
+# -----------------------------------------------------------------------------
+
+@test "#634 verify_task_deliverable: comment artefact verifies when the marker is present" {
+	cd "$TEST_TMP/repo" || exit 1
+	_fetch_issue_comment_bodies() { printf '%s\n' "Ruling: keep it. marker=ruling-634"; }
+	expect_ok "marker present verifies" verify_task_deliverable "comment:ruling-634"
+}
+
+@test "#634 verify_task_deliverable: comment artefact does NOT verify when the marker is absent" {
+	cd "$TEST_TMP/repo" || exit 1
+	_fetch_issue_comment_bodies() { printf '%s\n' "Some unrelated pipeline comment"; }
+	expect_not_ok "missing marker must not verify" \
+		verify_task_deliverable "comment:ruling-634"
+}
+
+@test "#634 verify_task_deliverable: a bare 'comment' with no marker is unverifiable and fails" {
+	cd "$TEST_TMP/repo" || exit 1
+	_fetch_issue_comment_bodies() { printf '%s\n' "anything at all"; }
+	expect_not_ok "markerless comment spec must not verify" \
+		verify_task_deliverable "comment"
+}
+
+@test "#634 verify_task_deliverable: file artefact verifies only when the path exists and is non-empty" {
+	cd "$TEST_TMP/repo" || exit 1
+	expect_not_ok "missing file must not verify" \
+		verify_task_deliverable "file:docs/ruling.md"
+	mkdir -p docs
+	: > docs/ruling.md
+	expect_not_ok "empty file must not verify" \
+		verify_task_deliverable "file:docs/ruling.md"
+	printf 'the ruling\n' > docs/ruling.md
+	expect_ok "existing non-empty file verifies" \
+		verify_task_deliverable "file:docs/ruling.md"
+}
+
+@test "#634 verify_task_deliverable: an unrecognised deliverable kind fails closed" {
+	cd "$TEST_TMP/repo" || exit 1
+	expect_not_ok "unknown kind must not verify" \
+		verify_task_deliverable "vibes:trust-me"
+}
+
+# -----------------------------------------------------------------------------
+# AC1/AC2 — the partial-delivery count and the commits-ahead abort
+# -----------------------------------------------------------------------------
+
+_setup_status_634() {
+	STATUS_FILE="$TEST_TMP/status-634.json"
+	export STATUS_FILE
+	printf '%s' "$1" > "$STATUS_FILE"
+}
+
+@test "#634 AC1 reconcile_noncommit_tasks_with_deliverables: promotes a verified comment-only task" {
+	cd "$TEST_TMP/repo" || exit 1
+	# The sole task produced no commit, so the no-op guard recorded it failed.
+	_setup_status_634 '{"tasks":[
+		{"id":1,"description":"Post the ruling","agent":"default",
+		 "status":"failed","deliverable":"comment:ruling-634"}
+	]}'
+	_fetch_issue_comment_bodies() { printf '%s\n' "ruling-634: proceed"; }
+
+	local delta status_after
+	delta=$(reconcile_noncommit_tasks_with_deliverables 2>/dev/null)
+	expect_glob "$delta" '1' "one task promoted"
+	status_after=$(jq -r '.tasks[0].status' "$STATUS_FILE")
+	expect_glob "$status_after" 'completed' "promoted task status"
+}
+
+@test "#634 AC1 all_tasks_are_verified_noncommit: true when the only task is a verified comment task" {
+	cd "$TEST_TMP/repo" || exit 1
+	_setup_status_634 '{"tasks":[
+		{"id":1,"description":"Post the ruling","agent":"default",
+		 "status":"completed","deliverable":"comment:ruling-634"}
+	]}'
+	expect_ok "comment-only issue must escape the 0-commits abort" \
+		all_tasks_are_verified_noncommit
+}
+
+@test "#634 AC2 all_tasks_are_verified_noncommit: false when a code task is also planned" {
+	cd "$TEST_TMP/repo" || exit 1
+	# A mixed issue must NOT get a blanket escape from the commits-ahead abort.
+	_setup_status_634 '{"tasks":[
+		{"id":1,"description":"Post the ruling","agent":"default",
+		 "status":"completed","deliverable":"comment:ruling-634"},
+		{"id":2,"description":"Apply in `src/a.ts`","agent":"default",
+		 "status":"completed"}
+	]}'
+	expect_not_ok "mixed issue must not escape the commits-ahead abort" \
+		all_tasks_are_verified_noncommit
+}
+
+@test "#634 AC2 reconcile_noncommit_tasks_with_deliverables: comment-only task does not count as partial" {
+	cd "$TEST_TMP/repo" || exit 1
+	# 3 planned tasks: 2 code tasks completed, 1 comment-only spike recorded
+	# failed by the no-op guard.  Before the fix this is 2/3 → implement:partial
+	# → merge blocked.  After reconciliation it is 3/3.
+	_setup_status_634 '{"tasks":[
+		{"id":1,"description":"Code in `src/a.ts`","agent":"default","status":"completed"},
+		{"id":2,"description":"Spike ruling","agent":"default",
+		 "status":"failed","deliverable":"comment:ruling-634"},
+		{"id":3,"description":"Code in `src/b.ts`","agent":"default","status":"completed"}
+	]}'
+	_fetch_issue_comment_bodies() { printf '%s\n' "ruling-634: proceed"; }
+
+	local delta completed total
+	delta=$(reconcile_noncommit_tasks_with_deliverables 2>/dev/null)
+	expect_glob "$delta" '1' "spike promoted"
+	completed=$(jq '[.tasks[] | select(.status == "completed")] | length' "$STATUS_FILE")
+	total=$(jq '.tasks | length' "$STATUS_FILE")
+	expect_glob "$completed" "$total" "no partial-delivery shortfall remains"
+}
+
+@test "#634 reconcile_noncommit_tasks_with_deliverables: does NOT promote an unverifiable artefact" {
+	cd "$TEST_TMP/repo" || exit 1
+	# The named risk: a task marked non-committing that should have produced
+	# work must not pass silently.
+	_setup_status_634 '{"tasks":[
+		{"id":1,"description":"Post the ruling","agent":"default",
+		 "status":"failed","deliverable":"comment:ruling-634"}
+	]}'
+	_fetch_issue_comment_bodies() { printf '%s\n' "no ruling was ever posted"; }
+
+	local delta status_after
+	delta=$(reconcile_noncommit_tasks_with_deliverables 2>/dev/null)
+	expect_glob "$delta" '0' "nothing promoted"
+	status_after=$(jq -r '.tasks[0].status' "$STATUS_FILE")
+	expect_glob "$status_after" 'failed' "unverified task stays failed"
+}
+
+@test "#634 reconcile_noncommit_tasks_with_deliverables: DEMOTES a completed task whose artefact is missing" {
+	cd "$TEST_TMP/repo" || exit 1
+	# A stage can report success without producing the declared artefact.
+	# Judging on the artefact means that verdict is overturned, not trusted.
+	_setup_status_634 '{"tasks":[
+		{"id":1,"description":"Post the ruling","agent":"default",
+		 "status":"completed","deliverable":"comment:ruling-634"}
+	]}'
+	_fetch_issue_comment_bodies() { printf '%s\n' "nothing relevant here"; }
+
+	local delta status_after
+	delta=$(reconcile_noncommit_tasks_with_deliverables 2>/dev/null)
+	expect_glob "$delta" '-1' "one task demoted"
+	status_after=$(jq -r '.tasks[0].status' "$STATUS_FILE")
+	expect_glob "$status_after" 'failed' "unverified task demoted to failed"
+}
+
+@test "#634 reconcile_noncommit_tasks_with_deliverables: leaves ordinary tasks untouched" {
+	cd "$TEST_TMP/repo" || exit 1
+	_setup_status_634 '{"tasks":[
+		{"id":1,"description":"Code in `src/a.ts`","agent":"default","status":"failed"},
+		{"id":2,"description":"Code in `src/b.ts`","agent":"default","status":"completed"}
+	]}'
+	local delta s1 s2
+	delta=$(reconcile_noncommit_tasks_with_deliverables 2>/dev/null)
+	expect_glob "$delta" '0' "no non-commit tasks declared"
+	s1=$(jq -r '.tasks[0].status' "$STATUS_FILE")
+	s2=$(jq -r '.tasks[1].status' "$STATUS_FILE")
+	expect_glob "$s1" 'failed' "task 1 untouched"
+	expect_glob "$s2" 'completed' "task 2 untouched"
+}
