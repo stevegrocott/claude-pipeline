@@ -439,8 +439,11 @@ check_run_budget() {
     # is kept on a single line so the BATS function extractor -- which counts
     # braces to find a function end -- is never tripped by a multi-line filter.
     local used_tokens used_cost
-    used_tokens=$(jq -r '[.stages[]?.tokens.input_tokens // 0, .stages[]?.tokens.output_tokens // 0, .stages[]?.tokens.cache_creation_input_tokens // 0, .stages[]?.tokens.cache_read_input_tokens // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_tokens=0
-    used_cost=$(jq -r '[.stages[]?.estimated_cost // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_cost=0
+    # cost_is_aggregate entries are phase totals already itemised on the
+    # per-call entries (issue #617) -- skipped here so the ceiling is not
+    # compared against double-counted spend.
+    used_tokens=$(jq -r '[.stages[]? | select(.cost_is_aggregate != true)] as $c | [$c[].tokens.input_tokens // 0, $c[].tokens.output_tokens // 0, $c[].tokens.cache_creation_input_tokens // 0, $c[].tokens.cache_read_input_tokens // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_tokens=0
+    used_cost=$(jq -r '[.stages[]? | select(.cost_is_aggregate != true)] | [.[].estimated_cost // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_cost=0
     [[ -n "$used_tokens" ]] || used_tokens=0
     [[ -n "$used_cost" ]] || used_cost=0
 
@@ -812,8 +815,24 @@ init_status() {
     sync_status_to_log
 }
 
+# Canonical .stages[] key for a stage name (issue #617).
+#
+# run_stage names are hyphenated ("implement-task-2", "test-iter-3") while
+# init_status seeds underscore keys ("parse_issue", "quality_loop").  run_stage
+# already normalised hyphens to underscores when recording the resolved model,
+# but the status/tokens/cost writers did not — so a hyphenated stage landed its
+# `model` on .stages.implement_task_2 and its `status` on
+# .stages["implement-task-2"], and no entry ever carried both halves.  Every
+# reader and writer now routes its key through here, so model, status, tokens
+# and estimated_cost land on ONE entry and metrics.json supports a
+# model<->outcome join.
+_stage_key() {
+    printf '%s' "${1//-/_}"
+}
+
 update_stage() {
-    local stage="$1"
+    local stage
+    stage=$(_stage_key "$1")
     local status="$2"
     local extra_field="${3:-}"
     local extra_value="${4:-}"
@@ -872,7 +891,9 @@ _stage_acc_dir() {
 }
 
 _stage_acc_file() {
-    local _s="${1//[^A-Za-z0-9_-]/_}"
+    local _s
+    _s=$(_stage_key "$1")
+    _s="${_s//[^A-Za-z0-9_]/_}"
     printf '%s/%s.jsonl' "$(_stage_acc_dir)" "$_s"
 }
 
@@ -887,38 +908,128 @@ _stage_acc_reset() {
 # Append one accepted stage_result's tokens/cost to the current logical stage's
 # file. Safe to call from inside the run_stage subshell (it writes to a file,
 # which the parent can read). No-op when no logical stage is active.
+#
+# Each line also records the CANONICAL KEY OF THE run_stage CALL that spent the
+# money (issue #617).  _apply_stage_action persists that same call's tokens/cost
+# onto .stages[<call key>], so _stage_acc_sum can hand the enclosing logical
+# stage only the lines it owns outright and the two writes can never
+# double-count the same dollar.  A line with no `stage` field (written by a
+# pre-#617 orchestrator mid-resume) is attributed to the logical stage.
 _stage_acc_add() {
     local _sr="$1"
     local _cur="${_STAGE_ACC_CURRENT:-}"
     [[ -n "$_cur" ]] || return 0
+    local _call
+    _call=$(_stage_key "${_RUN_STAGE_NAME:-$_cur}")
     local _line
     _line=$(printf '%s' "$_sr" \
-        | jq -c '{tokens: (.tokens // {}), cost: (.cost.estimated_usd // 0)}' \
+        | jq -c --arg stage "$_call" \
+            '{stage: $stage, tokens: (.tokens // {}), cost: (.cost.estimated_usd // 0)}' \
         2>/dev/null) || return 0
     [[ -n "$_line" ]] || return 0
+    mkdir -p "$(_stage_acc_dir)" 2>/dev/null || true
     printf '%s\n' "$_line" >> "$(_stage_acc_file "$_cur")" 2>/dev/null || true
 }
 
-# Sum a logical stage's accumulator file into one {tokens,cost} object. Prints
-# nothing when the file is absent or empty so callers can detect "no data".
+# Sum a logical stage's accumulator file into one {tokens,cost,aggregate}
+# object. Prints nothing when the file is absent or empty so callers can detect
+# "no data".
+#
+# `tokens`/`cost` sum EVERY line, so the logical stage keeps reporting the whole
+# phase's spend (issue #580's contract: two run_stage iterations under one stage
+# accumulate rather than last-win).
+#
+# `aggregate` is true when at least one line came from a run_stage call with a
+# DIFFERENT name than this stage — meaning those dollars are also persisted on
+# that call's own .stages[] entry by _persist_stage_call (issue #617).  The
+# cost_summary rollups skip entries flagged this way, so a phase total and its
+# per-call breakdown can both live in .stages[] without being counted twice.
 _stage_acc_sum() {
+    local _k
+    _k=$(_stage_key "$1")
     local _f
     _f=$(_stage_acc_file "$1")
     [[ -s "$_f" ]] || return 0
-    jq -cs '{
+    jq -cs --arg k "$_k" '{
         tokens: {
             input_tokens:                (map(.tokens.input_tokens // 0) | add // 0),
             output_tokens:               (map(.tokens.output_tokens // 0) | add // 0),
             cache_creation_input_tokens: (map(.tokens.cache_creation_input_tokens // 0) | add // 0),
             cache_read_input_tokens:     (map(.tokens.cache_read_input_tokens // 0) | add // 0)
         },
-        cost: (map(.cost // 0) | add // 0)
+        cost: (map(.cost // 0) | add // 0),
+        aggregate: (any(.[]; (.stage // $k) != $k))
     }' "$_f" 2>/dev/null || true
 }
 
+# Persist one run_stage call's outcome and spend on its OWN canonical
+# .stages[] entry (issue #617).
+#
+# run_stage records the resolved `model` under _stage_key("$stage_name"); this
+# completes that entry with `status`, `error_kind`, `tokens` and
+# `estimated_cost` so every stage that names a model also answers "did it
+# succeed, and what did it cost".  Task-level stages (implement-task-N,
+# test-iter-N, pr-review-iter-N) previously carried a model and nothing else.
+#
+# Double counting is prevented by _stage_acc_sum: the enclosing logical stage
+# only ever sums accumulator lines whose call key IS that stage, so spend
+# attributed here is never also rolled onto the parent entry.  Costs accumulate
+# (+=) rather than overwrite so a repeated run_stage name adds up instead of
+# last-winning.
+_persist_stage_call() {
+    local _sr="$1"
+    local _name="${_RUN_STAGE_NAME:-}"
+    [[ -n "$_name" ]] || return 0
+    [[ -f "$STATUS_FILE" ]] || return 0
+    local _key
+    _key=$(_stage_key "$_name")
+
+    jq --arg stage "$_key" --argjson sr "$_sr" '
+        # Match the status.json vocabulary set by set_stage_completed /
+        # set_stage_failed rather than the stage_result enum.
+        (if ($sr.status // "") == "success" then "completed" else "error" end)
+            as $stage_status |
+        ($sr.tokens // {}) as $tok |
+        ($sr.cost.estimated_usd // 0) as $cost |
+        .stages[$stage] = ((.stages[$stage] // {}) + {
+            status: $stage_status,
+            tokens: {
+                input_tokens:
+                    ((.stages[$stage].tokens.input_tokens // 0)
+                        + ($tok.input_tokens // 0)),
+                output_tokens:
+                    ((.stages[$stage].tokens.output_tokens // 0)
+                        + ($tok.output_tokens // 0)),
+                cache_creation_input_tokens:
+                    ((.stages[$stage].tokens.cache_creation_input_tokens // 0)
+                        + ($tok.cache_creation_input_tokens // 0)),
+                cache_read_input_tokens:
+                    ((.stages[$stage].tokens.cache_read_input_tokens // 0)
+                        + ($tok.cache_read_input_tokens // 0))
+            },
+            estimated_cost: ((.stages[$stage].estimated_cost // 0) + $cost),
+            completed_at: (now | todate)
+        }) |
+        (if ($sr.model // "") != "" then .stages[$stage].model = $sr.model
+         else . end) |
+        (if ($sr.error_kind // null) != null
+         then .stages[$stage].error_kind = $sr.error_kind else . end) |
+        .last_update = (now | todate)' \
+        "$STATUS_FILE" > "${STATUS_FILE}.tmp" 2>/dev/null \
+        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE" \
+        || rm -f "${STATUS_FILE}.tmp"
+}
+
+# NOTE on raw vs canonical names (issue #617): only the status.json KEY is
+# canonicalised.  model-config.sh's _STAGE_PREFIXES table is hyphenated
+# ("parse-issue", "e2e-verify", "test-iter"), and events.jsonl records the
+# stage name operators see in the logs, so effective_model() and emit_event()
+# keep receiving the caller's raw name.
 set_stage_started() {
-    local stage="$1"
+    local stage_name="$1"
     local model="${2:-}"
+    local stage
+    stage=$(_stage_key "$stage_name")
 
     # issue #580: mark this the active logical stage and clear its accumulator
     # so per-stage token/cost starts from zero for this run.
@@ -939,14 +1050,16 @@ set_stage_started() {
     # required `model` field. If effective_model isn't usable yet, fall back
     # to a stable placeholder so the event still validates.
     if [[ -z "$model" ]]; then
-        model=$(effective_model "$stage" "" 2>/dev/null) || model=""
+        model=$(effective_model "$stage_name" "" 2>/dev/null) || model=""
         [[ -n "$model" ]] || model="unresolved"
     fi
-    emit_event "stage_start" "stage=$stage" "model=$model"
+    emit_event "stage_start" "stage=$stage_name" "model=$model"
 }
 
 set_stage_completed() {
-    local stage="$1"
+    local stage_name="$1"
+    local stage
+    stage=$(_stage_key "$stage_name")
     local tokens_json="${2:-}"
     local estimated_cost="${3:-}"
 
@@ -956,6 +1069,7 @@ set_stage_completed() {
     # caller) always win. A stage with no accumulator file — a config-only-skip
     # path, or a stage that ran no CLI call — yields nothing here and is
     # persisted as zero/absent, never inheriting a previous stage's spend.
+    local is_aggregate="false"
     if [[ -z "$tokens_json" || -z "$estimated_cost" ]]; then
         local _acc_sum
         _acc_sum=$(_stage_acc_sum "$stage")
@@ -964,6 +1078,7 @@ set_stage_completed() {
                 || tokens_json=$(printf '%s' "$_acc_sum" | jq -c '.tokens' 2>/dev/null)
             [[ -n "$estimated_cost" ]] \
                 || estimated_cost=$(printf '%s' "$_acc_sum" | jq -r '.cost' 2>/dev/null)
+            is_aggregate=$(printf '%s' "$_acc_sum" | jq -r '.aggregate // false' 2>/dev/null)
         fi
     fi
 
@@ -975,10 +1090,16 @@ set_stage_completed() {
         jq --arg stage "$stage" \
            --argjson tokens "$tokens_json" \
            --argjson estimated_cost "${estimated_cost:-0}" \
+           --argjson is_aggregate "${is_aggregate:-false}" \
            '.stages[$stage].completed_at = (now | todate) |
             .stages[$stage].status = "completed" |
             .stages[$stage].tokens = $tokens |
             .stages[$stage].estimated_cost = $estimated_cost |
+            # issue #617: flag a phase total whose dollars are ALSO carried by
+            # the per-call entries (implement_task_N, test_iter_N, ...) so the
+            # rollups below count them exactly once.
+            (if $is_aggregate then .stages[$stage].cost_is_aggregate = true
+             else . end) |
             # Roll every stage'"'"'s tokens/estimated_cost up into the run-level
             # top-level cost_summary NOW (issue #580). Recomputed from .stages[]
             # on every completion — idempotent and resume-safe (re-derived, not
@@ -987,12 +1108,13 @@ set_stage_completed() {
             # batch-orchestrator.sh reads (metrics.json stays the final
             # artifact, written by export_metrics). Field names match
             # init_status'"'"'s seed and metrics.json. `// 0` guards throughout.
+            ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
             .cost_summary = {
-                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
-                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
-                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
-                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
-                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             } |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
@@ -1003,12 +1125,13 @@ set_stage_completed() {
         jq --arg stage "$stage" \
            '.stages[$stage].completed_at = (now | todate) |
             .stages[$stage].status = "completed" |
+            ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
             .cost_summary = {
-                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
-                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
-                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
-                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
-                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             } |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
@@ -1021,7 +1144,7 @@ set_stage_completed() {
     # stage_end event so events.jsonl carries per-stage spend (issue #580).
     # `:=` passes JSON-typed (numeric) values; the schema's stage_end branch
     # declares these fields optional so events without them still validate.
-    local -a _stage_end_args=("stage=$stage" "status=success")
+    local -a _stage_end_args=("stage=$stage_name" "status=success")
     if [[ -n "$tokens_json" ]]; then
         local _end_in _end_out _end_cache_creation _end_cache_read
         _end_in=$(printf '%s' "$tokens_json" | jq -r '.input_tokens // 0' 2>/dev/null)
@@ -1039,17 +1162,80 @@ set_stage_completed() {
     emit_event "stage_end" "${_stage_end_args[@]}"
 }
 
+# Terminal-state writer for a failed stage.
+#
+# Issue #617: a failed stage has ALREADY SPENT the tokens that produced its
+# failure, so it must record them exactly as set_stage_completed does.  Before
+# this fix set_stage_failed wrote only `status`, and the run-level cost_summary
+# — rolled up from .stages[].estimated_cost — silently dropped every failed
+# stage.  On run issue-614-20260726-153711 that hid $3.48 of $7.63 (~51%).
+# The rollup is recomputed here for the same reason as in set_stage_completed:
+# status.json must stay the canonical live cost source even when the run ends
+# on a failure and export_metrics is reached only via the EXIT trap.
 set_stage_failed() {
-    local stage="$1"
+    local stage_name="$1"
+    local stage
+    stage=$(_stage_key "$stage_name")
     local error_kind="$2"
-    jq --arg stage "$stage" \
-       '.stages[$stage].completed_at = (now | todate) |
-        .stages[$stage].status = "error" |
-        .state = "failed" |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    local tokens_json="${3:-}"
+    local estimated_cost="${4:-}"
+
+    local is_aggregate="false"
+    if [[ -z "$tokens_json" || -z "$estimated_cost" ]]; then
+        local _acc_sum
+        _acc_sum=$(_stage_acc_sum "$stage")
+        if [[ -n "$_acc_sum" ]]; then
+            [[ -n "$tokens_json" ]] \
+                || tokens_json=$(printf '%s' "$_acc_sum" | jq -c '.tokens' 2>/dev/null)
+            [[ -n "$estimated_cost" ]] \
+                || estimated_cost=$(printf '%s' "$_acc_sum" | jq -r '.cost' 2>/dev/null)
+            is_aggregate=$(printf '%s' "$_acc_sum" | jq -r '.aggregate // false' 2>/dev/null)
+        fi
+    fi
+
+    if [[ -n "$tokens_json" ]]; then
+        jq --arg stage "$stage" \
+           --argjson tokens "$tokens_json" \
+           --argjson estimated_cost "${estimated_cost:-0}" \
+           --argjson is_aggregate "${is_aggregate:-false}" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "error" |
+            .stages[$stage].tokens = $tokens |
+            .stages[$stage].estimated_cost = $estimated_cost |
+            (if $is_aggregate then .stages[$stage].cost_is_aggregate = true
+             else . end) |
+            ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
+            .cost_summary = {
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
+            } |
+            .state = "failed" |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    else
+        # No accumulator data for this stage — the spend, if any, is already on
+        # the run_stage call's own entry (see _apply_stage_action).  Recompute
+        # the rollup anyway so it stays consistent with .stages[].
+        jq --arg stage "$stage" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "error" |
+            ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
+            .cost_summary = {
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
+            } |
+            .state = "failed" |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    fi
     sync_status_to_log
-    emit_event "stage_end" "stage=$stage" "status=error" "error_kind=$error_kind"
+    emit_event "stage_end" "stage=$stage_name" "status=error" "error_kind=$error_kind"
 }
 
 # Terminal-state writer for a run-level token/cost budget ceiling breach
@@ -1060,7 +1246,9 @@ set_stage_failed() {
 # subshell) and set_final_state() refuses to overwrite it, so the halt is
 # preserved even as the bail path unwinds the stack.
 set_run_budget_exceeded() {
-    local stage="$1"
+    local stage_name="$1"
+    local stage
+    stage=$(_stage_key "$stage_name")
     local detail="${2:-run token/cost ceiling exceeded}"
     jq --arg stage "$stage" \
        --arg detail "$detail" \
@@ -1071,9 +1259,9 @@ set_run_budget_exceeded() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
-    log_warn "Run halted: $detail (stage=$stage) — state set to budget_exceeded"
+    log_warn "Run halted: $detail (stage=$stage_name) — state set to budget_exceeded"
     emit_event "budget_exceeded" \
-        "stage=$stage" \
+        "stage=$stage_name" \
         "scope=run" \
         "max_tokens:=${MAX_RUN_TOKENS:-0}" \
         "max_cost_usd:=${MAX_RUN_COST_USD:-0}"
@@ -1450,13 +1638,20 @@ export_metrics() {
         # set_stage_completed) up into run-level totals. This is the run-level
         # analogue of the batch-orchestrator per-issue cost rollup (issue #580).
         # Missing tokens/estimated_cost on a stage coalesce to 0.
+        #
+        # Failed stages and the triage stage are included deliberately (issue
+        # #617): spend is spend regardless of outcome, and excluding them is
+        # what under-reported run issue-614-20260726-153711 by ~51%.  Entries
+        # flagged cost_is_aggregate are the ONLY exclusion — those are phase
+        # totals whose dollars are already itemised on the per-call entries.
         def stage_cost_rollup:
+            [.stages[]? | select(.cost_is_aggregate != true)] as $counted |
             {
-                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
-                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
-                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
-                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
-                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             };
 
         . as $status |
@@ -1584,9 +1779,10 @@ load_resume_state() {
 # Check if a stage is completed in status file
 # Returns 0 if completed, 1 if not
 is_stage_completed() {
-    local stage="$1"
+    local stage
+    stage=$(_stage_key "$1")
     local status
-    status=$(jq -r ".stages.$stage.status" "$STATUS_FILE" 2>/dev/null)
+    status=$(jq -r --arg s "$stage" '.stages[$s].status' "$STATUS_FILE" 2>/dev/null)
     [[ "$status" == "completed" ]]
 }
 
@@ -2153,6 +2349,12 @@ _apply_stage_action() {
 	# to normal routing.  Disabled by default (ceilings 0), so no behaviour
 	# change for existing runs.
 	if ! check_run_budget; then
+		# issue #617: this call's tokens were spent before the ceiling was
+		# read, so record them even on the halt path.  Deliberately AFTER
+		# check_run_budget so the ceiling decision itself sees exactly the
+		# same .stages[] totals it saw before #617.
+		_persist_stage_call "$stage_result"
+		_stage_acc_add "$stage_result"
 		set_run_budget_exceeded \
 			"${_RUN_STAGE_NAME:-unknown}" \
 			"run token/cost ceiling exceeded (requested action=$action)"
@@ -2160,14 +2362,24 @@ _apply_stage_action() {
 		return 1
 	fi
 
+	# issue #617: persist THIS run_stage call's outcome and spend on its own
+	# canonical .stages[] entry — the same entry run_stage wrote the resolved
+	# `model` to — so model, status, tokens and estimated_cost are joinable and
+	# a task-level stage carries spend of its own, not just the aggregate one.
+	_persist_stage_call "$stage_result"
+
+	# issue #580 + #617: record this run_stage call's final (post-escalation/
+	# retry) tokens + cost into the current logical stage's accumulator.  This
+	# runs BEFORE the action dispatch because money is spent regardless of the
+	# outcome — accept, bail, escalate and retry_same all follow a completed CLI
+	# call.  Restricting it to `accept` (the pre-#617 behaviour) is what let
+	# failed stages contribute $0 to cost_summary.  Exactly one
+	# _apply_stage_action call is made per run_stage invocation (every branch of
+	# run_stage's dispatch returns immediately), so this appends exactly once.
+	_stage_acc_add "$stage_result"
+
 	case "$action" in
 		accept)
-			# issue #580: record this accepted run_stage's final (post-
-			# escalation/retry) tokens + cost into the current logical stage's
-			# accumulator. accept is the single choke point every accepted
-			# run_stage exit funnels through, so one append happens per
-			# accepted run_stage call.
-			_stage_acc_add "$stage_result"
 			printf '%s\n' "$stage_result"
 			return 0
 			;;
@@ -2268,7 +2480,8 @@ run_stage() {
 
     # Record resolved model in status.json stage entry for export_metrics()
     if [[ -f "$STATUS_FILE" ]]; then
-        local stage_key="${stage_name//-/_}"
+        local stage_key
+        stage_key=$(_stage_key "$stage_name")
         jq --arg stage "$stage_key" --arg model "$model" \
            '.stages[$stage].model = $model' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
@@ -3241,7 +3454,33 @@ run_triage_stage() {
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 
-    set_stage_completed "triage"
+    # Issue #617: triage runs its own CLI call rather than going through
+    # run_stage, so no _apply_stage_action ever fed the per-stage accumulator
+    # and the triage stage recorded $0 — $0.4479 of unattributed spend on run
+    # issue-614-20260726-153711.  Lift the usage straight off the CLI envelope
+    # and hand it to set_stage_completed explicitly.  When the CLI reports no
+    # cost, price the tokens with _model_cost against the resolved triage tier
+    # (the same reported→computed fallback _emit_stage_result uses).
+    local triage_usage triage_tokens triage_cost
+    triage_usage=$(_extract_usage "$raw")
+    triage_tokens=$(printf '%s' "$triage_usage" \
+        | jq -c '{input_tokens, output_tokens,
+                  cache_creation_input_tokens, cache_read_input_tokens}' \
+        2>/dev/null)
+    triage_cost=$(printf '%s' "$triage_usage" | jq -r '.total_cost_usd // 0' 2>/dev/null)
+    if [[ -z "$triage_cost" ]] || [[ "$triage_cost" == "0" ]] \
+        || [[ "$triage_cost" == "null" ]]; then
+        local _tm="${triage_model:-}"
+        [[ -n "$_tm" ]] || _tm=$(effective_model "triage" "" 2>/dev/null) || _tm=""
+        [[ -n "$_tm" ]] || _tm="haiku"
+        triage_cost=$(_model_cost "$_tm" \
+            "$(printf '%s' "$triage_usage" | jq -r '.input_tokens // 0')" \
+            "$(printf '%s' "$triage_usage" | jq -r '.output_tokens // 0')" \
+            "$(printf '%s' "$triage_usage" | jq -r '.cache_creation_input_tokens // 0')" \
+            "$(printf '%s' "$triage_usage" | jq -r '.cache_read_input_tokens // 0')" \
+            2>/dev/null) || triage_cost=0
+    fi
+    set_stage_completed "triage" "${triage_tokens:-}" "${triage_cost:-0}"
     log "Triage complete. Route: $route" \
         "(confidence: $confidence, dq: ${dq:-none})"
 
