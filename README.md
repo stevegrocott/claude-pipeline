@@ -519,6 +519,26 @@ A pre-commit hook (`skill-validate.sh`) validates every skill file against this 
 - **Post-PR Simplify** (`hooks/post-pr-simplify.sh`): Runs code-simplifier after PR/MR creation (platform-agnostic)
 - **RTK Command Rewrite** (`hooks/rtk-rewrite.sh`): PreToolUse hook that rewrites verbose Bash commands through [RTK](https://rtk.sh) (Rust Token Killer) to reduce token consumption. Opt-in via `RTK_ENABLED=1`. Registered as a repo-local hook in `.claude/settings.local.json` (not synced).
 
+### Which hooks ship in the plugin
+
+Migrating a repo to the `pipeline-core` plugin used to silently disable its guardrails, because the plugin's `hooks.json` registered only two hooks. Pipeline-owned hooks now ship in the plugin, generated from `.claude/hooks/` by `./sync.sh bundle` into `plugins/pipeline-core/hooks/scripts/` — the bundled tree is **produced, not hand-edited**.
+
+Bundling is an explicit **allowlist**, not a directory mirror. Both the not-shipped set and the shipped set are named in `sync.sh` (`BUNDLE_HOOKS` / `PROJECT_LOCAL_HOOKS` / `PLUGIN_ONLY_HOOKS`), so a hook added later and forgotten fails a test rather than quietly never reaching consumers.
+
+| Hook | Ships? | Why |
+|---|---|---|
+| `block-gh-issue-create.sh` | yes | Forces issue creation through `assert_issue_valid` — a core pipeline invariant |
+| `pipeline-status-inject.sh` | yes | `UserPromptSubmit`; reads the consumer's own `status.json` |
+| `pre-commit-skill-validate.sh` | yes | Validates SKILL.md frontmatter; resolves its validator from the plugin bundle |
+| `post-pr-simplify.sh` | yes | Runs code-simplifier after PR creation |
+| `scaffold-placeholder.sh` | yes | Plugin-only; no `.claude/hooks/` counterpart |
+| `block-destructive-db-commands.sh` | no | Project-local — DB safety; not every consumer has a database |
+| `rtk-rewrite.sh` | no | Project-local — routes commands through project-specific tooling |
+| `session-start.sh` | no | Project-local session banner |
+| `sync-reminder.sh` | no | **Retired** for plugin consumers — it reminds you to sync core pipeline changes upstream, which is meaningless once the plugin *is* the source of those files |
+
+`test-bundle-parity.bats` enforces all of this: bundled hooks must match their canonical counterpart byte for byte, a bundled hook with no canonical counterpart fails, every hook in `.claude/hooks/` must be classified, and `sync.sh`'s allowlists must agree with the guard's.
+
 ## Testing
 
 ```bash
