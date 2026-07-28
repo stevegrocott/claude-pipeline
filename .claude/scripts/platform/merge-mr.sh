@@ -15,26 +15,90 @@ source "$PLATFORM_SH_FILE"
 
 MR="$1"
 
+# Gate wait_for_mergeable on GitHub's richer `mergeStateStatus` field rather
+# than the coarse `mergeable` field: a PR blocked only by a still-running
+# check keeps waiting, while a PR with a check that has already concluded in
+# failure is refused immediately instead of looping until the timeout.
+# Defaults on; set MERGE_MR_MERGE_STATE_GATE=0 to opt back into the legacy
+# `mergeable`-only behavior.
+MERGE_MR_MERGE_STATE_GATE="${MERGE_MR_MERGE_STATE_GATE:-1}"
+
+# Returns success when any entry in a statusCheckRollup JSON array has
+# concluded in a failing state. CheckRun entries report status/conclusion
+# (conclusion is only trustworthy once status is COMPLETED); legacy
+# commit-status entries report state directly.
+_has_concluded_check_failure() {
+  local rollup_json="$1"
+
+  jq -e '
+    [.[]? |
+      if .__typename == "CheckRun" then
+        (select(.status == "COMPLETED") | .conclusion)
+      else
+        .state
+      end
+    ] | any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or
+        . == "TIMED_OUT" or . == "ACTION_REQUIRED" or
+        . == "STARTUP_FAILURE")
+  ' <<<"$rollup_json" >/dev/null 2>&1
+}
+
 wait_for_mergeable() {
   local pr="$1"
-  local interval=10
-  local max=90
+  local interval="${MERGE_MR_POLL_INTERVAL:-10}"
+  local max="${MERGE_MR_POLL_MAX:-90}"
   local elapsed=0
 
-  while [ "$elapsed" -lt "$max" ]; do
-    local state
-    state=$(gh pr view "$pr" --json mergeable --jq '.mergeable' 2>/dev/null || echo "UNKNOWN")
+  if [ "$MERGE_MR_MERGE_STATE_GATE" != "1" ]; then
+    while [ "$elapsed" -lt "$max" ]; do
+      local state
+      state=$(gh pr view "$pr" --json mergeable --jq '.mergeable' 2>/dev/null || echo "UNKNOWN")
 
-    case "$state" in
-      MERGEABLE)
+      case "$state" in
+        MERGEABLE)
+          return 0
+          ;;
+        CONFLICTING)
+          echo "PR has unresolvable merge conflicts" >&2
+          return 1
+          ;;
+        *)
+          echo "Waiting for PR #$pr to become mergeable (state: $state, ${elapsed}s elapsed)..." >&2
+          sleep "$interval"
+          elapsed=$((elapsed + interval))
+          ;;
+      esac
+    done
+
+    echo "Timed out waiting for GitHub to compute mergeability" >&2
+    return 1
+  fi
+
+  while [ "$elapsed" -lt "$max" ]; do
+    local json
+    json=$(gh pr view "$pr" --json mergeStateStatus,statusCheckRollup 2>/dev/null || echo "{}")
+
+    local merge_state
+    merge_state=$(jq -r '.mergeStateStatus // "UNKNOWN"' <<<"$json" 2>/dev/null || echo "UNKNOWN")
+
+    case "$merge_state" in
+      CLEAN|HAS_HOOKS)
         return 0
         ;;
-      CONFLICTING)
+      DIRTY)
         echo "PR has unresolvable merge conflicts" >&2
         return 1
         ;;
       *)
-        echo "Waiting for PR #$pr to become mergeable (state: $state, ${elapsed}s elapsed)..." >&2
+        local rollup
+        rollup=$(jq -c '.statusCheckRollup // []' <<<"$json" 2>/dev/null || echo "[]")
+
+        if _has_concluded_check_failure "$rollup"; then
+          echo "PR #$pr has a check that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
+          return 1
+        fi
+
+        echo "Waiting for PR #$pr to become mergeable (mergeStateStatus: $merge_state, ${elapsed}s elapsed)..." >&2
         sleep "$interval"
         elapsed=$((elapsed + interval))
         ;;

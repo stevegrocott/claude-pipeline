@@ -85,7 +85,7 @@ PLATFORM_EOF
     export MOCK_GH_EXIT_CODE=0
     export MOCK_GH_ISSUE_JSON='{"title":"Test Issue","body":"Test body","state":"OPEN"}'
     export MOCK_GH_ISSUES_JSON='[{"number":1,"title":"Issue 1","state":"OPEN"},{"number":2,"title":"Issue 2","state":"OPEN"}]'
-    export MOCK_GH_PR_JSON='{"number":99,"title":"Test PR","body":"PR body","state":"OPEN"}'
+    export MOCK_GH_PR_JSON='{"number":99,"title":"Test PR","body":"PR body","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}'
     export MOCK_GH_PR_LIST_JSON='[{"number":99}]'
     export MOCK_GLAB_EXIT_CODE=0
     export MOCK_GLAB_MR_LIST_JSON='[{"iid":55}]'
@@ -141,7 +141,23 @@ case "$1" in
         echo "https://github.com/owner/repo/pull/99"
         ;;
       view)
-        echo "${MOCK_GH_PR_JSON}"
+        # Check if --jq flag is present; if so, extract from JSON
+        _mock_has_jq=false
+        _mock_jq_expr=""
+        for arg in "$@"; do
+          if [[ "$_mock_has_jq" == "pending" ]]; then
+            _mock_jq_expr="$arg"
+            _mock_has_jq=true
+          fi
+          if [[ "$arg" == "--jq" ]]; then
+            _mock_has_jq="pending"
+          fi
+        done
+        if [[ "$_mock_has_jq" == "true" ]]; then
+          echo "${MOCK_GH_PR_VIEW_JSON:-$MOCK_GH_PR_JSON}" | jq -r "$_mock_jq_expr"
+        else
+          echo "${MOCK_GH_PR_VIEW_JSON:-$MOCK_GH_PR_JSON}"
+        fi
         ;;
       list)
         # Check if --jq flag is present; if so, extract from JSON
