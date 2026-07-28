@@ -341,6 +341,61 @@ teardown() {
 	expect_glob "$count" '0' "a task declaring no paths cannot be reconciled"
 }
 
+@test "reconcile: refuses to promote a task whose declared files are also declared by a still-failed sibling" {
+	# Issue #620 review: when several tasks declare the same file, branch
+	# evidence for that file cannot attribute it to one task — the first
+	# task to land must not promote its siblings too.
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["shared.sh"]},
+		{id: 2, description: "task two", status: "failed", affected_files: ["shared.sh"]},
+		{id: 3, description: "task three", status: "failed", affected_files: ["shared.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	echo "landed" > shared.sh
+	git add shared.sh
+	git commit -q -m "one of the three tasks lands shared.sh"
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '0' \
+		"no task reconciles when its declared file set is shared with a still-failed sibling"
+
+	local status1 status2 status3
+	status1=$(jq -r '(.tasks[] | select(.id == 1)).status' "$STATUS_FILE")
+	status2=$(jq -r '(.tasks[] | select(.id == 2)).status' "$STATUS_FILE")
+	status3=$(jq -r '(.tasks[] | select(.id == 3)).status' "$STATUS_FILE")
+	expect_glob "$status1" 'failed' "task 1 remains failed — ambiguous attribution"
+	expect_glob "$status2" 'failed' "task 2 remains failed — ambiguous attribution"
+	expect_glob "$status3" 'failed' "task 3 remains failed — ambiguous attribution"
+}
+
+@test "reconcile: does not promote an evidenced task while the test suite is red this run" {
+	# Issue #620's proposed direction requires file evidence AND a green
+	# test suite before treating a failed task as satisfied.
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["src/one.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	mkdir -p src
+	echo "one" > src/one.sh
+	git add src
+	git commit -q -m "implement task one"
+
+	DEGRADED_STAGES=("test:full_suite_red")
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '0' "a red test suite blocks promotion even with file evidence"
+
+	local status
+	status=$(jq -r '(.tasks[] | select(.id == 1)).status' "$STATUS_FILE")
+	expect_glob "$status" 'failed' "the task remains failed while the test suite is red"
+}
+
 @test "reconcile: leaves completed and pending tasks untouched" {
 	local tasks_json
 	tasks_json=$(jq -n '[

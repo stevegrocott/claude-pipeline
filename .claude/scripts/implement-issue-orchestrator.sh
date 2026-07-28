@@ -4544,8 +4544,20 @@ _extract_task_files_from_desc() {
 # `/` are stripped, so a task declaring `./src/app.ts` or `/src/app.ts`
 # still matches git's `src/app.ts`.  _extract_task_files_from_desc() pulls
 # tokens straight out of prose, where either rooting is common.  Matching
-# stays whole-path exact after normalisation — a declared path that is only
-# a substring of a changed path is still not evidence.
+# stays whole-path exact after normalisation, except a declared path ending
+# in `/` (a directory) which matches any changed path it prefixes.
+_normalize_declared_paths() {
+	local raw
+	for raw in "$@"; do
+		[[ -n "$raw" ]] || continue
+		while [[ "$raw" == ./* ]]; do
+			raw="${raw#./}"
+		done
+		raw="${raw#/}"
+		[[ -n "$raw" ]] && printf '%s\n' "$raw"
+	done
+}
+
 task_files_modified_on_branch() {
 	local base_branch="$1"
 	shift
@@ -4554,22 +4566,36 @@ task_files_modified_on_branch() {
 
 	# Normalise once up front rather than per diff entry.
 	local -a wants=()
-	local raw
-	for raw in "$@"; do
-		[[ -n "$raw" ]] || continue
-		while [[ "$raw" == ./* ]]; do
-			raw="${raw#./}"
-		done
-		raw="${raw#/}"
-		[[ -n "$raw" ]] && wants+=("$raw")
-	done
+	local w
+	while IFS= read -r w; do
+		wants+=("$w")
+	done < <(_normalize_declared_paths "$@")
 	((${#wants[@]} > 0)) || return 1
+
+	# A missing local base ref (shallow clone, origin/main-only checkout)
+	# makes the diff below silently fail and this helper indistinguishably
+	# report "no evidence" (issue #620 review) — surface it instead of
+	# reverting to pre-fix behaviour with no diagnostic. Run once up front
+	# purely to capture stderr; the real read still comes off the NUL-
+	# delimited process substitution below ($() would truncate it at the
+	# first NUL byte).
+	local diff_stderr
+	diff_stderr=$(git diff -z --no-renames --name-only \
+		"${base_branch}...HEAD" 2>&1 >/dev/null)
+	[[ -n "$diff_stderr" ]] && log_warn \
+		"task_files_modified_on_branch: git diff ${base_branch}...HEAD failed:" \
+		"$diff_stderr"
 
 	local found=1
 	local f want
 	while IFS= read -r -d '' f; do
 		for want in "${wants[@]}"; do
-			if [[ "$f" == "$want" ]]; then
+			if [[ "$want" == */ ]]; then
+				if [[ "$f" == "$want"* ]]; then
+					found=0
+					break 2
+				fi
+			elif [[ "$f" == "$want" ]]; then
 				found=0
 				break 2
 			fi
@@ -4580,6 +4606,48 @@ task_files_modified_on_branch() {
 	return "$found"
 }
 
+# _task_declared_files() — resolves and normalises a task's declared file
+# paths from $STATUS_FILE: prefers the task's recorded `affected_files`,
+# falling back to `_extract_task_files_from_desc()` on its description when
+# that is empty (the same source compute_task_batches() already relies on).
+# One normalised path per line.
+_task_declared_files() {
+	local task_id="$1"
+	local desc affected
+	desc=$(jq -r --argjson id "$task_id" \
+		'(.tasks[] | select(.id == $id)).description // ""' \
+		"$STATUS_FILE" 2>/dev/null)
+	affected=$(jq -r --argjson id "$task_id" \
+		'(.tasks[] | select(.id == $id)).affected_files // [] | .[]' \
+		"$STATUS_FILE" 2>/dev/null)
+
+	local -a raw=()
+	local f
+	if [[ -n "$affected" ]]; then
+		while IFS= read -r f; do
+			[[ -n "$f" ]] && raw+=("$f")
+		done <<< "$affected"
+	else
+		while IFS= read -r f; do
+			[[ -n "$f" ]] && raw+=("$f")
+		done < <(_extract_task_files_from_desc "$desc")
+	fi
+	_normalize_declared_paths "${raw[@]+"${raw[@]}"}"
+}
+
+# _file_set_contained() — true if every path in newline-separated set A also
+# appears in newline-separated set B (A == B counts as contained). Used by
+# the cross-task containment check below.
+_file_set_contained() {
+	local a="$1" b="$2"
+	local line
+	while IFS= read -r line; do
+		[[ -n "$line" ]] || continue
+		grep -Fqx "$line" <<< "$b" || return 1
+	done <<< "$a"
+	return 0
+}
+
 # reconcile_failed_tasks_with_branch_evidence() — convergence-verdict
 # re-evaluation (issue #616/#618/#620 task 2).
 #
@@ -4588,21 +4656,31 @@ task_files_modified_on_branch() {
 # abandoned work without ever touching the original task's status, so
 # `.tasks[].status` alone cannot be trusted as the convergence verdict
 # (issue #616). This walks every task currently marked "failed" in
-# $STATUS_FILE, gathers its declared file paths — preferring the
-# task's recorded `affected_files`, falling back to
-# `_extract_task_files_from_desc()` on its description when that is empty
-# (the same source compute_task_batches() already relies on) — and checks
-# them against the branch diff via task_files_modified_on_branch() (task 1).
-# A task with matching branch evidence is promoted to "completed" via
-# update_task(); a task with no declared files, or none of them evidenced
-# on the branch, is left "failed" so a genuine gap (issue #618) still
-# blocks the merge.
+# $STATUS_FILE and checks its declared files (_task_declared_files())
+# against the branch diff via task_files_modified_on_branch() (task 1).
+#
+# Per the issue's proposed direction, promotion requires BOTH file evidence
+# AND a green test suite — file evidence alone cannot attribute a shared
+# diff to the task that produced it. Two conjuncts guard against that:
+#   - tests_green: derived from the in-memory DEGRADED_STAGES markers
+#     test_loop records this run (test:full_suite_red /
+#     test:bats_full_suite_red). Same limitation as every other
+#     DEGRADED_STAGES-based gate check in this file: invisible on a resumed
+#     run where test_loop completed in an earlier process.
+#   - containment: when several tasks declare the same file(s) — e.g. tasks
+#     1-3 of #620 all declaring implement-issue-orchestrator.sh — branch
+#     evidence for that file cannot tell which task's work it reflects. A
+#     task whose declared file set is fully contained in (or equal to) a
+#     still-failed sibling's set is left "failed" rather than promoted.
+#
+# A task with no declared files, or none of them evidenced on the branch, is
+# left "failed" so a genuine gap (issue #618) still blocks the merge.
 #
 # Arguments:
 #   $1 - base branch name to diff against (e.g. "main")
 # Globals:
-#   STATUS_FILE - read tasks from and (via update_task) write reconciled
-#                 statuses to
+#   STATUS_FILE      - read tasks from and write reconciled statuses to
+#   DEGRADED_STAGES  - consulted for this run's test-suite verdict
 # Outputs:
 #   The number of tasks reconciled (promoted from "failed" to "completed")
 #   on stdout — add this to the caller's completed-task count.
@@ -4615,11 +4693,38 @@ reconcile_failed_tasks_with_branch_evidence() {
 		return 0
 	fi
 
+	local tests_green=1
+	local ds_marker
+	for ds_marker in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		case "$ds_marker" in
+			test:full_suite_red|test:bats_full_suite_red)
+				tests_green=0
+				break
+				;;
+		esac
+	done
+	if ((tests_green == 0)); then
+		log "Branch-evidence reconciliation: test suite is red this run —" \
+			"no failed task will be promoted regardless of file evidence."
+	fi
+
 	local recon_ids
 	recon_ids=$(jq -r '(.tasks // [])[] | select(.status == "failed") | .id' \
 		"$STATUS_FILE" 2>/dev/null)
 
-	local recon_id
+	# Pre-resolve every failed task's declared files up front so the
+	# containment check below can compare a task against its siblings before
+	# any promotion happens this call.
+	local -a recon_all_ids=() recon_all_files=()
+	local pre_id
+	while IFS= read -r pre_id; do
+		[[ -n "$pre_id" ]] || continue
+		[[ "$pre_id" =~ ^-?[0-9]+$ ]] || continue
+		recon_all_ids+=("$pre_id")
+		recon_all_files+=("$(_task_declared_files "$pre_id")")
+	done <<< "$recon_ids"
+
+	local recon_id idx=0
 	while IFS= read -r recon_id; do
 		[[ -n "$recon_id" ]] || continue
 		if [[ ! "$recon_id" =~ ^-?[0-9]+$ ]]; then
@@ -4628,34 +4733,43 @@ reconcile_failed_tasks_with_branch_evidence() {
 			continue
 		fi
 
-		local recon_desc recon_affected recon_attempts
-		recon_desc=$(jq -r --argjson id "$recon_id" \
-			'(.tasks[] | select(.id == $id)).description // ""' \
-			"$STATUS_FILE" 2>/dev/null)
-		recon_affected=$(jq -r --argjson id "$recon_id" \
-			'(.tasks[] | select(.id == $id)).affected_files // [] | .[]' \
-			"$STATUS_FILE" 2>/dev/null)
-		# update_task() rewrites review_attempts unconditionally, so carry the
-		# recorded value through rather than resetting a reconciled task's
-		# review history to 0.
-		recon_attempts=$(jq -r --argjson id "$recon_id" \
-			'(.tasks[] | select(.id == $id)).review_attempts // 0' \
-			"$STATUS_FILE" 2>/dev/null)
-		[[ "$recon_attempts" =~ ^[0-9]+$ ]] || recon_attempts=0
-
+		local recon_files_str="${recon_all_files[$idx]:-}"
+		idx=$((idx + 1))
 		local -a recon_files=()
-		if [[ -n "$recon_affected" ]]; then
-			while IFS= read -r recon_f; do
-				[[ -n "$recon_f" ]] && recon_files+=("$recon_f")
-			done <<< "$recon_affected"
-		else
-			while IFS= read -r recon_f; do
-				[[ -n "$recon_f" ]] && recon_files+=("$recon_f")
-			done < <(_extract_task_files_from_desc "$recon_desc")
+		local recon_f
+		while IFS= read -r recon_f; do
+			[[ -n "$recon_f" ]] && recon_files+=("$recon_f")
+		done <<< "$recon_files_str"
+
+		if ((${#recon_files[@]} == 0)); then
+			log "Task $recon_id remains failed —" \
+				"no declared file evidence vs $base_branch"
+			continue
 		fi
 
-		if ((${#recon_files[@]} > 0)) \
-			&& task_files_modified_on_branch "$base_branch" "${recon_files[@]}"; then
+		local ambiguous=0
+		local j sib_id sib_files_str
+		for ((j = 0; j < ${#recon_all_ids[@]}; j++)); do
+			sib_id="${recon_all_ids[$j]}"
+			[[ "$sib_id" == "$recon_id" ]] && continue
+			sib_files_str="${recon_all_files[$j]}"
+			if _file_set_contained "$recon_files_str" "$sib_files_str"; then
+				ambiguous=1
+				log "Task $recon_id remains failed — declared file(s)" \
+					"(${recon_files[*]}) are also declared by still-failed" \
+					"task $sib_id; branch evidence cannot attribute them" \
+					"to one task."
+				break
+			fi
+		done
+		((ambiguous == 0)) || continue
+
+		if ((tests_green == 0)); then
+			log "Task $recon_id remains failed — test suite not green this run"
+			continue
+		fi
+
+		if task_files_modified_on_branch "$base_branch" "${recon_files[@]}"; then
 			log "Task $recon_id recorded failed but declared file(s) present" \
 				"vs $base_branch — reconciling to completed: ${recon_files[*]}"
 			# Status-only write (issue #620 review): update_task() also stamps
@@ -4663,15 +4777,24 @@ reconcile_failed_tasks_with_branch_evidence() {
 			# during gate-time re-evaluation. reconciled_from preserves the
 			# raw stage verdict (issue #617) instead of discarding it, so both
 			# the original and reconciled status stay auditable.
-			jq --argjson id "$recon_id" \
-			   --argjson attempts "$recon_attempts" \
+			# review_attempts is intentionally left untouched — jq only
+			# rewrites fields this filter names, so omitting it already
+			# preserves the recorded history without a read-back-and-
+			# reassign round trip.
+			if jq --argjson id "$recon_id" \
 			   '(.tasks[] | select(.id == $id)).status = "completed" |
 			    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
-			    (.tasks[] | select(.id == $id)).review_attempts = $attempts |
 			    .last_update = (now | todate)' \
-			   "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
-			sync_status_to_log
-			reconciled=$((reconciled + 1))
+			   "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+			   && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"; then
+				sync_status_to_log
+				reconciled=$((reconciled + 1))
+			else
+				log_warn "reconcile_failed_tasks_with_branch_evidence:" \
+					"failed to persist reconciliation for task $recon_id" \
+					"— leaving it recorded as failed"
+				rm -f "${STATUS_FILE}.tmp"
+			fi
 		else
 			log "Task $recon_id remains failed —" \
 				"no declared file evidence vs $base_branch"
@@ -4691,16 +4814,27 @@ reconcile_failed_tasks_with_branch_evidence() {
 #
 # Example output: "task 2 (README install section) [README.md]"
 # Multiple tasks are joined with "; ". Empty output when no task is failed.
+# Each entry is capped at 200 chars and the joined string at 1500 chars
+# (issue #620 review) so several failed tasks — each with a full
+# description and file list — cannot blow up merge_blocked_reason and the
+# issue comment it feeds.
 #
 # Globals:
 #   STATUS_FILE - read tasks from
 _lacking_evidence_summary() {
 	[[ -f "$STATUS_FILE" ]] || return 0
 
+	local entry_max=200
+	local summary_max=1500
+
 	local -a lacking_parts=()
 	local lacking_entry
 	while IFS= read -r lacking_entry; do
-		[[ -n "$lacking_entry" ]] && lacking_parts+=("$lacking_entry")
+		[[ -n "$lacking_entry" ]] || continue
+		if ((${#lacking_entry} > entry_max)); then
+			lacking_entry="${lacking_entry:0:$((entry_max - 3))}..."
+		fi
+		lacking_parts+=("$lacking_entry")
 	done < <(jq -r '
 		(.tasks // [])[] | select(.status == "failed")
 		| "task \(.id // "?") (\(.description // "no description"))"
@@ -4717,6 +4851,9 @@ _lacking_evidence_summary() {
 			lacking_summary="${lacking_summary}; ${lacking_part}"
 		fi
 	done
+	if ((${#lacking_summary} > summary_max)); then
+		lacking_summary="${lacking_summary:0:$((summary_max - 3))}..."
+	fi
 	printf '%s' "$lacking_summary"
 }
 
@@ -4753,6 +4890,28 @@ revalidate_partial_block_against_branch() {
 	reval_total=$(jq '(.tasks // []) | length' "$STATUS_FILE" 2>/dev/null) \
 		|| reval_total=0
 	[[ "$reval_total" =~ ^[0-9]+$ ]] || reval_total=0
+
+	# Prefer the denominator the implement stage itself used (issue #620
+	# review): a stale implement:partial:N/M marker — in this run's
+	# DEGRADED_STAGES, or persisted in merge_blocked_reason on a resumed run
+	# — encodes the task_count that stage actually saw. A fresh count of
+	# .tasks can disagree with it if a resumed run's status.json carries an
+	# out-of-scope task set, changing implement:partial:N/M's denominator
+	# semantics mid-run.
+	local reval_marker=""
+	local rd
+	for rd in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		[[ "$rd" == implement:partial:*/* ]] && reval_marker="$rd"
+	done
+	if [[ -z "$reval_marker" ]]; then
+		reval_marker=$(jq -r '(.merge_blocked_reason // "")' "$STATUS_FILE" 2>/dev/null \
+			| grep -oE 'implement:partial:[0-9]+/[0-9]+' | head -1)
+	fi
+	if [[ "$reval_marker" =~ implement:partial:[0-9]+/([0-9]+)$ ]]; then
+		local reval_stage_total="${BASH_REMATCH[1]}"
+		((reval_stage_total > 0)) && reval_total="$reval_stage_total"
+	fi
+
 	((reval_total > 0)) || return 0
 
 	# Raw stage verdict — the completed count as this gate found it, before
