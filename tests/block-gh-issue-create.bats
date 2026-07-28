@@ -108,3 +108,40 @@ _run_hook() {
 	run bash -c "printf 'not json' | bash '$HOOK'"
 	[ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Guidance string (issue #632 AC5)
+#
+# The block message is the only instruction the model gets after being stopped,
+# so it has to name a path that EXISTS in the repo it is running in. Consumers
+# on the pipeline-core plugin have no .claude/scripts/ — those wrappers were
+# removed by the plugin migration — so naming them sends the model to a dead
+# path. Name the plugin bin/ entrypoints instead.
+# ---------------------------------------------------------------------------
+
+@test "(#632 AC5) block message names the plugin bin/ entrypoints" {
+	_run_hook 'gh issue create --title x --body y'
+	[ "$status" -eq 2 ]
+
+	[[ "$output" == *"pipeline-core-create-followup-issue"* ]] || {
+		printf 'FAIL: message does not name the follow-up bin entrypoint:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ "$output" == *"pipeline-core-platform-dir"* ]] || {
+		printf 'FAIL: message does not name the platform-dir entrypoint:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(#632 AC5) block message names no removed .claude/scripts/ wrapper" {
+	_run_hook 'gh issue create --title x --body y'
+	[ "$status" -eq 2 ]
+
+	[[ "$output" != *".claude/scripts/"* ]] || {
+		printf 'FAIL: message still points at a removed wrapper path:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}

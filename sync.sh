@@ -2,9 +2,14 @@
 #
 # sync.sh — Sync core pipeline files between claude-pipeline and project repos
 #
-# Core files (scripts, hooks, schemas) are identical across projects.
-# Adapted files (agents, skills, config, prompts) are project-specific
-# and never synced.
+# Core files (hooks, universal skills) are identical across projects.
+# Adapted files (agents, prompts) are project-specific and never synced.
+# Consumer config (config/platform.sh, config/context.md) is seeded once and
+# then left alone.
+#
+# .claude/scripts/ is NOT synced (issue #632): it is this repo's dogfood tree,
+# and consumers get the same scripts from the pipeline-core plugin bundle.
+# assert_no_plugin_shadow() fails the sync if that scope ever widens again.
 #
 # Usage:
 #   ./sync.sh to   <project-path>   # Push core files to a project
@@ -21,17 +26,39 @@ PIPELINE_DIR="$SCRIPT_DIR/.claude"
 # as a fallback so plugin-hosted skill docs still propagate to consumers'
 # .claude/skills/ until they adopt the plugin marketplace directly.
 PLUGIN_SKILLS_DIR="$SCRIPT_DIR/plugins/pipeline-core/skills"
+# Root of the plugin bundle. Anything under here is what a consumer installs
+# via the marketplace, so anything the sync would ALSO copy into the consumer's
+# .claude/ is a dead duplicate (see assert_no_plugin_shadow, issue #632).
+PLUGIN_ROOT="$SCRIPT_DIR/plugins/pipeline-core"
 # Bundled plugin script tree — what consumers install. Hand-editing this tree
 # is how it drifts from .claude/scripts/ (issue #623); `bundle` regenerates
 # it instead.
-BUNDLE_SCRIPTS_DIR="$SCRIPT_DIR/plugins/pipeline-core/scripts"
+BUNDLE_SCRIPTS_DIR="$PLUGIN_ROOT/scripts"
 
 # ---------------------------------------------------------------------------
 # Core files — synced between pipeline and projects.
 # These are the orchestration engine; they don't contain project-specific config.
-# ---------------------------------------------------------------------------
+#
+# "scripts" is deliberately ABSENT (issue #632). .claude/scripts/ is this
+# repo's DOGFOOD tree: the orchestrators it runs on itself, plus
+# implement-issue-test/, platform-test/, schemas/ and prompts/. Consumers get
+# every one of those from the plugin bundle (plugins/pipeline-core/scripts/,
+# reached via pipeline-core-platform-dir and the bin/ entrypoints), so copying
+# the tree in leaves files that are dead on arrival:
+#
+#   - implement-issue-test/ — 53 .bats suites that source
+#     $SCRIPT_DIR/implement-issue-orchestrator.sh, which the plugin migration
+#     removes from the consumer. Every test fails; wired into CI, CI is
+#     permanently red.
+#   - platform/ + platform-test/ — never executed, and UNREPAIRABLE by
+#     re-syncing: upstream's copy needs ../resolve-pipeline-root.sh, which the
+#     migration deletes from the consumer. Deletion is the only correct action.
+#   - schemas/ + prompts/ — byte-identical to the bundle and never read; edits
+#     to the consumer copy silently do nothing.
+#
+# 132 such files were left orphaned in stevegrocott/beegee-farm-3.
+# assert_no_plugin_shadow() below is the guard that stops this recurring.
 CORE_DIRS=(
-    "scripts"
     "hooks"
 )
 
@@ -45,12 +72,25 @@ CORE_DIRS=(
 # identical across all projects.
 CORE_FILES=()
 
+# Genuinely consumer-side config (issue #632). The plugin provides no
+# .claude/config/, so these are the consumer's own — its tracker, git host and
+# test commands, and its project context. They are SEEDED, never overwritten:
+# a consumer that has none gets a starting point, a consumer that has its own
+# keeps it. A wholesale copy would push this repo's github/bats settings over a
+# consumer's jira/phpunit ones.
+CONSUMER_CONFIG_FILES=(
+    "config/platform.sh"
+    "config/context.md"
+)
+
 # ---------------------------------------------------------------------------
 # Adapted files — NEVER synced. Project-specific.
 # ---------------------------------------------------------------------------
 # agents/*.md          — rewritten per project stack
 # config/platform.sh   — project-specific tracker, git host, test commands
+#                        (seeded if absent; never overwritten)
 # prompts/*.md         — project-specific review checklists
+# scripts/             — dogfood only; consumers get these from the plugin
 # skills/              — mix of universal and adapted (handled separately)
 
 # ---------------------------------------------------------------------------
@@ -152,6 +192,93 @@ sync_file() {
 
     cp "$src/$file" "$dst/$file"
     echo "  SYNC $file"
+}
+
+# Seed consumer-owned config that the consumer does not have yet. Never
+# overwrites: config/ holds the consumer's tracker, git host and test commands
+# (issue #632).
+sync_consumer_config() {
+    local src="$1" dst="$2"
+    local file
+
+    for file in ${CONSUMER_CONFIG_FILES[@]+"${CONSUMER_CONFIG_FILES[@]}"}; do
+        if [[ ! -f "$src/$file" ]]; then
+            echo "  SKIP $file (not in source)"
+            continue
+        fi
+        if [[ -f "$dst/$file" ]]; then
+            echo "  KEEP $file (consumer-owned, left untouched)"
+            continue
+        fi
+        mkdir -p "$(dirname "$dst/$file")"
+        cp "$src/$file" "$dst/$file"
+        echo "  SEED $file"
+    done
+}
+
+# Every .claude-relative path a `to` sync would write into a consumer.
+planned_sync_paths() {
+    local dir file found
+
+    # Strip the source prefix with parameter expansion rather than sed: the
+    # path is data, and PIPELINE_DIR contains regex metacharacters (".claude").
+    for dir in ${CORE_DIRS[@]+"${CORE_DIRS[@]}"}; do
+        [[ -d "$PIPELINE_DIR/$dir" ]] || continue
+        while IFS= read -r found; do
+            [[ -n "$found" ]] || continue
+            printf '%s\n' "${found#"$PIPELINE_DIR"/}"
+        done < <(find "$PIPELINE_DIR/$dir" -type f ! -name '.DS_Store')
+    done
+
+    for file in ${CORE_FILES[@]+"${CORE_FILES[@]}"}; do
+        [[ -f "$PIPELINE_DIR/$file" ]] && printf '%s\n' "$file"
+    done
+
+    for file in ${CONSUMER_CONFIG_FILES[@]+"${CONSUMER_CONFIG_FILES[@]}"}; do
+        [[ -f "$PIPELINE_DIR/$file" ]] && printf '%s\n' "$file"
+    done
+
+    return 0
+}
+
+# Fail the sync when its scope overlaps the plugin bundle (issue #632).
+#
+# A consumer on the pipeline-core plugin already has everything under
+# plugins/pipeline-core/. Copying the same relative path into its .claude/
+# produces a second, never-executed copy that silently rots — and, once the
+# migration removes the loaders those copies depend on, cannot be repaired by
+# re-syncing. Comments alone did not prevent that (132 orphans in
+# beegee-farm-3), so this is a hard gate: named paths, non-zero exit, nothing
+# written.
+#
+# The check is per-FILE, not per-directory: .claude/hooks/ legitimately syncs
+# because the plugin's hooks/ provides different files.
+assert_no_plugin_shadow() {
+    [[ -d "$PLUGIN_ROOT" ]] || return 0
+
+    local rel shadowed=""
+    while IFS= read -r rel; do
+        [[ -n "$rel" ]] || continue
+        if [[ -e "$PLUGIN_ROOT/$rel" ]]; then
+            shadowed+="  .claude/$rel"$'\n'
+        fi
+    done < <(planned_sync_paths)
+
+    [[ -n "$shadowed" ]] || return 0
+
+    {
+        echo "ERROR: sync scope overlaps the pipeline-core plugin bundle."
+        echo ""
+        echo "These paths are already provided by plugins/pipeline-core/, so"
+        echo "copying them into a consumer creates a dead duplicate (issue #632):"
+        echo ""
+        printf '%s' "$shadowed"
+        echo ""
+        echo "Remove them from CORE_DIRS / CORE_FILES / CONSUMER_CONFIG_FILES —"
+        echo "consumers reach them through the plugin's bin/ entrypoints and"
+        echo "pipeline-core-platform-dir instead."
+    } >&2
+    exit 1
 }
 
 # Sync universal skills (directory-level sync for each skill)
@@ -387,13 +514,19 @@ diff_skills() {
 # List all core files
 list_core() {
     echo "Core directories (fully synced):"
-    for dir in "${CORE_DIRS[@]}"; do
+    for dir in ${CORE_DIRS[@]+"${CORE_DIRS[@]}"}; do
         echo "  .claude/$dir/"
     done
 
     echo ""
     echo "Core files (individually synced):"
     for file in ${CORE_FILES[@]+"${CORE_FILES[@]}"}; do
+        echo "  .claude/$file"
+    done
+
+    echo ""
+    echo "Consumer config (seeded only if absent, never overwritten):"
+    for file in ${CONSUMER_CONFIG_FILES[@]+"${CONSUMER_CONFIG_FILES[@]}"}; do
         echo "  .claude/$file"
     done
 
@@ -406,9 +539,14 @@ list_core() {
     echo ""
     echo "Never synced (project-specific):"
     echo "  .claude/agents/*.md"
-    echo "  .claude/config/platform.sh"
     echo "  .claude/prompts/*.md"
     echo "  .claude/skills/ (non-universal skills)"
+
+    echo ""
+    echo "Never synced (dogfood only — consumers get these from the plugin):"
+    echo "  .claude/scripts/  -> plugins/pipeline-core/scripts/"
+    echo "                       via bin/pipeline-core-* and"
+    echo "                       pipeline-core-platform-dir"
 }
 
 # Deprecation notice for the script/skill copy path. Marketplace consumers
@@ -442,18 +580,25 @@ case "$COMMAND" in
     to)
         [[ $# -lt 2 ]] && usage
         PROJECT_DIR=$(resolve_project_dir "$2")
+        # Fail BEFORE writing anything: a partially-applied sync is what
+        # leaves orphans behind (issue #632).
+        assert_no_plugin_shadow
         print_marketplace_deprecation
         echo ""
         echo "Syncing core files: pipeline → $2"
         echo ""
 
-        for dir in "${CORE_DIRS[@]}"; do
+        for dir in ${CORE_DIRS[@]+"${CORE_DIRS[@]}"}; do
             sync_dir "$PIPELINE_DIR" "$PROJECT_DIR" "$dir"
         done
 
         for file in ${CORE_FILES[@]+"${CORE_FILES[@]}"}; do
             sync_file "$PIPELINE_DIR" "$PROJECT_DIR" "$file"
         done
+
+        echo ""
+        echo "Seeding consumer config (existing files left untouched):"
+        sync_consumer_config "$PIPELINE_DIR" "$PROJECT_DIR"
 
         echo ""
         echo "Syncing universal skills:"
@@ -466,7 +611,9 @@ case "$COMMAND" in
         patch_agents "$PROJECT_DIR"
 
         echo ""
-        echo "Done. Project-specific files (config, prompts) untouched."
+        echo "Done. Project-specific files (agents, prompts, existing config)"
+        echo "untouched; .claude/scripts/ is never copied — consumers resolve"
+        echo "those from the pipeline-core plugin."
         ;;
 
     from)
@@ -475,7 +622,7 @@ case "$COMMAND" in
         echo "Pulling core fixes: $2 → pipeline"
         echo ""
 
-        for dir in "${CORE_DIRS[@]}"; do
+        for dir in ${CORE_DIRS[@]+"${CORE_DIRS[@]}"}; do
             sync_dir "$PROJECT_DIR" "$PIPELINE_DIR" "$dir"
         done
 
@@ -497,7 +644,7 @@ case "$COMMAND" in
         echo "Comparing core files: pipeline vs $2"
         echo ""
 
-        for dir in "${CORE_DIRS[@]}"; do
+        for dir in ${CORE_DIRS[@]+"${CORE_DIRS[@]}"}; do
             diff_dir "$PIPELINE_DIR" "$PROJECT_DIR" "$dir"
         done
 

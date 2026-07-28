@@ -8699,6 +8699,85 @@ leaving changes in the working tree. The reported fixes have NOT landed on
 	return 0
 }
 
+# Regenerate the pipeline-core plugin bundle when this run edited a canonical
+# script (issue #632).
+#
+# plugins/pipeline-core/scripts/ is GENERATED from .claude/scripts/ by
+# `./sync.sh bundle` (#623). Nothing in the pipeline ever ran the generator, so
+# every pipeline PR that touched a canonical script arrived with a stale bundle
+# and a red `Bundle Parity & Syntax` check — #620 PR #628 stayed red across two
+# full fix iterations and was fixed by hand before merge; #633 hit the same.
+# The PR-review loop reads the diff's logic, not CI conclusions, so no reviewer
+# ever raised it and no fix iteration addressed it.
+#
+# Runs immediately before the PR stage: late enough that every commit the run
+# will push already exists, early enough that the regenerated bundle is part of
+# the PR rather than a manual follow-up.
+#
+# Inert unless BOTH hold, so consumer repos (which install the orchestrator
+# from the bundle and have neither sync.sh nor plugins/pipeline-core/) are
+# untouched:
+#   - the repo owns the generator, and
+#   - a file under .claude/scripts/ actually changed on this branch.
+#
+# Args:
+#   $1 - working directory (git dir for this run)
+#   $2 - base branch to diff against
+# Returns 0 always: a bundle that cannot be regenerated is worth a loud log and
+# a red CI check, not a killed run one stage before the PR.
+regenerate_bundle_if_needed() {
+	local work_dir="$1" base_branch="$2"
+	local repo_root changed dirty
+
+	# Resolve the root once, then run every git call against it: the pathspecs
+	# below are repo-relative, so they must not depend on where the
+	# orchestrator's cwd happens to be.
+	repo_root=$(git -C "$work_dir" rev-parse --show-toplevel 2>/dev/null) \
+		|| return 0
+	[[ -n "$repo_root" ]] || return 0
+
+	# Consumer repos have no generator and no bundle — nothing to do.
+	[[ -f "$repo_root/sync.sh" && -d "$repo_root/plugins/pipeline-core/scripts" ]] \
+		|| return 0
+
+	changed=$(git -C "$repo_root" diff --name-only \
+		"$base_branch"...HEAD -- '.claude/scripts' 2>/dev/null) || changed=""
+	if [[ -z "$changed" ]]; then
+		return 0
+	fi
+
+	log "Canonical script(s) changed; regenerating pipeline-core bundle"
+
+	if ! bash "$repo_root/sync.sh" bundle >/dev/null 2>&1; then
+		log_error "sync.sh bundle failed — bundle parity will be red on the PR"
+		return 0
+	fi
+
+	dirty=$(git -C "$repo_root" status --porcelain \
+		-- 'plugins/pipeline-core/scripts' 2>/dev/null) || dirty=""
+	if [[ -z "$dirty" ]]; then
+		log "Bundle already in sync with .claude/scripts/"
+		return 0
+	fi
+
+	# Stage only the generated tree — never `git add -A`; unrelated working
+	# tree state must not ride along into the PR.
+	if ! git -C "$repo_root" add -- 'plugins/pipeline-core/scripts' 2>/dev/null; then
+		log_error "Could not stage the regenerated bundle"
+		return 0
+	fi
+
+	if git -C "$repo_root" commit -q \
+		-m "chore(bundle): regenerate pipeline-core bundle for issue #$ISSUE_NUMBER" \
+		2>/dev/null; then
+		log "Committed regenerated bundle (plugins/pipeline-core/scripts/)"
+	else
+		log_error "Could not commit the regenerated bundle"
+	fi
+
+	return 0
+}
+
 # =============================================================================
 # MAIN FLOW
 # =============================================================================
@@ -9838,6 +9917,16 @@ Only the files listed above should be staged and committed."
             set_stage_completed "docs"
         fi
     fi
+
+    # -------------------------------------------------------------------------
+    # PRE-PR: regenerate the plugin bundle if a canonical script changed
+    #
+    # Must run before the PR is opened, otherwise the PR carries a stale
+    # plugins/pipeline-core/scripts/ and `Bundle Parity & Syntax` is red from
+    # the first CI run (issue #632; observed on #620 PR #628 and #633). No-op
+    # in repos that do not own the generator.
+    # -------------------------------------------------------------------------
+    regenerate_bundle_if_needed "." "$BASE_BRANCH"
 
     # -------------------------------------------------------------------------
     # STAGE: PR
