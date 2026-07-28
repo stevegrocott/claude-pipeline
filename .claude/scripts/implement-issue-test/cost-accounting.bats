@@ -289,6 +289,120 @@ _setup_orchestrator_env() {
 }
 
 # =============================================================================
+# RECONCILIATION — summed per-stage cost vs cost_summary.total_cost_usd (±5%)
+# =============================================================================
+#
+# Issue #617: cost_summary under-reported run cost by ~51% because failed and
+# triage stages never had estimated_cost recorded on them, so the rollup
+# silently excluded exactly the spend #580 existed to make visible. This is
+# the regression guard called for by #617's acceptance criteria: sum whatever
+# estimated_cost every .stages[] entry carries (regardless of status) and
+# fail loudly — naming both figures and the percent drift — if that sum
+# diverges from cost_summary.total_cost_usd by more than the tolerance.
+
+# assert_cost_reconciles() lives in helpers/test-helper.bash alongside the
+# other shared assertion helpers (it is also useful for batch-level metrics
+# reconciliation, not just this file).
+
+@test "cost_summary reconciles with summed per-stage cost within 5%, including a failed stage and triage" {
+	_setup_orchestrator_env
+	init_status
+	# Mirrors the issue #617 ground-truth shape: a failed task stage and the
+	# triage stage each carry their own estimated_cost, not just the
+	# successfully completed stages.
+	jq '.stages.triage = {status: "completed", estimated_cost: 0.4479} |
+	    .stages.implement_task_1 = {status: "completed", estimated_cost: 0.9562} |
+	    .stages.implement_task_2 = {status: "error", estimated_cost: 1.3836} |
+	    .stages.implement_task_3 = {status: "error", estimated_cost: 2.0973} |
+	    .stages.pr = {status: "completed", estimated_cost: 0.4144}' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	export_metrics
+
+	assert_cost_reconciles "$LOG_BASE/metrics.json"
+}
+
+@test "reconciliation check fails loudly when cost_summary drifts more than 5% from summed per-stage cost" {
+	_setup_orchestrator_env
+	init_status
+	jq '.stages.triage = {status: "completed", estimated_cost: 0.4479} |
+	    .stages.implement_task_1 = {status: "completed", estimated_cost: 0.9562} |
+	    .stages.implement_task_2 = {status: "error", estimated_cost: 1.3836} |
+	    .stages.implement_task_3 = {status: "error", estimated_cost: 2.0973} |
+	    .stages.pr = {status: "completed", estimated_cost: 0.4144}' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	export_metrics
+
+	# Reproduce the #617 defect directly on metrics.json: cost_summary only
+	# counted the non-failed stages (0.4479 + 0.9562 + 0.4144 = 1.8185),
+	# ~65.7% below the full per-stage sum (5.2994) computed above. This
+	# test's stage costs are synthetic, not the issue's real-run figures, so
+	# the drift percentage differs from the ~51% measured there — what's
+	# reproduced is the same defect shape: failed and triage stages silently
+	# excluded from the rollup.
+	jq '.cost_summary.total_cost_usd = 1.8185' \
+		"$LOG_BASE/metrics.json" > "$LOG_BASE/metrics.json.tmp" && mv "$LOG_BASE/metrics.json.tmp" "$LOG_BASE/metrics.json"
+
+	run assert_cost_reconciles "$LOG_BASE/metrics.json"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"drifts"* ]]
+	[[ "$output" == *"reconciliation tolerance"* ]]
+}
+
+# =============================================================================
+# FAILED-STAGE COST — bail path must still persist cost onto the stage
+# =============================================================================
+#
+# Issue #617: the reconciliation tests above hand-craft a status.json with
+# estimated_cost already present on the "error" stages, which only proves
+# export_metrics's rollup is status-agnostic (it always was). It does not
+# prove a real failing run ever gets that estimated_cost onto the stage entry
+# in the first place. In production a failing run_stage attempt is routed
+# through _apply_stage_action's "bail" branch, which calls set_stage_failed
+# with only the stage name + error_kind — never the stage_result's
+# tokens/cost, unlike the "accept" branch which threads tokens/cost onto the
+# stage via _stage_acc_add. This is the actual source of #617's ~51%
+# under-report: a bailed stage's own spend never reaches cost_summary. This
+# test drives the real bail path end-to-end and must fail until that gap is
+# closed.
+
+@test "a stage that bails still persists its cost so cost_summary includes it" {
+	_setup_orchestrator_env
+	init_status
+	# Pin check_run_budget's ceilings to their documented disabled state (0 —
+	# see orchestrator.sh's check_run_budget) so this test exercises the bail
+	# path regardless of what that default happens to be elsewhere. If it
+	# ever flips, an unpinned test would silently start exercising the
+	# budget_exceeded path instead.
+	export MAX_RUN_TOKENS=0
+	export MAX_RUN_COST_USD=0
+	set_stage_started "implement_task_2"
+
+	local stage_result
+	stage_result=$(jq -n '{
+		status: "error",
+		error_kind: "error_max_turns",
+		tokens: {input_tokens: 500000, output_tokens: 200000,
+		         cache_creation_input_tokens: 0, cache_read_input_tokens: 0},
+		cost: {reported_usd: 1.3836, computed_usd: 1.3836, estimated_usd: 1.3836}
+	}')
+
+	_RUN_STAGE_NAME="implement_task_2"
+	run _apply_stage_action "$stage_result" "bail" "max turns exceeded"
+	[ "$status" -eq 1 ]
+
+	export_metrics
+
+	local stage_status total_cost
+	stage_status=$(jq -r '.stages.implement_task_2.status' "$LOG_BASE/metrics.json")
+	total_cost=$(jq -r '.cost_summary.total_cost_usd' "$LOG_BASE/metrics.json")
+	[ "$stage_status" = "error" ]
+	assert_cost_equals "$total_cost" "1.3836" \
+		"a bailed stage's cost must still reach cost_summary.total_cost_usd"
+}
+
+# =============================================================================
 # BATCH-LEVEL cost_summary ROLLUP (batch-orchestrator.sh)
 # =============================================================================
 #

@@ -1042,12 +1042,47 @@ set_stage_completed() {
 set_stage_failed() {
     local stage="$1"
     local error_kind="$2"
-    jq --arg stage "$stage" \
-       '.stages[$stage].completed_at = (now | todate) |
-        .stages[$stage].status = "error" |
-        .state = "failed" |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+    # issue #617: a bailed stage's spend must reach cost_summary just like a
+    # completed one. Default tokens/cost from the per-stage accumulator that
+    # _apply_stage_action's "bail" branch populated via _stage_acc_add —
+    # mirrors set_stage_completed's bridge above. A stage with no accumulator
+    # file (never started, or started but no run_stage attempt spent
+    # anything) yields nothing here and is persisted as zero/absent.
+    local tokens_json estimated_cost
+    local _acc_sum
+    _acc_sum=$(_stage_acc_sum "$stage")
+    if [[ -n "$_acc_sum" ]]; then
+        tokens_json=$(printf '%s' "$_acc_sum" | jq -c '.tokens' 2>/dev/null)
+        estimated_cost=$(printf '%s' "$_acc_sum" | jq -r '.cost' 2>/dev/null)
+    fi
+
+    if [[ -n "$tokens_json" ]]; then
+        jq --arg stage "$stage" \
+           --argjson tokens "$tokens_json" \
+           --argjson estimated_cost "${estimated_cost:-0}" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "error" |
+            .stages[$stage].tokens = $tokens |
+            .stages[$stage].estimated_cost = $estimated_cost |
+            .state = "failed" |
+            .cost_summary = {
+                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+            } |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    else
+        jq --arg stage "$stage" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "error" |
+            .state = "failed" |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    fi
     sync_status_to_log
     emit_event "stage_end" "stage=$stage" "status=error" "error_kind=$error_kind"
 }
@@ -2173,6 +2208,11 @@ _apply_stage_action() {
 			;;
 		bail)
 			log_error "Stage bailed: ${reason:-action=bail}"
+			# issue #617: a bailed run_stage's own spend must still reach
+			# cost_summary — mirror the "accept" branch above and append this
+			# stage_result's tokens/cost to the logical stage's accumulator
+			# before recording the failure, so set_stage_failed picks it up.
+			_stage_acc_add "$stage_result"
 			set_stage_failed \
 				"${_RUN_STAGE_NAME:-unknown}" \
 				"$(jq -r '.error_kind // "bail"' <<< "$stage_result")"
