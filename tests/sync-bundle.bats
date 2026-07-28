@@ -226,8 +226,19 @@ _make_fake_pipeline() {
 		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
 	printf '#!/usr/bin/env bash\necho create-issue\n' \
 		> "$TEST_TMP/.claude/scripts/platform/create-issue.sh"
-	printf '#!/usr/bin/env bash\necho hook\n' \
-		> "$TEST_TMP/.claude/hooks/block-gh-issue-create.sh"
+	# Every hook on sync.sh's BUNDLE_HOOKS allowlist must exist: bundle_hooks
+	# (issue #640) fails loudly on an allowlisted hook that is missing, which
+	# is the drift guard working as intended. A fixture carrying only some of
+	# them makes `sync.sh bundle` exit 1 for a reason unrelated to what these
+	# tests are asserting. Read the allowlist from sync.sh rather than
+	# hardcoding it, so adding a hook there cannot silently rot this fixture.
+	local _hook
+	while IFS= read -r _hook; do
+		[[ -n "$_hook" ]] || continue
+		printf '#!/usr/bin/env bash\necho hook\n' \
+			> "$TEST_TMP/.claude/hooks/$_hook"
+	done < <(awk '/^BUNDLE_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$SYNC_SH")
 	printf 'TRACKER=github\n' > "$TEST_TMP/.claude/config/platform.sh"
 	printf '# pipeline context\n' > "$TEST_TMP/.claude/config/context.md"
 

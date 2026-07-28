@@ -439,8 +439,11 @@ check_run_budget() {
     # is kept on a single line so the BATS function extractor -- which counts
     # braces to find a function end -- is never tripped by a multi-line filter.
     local used_tokens used_cost
-    used_tokens=$(jq -r '[.stages[]?.tokens.input_tokens // 0, .stages[]?.tokens.output_tokens // 0, .stages[]?.tokens.cache_creation_input_tokens // 0, .stages[]?.tokens.cache_read_input_tokens // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_tokens=0
-    used_cost=$(jq -r '[.stages[]?.estimated_cost // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_cost=0
+    # cost_is_aggregate entries are phase totals already itemised on the
+    # per-call entries (issue #617) -- skipped here so the ceiling is not
+    # compared against double-counted spend.
+    used_tokens=$(jq -r '[.stages[]? | select(.cost_is_aggregate != true)] as $c | [$c[].tokens.input_tokens // 0, $c[].tokens.output_tokens // 0, $c[].tokens.cache_creation_input_tokens // 0, $c[].tokens.cache_read_input_tokens // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_tokens=0
+    used_cost=$(jq -r '[.stages[]? | select(.cost_is_aggregate != true)] | [.[].estimated_cost // 0] | add // 0' "$STATUS_FILE" 2>/dev/null) || used_cost=0
     [[ -n "$used_tokens" ]] || used_tokens=0
     [[ -n "$used_cost" ]] || used_cost=0
 
@@ -812,8 +815,24 @@ init_status() {
     sync_status_to_log
 }
 
+# Canonical .stages[] key for a stage name (issue #617).
+#
+# run_stage names are hyphenated ("implement-task-2", "test-iter-3") while
+# init_status seeds underscore keys ("parse_issue", "quality_loop").  run_stage
+# already normalised hyphens to underscores when recording the resolved model,
+# but the status/tokens/cost writers did not — so a hyphenated stage landed its
+# `model` on .stages.implement_task_2 and its `status` on
+# .stages["implement-task-2"], and no entry ever carried both halves.  Every
+# reader and writer now routes its key through here, so model, status, tokens
+# and estimated_cost land on ONE entry and metrics.json supports a
+# model<->outcome join.
+_stage_key() {
+    printf '%s' "${1//-/_}"
+}
+
 update_stage() {
-    local stage="$1"
+    local stage
+    stage=$(_stage_key "$1")
     local status="$2"
     local extra_field="${3:-}"
     local extra_value="${4:-}"
@@ -872,7 +891,9 @@ _stage_acc_dir() {
 }
 
 _stage_acc_file() {
-    local _s="${1//[^A-Za-z0-9_-]/_}"
+    local _s
+    _s=$(_stage_key "$1")
+    _s="${_s//[^A-Za-z0-9_]/_}"
     printf '%s/%s.jsonl' "$(_stage_acc_dir)" "$_s"
 }
 
@@ -887,38 +908,128 @@ _stage_acc_reset() {
 # Append one accepted stage_result's tokens/cost to the current logical stage's
 # file. Safe to call from inside the run_stage subshell (it writes to a file,
 # which the parent can read). No-op when no logical stage is active.
+#
+# Each line also records the CANONICAL KEY OF THE run_stage CALL that spent the
+# money (issue #617).  _apply_stage_action persists that same call's tokens/cost
+# onto .stages[<call key>], so _stage_acc_sum can hand the enclosing logical
+# stage only the lines it owns outright and the two writes can never
+# double-count the same dollar.  A line with no `stage` field (written by a
+# pre-#617 orchestrator mid-resume) is attributed to the logical stage.
 _stage_acc_add() {
     local _sr="$1"
     local _cur="${_STAGE_ACC_CURRENT:-}"
     [[ -n "$_cur" ]] || return 0
+    local _call
+    _call=$(_stage_key "${_RUN_STAGE_NAME:-$_cur}")
     local _line
     _line=$(printf '%s' "$_sr" \
-        | jq -c '{tokens: (.tokens // {}), cost: (.cost.estimated_usd // 0)}' \
+        | jq -c --arg stage "$_call" \
+            '{stage: $stage, tokens: (.tokens // {}), cost: (.cost.estimated_usd // 0)}' \
         2>/dev/null) || return 0
     [[ -n "$_line" ]] || return 0
+    mkdir -p "$(_stage_acc_dir)" 2>/dev/null || true
     printf '%s\n' "$_line" >> "$(_stage_acc_file "$_cur")" 2>/dev/null || true
 }
 
-# Sum a logical stage's accumulator file into one {tokens,cost} object. Prints
-# nothing when the file is absent or empty so callers can detect "no data".
+# Sum a logical stage's accumulator file into one {tokens,cost,aggregate}
+# object. Prints nothing when the file is absent or empty so callers can detect
+# "no data".
+#
+# `tokens`/`cost` sum EVERY line, so the logical stage keeps reporting the whole
+# phase's spend (issue #580's contract: two run_stage iterations under one stage
+# accumulate rather than last-win).
+#
+# `aggregate` is true when at least one line came from a run_stage call with a
+# DIFFERENT name than this stage — meaning those dollars are also persisted on
+# that call's own .stages[] entry by _persist_stage_call (issue #617).  The
+# cost_summary rollups skip entries flagged this way, so a phase total and its
+# per-call breakdown can both live in .stages[] without being counted twice.
 _stage_acc_sum() {
+    local _k
+    _k=$(_stage_key "$1")
     local _f
     _f=$(_stage_acc_file "$1")
     [[ -s "$_f" ]] || return 0
-    jq -cs '{
+    jq -cs --arg k "$_k" '{
         tokens: {
             input_tokens:                (map(.tokens.input_tokens // 0) | add // 0),
             output_tokens:               (map(.tokens.output_tokens // 0) | add // 0),
             cache_creation_input_tokens: (map(.tokens.cache_creation_input_tokens // 0) | add // 0),
             cache_read_input_tokens:     (map(.tokens.cache_read_input_tokens // 0) | add // 0)
         },
-        cost: (map(.cost // 0) | add // 0)
+        cost: (map(.cost // 0) | add // 0),
+        aggregate: (any(.[]; (.stage // $k) != $k))
     }' "$_f" 2>/dev/null || true
 }
 
+# Persist one run_stage call's outcome and spend on its OWN canonical
+# .stages[] entry (issue #617).
+#
+# run_stage records the resolved `model` under _stage_key("$stage_name"); this
+# completes that entry with `status`, `error_kind`, `tokens` and
+# `estimated_cost` so every stage that names a model also answers "did it
+# succeed, and what did it cost".  Task-level stages (implement-task-N,
+# test-iter-N, pr-review-iter-N) previously carried a model and nothing else.
+#
+# Double counting is prevented by _stage_acc_sum: the enclosing logical stage
+# only ever sums accumulator lines whose call key IS that stage, so spend
+# attributed here is never also rolled onto the parent entry.  Costs accumulate
+# (+=) rather than overwrite so a repeated run_stage name adds up instead of
+# last-winning.
+_persist_stage_call() {
+    local _sr="$1"
+    local _name="${_RUN_STAGE_NAME:-}"
+    [[ -n "$_name" ]] || return 0
+    [[ -f "$STATUS_FILE" ]] || return 0
+    local _key
+    _key=$(_stage_key "$_name")
+
+    jq --arg stage "$_key" --argjson sr "$_sr" '
+        # Match the status.json vocabulary set by set_stage_completed /
+        # set_stage_failed rather than the stage_result enum.
+        (if ($sr.status // "") == "success" then "completed" else "error" end)
+            as $stage_status |
+        ($sr.tokens // {}) as $tok |
+        ($sr.cost.estimated_usd // 0) as $cost |
+        .stages[$stage] = ((.stages[$stage] // {}) + {
+            status: $stage_status,
+            tokens: {
+                input_tokens:
+                    ((.stages[$stage].tokens.input_tokens // 0)
+                        + ($tok.input_tokens // 0)),
+                output_tokens:
+                    ((.stages[$stage].tokens.output_tokens // 0)
+                        + ($tok.output_tokens // 0)),
+                cache_creation_input_tokens:
+                    ((.stages[$stage].tokens.cache_creation_input_tokens // 0)
+                        + ($tok.cache_creation_input_tokens // 0)),
+                cache_read_input_tokens:
+                    ((.stages[$stage].tokens.cache_read_input_tokens // 0)
+                        + ($tok.cache_read_input_tokens // 0))
+            },
+            estimated_cost: ((.stages[$stage].estimated_cost // 0) + $cost),
+            completed_at: (now | todate)
+        }) |
+        (if ($sr.model // "") != "" then .stages[$stage].model = $sr.model
+         else . end) |
+        (if ($sr.error_kind // null) != null
+         then .stages[$stage].error_kind = $sr.error_kind else . end) |
+        .last_update = (now | todate)' \
+        "$STATUS_FILE" > "${STATUS_FILE}.tmp" 2>/dev/null \
+        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE" \
+        || rm -f "${STATUS_FILE}.tmp"
+}
+
+# NOTE on raw vs canonical names (issue #617): only the status.json KEY is
+# canonicalised.  model-config.sh's _STAGE_PREFIXES table is hyphenated
+# ("parse-issue", "e2e-verify", "test-iter"), and events.jsonl records the
+# stage name operators see in the logs, so effective_model() and emit_event()
+# keep receiving the caller's raw name.
 set_stage_started() {
-    local stage="$1"
+    local stage_name="$1"
     local model="${2:-}"
+    local stage
+    stage=$(_stage_key "$stage_name")
 
     # issue #580: mark this the active logical stage and clear its accumulator
     # so per-stage token/cost starts from zero for this run.
@@ -939,14 +1050,16 @@ set_stage_started() {
     # required `model` field. If effective_model isn't usable yet, fall back
     # to a stable placeholder so the event still validates.
     if [[ -z "$model" ]]; then
-        model=$(effective_model "$stage" "" 2>/dev/null) || model=""
+        model=$(effective_model "$stage_name" "" 2>/dev/null) || model=""
         [[ -n "$model" ]] || model="unresolved"
     fi
-    emit_event "stage_start" "stage=$stage" "model=$model"
+    emit_event "stage_start" "stage=$stage_name" "model=$model"
 }
 
 set_stage_completed() {
-    local stage="$1"
+    local stage_name="$1"
+    local stage
+    stage=$(_stage_key "$stage_name")
     local tokens_json="${2:-}"
     local estimated_cost="${3:-}"
 
@@ -956,6 +1069,7 @@ set_stage_completed() {
     # caller) always win. A stage with no accumulator file — a config-only-skip
     # path, or a stage that ran no CLI call — yields nothing here and is
     # persisted as zero/absent, never inheriting a previous stage's spend.
+    local is_aggregate="false"
     if [[ -z "$tokens_json" || -z "$estimated_cost" ]]; then
         local _acc_sum
         _acc_sum=$(_stage_acc_sum "$stage")
@@ -964,6 +1078,7 @@ set_stage_completed() {
                 || tokens_json=$(printf '%s' "$_acc_sum" | jq -c '.tokens' 2>/dev/null)
             [[ -n "$estimated_cost" ]] \
                 || estimated_cost=$(printf '%s' "$_acc_sum" | jq -r '.cost' 2>/dev/null)
+            is_aggregate=$(printf '%s' "$_acc_sum" | jq -r '.aggregate // false' 2>/dev/null)
         fi
     fi
 
@@ -975,10 +1090,16 @@ set_stage_completed() {
         jq --arg stage "$stage" \
            --argjson tokens "$tokens_json" \
            --argjson estimated_cost "${estimated_cost:-0}" \
+           --argjson is_aggregate "${is_aggregate:-false}" \
            '.stages[$stage].completed_at = (now | todate) |
             .stages[$stage].status = "completed" |
             .stages[$stage].tokens = $tokens |
             .stages[$stage].estimated_cost = $estimated_cost |
+            # issue #617: flag a phase total whose dollars are ALSO carried by
+            # the per-call entries (implement_task_N, test_iter_N, ...) so the
+            # rollups below count them exactly once.
+            (if $is_aggregate then .stages[$stage].cost_is_aggregate = true
+             else . end) |
             # Roll every stage'"'"'s tokens/estimated_cost up into the run-level
             # top-level cost_summary NOW (issue #580). Recomputed from .stages[]
             # on every completion — idempotent and resume-safe (re-derived, not
@@ -987,12 +1108,13 @@ set_stage_completed() {
             # batch-orchestrator.sh reads (metrics.json stays the final
             # artifact, written by export_metrics). Field names match
             # init_status'"'"'s seed and metrics.json. `// 0` guards throughout.
+            ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
             .cost_summary = {
-                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
-                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
-                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
-                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
-                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             } |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
@@ -1003,12 +1125,13 @@ set_stage_completed() {
         jq --arg stage "$stage" \
            '.stages[$stage].completed_at = (now | todate) |
             .stages[$stage].status = "completed" |
+            ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
             .cost_summary = {
-                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
-                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
-                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
-                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
-                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             } |
             .last_update = (now | todate)' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
@@ -1021,7 +1144,7 @@ set_stage_completed() {
     # stage_end event so events.jsonl carries per-stage spend (issue #580).
     # `:=` passes JSON-typed (numeric) values; the schema's stage_end branch
     # declares these fields optional so events without them still validate.
-    local -a _stage_end_args=("stage=$stage" "status=success")
+    local -a _stage_end_args=("stage=$stage_name" "status=success")
     if [[ -n "$tokens_json" ]]; then
         local _end_in _end_out _end_cache_creation _end_cache_read
         _end_in=$(printf '%s' "$tokens_json" | jq -r '.input_tokens // 0' 2>/dev/null)
@@ -1039,17 +1162,80 @@ set_stage_completed() {
     emit_event "stage_end" "${_stage_end_args[@]}"
 }
 
+# Terminal-state writer for a failed stage.
+#
+# Issue #617: a failed stage has ALREADY SPENT the tokens that produced its
+# failure, so it must record them exactly as set_stage_completed does.  Before
+# this fix set_stage_failed wrote only `status`, and the run-level cost_summary
+# — rolled up from .stages[].estimated_cost — silently dropped every failed
+# stage.  On run issue-614-20260726-153711 that hid $3.48 of $7.63 (~51%).
+# The rollup is recomputed here for the same reason as in set_stage_completed:
+# status.json must stay the canonical live cost source even when the run ends
+# on a failure and export_metrics is reached only via the EXIT trap.
 set_stage_failed() {
-    local stage="$1"
+    local stage_name="$1"
+    local stage
+    stage=$(_stage_key "$stage_name")
     local error_kind="$2"
-    jq --arg stage "$stage" \
-       '.stages[$stage].completed_at = (now | todate) |
-        .stages[$stage].status = "error" |
-        .state = "failed" |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    local tokens_json="${3:-}"
+    local estimated_cost="${4:-}"
+
+    local is_aggregate="false"
+    if [[ -z "$tokens_json" || -z "$estimated_cost" ]]; then
+        local _acc_sum
+        _acc_sum=$(_stage_acc_sum "$stage")
+        if [[ -n "$_acc_sum" ]]; then
+            [[ -n "$tokens_json" ]] \
+                || tokens_json=$(printf '%s' "$_acc_sum" | jq -c '.tokens' 2>/dev/null)
+            [[ -n "$estimated_cost" ]] \
+                || estimated_cost=$(printf '%s' "$_acc_sum" | jq -r '.cost' 2>/dev/null)
+            is_aggregate=$(printf '%s' "$_acc_sum" | jq -r '.aggregate // false' 2>/dev/null)
+        fi
+    fi
+
+    if [[ -n "$tokens_json" ]]; then
+        jq --arg stage "$stage" \
+           --argjson tokens "$tokens_json" \
+           --argjson estimated_cost "${estimated_cost:-0}" \
+           --argjson is_aggregate "${is_aggregate:-false}" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "error" |
+            .stages[$stage].tokens = $tokens |
+            .stages[$stage].estimated_cost = $estimated_cost |
+            (if $is_aggregate then .stages[$stage].cost_is_aggregate = true
+             else . end) |
+            ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
+            .cost_summary = {
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
+            } |
+            .state = "failed" |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    else
+        # No accumulator data for this stage — the spend, if any, is already on
+        # the run_stage call's own entry (see _apply_stage_action).  Recompute
+        # the rollup anyway so it stays consistent with .stages[].
+        jq --arg stage "$stage" \
+           '.stages[$stage].completed_at = (now | todate) |
+            .stages[$stage].status = "error" |
+            ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
+            .cost_summary = {
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
+            } |
+            .state = "failed" |
+            .last_update = (now | todate)' \
+           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    fi
     sync_status_to_log
-    emit_event "stage_end" "stage=$stage" "status=error" "error_kind=$error_kind"
+    emit_event "stage_end" "stage=$stage_name" "status=error" "error_kind=$error_kind"
 }
 
 # Terminal-state writer for a run-level token/cost budget ceiling breach
@@ -1060,7 +1246,9 @@ set_stage_failed() {
 # subshell) and set_final_state() refuses to overwrite it, so the halt is
 # preserved even as the bail path unwinds the stack.
 set_run_budget_exceeded() {
-    local stage="$1"
+    local stage_name="$1"
+    local stage
+    stage=$(_stage_key "$stage_name")
     local detail="${2:-run token/cost ceiling exceeded}"
     jq --arg stage "$stage" \
        --arg detail "$detail" \
@@ -1071,9 +1259,9 @@ set_run_budget_exceeded() {
         .last_update = (now | todate)' \
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
     sync_status_to_log
-    log_warn "Run halted: $detail (stage=$stage) — state set to budget_exceeded"
+    log_warn "Run halted: $detail (stage=$stage_name) — state set to budget_exceeded"
     emit_event "budget_exceeded" \
-        "stage=$stage" \
+        "stage=$stage_name" \
         "scope=run" \
         "max_tokens:=${MAX_RUN_TOKENS:-0}" \
         "max_cost_usd:=${MAX_RUN_COST_USD:-0}"
@@ -1450,13 +1638,20 @@ export_metrics() {
         # set_stage_completed) up into run-level totals. This is the run-level
         # analogue of the batch-orchestrator per-issue cost rollup (issue #580).
         # Missing tokens/estimated_cost on a stage coalesce to 0.
+        #
+        # Failed stages and the triage stage are included deliberately (issue
+        # #617): spend is spend regardless of outcome, and excluding them is
+        # what under-reported run issue-614-20260726-153711 by ~51%.  Entries
+        # flagged cost_is_aggregate are the ONLY exclusion — those are phase
+        # totals whose dollars are already itemised on the per-call entries.
         def stage_cost_rollup:
+            [.stages[]? | select(.cost_is_aggregate != true)] as $counted |
             {
-                total_input_tokens:          ([.stages[]?.tokens.input_tokens // 0] | add // 0),
-                total_output_tokens:         ([.stages[]?.tokens.output_tokens // 0] | add // 0),
-                total_cache_read_tokens:     ([.stages[]?.tokens.cache_read_input_tokens // 0] | add // 0),
-                total_cache_creation_tokens: ([.stages[]?.tokens.cache_creation_input_tokens // 0] | add // 0),
-                total_cost_usd:              ([.stages[]?.estimated_cost // 0] | add // 0)
+                total_input_tokens:          ([$counted[].tokens.input_tokens // 0] | add // 0),
+                total_output_tokens:         ([$counted[].tokens.output_tokens // 0] | add // 0),
+                total_cache_read_tokens:     ([$counted[].tokens.cache_read_input_tokens // 0] | add // 0),
+                total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
+                total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             };
 
         . as $status |
@@ -1584,9 +1779,10 @@ load_resume_state() {
 # Check if a stage is completed in status file
 # Returns 0 if completed, 1 if not
 is_stage_completed() {
-    local stage="$1"
+    local stage
+    stage=$(_stage_key "$1")
     local status
-    status=$(jq -r ".stages.$stage.status" "$STATUS_FILE" 2>/dev/null)
+    status=$(jq -r --arg s "$stage" '.stages[$s].status' "$STATUS_FILE" 2>/dev/null)
     [[ "$status" == "completed" ]]
 }
 
@@ -2153,6 +2349,12 @@ _apply_stage_action() {
 	# to normal routing.  Disabled by default (ceilings 0), so no behaviour
 	# change for existing runs.
 	if ! check_run_budget; then
+		# issue #617: this call's tokens were spent before the ceiling was
+		# read, so record them even on the halt path.  Deliberately AFTER
+		# check_run_budget so the ceiling decision itself sees exactly the
+		# same .stages[] totals it saw before #617.
+		_persist_stage_call "$stage_result"
+		_stage_acc_add "$stage_result"
 		set_run_budget_exceeded \
 			"${_RUN_STAGE_NAME:-unknown}" \
 			"run token/cost ceiling exceeded (requested action=$action)"
@@ -2160,14 +2362,24 @@ _apply_stage_action() {
 		return 1
 	fi
 
+	# issue #617: persist THIS run_stage call's outcome and spend on its own
+	# canonical .stages[] entry — the same entry run_stage wrote the resolved
+	# `model` to — so model, status, tokens and estimated_cost are joinable and
+	# a task-level stage carries spend of its own, not just the aggregate one.
+	_persist_stage_call "$stage_result"
+
+	# issue #580 + #617: record this run_stage call's final (post-escalation/
+	# retry) tokens + cost into the current logical stage's accumulator.  This
+	# runs BEFORE the action dispatch because money is spent regardless of the
+	# outcome — accept, bail, escalate and retry_same all follow a completed CLI
+	# call.  Restricting it to `accept` (the pre-#617 behaviour) is what let
+	# failed stages contribute $0 to cost_summary.  Exactly one
+	# _apply_stage_action call is made per run_stage invocation (every branch of
+	# run_stage's dispatch returns immediately), so this appends exactly once.
+	_stage_acc_add "$stage_result"
+
 	case "$action" in
 		accept)
-			# issue #580: record this accepted run_stage's final (post-
-			# escalation/retry) tokens + cost into the current logical stage's
-			# accumulator. accept is the single choke point every accepted
-			# run_stage exit funnels through, so one append happens per
-			# accepted run_stage call.
-			_stage_acc_add "$stage_result"
 			printf '%s\n' "$stage_result"
 			return 0
 			;;
@@ -2268,7 +2480,8 @@ run_stage() {
 
     # Record resolved model in status.json stage entry for export_metrics()
     if [[ -f "$STATUS_FILE" ]]; then
-        local stage_key="${stage_name//-/_}"
+        local stage_key
+        stage_key=$(_stage_key "$stage_name")
         jq --arg stage "$stage_key" --arg model "$model" \
            '.stages[$stage].model = $model' \
            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
@@ -2329,7 +2542,14 @@ run_stage() {
     # immediately before calling run_stage.  Consumed and cleared here so a
     # stale value can never raise the budget of an unrelated later stage.
     local _stage_desc_len="${_RUN_STAGE_DESC_LEN:-0}"
-    local _promote_chars="${TASK_DESC_PROMOTE_CHARS:-200}"
+    # Promotion threshold (issue #619, retuned by #637).  This MUST sit below
+    # the explore skill's "task descriptions must stay under ~200 characters"
+    # rule: at 200 the two used the same number in opposite directions, so a
+    # correctly-authored task could never be promoted and the branch was dead
+    # code.  Measured bails clustered at 152–190 chars; 120 covers that band.
+    # The raised budget is a ceiling, not a target — unused turns cost nothing.
+    # Pinned against the skill by test-stage-runner.bats.
+    local _promote_chars="${TASK_DESC_PROMOTE_CHARS:-120}"
     unset _RUN_STAGE_DESC_LEN
     [[ "$_stage_desc_len" =~ ^[0-9]+$ ]] || _stage_desc_len=0
 
@@ -2780,7 +3000,7 @@ for m in re.finditer(r'\[\s*\{', t):
     fi
 
     # ── Single decide-action.sh call (AC1) ───────────────────────────────────
-    local _da_json _da_action _da_target_model _da_reason
+    local _da_json _da_action _da_target_model _da_reason _da_uncapped
     _da_json=$(bash "$SCRIPT_DIR/decide-action.sh" \
         "$_sr_interim" "$_history" 2>/dev/null) \
         || _da_json='{"action":"bail","reason":"decide-action.sh invocation failed"}'
@@ -2790,6 +3010,11 @@ for m in re.finditer(r'\[\s*\{', t):
         | jq -r '.model // empty' 2>/dev/null)
     _da_reason=$(printf '%s' "$_da_json" \
         | jq -r '.reason // ""' 2>/dev/null)
+    # Issue #637: a retry_same carrying "uncapped":true must run WITHOUT the
+    # --max-turns cap.  This is the S-task cap-lift that the #579 Opus gate
+    # used to discard along with the (correctly withheld) model upgrade.
+    _da_uncapped=$(printf '%s' "$_da_json" \
+        | jq -r '.uncapped // false' 2>/dev/null)
 
     log "decide-action.sh → action=$_da_action${_da_target_model:+ model=$_da_target_model}"
 
@@ -2963,7 +3188,7 @@ for m in re.finditer(r'\[\s*\{', t):
             # classification above; emit the retry/model_call events now.
             emit_event "retry" \
                 "stage=$stage_name" \
-                "reason=rate_limit" \
+                "reason=${_error_kind:-rate_limit}" \
                 "attempt:=2" \
                 "max_attempts:=2" \
                 "model=$model"
@@ -2976,6 +3201,20 @@ for m in re.finditer(r'\[\s*\{', t):
                 "complexity=${complexity:-}" \
                 "stage_attempt:=2"
 
+            # Issue #637: drop the turn cap when decide-action.sh flagged this
+            # retry uncapped (S task at sonnet that exhausted its 25-turn
+            # budget).  Same model — #579's finding that opus buys no
+            # completion lift for S tasks stands — but the constraint that
+            # actually killed the stage is lifted.  Exactly one such attempt is
+            # made: this branch does not loop, and a second exhaustion is
+            # treated as terminal below.
+            local -a _retry_turns_args=()
+            if [[ "$_da_uncapped" == "true" ]]; then
+                log "  Retry: turn cap lifted (issue #637)"
+            else
+                _retry_turns_args=("${turns_args[@]+"${turns_args[@]}"}")
+            fi
+
             local _retry_exit_code=0
             # Temp-file capture (see run_stage's primary launch) — avoids the
             # command-substitution pipe-wedge when the CLI leaves a lingering child.
@@ -2985,7 +3224,7 @@ for m in re.finditer(r'\[\s*\{', t):
                 ${agent_args[@]+"${agent_args[@]}"} \
                 --model "$model" \
                 ${fallback_args[@]+"${fallback_args[@]}"} \
-                ${turns_args[@]+"${turns_args[@]}"} \
+                ${_retry_turns_args[@]+"${_retry_turns_args[@]}"} \
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$schema" \
@@ -3001,6 +3240,31 @@ for m in re.finditer(r'\[\s*\{', t):
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' \
                 "=== retry exit code: $_retry_exit_code ===" >> "$stage_log"
+
+            # Issue #637: a second turn exhaustion is terminal — exactly one
+            # uncapped attempt is granted, then the stage is recorded failed.
+            # Checked BEFORE the .result fallback below, which would otherwise
+            # read the CLI's max-turns envelope (is_error=false with .result
+            # set) as a success and silently pass an unfinished stage on.
+            local _retry_subtype
+            _retry_subtype=$(printf '%s' "$output" \
+                | jq -r '.subtype // empty' 2>/dev/null)
+            if [[ "$_retry_subtype" == "error_max_turns" ]]; then
+                _CONSECUTIVE_TIMEOUTS=0
+                _TIMED_OUT_STAGE_NAMES=""
+                log_error "Stage $stage_name hit max turns again on the retry —" \
+                    "no headroom left, failing"
+                local _sr_retry_exhausted
+                _sr_retry_exhausted=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"max_turns_exhausted_at_ceiling"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage" "${complexity:-}")
+                _apply_stage_action "$_sr_retry_exhausted" "bail" \
+                    "max_turns_exhausted on retry: no further headroom"
+                return $?
+            fi
 
             local _retry_structured
             _retry_structured=$(printf '%s' "$output" \
@@ -3190,7 +3454,33 @@ run_triage_stage() {
        "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 
-    set_stage_completed "triage"
+    # Issue #617: triage runs its own CLI call rather than going through
+    # run_stage, so no _apply_stage_action ever fed the per-stage accumulator
+    # and the triage stage recorded $0 — $0.4479 of unattributed spend on run
+    # issue-614-20260726-153711.  Lift the usage straight off the CLI envelope
+    # and hand it to set_stage_completed explicitly.  When the CLI reports no
+    # cost, price the tokens with _model_cost against the resolved triage tier
+    # (the same reported→computed fallback _emit_stage_result uses).
+    local triage_usage triage_tokens triage_cost
+    triage_usage=$(_extract_usage "$raw")
+    triage_tokens=$(printf '%s' "$triage_usage" \
+        | jq -c '{input_tokens, output_tokens,
+                  cache_creation_input_tokens, cache_read_input_tokens}' \
+        2>/dev/null)
+    triage_cost=$(printf '%s' "$triage_usage" | jq -r '.total_cost_usd // 0' 2>/dev/null)
+    if [[ -z "$triage_cost" ]] || [[ "$triage_cost" == "0" ]] \
+        || [[ "$triage_cost" == "null" ]]; then
+        local _tm="${triage_model:-}"
+        [[ -n "$_tm" ]] || _tm=$(effective_model "triage" "" 2>/dev/null) || _tm=""
+        [[ -n "$_tm" ]] || _tm="haiku"
+        triage_cost=$(_model_cost "$_tm" \
+            "$(printf '%s' "$triage_usage" | jq -r '.input_tokens // 0')" \
+            "$(printf '%s' "$triage_usage" | jq -r '.output_tokens // 0')" \
+            "$(printf '%s' "$triage_usage" | jq -r '.cache_creation_input_tokens // 0')" \
+            "$(printf '%s' "$triage_usage" | jq -r '.cache_read_input_tokens // 0')" \
+            2>/dev/null) || triage_cost=0
+    fi
+    set_stage_completed "triage" "${triage_tokens:-}" "${triage_cost:-0}"
     log "Triage complete. Route: $route" \
         "(confidence: $confidence, dq: ${dq:-none})"
 
@@ -4273,6 +4563,76 @@ _extract_tasks_section() {
 	'
 }
 
+# Reads one backtick-delimited task annotation out of a task description
+# (issue #634).
+#
+# Annotations are written inline in the description — never as a new bullet
+# shape — so BOTH mirrored parsers (_parse_task_lines here and
+# _issue_body_parse_tasks in issue-body-lib.sh) keep matching the same lines
+# and keep emitting byte-identical descriptions.  Nothing is stripped: the
+# annotation stays in the description the specialist agent is handed, and the
+# parser-parity contract (section / count / descriptions) is untouched.
+#
+#   `deliverable:<kind>:<ref>`   a NON-COMMIT deliverable (see
+#                                verify_task_deliverable)
+#   `depends-on:<id>[,<id>...]`  inter-task dependency (see
+#                                compute_task_batches)
+#
+# Arguments:
+#   $1 - task description
+#   $2 - annotation key ("deliverable" / "depends-on")
+# Outputs:
+#   The annotation value on stdout, whitespace-trimmed
+# Returns:
+#   0 when the annotation is present, 1 otherwise
+#
+_task_annotation() {
+	local desc="$1"
+	local key="$2"
+	# Backtick-bearing regex must live in a variable — bash cannot escape a
+	# backtick inside an inline [[ =~ ]] pattern reliably.
+	local bt='`'
+	local re="${bt}${key}:([^${bt}]+)${bt}"
+	[[ "$desc" =~ $re ]] || return 1
+	local val="${BASH_REMATCH[1]}"
+	val="${val#"${val%%[![:space:]]*}"}"
+	val="${val%"${val##*[![:space:]]}"}"
+	printf '%s' "$val"
+}
+
+# Normalises a `depends-on:` annotation value into a JSON array of task ids.
+#
+# Non-numeric tokens are dropped rather than propagated, so a typo degrades to
+# "no declared dependency" (which is the pre-#634 behaviour) instead of
+# poisoning the batch plan with an unresolvable id.
+#
+# Arguments:
+#   $1 - raw annotation value (e.g. "1, 2")
+# Outputs:
+#   JSON array on stdout (e.g. "[1,2]"; "[]" when nothing parses)
+#
+_parse_depends_on() {
+	local raw="${1:-}"
+	local -a toks=()
+	IFS=', ' read -r -a toks <<< "$raw"
+
+	local -a ids=()
+	local tok
+	for tok in "${toks[@]+"${toks[@]}"}"; do
+		[[ "$tok" =~ ^[0-9]+$ ]] || continue
+		ids+=("$tok")
+	done
+
+	if ((${#ids[@]} == 0)); then
+		printf '[]'
+		return 0
+	fi
+
+	local joined
+	joined=$(printf ',%s' "${ids[@]}")
+	printf '[%s]' "${joined#,}"
+}
+
 _parse_task_lines() {
 	local tasks_section="$1"
 
@@ -4362,13 +4722,29 @@ _parse_task_lines() {
 			log_warn "No file path in task (scans codebase blind): $line"
 		fi
 
+		# Optional task annotations (issue #634).  Both fields are emitted
+		# ONLY when the task actually declares them, so an unannotated task
+		# produces the exact object shape it produced before this change —
+		# existing issue bodies parse to byte-identical task JSON.
+		local task_deliverable task_depends
+		task_deliverable=$(_task_annotation "$desc" "deliverable") \
+			|| task_deliverable=""
+		local task_depends_raw
+		task_depends_raw=$(_task_annotation "$desc" "depends-on") \
+			|| task_depends_raw=""
+		task_depends=$(_parse_depends_on "$task_depends_raw")
+
 		task_id=$((task_id + 1))
 		# Store task for now; affected_files will be attached in the second pass.
 		tasks_json=$(printf '%s' "$tasks_json" | jq \
 			--argjson id "$task_id" \
 			--arg desc "$desc" \
 			--arg agent "$agent" \
-			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0, affected_files: []}]')
+			--arg deliverable "$task_deliverable" \
+			--argjson depends "$task_depends" \
+			'. + [{id: $id, description: $desc, agent: $agent, status: "pending", review_attempts: 0, affected_files: []}
+			      + (if $deliverable == "" then {} else {deliverable: $deliverable} end)
+			      + (if ($depends | length) == 0 then {} else {depends_on: $depends} end)]')
 
 	done <<< "$tasks_section"
 
@@ -4981,6 +5357,214 @@ revalidate_partial_block_against_branch() {
 	sync_status_to_log
 }
 
+# =============================================================================
+# NON-COMMIT TASK DELIVERABLES (issue #634)
+#
+# Task success is otherwise inferred from commits landing on the branch: the
+# no-op guard in execute_batch_parallel() marks a task failed when its
+# worktree branch is empty, the 0-commits guardrails abort the run, and the
+# PARTIAL-COMPLETION GATE turns a shortfall into a merge block.  All correct
+# for a task that was SUPPOSED to write code.
+#
+# Some tasks legitimately produce no commit — a spike whose deliverable is a
+# ruling posted as an issue comment, for instance.  For those the count is
+# accurate and the interpretation is wrong.  A task may therefore declare its
+# deliverable in the issue body:
+#
+#   `deliverable:comment:<marker>`  an issue comment containing <marker>
+#   `deliverable:file:<path>`       a non-empty file at <path>
+#
+# The declared artefact is VERIFIED, never assumed.  This is deliberate: the
+# stated risk of the feature is that a task marked non-committing which should
+# have produced code passes silently.  Verification closes that both ways —
+# an unverified artefact is never promoted, and a task a stage recorded
+# "completed" is DEMOTED when its declared artefact does not exist.
+# =============================================================================
+
+# Emits every comment body on the current issue, one per line.
+#
+# Split out from verify_task_deliverable() so the verification logic is
+# testable without a tracker, and so an unsupported tracker fails loudly
+# rather than silently verifying nothing.
+#
+# Globals:
+#   ISSUE_NUMBER, TRACKER
+# Outputs:
+#   Comment bodies on stdout
+# Returns:
+#   0 on a successful fetch, 1 when the tracker cannot be queried
+#
+_fetch_issue_comment_bodies() {
+	case "${TRACKER:-github}" in
+		github)
+			gh issue view "$ISSUE_NUMBER" --json comments \
+				--jq '.comments[]?.body' 2>/dev/null
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+# Verifies that a task's declared non-commit artefact actually exists.
+#
+# Arguments:
+#   $1 - deliverable spec ("comment:<marker>" or "file:<path>")
+# Returns:
+#   0 when the artefact is present, 1 otherwise
+#
+# Fails closed on every ambiguous input — an unrecognised kind, a markerless
+# "comment" (which would match any comment the pipeline itself posted), an
+# unreachable tracker, or a missing/empty file.  A task can only be credited
+# for an artefact that can be pointed at.
+#
+verify_task_deliverable() {
+	local spec="${1:-}"
+
+	case "$spec" in
+		comment:?*)
+			local marker="${spec#comment:}"
+			local bodies
+			if ! bodies=$(_fetch_issue_comment_bodies); then
+				log_warn "Deliverable verification: cannot read comments for" \
+					"issue #$ISSUE_NUMBER (tracker=${TRACKER:-github}) —" \
+					"treating '$spec' as unverified."
+				return 1
+			fi
+			grep -qF -- "$marker" <<< "$bodies"
+			;;
+		file:?*)
+			local artefact_path="${spec#file:}"
+			[[ -s "$artefact_path" ]]
+			;;
+		*)
+			log_warn "Deliverable verification: unrecognised deliverable" \
+				"'$spec' — expected 'comment:<marker>' or 'file:<path>'." \
+				"Treating the task as unverified."
+			return 1
+			;;
+	esac
+}
+
+# Re-judges every task that declared a non-commit deliverable on its artefact
+# rather than on commits (issue #634).
+#
+# Promotes a task the commit-based verdict recorded failed when its declared
+# artefact verifies, and demotes a task recorded completed when it does not.
+# Runs BEFORE the 0-commits guardrail and the PARTIAL-COMPLETION GATE so
+# $completed_tasks — and everything downstream that reads it — reflects
+# declared artefacts as well as branch content.
+#
+# Globals:
+#   STATUS_FILE - read tasks from and write re-judged statuses to
+# Outputs:
+#   The NET change to the caller's completed-task count on stdout (may be
+#   negative when artefacts are missing) — add it to $completed_tasks.
+#
+reconcile_noncommit_tasks_with_deliverables() {
+	local delta=0
+
+	if [[ ! -f "$STATUS_FILE" ]]; then
+		printf '%s\n' "$delta"
+		return 0
+	fi
+
+	local rows
+	rows=$(jq -r '(.tasks // [])[]
+		| select((.deliverable // "") != "")
+		| "\(.id)\t\(.status // "")\t\(.deliverable)"' \
+		"$STATUS_FILE" 2>/dev/null)
+
+	if [[ -z "$rows" ]]; then
+		printf '%s\n' "$delta"
+		return 0
+	fi
+
+	local nc_id nc_status nc_spec nc_new_status nc_step
+	while IFS=$'\t' read -r nc_id nc_status nc_spec; do
+		[[ -n "$nc_id" ]] || continue
+		if [[ ! "$nc_id" =~ ^-?[0-9]+$ ]]; then
+			log_warn "reconcile_noncommit_tasks_with_deliverables:" \
+				"skipping task with non-numeric id '$nc_id'"
+			continue
+		fi
+
+		if verify_task_deliverable "$nc_spec"; then
+			if [[ "$nc_status" == "completed" ]]; then
+				continue
+			fi
+			nc_new_status="completed"
+			nc_step=1
+			log "Task $nc_id declared a non-commit deliverable ($nc_spec)" \
+				"and the artefact is present — recording completed" \
+				"(was '$nc_status'; no commit is expected for this task)."
+		else
+			if [[ "$nc_status" != "completed" ]]; then
+				continue
+			fi
+			nc_new_status="failed"
+			nc_step=-1
+			log_warn "Task $nc_id was recorded completed but its declared" \
+				"non-commit deliverable ($nc_spec) cannot be found —" \
+				"recording failed."
+		fi
+
+		if jq --argjson id "$nc_id" \
+			--arg st "$nc_new_status" \
+			'(.tasks[] | select(.id == $id)).status = $st |
+			 (.tasks[] | select(.id == $id)).deliverable_verified =
+				($st == "completed") |
+			 .last_update = (now | todate)' \
+			"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+			&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"; then
+			sync_status_to_log
+			delta=$((delta + nc_step))
+		else
+			log_warn "reconcile_noncommit_tasks_with_deliverables:" \
+				"failed to persist the verdict for task $nc_id" \
+				"— leaving its recorded status unchanged"
+			rm -f "${STATUS_FILE}.tmp"
+		fi
+	done <<< "$rows"
+
+	printf '%s\n' "$delta"
+}
+
+# True when EVERY planned task declared a non-commit deliverable and every one
+# of those artefacts verified (issue #634).
+#
+# This is the only condition under which "0 commits ahead of base" is the
+# designed outcome rather than a merge-back failure, so it is the sole escape
+# from the 0-commits abort.  A single ordinary code task in the issue makes it
+# false — a mixed issue keeps the guardrail.
+#
+# Must run AFTER reconcile_noncommit_tasks_with_deliverables(), which is what
+# makes "declared and completed" equivalent to "declared and verified".
+#
+# Globals:
+#   STATUS_FILE
+# Returns:
+#   0 when every task is a verified non-commit deliverable, 1 otherwise
+#
+all_tasks_are_verified_noncommit() {
+	[[ -f "$STATUS_FILE" ]] || return 1
+
+	local nc_total nc_declared nc_verified
+	nc_total=$(jq '(.tasks // []) | length' "$STATUS_FILE" 2>/dev/null) || return 1
+	[[ "$nc_total" =~ ^[0-9]+$ ]] || return 1
+	((nc_total > 0)) || return 1
+
+	nc_declared=$(jq '[(.tasks // [])[]
+		| select((.deliverable // "") != "")] | length' \
+		"$STATUS_FILE" 2>/dev/null) || return 1
+	nc_verified=$(jq '[(.tasks // [])[]
+		| select((.deliverable // "") != "" and .status == "completed")]
+		| length' "$STATUS_FILE" 2>/dev/null) || return 1
+	[[ "$nc_declared" =~ ^[0-9]+$ && "$nc_verified" =~ ^[0-9]+$ ]] || return 1
+
+	((nc_declared == nc_total && nc_verified == nc_total))
+}
+
 # Groups tasks into parallelizable batches by detecting file-level conflicts.
 #
 # Tasks whose file sets do not overlap are placed in the same batch and can
@@ -5032,10 +5616,21 @@ compute_task_batches() {
 
 	# Build file sets for each task (parallel arrays, 0-based index)
 	local -a task_files
+	# Declared inter-task dependencies (issue #634), parallel arrays too:
+	# task_ids[i] is the task's own id, task_deps[i] the space-separated ids
+	# it declared `depends-on:` for.
+	local -a task_ids
+	local -a task_deps
 	local i
 	for ((i = 0; i < task_count; i++)); do
 		local desc
 		desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
+
+		task_ids[$i]=$(printf '%s' "$tasks_json" \
+			| jq -r ".[$i].id // $((i + 1))")
+		task_deps[$i]=$(printf '%s' "$tasks_json" \
+			| jq -r ".[$i].depends_on // [] | map(tostring) | join(\" \")" \
+			2>/dev/null)
 
 		# Primary: use explicit affected_files from task JSON if available
 		local af_json
@@ -5088,6 +5683,37 @@ compute_task_batches() {
 	for ((i = 0; i < task_count; i++)); do
 		local my_files="${task_files[$i]:-}"
 		local b=0
+
+		# Declared-dependency floor (issue #634).  File-conflict detection
+		# alone cannot express "decide, THEN apply": a spike and the task
+		# that consumes its ruling usually touch different files, so both
+		# land in batch 1 and the dependent runs in parallel with the
+		# decision it is waiting on.  Starting the search above every
+		# dependency's batch serialises them without weakening the conflict
+		# check, which still runs from this floor upward.
+		local -a my_deps=()
+		IFS=' ' read -r -a my_deps <<< "${task_deps[$i]:-}"
+		local dep_id dep_found j
+		for dep_id in "${my_deps[@]+"${my_deps[@]}"}"; do
+			[[ -n "$dep_id" ]] || continue
+			dep_found=0
+			for ((j = 0; j < i; j++)); do
+				if [[ "${task_ids[$j]:-}" == "$dep_id" ]]; then
+					dep_found=1
+					if ((task_batch_idx[j] + 1 > b)); then
+						b=$((task_batch_idx[j] + 1))
+					fi
+					break
+				fi
+			done
+			if ((dep_found == 0)); then
+				log_warn "Task ${task_ids[$i]:-$((i + 1))} declares" \
+					"depends-on:${dep_id}, which is not an earlier task" \
+					"— ignoring. A dependency must be listed BEFORE its" \
+					"dependent in the Implementation Tasks section."
+			fi
+		done
+
 		local placed=0
 		while [[ $placed -eq 0 && $b -lt 1000 ]]; do
 			local conflict=0
@@ -6710,10 +7336,29 @@ run_test_loop() {
     # dependency graph, which can miss or over-include files.
     # Exclude .integration.test.ts files (run separately).
     # Split into Jest unit tests vs Playwright E2E specs.
+    #
+    # Which filename pattern identifies a test file depends on the scope:
+    # TypeScript scopes use Jest/Playwright naming, bash scope uses .bats.
+    # An EMPTY pattern means detection is not supported for this scope, so an
+    # empty changed_test_files carries no information — see the pre-existing
+    # failure skip below, which keys off changed_test_detection_attempted
+    # rather than off emptiness alone (#636).
     local changed_test_files=""
+    local changed_test_detection_attempted=false
     local jest_test_files=""
     local playwright_test_files=""
-    if [[ "$change_scope" == "typescript" || "$change_scope" == "mixed" || "$change_scope" == "ts-frontend" ]]; then
+    local changed_test_pattern=""
+    case "$change_scope" in
+        typescript|mixed|ts-frontend)
+            changed_test_pattern='\.test\.[jt]sx?$|\.spec\.[jt]sx?$'
+            ;;
+        bash)
+            changed_test_pattern='\.bats$'
+            ;;
+    esac
+
+    if [[ -n "$changed_test_pattern" ]]; then
+        changed_test_detection_attempted=true
         local _tl_git_raw _tl_git_exit
         _tl_git_raw=$(timeout "$TEST_LOOP_GIT_TIMEOUT" git -C "$loop_dir" diff \
             "$BASE_BRANCH"...HEAD --name-only 2>/dev/null)
@@ -6723,10 +7368,20 @@ run_test_loop() {
             _tl_git_raw=""
         fi
         changed_test_files=$(printf '%s' "$_tl_git_raw" \
-            | grep -E '\.test\.[jt]sx?$|\.spec\.[jt]sx?$' \
+            | grep -E "$changed_test_pattern" \
             | grep -v '\.integration\.test\.' \
             || true)
+    fi
 
+    if [[ "$change_scope" == "bash" ]]; then
+        # BATS always runs every suite, so the changed list is used purely to
+        # attribute failures to the PR — never to narrow the command.
+        if [[ -n "$changed_test_files" ]]; then
+            log "Changed BATS test files: $(echo "$changed_test_files" | tr '\n' ' ')"
+        else
+            log "No changed BATS test files found — BATS failures will be treated as pre-existing"
+        fi
+    elif [[ "$changed_test_detection_attempted" == true ]]; then
         # Split: Playwright specs (in e2e/ directories) vs Jest unit tests
         local file
         while IFS= read -r file; do
@@ -6751,10 +7406,12 @@ run_test_loop() {
         log "Explicit Jest test files: $(echo "$jest_test_files" | tr '\n' ' ')"
     else
         jest_command="npx jest --passWithNoTests --changedSince=$safe_branch"
-        if [[ -n "$changed_test_files" ]]; then
-            log "All changed test files are Playwright specs — falling back to --changedSince=$safe_branch for Jest"
-        else
-            log "No changed test files found — falling back to --changedSince=$safe_branch"
+        if [[ "$change_scope" != "bash" ]]; then
+            if [[ -n "$changed_test_files" ]]; then
+                log "All changed test files are Playwright specs — falling back to --changedSince=$safe_branch for Jest"
+            else
+                log "No changed test files found — falling back to --changedSince=$safe_branch"
+            fi
         fi
     fi
 
@@ -7068,13 +7725,19 @@ $test_summary" "default"
             # PR-changed files since Jest ran only those files explicitly.
             # Fallback mode (changed_test_files empty, --changedSince used): failures
             # may be from dependency-pulled test files (pre-existing relative to this PR).
+            #
+            # The skip is only sound when detection actually ran for this scope.
+            # An unpopulated changed_test_files on a scope we never scanned means
+            # "unknown", NOT "no PR-owned failures" — inferring the latter is what
+            # made every bash-scope failure vanish (#636).
             local pr_failures skipped_count
             pr_failures="$failures"
             skipped_count=0
-            if [[ -z "$changed_test_files" ]]; then
+            if [[ "$changed_test_detection_attempted" == true \
+                    && -z "$changed_test_files" ]]; then
                 skipped_count=$(printf '%s' "$failures" | jq 'length // 0' 2>/dev/null || echo 0)
                 if (( skipped_count > 0 )); then
-                    log "INFO: Skipping $skipped_count pre-existing failure(s) — failures from --changedSince fallback are not from PR-changed test files"
+                    log "INFO: Skipping $skipped_count pre-existing failure(s) — no PR-changed test files detected for $change_scope scope"
                     pr_failures="[]"
                 fi
             fi
@@ -7929,6 +8592,208 @@ _prior_merged_prs_for_issue() {
 	return 0
 }
 
+# Silent no-op guard for fix stages (issue #638).
+#
+# A fix-pr-review-iterN stage can self-report {"status":"success"} after doing
+# the whole fix in the working tree and never committing it.  The branch head
+# does not move, `git push` is a no-op, and the edits are lost — while the PR
+# gets a comment saying the fixes landed (#620 / PR #628 iteration 2 lost a
+# complete +270/-56 fix exactly this way).  This mirrors the task-stage guard
+# in execute_batch_parallel.
+#
+# The dirty-vs-clean distinction matters: a stage that produced no commit
+# because the review findings were already addressed is a genuine no-op and
+# must still pass.  Only a DIRTY tree with no commit is a lost fix.
+#
+# Arguments:
+#   $1 - stage label, for the log line
+#   $2 - branch head SHA captured before the stage ran
+# Returns:
+#   0 - head advanced, or clean tree with nothing to commit (genuine no-op)
+#   1 - work left uncommitted; the error names the uncommitted paths
+verify_fix_stage_commit() {
+	local stage_label="$1"
+	local head_before="$2"
+
+	local head_after
+	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
+
+	if [[ -n "$head_after" && "$head_after" != "$head_before" ]]; then
+		return 0
+	fi
+
+	local dirty
+	dirty=$(git status --porcelain 2>/dev/null || printf '')
+
+	if [[ -z "$dirty" ]]; then
+		log "$stage_label produced no commit and left a clean tree" \
+			"— accepting as a genuine no-op"
+		return 0
+	fi
+
+	# Porcelain v1 lines are "XY <path>"; renames read "R  old -> new".
+	local -a dirty_paths=()
+	local line
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		dirty_paths+=("${line:3}")
+	done <<< "$dirty"
+
+	log_error "$stage_label reported success but produced no commit" \
+		"while leaving changes in the working tree" \
+		"— marking failed (silent no-op guard)." \
+		"Uncommitted paths: ${dirty_paths[*]}"
+	return 1
+}
+
+# Post-fix-stage reporting for the PR review loop (issue #638).
+#
+# Verifies the stage actually committed before it is reported as applied, so a
+# stage that dropped its work can never post a success comment. The caller
+# pushes only when this returns 0.
+#
+# Arguments:
+#   $1 - PR number
+#   $2 - PR review iteration
+#   $3 - branch name
+#   $4 - branch head SHA captured before the fix stage ran
+#   $5 - fix stage result JSON
+# Returns:
+#   0 - fix committed, or a genuine no-op
+#   1 - fix left uncommitted; no success comment posted
+_handle_fix_stage_result() {
+	local pr_number="$1"
+	local pr_iteration="$2"
+	local branch="$3"
+	local head_before="$4"
+	local fix_result="$5"
+
+	local head_after
+	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
+
+	if ! verify_fix_stage_commit \
+		"fix-pr-review-iter-$pr_iteration" "$head_before"; then
+		comment_pr "$pr_number" \
+			"⚠️ PR Review Fix FAILED (Iteration $pr_iteration)" \
+			"The fix stage reported success but committed nothing while
+leaving changes in the working tree. The reported fixes have NOT landed on
+\`$branch\` — see the orchestrator log for the uncommitted paths." \
+			"$AGENT"
+		return 1
+	fi
+
+	# Genuine no-op: nothing landed, so there is no fix to report.
+	if [[ -z "$head_after" || "$head_after" == "$head_before" ]]; then
+		log "No commit from fix-pr-review-iter-$pr_iteration" \
+			"and a clean tree — skipping the fix comment"
+		return 0
+	fi
+
+	local fix_summary
+	fix_summary=$(printf '%s' "$fix_result" \
+		| jq -r '.output.summary // "Fixes applied"')
+
+	# Comment #12: PR Fix Result
+	comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" \
+		"$fix_summary" "$AGENT"
+	return 0
+}
+
+# Regenerate the pipeline-core plugin bundle when this run edited a canonical
+# script (issue #632).
+#
+# plugins/pipeline-core/scripts/ is GENERATED from .claude/scripts/ by
+# `./sync.sh bundle` (#623). Nothing in the pipeline ever ran the generator, so
+# every pipeline PR that touched a canonical script arrived with a stale bundle
+# and a red `Bundle Parity & Syntax` check — #620 PR #628 stayed red across two
+# full fix iterations and was fixed by hand before merge; #633 hit the same.
+# The PR-review loop reads the diff's logic, not CI conclusions, so no reviewer
+# ever raised it and no fix iteration addressed it.
+#
+# Runs immediately before the PR stage: late enough that every commit the run
+# will push already exists, early enough that the regenerated bundle is part of
+# the PR rather than a manual follow-up.
+#
+# Inert unless BOTH hold, so consumer repos (which install the orchestrator
+# from the bundle and have neither sync.sh nor plugins/pipeline-core/) are
+# untouched:
+#   - the repo owns the generator, and
+#   - a file under .claude/scripts/ actually changed on this branch.
+#
+# Args:
+#   $1 - working directory (git dir for this run)
+#   $2 - base branch to diff against
+# Returns 0 always: a bundle that cannot be regenerated is worth a loud log and
+# a red CI check, not a killed run one stage before the PR.
+regenerate_bundle_if_needed() {
+	local work_dir="$1" base_branch="$2"
+	local repo_root changed dirty
+
+	# Resolve the root once, then run every git call against it: the pathspecs
+	# below are repo-relative, so they must not depend on where the
+	# orchestrator's cwd happens to be.
+	repo_root=$(git -C "$work_dir" rev-parse --show-toplevel 2>/dev/null) \
+		|| return 0
+	[[ -n "$repo_root" ]] || return 0
+
+	# Consumer repos have no generator and no bundle — nothing to do.
+	[[ -f "$repo_root/sync.sh" && -d "$repo_root/plugins/pipeline-core/scripts" ]] \
+		|| return 0
+
+	changed=$(git -C "$repo_root" diff --name-only \
+		"$base_branch"...HEAD -- '.claude/scripts' 2>/dev/null) || changed=""
+	if [[ -z "$changed" ]]; then
+		return 0
+	fi
+
+	log "Canonical script(s) changed; regenerating pipeline-core bundle"
+
+	if ! bash "$repo_root/sync.sh" bundle >/dev/null 2>&1; then
+		log_error "sync.sh bundle failed — bundle parity will be red on the PR"
+		return 0
+	fi
+
+	dirty=$(git -C "$repo_root" status --porcelain \
+		-- 'plugins/pipeline-core/scripts' 2>/dev/null) || dirty=""
+	if [[ -z "$dirty" ]]; then
+		log "Bundle already in sync with .claude/scripts/"
+		return 0
+	fi
+
+	# Stage only the generated trees — never `git add -A`; unrelated working
+	# tree state must not ride along into the PR.  Both trees are generated by
+	# `./sync.sh bundle`: scripts (#623) and hooks (#640).  Staging only
+	# scripts leaves the regenerated hooks uncommitted, which is still a red
+	# `Bundle Parity & Syntax` — the exact failure this function exists to
+	# prevent.
+	# `git add` is fatal on a pathspec that matches nothing, so only pass the
+	# generated trees that actually exist — a repo may predate the hooks
+	# bundle, and one missing tree must not abort staging the other.
+	local -a _bundle_paths=()
+	local _bp
+	for _bp in 'plugins/pipeline-core/scripts' 'plugins/pipeline-core/hooks'; do
+		[[ -e "$repo_root/$_bp" ]] && _bundle_paths+=("$_bp")
+	done
+	if ((${#_bundle_paths[@]} == 0)); then
+		log_error "No generated bundle tree to stage"
+		return 0
+	fi
+	if ! git -C "$repo_root" add -- "${_bundle_paths[@]}" 2>/dev/null; then
+		log_error "Could not stage the regenerated bundle"
+		return 0
+	fi
+
+	if git -C "$repo_root" commit -q \
+		-m "chore(bundle): regenerate pipeline-core bundle for issue #$ISSUE_NUMBER" \
+		2>/dev/null; then
+		log "Committed regenerated bundle (plugins/pipeline-core/scripts/ + hooks/)"
+	else
+		log_error "Could not commit the regenerated bundle"
+	fi
+
+	return 0
+}
+
 # =============================================================================
 # MAIN FLOW
 # =============================================================================
@@ -8638,6 +9503,24 @@ $impl_summary" "$tagent"
             "$completed_tasks/$task_count tasks" \
             "completed (with per-task quality loops)."
 
+        # -----------------------------------------------------------------
+        # NON-COMMIT DELIVERABLE RE-JUDGEMENT (issue #634)
+        # A task that declared `deliverable:...` is judged on its artefact,
+        # not on commits: the commit-based verdict recorded it failed simply
+        # because its worktree branch was empty, which for this kind of task
+        # is the designed outcome. Runs BEFORE the 0-commits guardrail and
+        # the PARTIAL-COMPLETION GATE so both see the artefact verdict.
+        # The delta can be negative — a task recorded completed whose
+        # declared artefact is absent is demoted rather than trusted.
+        # -----------------------------------------------------------------
+        local _noncommit_delta
+        _noncommit_delta=$(reconcile_noncommit_tasks_with_deliverables)
+        [[ "$_noncommit_delta" =~ ^-?[0-9]+$ ]] || _noncommit_delta=0
+        completed_tasks=$((completed_tasks + _noncommit_delta))
+        if (( completed_tasks < 0 )); then
+            completed_tasks=0
+        fi
+
         # Guardrail: abort if no tasks completed but tasks were expected.
         # Guard: if the branch has commits ahead of base (from a prior run or
         # partial work), continue to PR creation instead of aborting.
@@ -8792,6 +9675,22 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
         if (( commits_ahead > 0 )); then
             log "Branch has $commits_ahead commit(s) ahead of" \
                 "$BASE_BRANCH — continuing."
+        elif all_tasks_are_verified_noncommit; then
+            # Issue #634: every planned task declared a non-commit deliverable
+            # and every declared artefact verified, so 0 commits is what the
+            # issue asked for — not a failed worktree merge-back. There is
+            # nothing to open a PR for, so terminate on the existing no-PR
+            # success path (already_implemented is the state the batch
+            # orchestrator already maps to "done, nothing to merge") instead
+            # of aborting the run.
+            log "All $task_count task(s) declared a non-commit deliverable" \
+                "and every declared artefact was verified — 0 commits is the" \
+                "expected outcome; finishing without a PR."
+            comment_issue "Implementation: Non-Commit Deliverable" \
+                "✅ Every implementation task for this issue declared a non-commit deliverable, and each declared artefact was verified. No code changes were required, so no pull request is opened." \
+                "default"
+            set_final_state "already_implemented"
+            exit 0
         else
             log_error "ABORT: Implementation stage completed but branch has 0 commits ahead of $BASE_BRANCH." \
                 "Worktree merge-back likely failed. Check orchestrator log for merge errors."
@@ -9034,6 +9933,16 @@ Only the files listed above should be staged and committed."
             set_stage_completed "docs"
         fi
     fi
+
+    # -------------------------------------------------------------------------
+    # PRE-PR: regenerate the plugin bundle if a canonical script changed
+    #
+    # Must run before the PR is opened, otherwise the PR carries a stale
+    # plugins/pipeline-core/scripts/ and `Bundle Parity & Syntax` is red from
+    # the first CI run (issue #632; observed on #620 PR #628 and #633). No-op
+    # in repos that do not own the generator.
+    # -------------------------------------------------------------------------
+    regenerate_bundle_if_needed "." "$BASE_BRANCH"
 
     # -------------------------------------------------------------------------
     # STAGE: PR
@@ -9463,21 +10372,27 @@ fi)
 
 Fix the issues and commit. Output a summary of fixes applied."
 
+            # Silent no-op guard (#638): remember where the branch was so a fix
+            # stage that never commits cannot be reported as applied.
+            local fix_head_before
+            fix_head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
+
             verify_on_feature_branch "$branch" || true
 
             local fix_result
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
             _halt_if_budget_exceeded
 
-            local fix_summary
-            fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
-
-            # Comment #12: PR Fix Result
-            comment_pr "$pr_number" "PR Review Fix (Iteration $pr_iteration)" "$fix_summary" "$AGENT"
-
-            # Push updates (quality loop skipped — re-review will catch remaining issues)
-            log "Pushing updates to PR..."
-            git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
+            # Comments only if a commit landed; fails loudly if the stage left
+            # its work uncommitted.
+            if _handle_fix_stage_result "$pr_number" "$pr_iteration" \
+                "$branch" "$fix_head_before" "$fix_result"; then
+                # Push updates (quality loop skipped — re-review will catch remaining issues)
+                log "Pushing updates to PR..."
+                git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
+            else
+                log_error "fix-pr-review-iter-$pr_iteration did not land its changes — re-reviewing unchanged branch"
+            fi
         fi
         done
 
