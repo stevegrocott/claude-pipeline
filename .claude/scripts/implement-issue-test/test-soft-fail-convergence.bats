@@ -296,3 +296,162 @@ teardown() {
 	[[ "$script_content" == *'DEGRADED_STAGES[@]}'* ]]
 	[[ "$script_content" == *'jq'* ]]
 }
+
+# =============================================================================
+# PR-CHANGED TEST FILE DETECTION ON BASH SCOPE (#636)
+#
+# The test loop only dispatches a fix agent for failures it believes belong to
+# the PR.  Under `bash` scope changed_test_files used to be empty by
+# construction, so every bats failure was reclassified "pre-existing" and the
+# loop reported complete.  These tests pin the detection AND the inference:
+# an empty changed_test_files may only mean "no PR-owned failures" when
+# detection was actually attempted for the active scope.
+# =============================================================================
+
+# Build a throwaway git repo on `main` for run_test_loop to diff against.
+_setup_test_loop_repo() {
+	mkdir -p "$TEST_TMP/repo"
+	cd "$TEST_TMP/repo" || return 1
+	git init -q
+	git config user.email "test@example.com"
+	git config user.name "Test"
+	git checkout -q -b main
+	printf 'initial\n' > README.md
+	git add README.md
+	git commit -q -m "initial"
+	export BASE_BRANCH=main
+}
+
+# Install a run_stage stub that fails the first test iteration with
+# $1 (a JSON failures array) and passes every later iteration, recording
+# fix-agent dispatch in $FIX_CALLED_FILE.
+_install_failing_then_passing_run_stage() {
+	local failures_json="$1"
+
+	FIX_CALLED_FILE="$TEST_TMP/fix_called"
+	TEST_ITER_FILE="$TEST_TMP/test_iters"
+	export FIX_CALLED_FILE TEST_ITER_FILE
+	printf 'false\n' > "$FIX_CALLED_FILE"
+	printf '0\n' > "$TEST_ITER_FILE"
+
+	STUB_FAILURES_JSON="$failures_json"
+	export STUB_FAILURES_JSON
+
+	run_stage() {
+		local stage_name="$1"
+		local count
+		case "$stage_name" in
+			test-iter-*)
+				count=$(< "$TEST_ITER_FILE")
+				count=$((count + 1))
+				printf '%s\n' "$count" > "$TEST_ITER_FILE"
+				if (( count <= 1 )); then
+					printf '%s' "{\"status\":\"success\",\"output\":{\"result\":\"failed\",\"failures\":$STUB_FAILURES_JSON,\"summary\":\"failures\",\"validation_result\":\"skipped\"}}"
+				else
+					printf '%s' '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}}'
+				fi
+				;;
+			fix-tests-*)
+				printf 'true\n' > "$FIX_CALLED_FILE"
+				printf '%s' '{"status":"success","output":{"summary":"Fixed"}}'
+				;;
+			*)
+				printf '%s' '{"status":"success","output":{"summary":"noop"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	comment_issue() { :; }
+	export -f comment_issue
+}
+
+@test "bash scope: failure in a PR-changed .bats file dispatches the fix agent" {
+	_setup_test_loop_repo
+	git checkout -q -b feature-bats-red
+
+	mkdir -p tests
+	printf '@test "red" { false; }\n' > tests/new-suite.bats
+	git add tests/new-suite.bats
+	git commit -q -m "add failing bats suite"
+
+	_install_failing_then_passing_run_stage \
+		'[{"title":"new-suite","description":"not ok 1 red"}]'
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-red" "" "bash"
+
+	expect_ok "fix agent must be dispatched for a failure in a PR-changed .bats file" \
+		test "$(< "$FIX_CALLED_FILE")" = "true"
+	expect_not_ok "loop must not declare the failure pre-existing" \
+		grep -q "All test failures are pre-existing" "$LOG_FILE"
+}
+
+@test "bash scope: failure in an untouched suite is still skipped as pre-existing" {
+	_setup_test_loop_repo
+	git checkout -q -b feature-bash-no-tests
+
+	mkdir -p .claude/scripts
+	printf '#!/usr/bin/env bash\ntrue\n' > .claude/scripts/helper.sh
+	git add .claude/scripts/helper.sh
+	git commit -q -m "shell change without touching any bats file"
+
+	_install_failing_then_passing_run_stage \
+		'[{"title":"untouched-suite","description":"not ok 1 pre-existing"}]'
+
+	run_test_loop "$TEST_TMP/repo" "feature-bash-no-tests" "" "bash"
+
+	expect_ok "fix agent must not be dispatched when the PR changed no .bats file" \
+		test "$(< "$FIX_CALLED_FILE")" = "false"
+	expect_ok "loop must log the pre-existing skip" \
+		grep -q "pre-existing failure" "$LOG_FILE"
+}
+
+@test "bash scope: #631 replay — 5 failures with one in a PR-added bats file dispatch the fix agent" {
+	# Replay of run issue-631-20260728-121943, which logged
+	#   "No changed test files found — falling back to --changedSince=main"
+	#   "Skipping 5 pre-existing failure(s)"
+	#   "Test loop complete."
+	# while one of the 5 was tests/marketplace-smoke.bats, added by that PR.
+	_setup_test_loop_repo
+	git checkout -q -b feature-631-replay
+
+	mkdir -p tests .claude/scripts
+	printf '@test "consumer" { false; }\n' > tests/marketplace-smoke.bats
+	printf '#!/usr/bin/env bash\ntrue\n' > .claude/scripts/issue-body-lib.sh
+	git add tests/marketplace-smoke.bats .claude/scripts/issue-body-lib.sh
+	git commit -q -m "issue 631 tasks"
+
+	_install_failing_then_passing_run_stage \
+		'[{"title":"comment_issue","description":"pre-existing"},
+		  {"title":"comment_pr","description":"pre-existing"},
+		  {"title":"issue_num guard","description":"pre-existing"},
+		  {"title":"writing-agents SKILL.md","description":"pre-existing"},
+		  {"title":"bundle: issue-body-lib validates a consumer agent","description":"assert_issue_valid: unknown agent: consumer-only-agent"}]'
+
+	run_test_loop "$TEST_TMP/repo" "feature-631-replay" "" "bash"
+
+	expect_ok "fix agent must be dispatched when a PR-added bats suite is red" \
+		test "$(< "$FIX_CALLED_FILE")" = "true"
+	expect_not_ok "loop must not short-circuit as all-pre-existing" \
+		grep -q "All test failures are pre-existing" "$LOG_FILE"
+}
+
+@test "pre-existing skip requires detection to have been attempted for the scope" {
+	# `frontend` scope never populates changed_test_files, so an empty value
+	# carries no information.  Inferring "no PR-owned failures" from emptiness
+	# alone must not resurrect: failures have to reach the fix agent.
+	_setup_test_loop_repo
+	git checkout -q -b feature-scope-without-detection
+
+	printf 'export const Button = () => null;\n' > Button.tsx
+	git add Button.tsx
+	git commit -q -m "frontend change"
+
+	_install_failing_then_passing_run_stage \
+		'[{"title":"Button","description":"render failure"}]'
+
+	run_test_loop "$TEST_TMP/repo" "feature-scope-without-detection" "" "frontend"
+
+	expect_ok "empty changed_test_files must not imply pre-existing when detection never ran" \
+		test "$(< "$FIX_CALLED_FILE")" = "true"
+}

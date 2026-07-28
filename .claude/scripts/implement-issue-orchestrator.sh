@@ -6761,10 +6761,29 @@ run_test_loop() {
     # dependency graph, which can miss or over-include files.
     # Exclude .integration.test.ts files (run separately).
     # Split into Jest unit tests vs Playwright E2E specs.
+    #
+    # Which filename pattern identifies a test file depends on the scope:
+    # TypeScript scopes use Jest/Playwright naming, bash scope uses .bats.
+    # An EMPTY pattern means detection is not supported for this scope, so an
+    # empty changed_test_files carries no information — see the pre-existing
+    # failure skip below, which keys off changed_test_detection_attempted
+    # rather than off emptiness alone (#636).
     local changed_test_files=""
+    local changed_test_detection_attempted=false
     local jest_test_files=""
     local playwright_test_files=""
-    if [[ "$change_scope" == "typescript" || "$change_scope" == "mixed" || "$change_scope" == "ts-frontend" ]]; then
+    local changed_test_pattern=""
+    case "$change_scope" in
+        typescript|mixed|ts-frontend)
+            changed_test_pattern='\.test\.[jt]sx?$|\.spec\.[jt]sx?$'
+            ;;
+        bash)
+            changed_test_pattern='\.bats$'
+            ;;
+    esac
+
+    if [[ -n "$changed_test_pattern" ]]; then
+        changed_test_detection_attempted=true
         local _tl_git_raw _tl_git_exit
         _tl_git_raw=$(timeout "$TEST_LOOP_GIT_TIMEOUT" git -C "$loop_dir" diff \
             "$BASE_BRANCH"...HEAD --name-only 2>/dev/null)
@@ -6774,10 +6793,20 @@ run_test_loop() {
             _tl_git_raw=""
         fi
         changed_test_files=$(printf '%s' "$_tl_git_raw" \
-            | grep -E '\.test\.[jt]sx?$|\.spec\.[jt]sx?$' \
+            | grep -E "$changed_test_pattern" \
             | grep -v '\.integration\.test\.' \
             || true)
+    fi
 
+    if [[ "$change_scope" == "bash" ]]; then
+        # BATS always runs every suite, so the changed list is used purely to
+        # attribute failures to the PR — never to narrow the command.
+        if [[ -n "$changed_test_files" ]]; then
+            log "Changed BATS test files: $(echo "$changed_test_files" | tr '\n' ' ')"
+        else
+            log "No changed BATS test files found — BATS failures will be treated as pre-existing"
+        fi
+    elif [[ "$changed_test_detection_attempted" == true ]]; then
         # Split: Playwright specs (in e2e/ directories) vs Jest unit tests
         local file
         while IFS= read -r file; do
@@ -6802,10 +6831,12 @@ run_test_loop() {
         log "Explicit Jest test files: $(echo "$jest_test_files" | tr '\n' ' ')"
     else
         jest_command="npx jest --passWithNoTests --changedSince=$safe_branch"
-        if [[ -n "$changed_test_files" ]]; then
-            log "All changed test files are Playwright specs — falling back to --changedSince=$safe_branch for Jest"
-        else
-            log "No changed test files found — falling back to --changedSince=$safe_branch"
+        if [[ "$change_scope" != "bash" ]]; then
+            if [[ -n "$changed_test_files" ]]; then
+                log "All changed test files are Playwright specs — falling back to --changedSince=$safe_branch for Jest"
+            else
+                log "No changed test files found — falling back to --changedSince=$safe_branch"
+            fi
         fi
     fi
 
@@ -7119,13 +7150,19 @@ $test_summary" "default"
             # PR-changed files since Jest ran only those files explicitly.
             # Fallback mode (changed_test_files empty, --changedSince used): failures
             # may be from dependency-pulled test files (pre-existing relative to this PR).
+            #
+            # The skip is only sound when detection actually ran for this scope.
+            # An unpopulated changed_test_files on a scope we never scanned means
+            # "unknown", NOT "no PR-owned failures" — inferring the latter is what
+            # made every bash-scope failure vanish (#636).
             local pr_failures skipped_count
             pr_failures="$failures"
             skipped_count=0
-            if [[ -z "$changed_test_files" ]]; then
+            if [[ "$changed_test_detection_attempted" == true \
+                    && -z "$changed_test_files" ]]; then
                 skipped_count=$(printf '%s' "$failures" | jq 'length // 0' 2>/dev/null || echo 0)
                 if (( skipped_count > 0 )); then
-                    log "INFO: Skipping $skipped_count pre-existing failure(s) — failures from --changedSince fallback are not from PR-changed test files"
+                    log "INFO: Skipping $skipped_count pre-existing failure(s) — no PR-changed test files detected for $change_scope scope"
                     pr_failures="[]"
                 fi
             fi
