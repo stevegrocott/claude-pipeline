@@ -2329,7 +2329,14 @@ run_stage() {
     # immediately before calling run_stage.  Consumed and cleared here so a
     # stale value can never raise the budget of an unrelated later stage.
     local _stage_desc_len="${_RUN_STAGE_DESC_LEN:-0}"
-    local _promote_chars="${TASK_DESC_PROMOTE_CHARS:-200}"
+    # Promotion threshold (issue #619, retuned by #637).  This MUST sit below
+    # the explore skill's "task descriptions must stay under ~200 characters"
+    # rule: at 200 the two used the same number in opposite directions, so a
+    # correctly-authored task could never be promoted and the branch was dead
+    # code.  Measured bails clustered at 152–190 chars; 120 covers that band.
+    # The raised budget is a ceiling, not a target — unused turns cost nothing.
+    # Pinned against the skill by test-stage-runner.bats.
+    local _promote_chars="${TASK_DESC_PROMOTE_CHARS:-120}"
     unset _RUN_STAGE_DESC_LEN
     [[ "$_stage_desc_len" =~ ^[0-9]+$ ]] || _stage_desc_len=0
 
@@ -2780,7 +2787,7 @@ for m in re.finditer(r'\[\s*\{', t):
     fi
 
     # ── Single decide-action.sh call (AC1) ───────────────────────────────────
-    local _da_json _da_action _da_target_model _da_reason
+    local _da_json _da_action _da_target_model _da_reason _da_uncapped
     _da_json=$(bash "$SCRIPT_DIR/decide-action.sh" \
         "$_sr_interim" "$_history" 2>/dev/null) \
         || _da_json='{"action":"bail","reason":"decide-action.sh invocation failed"}'
@@ -2790,6 +2797,11 @@ for m in re.finditer(r'\[\s*\{', t):
         | jq -r '.model // empty' 2>/dev/null)
     _da_reason=$(printf '%s' "$_da_json" \
         | jq -r '.reason // ""' 2>/dev/null)
+    # Issue #637: a retry_same carrying "uncapped":true must run WITHOUT the
+    # --max-turns cap.  This is the S-task cap-lift that the #579 Opus gate
+    # used to discard along with the (correctly withheld) model upgrade.
+    _da_uncapped=$(printf '%s' "$_da_json" \
+        | jq -r '.uncapped // false' 2>/dev/null)
 
     log "decide-action.sh → action=$_da_action${_da_target_model:+ model=$_da_target_model}"
 
@@ -2963,7 +2975,7 @@ for m in re.finditer(r'\[\s*\{', t):
             # classification above; emit the retry/model_call events now.
             emit_event "retry" \
                 "stage=$stage_name" \
-                "reason=rate_limit" \
+                "reason=${_error_kind:-rate_limit}" \
                 "attempt:=2" \
                 "max_attempts:=2" \
                 "model=$model"
@@ -2976,6 +2988,20 @@ for m in re.finditer(r'\[\s*\{', t):
                 "complexity=${complexity:-}" \
                 "stage_attempt:=2"
 
+            # Issue #637: drop the turn cap when decide-action.sh flagged this
+            # retry uncapped (S task at sonnet that exhausted its 25-turn
+            # budget).  Same model — #579's finding that opus buys no
+            # completion lift for S tasks stands — but the constraint that
+            # actually killed the stage is lifted.  Exactly one such attempt is
+            # made: this branch does not loop, and a second exhaustion is
+            # treated as terminal below.
+            local -a _retry_turns_args=()
+            if [[ "$_da_uncapped" == "true" ]]; then
+                log "  Retry: turn cap lifted (issue #637)"
+            else
+                _retry_turns_args=("${turns_args[@]+"${turns_args[@]}"}")
+            fi
+
             local _retry_exit_code=0
             # Temp-file capture (see run_stage's primary launch) — avoids the
             # command-substitution pipe-wedge when the CLI leaves a lingering child.
@@ -2985,7 +3011,7 @@ for m in re.finditer(r'\[\s*\{', t):
                 ${agent_args[@]+"${agent_args[@]}"} \
                 --model "$model" \
                 ${fallback_args[@]+"${fallback_args[@]}"} \
-                ${turns_args[@]+"${turns_args[@]}"} \
+                ${_retry_turns_args[@]+"${_retry_turns_args[@]}"} \
                 --dangerously-skip-permissions \
                 --output-format json \
                 --json-schema "$schema" \
@@ -3001,6 +3027,31 @@ for m in re.finditer(r'\[\s*\{', t):
             printf '%s\n' "$output" >> "$stage_log"
             printf '%s\n' \
                 "=== retry exit code: $_retry_exit_code ===" >> "$stage_log"
+
+            # Issue #637: a second turn exhaustion is terminal — exactly one
+            # uncapped attempt is granted, then the stage is recorded failed.
+            # Checked BEFORE the .result fallback below, which would otherwise
+            # read the CLI's max-turns envelope (is_error=false with .result
+            # set) as a success and silently pass an unfinished stage on.
+            local _retry_subtype
+            _retry_subtype=$(printf '%s' "$output" \
+                | jq -r '.subtype // empty' 2>/dev/null)
+            if [[ "$_retry_subtype" == "error_max_turns" ]]; then
+                _CONSECUTIVE_TIMEOUTS=0
+                _TIMED_OUT_STAGE_NAMES=""
+                log_error "Stage $stage_name hit max turns again on the retry —" \
+                    "no headroom left, failing"
+                local _sr_retry_exhausted
+                _sr_retry_exhausted=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"max_turns_exhausted_at_ceiling"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage" "${complexity:-}")
+                _apply_stage_action "$_sr_retry_exhausted" "bail" \
+                    "max_turns_exhausted on retry: no further headroom"
+                return $?
+            fi
 
             local _retry_structured
             _retry_structured=$(printf '%s' "$output" \

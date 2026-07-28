@@ -350,6 +350,105 @@ teardown() {
     [ "$model" = "opus" ] || fail "Expected opus for L quality_stall, got: $model"
 }
 
+# =============================================================================
+# S-COMPLEXITY UNCAPPED RETRY — max_turns_exhausted branch (issue #637)
+#
+# On error_max_turns the escalation path's real benefit is that the retry runs
+# with the turn cap REMOVED, not that the model changes.  The #579 gate threw
+# that cap-lift away along with the model upgrade, so an S task that merely
+# needed more turns was recorded failed after a single capped attempt.
+# decide-action must now return a SAME-MODEL retry (never opus) for
+# S + sonnet + max_turns_exhausted, in both backends.
+# =============================================================================
+
+@test "S-complexity max_turns_exhausted at sonnet retries instead of bailing (issue #637)" {
+    local sr='{"status":"error","error_kind":"max_turns_exhausted","model":"sonnet","complexity":"S"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action
+    action=$(printf '%s' "$output" | jq -r '.action')
+    [ "$action" = "retry_same" ] || \
+        fail "Expected retry_same for S-at-sonnet max_turns, got: $action ($output)"
+}
+
+@test "S-complexity max_turns retry is flagged uncapped and stays at sonnet" {
+    local sr='{"status":"error","error_kind":"max_turns_exhausted","model":"sonnet","complexity":"S"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local uncapped model
+    uncapped=$(printf '%s' "$output" | jq -r '.uncapped // false')
+    model=$(printf '%s' "$output" | jq -r '.model // empty')
+    [ "$uncapped" = "true" ] || \
+        fail "Expected uncapped:true marker, got: $output"
+    [ "$model" != "opus" ] || \
+        fail "S task must never be routed to opus (issue #579), got: $output"
+}
+
+@test "backend parity: compose path also retries S-at-sonnet max_turns uncapped" {
+    local sr='{"status":"error","error_kind":"max_turns_exhausted","model":"sonnet","complexity":"S"}'
+    # Skill-native compose path (bash sub-backends), NOT ESCALATION_POLICY_BACKEND=bash
+    run env RETRY_POLICY_BACKEND=bash MODEL_FALLBACK_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action uncapped
+    action=$(printf '%s' "$output" | jq -r '.action')
+    uncapped=$(printf '%s' "$output" | jq -r '.uncapped // false')
+    [ "$action" = "retry_same" ] || \
+        fail "Expected compose retry_same for S-at-sonnet max_turns, got: $action ($output)"
+    [ "$uncapped" = "true" ] || \
+        fail "Expected compose uncapped:true marker, got: $output"
+}
+
+@test "uncapped retry is still bounded by MAX_ESCALATIONS_PER_RUN (AC5)" {
+    local sr='{"status":"error","error_kind":"max_turns_exhausted","model":"sonnet","complexity":"S"}'
+    run env MAX_ESCALATIONS_PER_RUN=5 ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[{},{},{},{},{}]'
+    [ "$status" -eq 0 ]
+    local action
+    action=$(printf '%s' "$output" | jq -r '.action')
+    [ "$action" = "bail" ] || \
+        fail "Uncapped retry must not bypass the per-run cap, got: $action ($output)"
+    [[ "$output" == *"escalation cap reached"* ]] || \
+        fail "Expected cap-reached reason, got: $output"
+}
+
+@test "S-complexity max_turns_exhausted_at_ceiling still bails (no uncapped retry)" {
+    local sr='{"status":"error","error_kind":"max_turns_exhausted_at_ceiling","model":"sonnet","complexity":"S"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action
+    action=$(printf '%s' "$output" | jq -r '.action')
+    [ "$action" = "bail" ] || \
+        fail "Expected bail at ceiling, got: $action ($output)"
+}
+
+@test "S-complexity double_timeout at sonnet still bails (cap-lift is max_turns only)" {
+    local sr='{"status":"error","error_kind":"double_timeout","model":"sonnet","complexity":"S"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action
+    action=$(printf '%s' "$output" | jq -r '.action')
+    [ "$action" = "bail" ] || \
+        fail "double_timeout must not gain an uncapped retry, got: $action ($output)"
+}
+
+@test "M-complexity max_turns_exhausted at sonnet still escalates to opus" {
+    local sr='{"status":"error","error_kind":"max_turns_exhausted","model":"sonnet","complexity":"M"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action model
+    action=$(printf '%s' "$output" | jq -r '.action')
+    model=$(printf '%s' "$output" | jq -r '.model')
+    [ "$action" = "escalate" ] || \
+        fail "Expected escalate for M max_turns, got: $action ($output)"
+    [ "$model" = "opus" ] || fail "Expected opus for M max_turns, got: $model"
+}
+
 @test "stage_result envelope carries complexity field (issue #579)" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local sr
