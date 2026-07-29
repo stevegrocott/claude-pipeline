@@ -756,6 +756,55 @@ emit_event() {
 # STATUS FILE MANAGEMENT
 # =============================================================================
 
+# Ceiling (seconds) status_json_write waits for the status-file lock before
+# giving up.  A unique tmp path (above) stops writers corrupting each other's
+# output, but the read-modify-write itself (read $STATUS_FILE, transform,
+# `mv` back) must still be serialised or the SECOND writer to start can read
+# the stale pre-mv content and clobber the FIRST writer's already-`mv`'d
+# update — a lost update rather than corruption.  Bounded rather than
+# unbounded so a writer that hangs mid-transform cannot wedge every later
+# writer forever.  Env-overridable for tests / tuning.
+readonly STATUS_LOCK_TIMEOUT="${STATUS_LOCK_TIMEOUT:-10}"
+
+# _status_lock_acquire / _status_lock_release - mkdir-based advisory lock
+# used by status_json_write when flock(1) is unavailable (e.g. macOS without
+# util-linux).  Mirrors the locking in event-emit.sh's _mkdir_locked_append:
+# `mkdir` is atomic so it doubles as the mutex, and a pidfile inside the lock
+# directory lets a later writer tell a held lock apart from a STALE one — a
+# lock directory left behind by a writer that died mid-write (issue #642
+# AC4) — and break it instead of blocking on it indefinitely.
+_status_lock_acquire() {
+    local lockdir="${STATUS_FILE}.lockdir"
+    local pidfile="${lockdir}/pid"
+    local attempts=0
+
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        if [[ -f "$pidfile" ]]; then
+            local lock_pid
+            lock_pid=$(cat "$pidfile" 2>/dev/null)
+            if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+                # Owning process is gone — stale lock. Break it and retry.
+                rm -rf "$lockdir" 2>/dev/null || true
+                continue
+            fi
+        fi
+
+        if (( attempts >= STATUS_LOCK_TIMEOUT )); then
+            log_warn "status_json_write: timed out after" \
+                "${STATUS_LOCK_TIMEOUT}s waiting for lock on $STATUS_FILE"
+            return 1
+        fi
+        sleep 1
+        (( attempts++ )) || true
+    done
+
+    printf '%d\n' "$$" > "$pidfile" 2>/dev/null || true
+}
+
+_status_lock_release() {
+    rm -rf "${STATUS_FILE}.lockdir" 2>/dev/null || true
+}
+
 # status_json_write - Atomically update $STATUS_FILE via jq (issue #642).
 #
 # EVERY status.json write goes through here instead of a hand-rolled
@@ -768,20 +817,58 @@ emit_event() {
 # its own unique temp path in the SAME directory as $STATUS_FILE, so the final
 # `mv` stays a same-filesystem atomic rename and collision-free.
 #
+# That alone stops corruption but not a LOST update: two writers can still
+# both read $STATUS_FILE before either has `mv`'d its result back, so the
+# second `mv` overwrites the first writer's change instead of building on
+# top of it.  The read (jq "$@" "$STATUS_FILE") through the final `mv` is
+# therefore run inside an exclusive, timeout-bounded lock so concurrent
+# writers serialise instead of racing.  `flock` is preferred (the lock is
+# tied to the holding process's open fd, so it can never go stale — a killed
+# writer's lock is released by the kernel the moment its fd closes); the
+# mkdir-based fallback above is used where flock(1) isn't installed and
+# explicitly detects and breaks a stale lock via the pidfile.
+#
 # Usage: status_json_write <jq-args...>
 #   Pass exactly the arguments you would normally give `jq` BEFORE the input
 #   file (filter string, --arg, --argjson, --slurpfile, ...).  This helper
 #   always reads from and writes back to $STATUS_FILE.
 #
-# Returns non-zero and leaves $STATUS_FILE untouched if jq fails.
+# Returns non-zero and leaves $STATUS_FILE untouched if jq fails or the lock
+# times out.
 status_json_write() {
     local tmp_file
     tmp_file=$(mktemp "${STATUS_FILE}.XXXXXX" 2>/dev/null) \
         || tmp_file="${STATUS_FILE}.tmp.$$"
 
-    if jq "$@" "$STATUS_FILE" > "$tmp_file"; then
-        mv "$tmp_file" "$STATUS_FILE"
+    local rc
+    if command -v flock > /dev/null 2>&1; then
+        (
+            flock -x -w "$STATUS_LOCK_TIMEOUT" 200 || {
+                log_warn "status_json_write: timed out after" \
+                    "${STATUS_LOCK_TIMEOUT}s waiting for lock on" \
+                    "$STATUS_FILE"
+                exit 1
+            }
+            jq "$@" "$STATUS_FILE" > "$tmp_file" || exit 1
+            mv "$tmp_file" "$STATUS_FILE"
+        ) 200>"${STATUS_FILE}.lock"
+        rc=$?
     else
+        # flock unavailable (e.g. macOS without util-linux) — mkdir lock.
+        if _status_lock_acquire; then
+            if jq "$@" "$STATUS_FILE" > "$tmp_file"; then
+                mv "$tmp_file" "$STATUS_FILE"
+                rc=0
+            else
+                rc=1
+            fi
+            _status_lock_release
+        else
+            rc=1
+        fi
+    fi
+
+    if (( rc != 0 )); then
         rm -f "$tmp_file"
         return 1
     fi

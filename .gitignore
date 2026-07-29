@@ -1,6 +1,8 @@
 # Orchestrator runtime artifacts
 logs/
 status.json
+status.json.lock
+status.json.lockdir
 
 # Pipeline-tooling working directories (MCP servers and tools; must not land in feature commits)
 .serena/
