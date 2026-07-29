@@ -7996,6 +7996,33 @@ Output both test results and validation findings in one structured response.
         validate_summary=$(printf '%s' "$test_result" | jq -r '.output.validation_summary // ""')
 
         # -----------------------------------------------------------------
+        # BATS SUITE DID NOT FINISH (issue #666)
+        # bats_result: 'incomplete' means the BATS run never reached an exit
+        # code within this iteration's budget — a partial pass/fail count,
+        # not a verdict. For 'mixed' scope BATS is informational-only and
+        # never affects test_status, so without this check an incomplete
+        # run would fall straight into the "TESTS PASSED" branch below and
+        # be reported "✅ Tests: passed" — exactly the false-green case this
+        # issue exists to close. Recorded non-blocking, reusing the same
+        # DEGRADED_STAGES + comment_issue marker path the post-loop
+        # full-suite guard already uses for `test:full_suite_red` (see
+        # L10010-10028): a degraded marker plus an issue comment, without
+        # touching loop_complete or test_status.
+        # -----------------------------------------------------------------
+        local bats_status bats_summary_out
+        bats_status=$(printf '%s' "$test_result" | jq -r '.output.bats_result // ""')
+        bats_summary_out=$(printf '%s' "$test_result" | jq -r '.output.bats_summary // ""')
+
+        if [[ "$bats_status" == "incomplete" ]]; then
+            DEGRADED_STAGES+=("test:bats_incomplete:iter=$test_iteration")
+            comment_issue "Test Loop: BATS run incomplete ($test_iteration/$max_test_iter)" \
+                "⚠️ The BATS suite did not reach an exit code before this iteration's report was due. This is **not a pass** — no confirmed pass/fail count is available for the untested remainder. Recorded as a degraded stage; **review before merge; do not assume green.**
+
+$bats_summary_out" "default"
+            log "WARN: BATS run incomplete on iteration $test_iteration (non-blocking, recorded as degraded)"
+        fi
+
+        # -----------------------------------------------------------------
         # HANDLE TEST FAILURES
         # -----------------------------------------------------------------
         if [[ "$test_status" == "failed" ]]; then
