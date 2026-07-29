@@ -26,6 +26,15 @@ BUNDLE_DIR="$REPO_ROOT/plugins/pipeline-core/scripts"
 # covered here, not just at the top level.
 PARITY_SUBDIRS=(platform prompts schemas)
 
+# Print the committed file mode (e.g. 100755) for $1 via `git ls-files -s`,
+# or nothing if $1 is untracked. Reads from the git index rather than the
+# filesystem so the check is about what is committed, not local umask or a
+# checkout with core.fileMode=false (issue #653 AC5).
+_git_mode() {
+	local path="$1"
+	git -C "$REPO_ROOT" ls-files -s -- "$path" 2>/dev/null | awk '{print $1}'
+}
+
 # Print, one per line, every file under $1 that this guard is responsible
 # for: top-level *.sh, plus every file (any extension) under each of
 # PARITY_SUBDIRS, as a path relative to $1.
@@ -50,6 +59,7 @@ _parity_relpaths() {
 	[[ -d "$BUNDLE_DIR" ]] || fail "bundle directory not found: $BUNDLE_DIR"
 
 	local report="" rel canonical counterpart pair_diff
+	local canonical_mode counterpart_mode
 	while IFS= read -r rel; do
 		canonical="$SCRIPT_DIR/$rel"
 		counterpart="$BUNDLE_DIR/$rel"
@@ -59,15 +69,30 @@ _parity_relpaths() {
 			continue
 		fi
 
-		diff -q "$canonical" "$counterpart" >/dev/null 2>&1 && continue
+		if ! diff -q "$canonical" "$counterpart" >/dev/null 2>&1; then
+			pair_diff="$(diff -u "$counterpart" "$canonical")" || true
+			report+=$'\n'"DIFF: $rel"$'\n'"$pair_diff"
+		fi
 
-		pair_diff="$(diff -u "$counterpart" "$canonical")" || true
-		report+=$'\n'"DIFF: $rel"$'\n'"$pair_diff"
+		# Content parity says nothing about the executable bit — cp in
+		# sync.sh's _bundle_scripts_dir does not preserve it, so a canonical
+		# script can drift to non-executable (or vice versa) while `diff`
+		# stays silent (issue #653).
+		canonical_mode="$(_git_mode "$canonical")"
+		counterpart_mode="$(_git_mode "$counterpart")"
+		if [[ -n "$canonical_mode" && -n "$counterpart_mode" && \
+			"$canonical_mode" != "$counterpart_mode" ]]; then
+			report+=$'\n'"MODE MISMATCH: $rel canonical=$canonical_mode"
+			report+=" bundled=$counterpart_mode"
+		fi
 	done < <(_parity_relpaths "$SCRIPT_DIR")
 
 	local msg="canonical/bundle drift detected — run ./sync.sh bundle to"
 	msg+=" regenerate the bundle from canonical, then review and commit"
-	msg+=" the result:$report"
+	msg+=" the result. Note: sync.sh's bundler only re-copies a file when its"
+	msg+=" content differs, so a MODE MISMATCH with no accompanying DIFF is"
+	msg+=" not fixed by ./sync.sh bundle — chmod the drifted file(s) to"
+	msg+=" match directly:$report"
 	[[ -z "$report" ]] || fail "$msg"
 }
 

@@ -1967,3 +1967,129 @@ GHEOF
 	done
 	[[ "$found" == "true" ]]
 }
+
+# =============================================================================
+# ISSUE #653 (task 3): a failed exec of the orchestrator must be reported as
+# a distinct non-zero failure, not silently as exit 0 with the generic
+# "Status file not created" diagnostic.
+#
+# Root cause: on hosts without a real setsid(1) (e.g. macOS), the fallback
+# defined here execs the target orchestrator via perl. Perl's `exec` RETURNS
+# instead of aborting the interpreter when exec(2) fails (e.g. a missing
+# exec bit), so a bare `exec @ARGV` falls through to the end of the perl
+# program and the interpreter exits 0 -- reporting a failed exec as a
+# clean, silent, zero-output run.
+# =============================================================================
+
+# Extract the "PORTABLE SETSID" fallback block verbatim and force its guard
+# to true, so the fallback function is defined regardless of whether this
+# test host happens to ship a real setsid(1).
+_source_setsid_fallback() {
+	local fallback_src="$TEST_TMP/setsid-fallback.bash"
+	sed -n '/^# PORTABLE SETSID/,/^fi$/p' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| sed 's/^if ! command -v setsid.*/if true; then/' \
+		> "$fallback_src"
+	source "$fallback_src"
+}
+
+@test "setsid perl fallback exits non-zero when the target fails to exec" {
+	local not_exec="$TEST_TMP/not-executable.sh"
+	cat > "$not_exec" << 'EOF'
+#!/usr/bin/env bash
+echo "should never run"
+EOF
+	chmod -x "$not_exec"
+
+	_source_setsid_fallback
+	run setsid "$not_exec"
+
+	[[ "$status" -ne 0 ]]
+}
+
+@test "setsid perl fallback exits 126 (found but not executable) on exec failure" {
+	local not_exec="$TEST_TMP/not-executable.sh"
+	cat > "$not_exec" << 'EOF'
+#!/usr/bin/env bash
+echo "should never run"
+EOF
+	chmod -x "$not_exec"
+
+	_source_setsid_fallback
+	run setsid "$not_exec"
+
+	[[ "$status" -eq 126 ]]
+}
+
+@test "setsid perl fallback names the exec failure instead of running silently" {
+	local not_exec="$TEST_TMP/not-executable.sh"
+	cat > "$not_exec" << 'EOF'
+#!/usr/bin/env bash
+echo "should never run"
+EOF
+	chmod -x "$not_exec"
+
+	_source_setsid_fallback
+	run setsid "$not_exec"
+
+	[[ "$output" == *"failed to execute"* ]]
+}
+
+@test "batch-orchestrator.sh setsid fallback no longer relies on a bare exec with no failure handling" {
+	# Guard against regressing back to `exec @ARGV` alone (which silently
+	# falls through to exit 0 on failure): the fallback must exit non-zero
+	# explicitly after a failed exec.
+	local fallback_block
+	fallback_block=$(sed -n '/^# PORTABLE SETSID/,/^fi$/p' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$fallback_block" == *"exit 126"* ]]
+}
+
+# -----------------------------------------------------------------------
+# The impl_error diagnostic set when the orchestrator's status file was
+# never written must distinguish "the process itself failed to execute"
+# (impl_exit != 0) from "it ran but produced nothing" (impl_exit == 0).
+# -----------------------------------------------------------------------
+
+# Replicate the post-fix else-branch logic (process_issue, missing status
+# file case) in pure bash so it can be verified without running the full
+# function (which requires git, gh, a live orchestrator, etc.).
+_simulate_missing_status_file_error() {
+	local impl_exit="$1"
+	local impl_error=""
+
+	if (( impl_exit != 0 )); then
+		impl_error="Orchestrator failed to execute (exit $impl_exit) — no status file was written"
+	else
+		impl_error="Status file not created"
+	fi
+
+	sim_impl_error="$impl_error"
+}
+
+@test "missing status file with non-zero orchestrator exit names the exec failure" {
+	_simulate_missing_status_file_error 126
+	[[ "$sim_impl_error" == *"failed to execute"* ]]
+}
+
+@test "missing status file with non-zero orchestrator exit includes the exit code" {
+	_simulate_missing_status_file_error 126
+	[[ "$sim_impl_error" == *"126"* ]]
+}
+
+@test "missing status file with non-zero orchestrator exit does NOT use the generic message" {
+	_simulate_missing_status_file_error 126
+	[[ "$sim_impl_error" != "Status file not created" ]]
+}
+
+@test "missing status file with zero orchestrator exit keeps the generic message" {
+	_simulate_missing_status_file_error 0
+	[[ "$sim_impl_error" == "Status file not created" ]]
+}
+
+@test "batch-orchestrator.sh distinguishes exec failure from generic missing-status-file case" {
+	grep -q 'impl_exit != 0' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "batch-orchestrator.sh exec-failure diagnostic names the exit code" {
+	grep -Fq 'Orchestrator failed to execute (exit $impl_exit)' \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
