@@ -910,6 +910,45 @@ teardown() {
     [ "$status" -eq 1 ]
 }
 
+@test "_matches_frontend_pattern is not corrupted by matching files on disk" {
+    # Regression test: the pattern loop iterates over an unquoted,
+    # word-split expansion of FRONTEND_PATH_PATTERNS. Without `set -f`,
+    # a glob pattern that happens to match real files in the cwd gets
+    # replaced by those literal filenames before the case match runs —
+    # so the loop variable is no longer the intended glob at all.
+    export FRONTEND_PATH_PATTERNS="web/src/components/*"
+    mkdir -p web/src/components
+    touch web/src/components/Alpha.tsx
+
+    # Beta.tsx does not exist on disk, but it still falls under the
+    # web/src/components/* glob and must be reported as a match.
+    run _matches_frontend_pattern "web/src/components/Beta.tsx"
+    [ "$status" -eq 0 ] || fail \
+        "pattern should match Beta.tsx even though only Alpha.tsx exists on disk"
+}
+
+@test "_matches_frontend_pattern restores globbing on every exit path" {
+    export FRONTEND_PATH_PATTERNS="web/src/components/*"
+    mkdir -p web/src/components
+    touch web/src/components/Alpha.tsx
+
+    # Call directly (not via `run`) so any leaked `set -f` would affect
+    # this shell.
+    _matches_frontend_pattern "web/src/components/Alpha.tsx"
+
+    case "$-" in
+        *f*) fail "set -f (noglob) leaked out of _matches_frontend_pattern" ;;
+    esac
+
+    # A non-matching call (early-return path) must restore it too.
+    unset FRONTEND_PATH_PATTERNS
+    _matches_frontend_pattern "web/src/components/Alpha.tsx" || true
+
+    case "$-" in
+        *f*) fail "set -f (noglob) leaked out of the empty-pattern exit path" ;;
+    esac
+}
+
 # =============================================================================
 # detect_change_scope() FRONTEND SCOPE TESTS
 # =============================================================================
