@@ -15,6 +15,16 @@
 # matches nothing, the function stays undefined, and the relevant tests fail
 # as expected (RED) until the implementation lands.
 #
+# Issue #648 added coverage for the literal name "default": no repo ships
+# agents/default.md, so before #648 the fallback branch treated "default"
+# itself as an unknown agent and warned about falling back to the value it
+# already had ("unknown agent 'default' — falling back to 'default'").  Tests
+# (11) and (12) below assert the fix — "default" resolves silently, both as
+# a direct _normalize_agent_name() call and as a `[default]` task selector —
+# while test (10) above continues to prove genuinely unknown names still
+# warn.  These stay RED until the corresponding source fix (a separate task
+# on this issue) lands in implement-issue-orchestrator.sh.
+#
 
 bats_require_minimum_version 1.5.0
 
@@ -252,6 +262,54 @@ _agent_of_first_task() {
 	}
 	[[ "$stderr" == *"totally-bogus-agent"* ]] || {
 		printf 'FAIL: WARN should mention the unknown agent name, got: %s\n' "$stderr" >&2
+		return 1
+	}
+}
+
+@test "(11) _normalize_agent_name resolves the literal 'default' silently" {
+	_source_orchestrator_functions
+
+	# "default" is the reserved fallback sentinel, not a resolvable agent —
+	# no repo ships agents/default.md.  It must short-circuit before the
+	# unknown-agent lookup, so no WARN fires for it (issue #648, AC1).
+	run --separate-stderr _normalize_agent_name "default"
+	[ "$status" -eq 0 ]
+	[ "$output" = "default" ] || {
+		printf 'FAIL: expected default, got: %q\n' "$output" >&2
+		return 1
+	}
+	[ -z "$stderr" ] || {
+		printf 'FAIL: expected no stderr for literal "default", got:\n%s\n' \
+			"$stderr" >&2
+		return 1
+	}
+}
+
+@test "(12) _parse_task_lines emits no agent warning for a '[default]' task selector" {
+	_source_orchestrator_functions
+
+	# A task line declaring [default] must produce no agent warning during
+	# parse (issue #648, AC3) — contrast with test (9), where a genuinely
+	# unknown bracketed name normalizes to "default" but still warns.  The
+	# description names a real file (not a bare trailing-slash directory) so
+	# the unrelated "No file path in task" diagnostic doesn't fire and
+	# muddy this assertion; the check below is scoped to the agent-unknown
+	# warning specifically, not "no WARN of any kind", so it stays accurate
+	# even if unrelated warnings are added to this function later.
+	local line
+	line='- [ ] `[default]` **(S)** Add coverage — `tests/agent-name-normalization.bats`'
+	run --separate-stderr _parse_task_lines "$line"
+	[ "$status" -eq 0 ]
+	[[ "$stderr" != *"unknown agent"* ]] || {
+		printf 'FAIL: did not expect an unknown-agent WARN for a [default] selector, got stderr:\n%s\n' \
+			"$stderr" >&2
+		return 1
+	}
+
+	local agent
+	agent="$(printf '%s' "$output" | jq -r '.[0].agent')"
+	[ "$agent" = "default" ] || {
+		printf 'FAIL: expected default, got: %q\n' "$agent" >&2
 		return 1
 	}
 }
