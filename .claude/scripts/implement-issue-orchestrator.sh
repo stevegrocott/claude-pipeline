@@ -485,9 +485,8 @@ check_run_budget() {
             fi
             if [[ "$_soft_warned" != "true" ]]; then
                 if [[ -f "$STATUS_FILE" ]]; then
-                    jq '.run_budget_soft_warned = true | .last_update = (now | todate)' \
-                        "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
-                        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+                    status_json_write \
+                        '.run_budget_soft_warned = true | .last_update = (now | todate)'
                 fi
                 log_warn "Run budget soft threshold reached (${soft_pct}%):" \
                     "tokens=${used_tokens}/${max_tokens}" \
@@ -757,6 +756,37 @@ emit_event() {
 # STATUS FILE MANAGEMENT
 # =============================================================================
 
+# status_json_write - Atomically update $STATUS_FILE via jq (issue #642).
+#
+# EVERY status.json write goes through here instead of a hand-rolled
+# `jq ... > "${STATUS_FILE}.tmp" && mv ...` chain.  All ~33 previous call sites
+# shared the identical hardcoded "${STATUS_FILE}.tmp" path, so two writers
+# running close together (background stages, run_stage subshells, trap
+# handlers, retried stages) could race on that one temp file — one writer's
+# half-written output clobbering or truncating the other's before its `mv`,
+# corrupting status.json or silently losing an update.  mktemp gives each call
+# its own unique temp path in the SAME directory as $STATUS_FILE, so the final
+# `mv` stays a same-filesystem atomic rename and collision-free.
+#
+# Usage: status_json_write <jq-args...>
+#   Pass exactly the arguments you would normally give `jq` BEFORE the input
+#   file (filter string, --arg, --argjson, --slurpfile, ...).  This helper
+#   always reads from and writes back to $STATUS_FILE.
+#
+# Returns non-zero and leaves $STATUS_FILE untouched if jq fails.
+status_json_write() {
+    local tmp_file
+    tmp_file=$(mktemp "${STATUS_FILE}.XXXXXX" 2>/dev/null) \
+        || tmp_file="${STATUS_FILE}.tmp.$$"
+
+    if jq "$@" "$STATUS_FILE" > "$tmp_file"; then
+        mv "$tmp_file" "$STATUS_FILE"
+    else
+        rm -f "$tmp_file"
+        return 1
+    fi
+}
+
 init_status() {
     jq -n \
         --arg state "initializing" \
@@ -838,22 +868,20 @@ update_stage() {
     local extra_value="${4:-}"
 
     if [[ -n "$extra_field" ]]; then
-        jq --arg stage "$stage" \
+        status_json_write --arg stage "$stage" \
            --arg status "$status" \
            --arg field "$extra_field" \
            --arg value "$extra_value" \
            '.stages[$stage].status = $status |
             .stages[$stage][$field] = $value |
             .current_stage = $stage |
-            .last_update = (now | todate)' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+            .last_update = (now | todate)'
     else
-        jq --arg stage "$stage" \
+        status_json_write --arg stage "$stage" \
            --arg status "$status" \
            '.stages[$stage].status = $status |
             .current_stage = $stage |
-            .last_update = (now | todate)' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+            .last_update = (now | todate)'
     fi
     sync_status_to_log
 }
@@ -984,7 +1012,9 @@ _persist_stage_call() {
     local _key
     _key=$(_stage_key "$_name")
 
-    jq --arg stage "$_key" --argjson sr "$_sr" '
+    # Best-effort write: jq's stderr stays suppressed and a failed update is
+    # swallowed, exactly as before the status_json_write refactor.
+    status_json_write --arg stage "$_key" --argjson sr "$_sr" '
         # Match the status.json vocabulary set by set_stage_completed /
         # set_stage_failed rather than the stage_result enum.
         (if ($sr.status // "") == "success" then "completed" else "error" end)
@@ -1014,10 +1044,7 @@ _persist_stage_call() {
          else . end) |
         (if ($sr.error_kind // null) != null
          then .stages[$stage].error_kind = $sr.error_kind else . end) |
-        .last_update = (now | todate)' \
-        "$STATUS_FILE" > "${STATUS_FILE}.tmp" 2>/dev/null \
-        && mv "${STATUS_FILE}.tmp" "$STATUS_FILE" \
-        || rm -f "${STATUS_FILE}.tmp"
+        .last_update = (now | todate)' 2>/dev/null || true
 }
 
 # NOTE on raw vs canonical names (issue #617): only the status.json KEY is
@@ -1036,14 +1063,13 @@ set_stage_started() {
     _STAGE_ACC_CURRENT="$stage"
     _stage_acc_reset "$stage"
 
-    jq --arg stage "$stage" \
+    status_json_write --arg stage "$stage" \
        '.stages[$stage].started_at = (now | todate) |
         .stages[$stage].status = "in_progress" |
         .current_stage = $stage |
         .stage_started_at = (now | todate) |
         .state = "running" |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
     sync_status_to_log
 
     # Resolve the model so the stage_start event satisfies the schema's
@@ -1087,7 +1113,7 @@ set_stage_completed() {
         # persistence above): thread the stage_result envelope's tokens
         # object and estimated cost onto the stage entry so per-stage spend
         # survives into status.json/metrics.json (issue #580).
-        jq --arg stage "$stage" \
+        status_json_write --arg stage "$stage" \
            --argjson tokens "$tokens_json" \
            --argjson estimated_cost "${estimated_cost:-0}" \
            --argjson is_aggregate "${is_aggregate:-false}" \
@@ -1116,13 +1142,12 @@ set_stage_completed() {
                 total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
                 total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             } |
-            .last_update = (now | todate)' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+            .last_update = (now | todate)'
     else
         # No token data for this stage — still recompute the top-level
         # cost_summary from .stages[] so it stays consistent with whatever
         # other stages have recorded (issue #580).
-        jq --arg stage "$stage" \
+        status_json_write --arg stage "$stage" \
            '.stages[$stage].completed_at = (now | todate) |
             .stages[$stage].status = "completed" |
             ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
@@ -1133,8 +1158,7 @@ set_stage_completed() {
                 total_cache_creation_tokens: ([$counted[].tokens.cache_creation_input_tokens // 0] | add // 0),
                 total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             } |
-            .last_update = (now | todate)' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+            .last_update = (now | todate)'
     fi
     sync_status_to_log
     # Schema enum for stage_end.status is ["success","error","rate_limit"];
@@ -1194,7 +1218,7 @@ set_stage_failed() {
     fi
 
     if [[ -n "$tokens_json" ]]; then
-        jq --arg stage "$stage" \
+        status_json_write --arg stage "$stage" \
            --argjson tokens "$tokens_json" \
            --argjson estimated_cost "${estimated_cost:-0}" \
            --argjson is_aggregate "${is_aggregate:-false}" \
@@ -1213,13 +1237,12 @@ set_stage_failed() {
                 total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             } |
             .state = "failed" |
-            .last_update = (now | todate)' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+            .last_update = (now | todate)'
     else
         # No accumulator data for this stage — the spend, if any, is already on
         # the run_stage call's own entry (see _apply_stage_action).  Recompute
         # the rollup anyway so it stays consistent with .stages[].
-        jq --arg stage "$stage" \
+        status_json_write --arg stage "$stage" \
            '.stages[$stage].completed_at = (now | todate) |
             .stages[$stage].status = "error" |
             ([.stages[]? | select(.cost_is_aggregate != true)]) as $counted |
@@ -1231,8 +1254,7 @@ set_stage_failed() {
                 total_cost_usd:              ([$counted[].estimated_cost // 0] | add // 0)
             } |
             .state = "failed" |
-            .last_update = (now | todate)' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+            .last_update = (now | todate)'
     fi
     sync_status_to_log
     emit_event "stage_end" "stage=$stage_name" "status=error" "error_kind=$error_kind"
@@ -1250,14 +1272,13 @@ set_run_budget_exceeded() {
     local stage
     stage=$(_stage_key "$stage_name")
     local detail="${2:-run token/cost ceiling exceeded}"
-    jq --arg stage "$stage" \
+    status_json_write --arg stage "$stage" \
        --arg detail "$detail" \
        '.stages[$stage].completed_at = (now | todate) |
         .stages[$stage].status = "budget_exceeded" |
         .state = "budget_exceeded" |
         .budget_exceeded_reason = $detail |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
     sync_status_to_log
     log_warn "Run halted: $detail (stage=$stage_name) — state set to budget_exceeded"
     emit_event "budget_exceeded" \
@@ -1304,13 +1325,12 @@ record_escalation() {
     local to_model="$3"
     local reason="$4"
 
-    jq --arg stage "$stage" \
+    status_json_write --arg stage "$stage" \
        --arg from_model "$from_model" \
        --arg to_model "$to_model" \
        --arg reason "$reason" \
        '.escalations += [{stage: $stage, from_model: $from_model, to_model: $to_model, reason: $reason}] |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
     sync_status_to_log
     emit_event "escalation" \
         "stage=$stage" \
@@ -1324,32 +1344,29 @@ update_task() {
     local status="$2"
     local review_attempts="${3:-0}"
 
-    jq --argjson id "$task_id" \
+    status_json_write --argjson id "$task_id" \
        --arg status "$status" \
        --argjson attempts "$review_attempts" \
        '(.tasks[] | select(.id == $id)).status = $status |
         (.tasks[] | select(.id == $id)).review_attempts = $attempts |
         .current_task = $id |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
     sync_status_to_log
 }
 
 set_tasks() {
     local tasks_json="$1"
-    jq --argjson tasks "$tasks_json" \
+    status_json_write --argjson tasks "$tasks_json" \
        '.tasks = $tasks |
         .stages.implement.task_progress = "0/\($tasks | length)" |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
     sync_status_to_log
 }
 
 set_branch_info() {
     local branch="$1"
-    jq --arg branch "$branch" \
-       '.branch = $branch | .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    status_json_write --arg branch "$branch" \
+       '.branch = $branch | .last_update = (now | todate)'
     sync_status_to_log
 }
 
@@ -1373,9 +1390,8 @@ set_final_state() {
         return 0
     fi
 
-    jq --arg state "$state" \
-       '.state = $state | .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    status_json_write --arg state "$state" \
+       '.state = $state | .last_update = (now | todate)'
     sync_status_to_log
     emit_event "status_change" \
         "stage=$stage" \
@@ -1394,33 +1410,29 @@ set_final_state() {
 persist_merge_blocked_reason() {
     local reason="$1"
     [[ -f "$STATUS_FILE" ]] || return 0
-    jq --arg reason "$reason" \
-       '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    status_json_write --arg reason "$reason" \
+       '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)'
     sync_status_to_log
 }
 
 increment_quality_iteration() {
-    jq '.quality_iterations += 1 |
+    status_json_write '.quality_iterations += 1 |
         .stages.quality_loop.iteration = .quality_iterations |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
     sync_status_to_log
 }
 
 increment_test_iteration() {
-    jq '.test_iterations += 1 |
+    status_json_write '.test_iterations += 1 |
         .stages.test_loop.iteration = .test_iterations |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
     sync_status_to_log
 }
 
 increment_pr_review_iteration() {
-    jq '.pr_review_iterations += 1 |
+    status_json_write '.pr_review_iterations += 1 |
         .stages.pr_review.iteration = .pr_review_iterations |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
     sync_status_to_log
 }
 
@@ -1515,10 +1527,8 @@ _rewrite_running_to_interrupted() {
 		|| stage="unknown"
 	[[ -n "$stage" && "$stage" != "null" ]] || stage="unknown"
 
-	jq --arg new_state "interrupted_during_${stage}" \
-	   '.state = $new_state | .last_update = (now | todate)' \
-	   "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
-		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+	status_json_write --arg new_state "interrupted_during_${stage}" \
+	   '.state = $new_state | .last_update = (now | todate)'
 	sync_status_to_log
 }
 
@@ -1547,9 +1557,8 @@ write_task_summary_to_status() {
     local summary
     summary=$(compute_task_summary) || return 0
 
-    jq --argjson summary "$summary" \
-       '.task_summary = $summary' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    status_json_write --argjson summary "$summary" \
+       '.task_summary = $summary'
     sync_status_to_log
 }
 
@@ -2554,9 +2563,8 @@ run_stage() {
     if [[ -f "$STATUS_FILE" ]]; then
         local stage_key
         stage_key=$(_stage_key "$stage_name")
-        jq --arg stage "$stage_key" --arg model "$model" \
-           '.stages[$stage].model = $model' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        status_json_write --arg stage "$stage_key" --arg model "$model" \
+           '.stages[$stage].model = $model'
     fi
 
     log "Running stage: $stage_name"
@@ -3541,7 +3549,7 @@ run_triage_stage() {
         }' > "$artifact"
 
     # Update status.json: triage stage details + top-level route field.
-    jq --arg route "$route" \
+    status_json_write --arg route "$route" \
        --arg confidence "$confidence" \
        --arg dq "${dq:-}" \
        '.stages.triage.route = $route |
@@ -3549,9 +3557,7 @@ run_triage_stage() {
         .stages.triage.disqualifying_criterion =
             (if $dq == "" then null else $dq end) |
         .route = $route |
-        .last_update = (now | todate)' \
-       "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
-       && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        .last_update = (now | todate)'
 
     # Issue #617: triage runs its own CLI call rather than going through
     # run_stage, so no _apply_stage_action ever fed the per-stage accumulator
@@ -3873,11 +3879,9 @@ Repeating issues:
                 if [[ -f "$STATUS_FILE" ]]; then
                     local degraded_json
                     degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | jq -R . | jq -s .)
-                    jq --arg reason "$block_reason" \
+                    status_json_write --arg reason "$block_reason" \
                        --argjson stages "$degraded_json" \
-                       '.merge_blocked_reason = $reason | .degraded_stages = $stages | .last_update = (now | todate)' \
-                       "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
-                       && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+                       '.merge_blocked_reason = $reason | .degraded_stages = $stages | .last_update = (now | todate)'
                     sync_status_to_log
                 fi
 
@@ -5277,19 +5281,16 @@ reconcile_failed_tasks_with_branch_evidence() {
 			# rewrites fields this filter names, so omitting it already
 			# preserves the recorded history without a read-back-and-
 			# reassign round trip.
-			if jq --argjson id "$recon_id" \
+			if status_json_write --argjson id "$recon_id" \
 			   '(.tasks[] | select(.id == $id)).status = "completed" |
 			    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
-			    .last_update = (now | todate)' \
-			   "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
-			   && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"; then
+			    .last_update = (now | todate)'; then
 				sync_status_to_log
 				reconciled=$((reconciled + 1))
 			else
 				log_warn "reconcile_failed_tasks_with_branch_evidence:" \
 					"failed to persist reconciliation for task $recon_id" \
 					"— leaving it recorded as failed"
-				rm -f "${STATUS_FILE}.tmp"
 			fi
 		else
 			log "Task $recon_id remains failed —" \
@@ -5446,22 +5447,21 @@ revalidate_partial_block_against_branch() {
 		reval_lacking=$(_lacking_evidence_summary)
 		local reval_reason
 		reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking file evidence: ${reval_lacking}}."
-		jq --arg reason "$reval_reason" \
+		status_json_write --arg reason "$reval_reason" \
 			'if ((.merge_blocked_reason // "")
 					| (. == "" or startswith("Partial implementation:")))
 			 then .merge_blocked_reason = $reason
 			 else . end
-			 | .last_update = (now | todate)' \
-			"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+			 | .last_update = (now | todate)'
 	else
 		log "Gate re-evaluation: all ${reval_total} task(s) evidenced on the branch" \
 			"(${reval_reconciled} reconciled here) —" \
 			"clearing stale partial merge block."
-		jq 'if ((.merge_blocked_reason // "") | startswith("Partial implementation:"))
+		status_json_write \
+			'if ((.merge_blocked_reason // "") | startswith("Partial implementation:"))
 			 then .merge_blocked_reason = null
 			 else . end
-			 | .last_update = (now | todate)' \
-			"$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+			 | .last_update = (now | todate)'
 	fi
 	sync_status_to_log
 }
@@ -5618,21 +5618,18 @@ reconcile_noncommit_tasks_with_deliverables() {
 				"recording failed."
 		fi
 
-		if jq --argjson id "$nc_id" \
+		if status_json_write --argjson id "$nc_id" \
 			--arg st "$nc_new_status" \
 			'(.tasks[] | select(.id == $id)).status = $st |
 			 (.tasks[] | select(.id == $id)).deliverable_verified =
 				($st == "completed") |
-			 .last_update = (now | todate)' \
-			"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
-			&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"; then
+			 .last_update = (now | todate)'; then
 			sync_status_to_log
 			delta=$((delta + nc_step))
 		else
 			log_warn "reconcile_noncommit_tasks_with_deliverables:" \
 				"failed to persist the verdict for task $nc_id" \
 				"— leaving its recorded status unchanged"
-			rm -f "${STATUS_FILE}.tmp"
 		fi
 	done <<< "$rows"
 
@@ -8939,9 +8936,8 @@ main() {
         tasks_json="$RESUME_TASKS_JSON"
 
         # Update status to indicate resumption
-        jq --arg state "running" \
-           '.state = $state | .last_update = (now | todate)' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        status_json_write --arg state "running" \
+           '.state = $state | .last_update = (now | todate)'
         sync_status_to_log
 
         # Comment on issue about resumption
@@ -9449,13 +9445,9 @@ $task_list_md
 $impl_summary" "$tagent"
 
                 # Update progress
-                jq --arg progress \
+                status_json_write --arg progress \
                     "$completed_tasks/$task_count" \
-                    '.stages.implement.task_progress = $progress | .last_update = (now | todate)' \
-                    "$STATUS_FILE" \
-                    > "${STATUS_FILE}.tmp" \
-                    && mv "${STATUS_FILE}.tmp" \
-                    "$STATUS_FILE"
+                    '.stages.implement.task_progress = $progress | .last_update = (now | todate)'
                 sync_status_to_log
             done
 
@@ -9716,9 +9708,8 @@ $impl_summary" "$tagent"
                 local _lacking_evidence _reason
                 _lacking_evidence=$(_lacking_evidence_summary)
                 _reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking file evidence: ${_lacking_evidence}}."
-                jq --arg reason "$_reason" \
-                   '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)' \
-                   "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+                status_json_write --arg reason "$_reason" \
+                   '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)'
                 sync_status_to_log
             fi
 
@@ -9784,7 +9775,8 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
                     "✅ All tasks for this issue were already completed in a prior run. No new changes are needed. Closing as done." \
                     "default"
                 set_final_state "already_implemented"
-                jq '.task_summary.sp_completed = 0 | .task_summary.sp_total = 0' status.json > status.json.tmp && mv status.json.tmp status.json
+                status_json_write \
+                    '.task_summary.sp_completed = 0 | .task_summary.sp_total = 0'
                 exit 0
             fi
         fi
@@ -10134,9 +10126,8 @@ $pr_creation_skill}"
         log "PR #$pr_number created/updated"
 
         # Store PR info in status
-        jq --argjson pr "$pr_number" \
-           '.stages.pr.pr_number = $pr | .last_update = (now | todate)' \
-           "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+        status_json_write --argjson pr "$pr_number" \
+           '.stages.pr.pr_number = $pr | .last_update = (now | todate)'
         sync_status_to_log
         set_stage_completed "pr"
     fi
@@ -11031,7 +11022,8 @@ $dv_summary" \
     if (( ${#DEGRADED_STAGES[@]} > 0 )); then
         local degraded_json
         degraded_json=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | jq -R . | jq -s .)
-        jq --argjson degraded "$degraded_json" '.degraded_stages = $degraded' "$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+        status_json_write --argjson degraded "$degraded_json" \
+            '.degraded_stages = $degraded'
     fi
 
     # Copy final status to log dir
