@@ -379,6 +379,93 @@ _make_fake_consumer() {
 }
 
 # =============================================================================
+# Consumer with no .claude/agents/ (issue #641)
+#
+# patch_agents() guards on .claude/agents/ existing with
+# `[[ -d "$agents_dir" ]] || return`. A bare `return` propagates the failed
+# `[[ -d ]]` test's own exit status (1), and patch_agents is the last call in
+# the `to` branch, so that 1 becomes sync.sh's own exit status even though
+# every file synced correctly. All nine local consumers happen to have an
+# agents/ dir, so this only bites a brand-new consumer being onboarded.
+# =============================================================================
+
+# A throwaway consumer shaped like a brand-new onboarding: a .claude/ with no
+# agents/ subdirectory at all — patch_agents's not-applicable case.
+_make_fake_consumer_no_agents() {
+	CONSUMER="$TEST_TMP/consumer-no-agents"
+	mkdir -p "$CONSUMER/.claude"
+}
+
+@test "(#641 AC1) sync.sh to exits 0 against a consumer with no .claude/agents/" {
+	_make_fake_pipeline
+	_make_fake_consumer_no_agents
+
+	[[ ! -d "$CONSUMER/.claude/agents" ]] || {
+		printf 'FAIL: fixture unexpectedly has an agents/ dir\n' >&2
+		return 1
+	}
+
+	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: sync to exited %d against an agents-less consumer:\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+}
+
+@test "(#641 AC2) that sync still writes .claude/config/ and .claude/hooks/" {
+	_make_fake_pipeline
+	_make_fake_consumer_no_agents
+
+	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
+	[ "$status" -eq 0 ] || {
+		printf 'sync to exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ -f "$CONSUMER/.claude/config/platform.sh" ]] || {
+		printf 'FAIL: config/platform.sh was not synced\n' >&2
+		return 1
+	}
+
+	local hooks_written
+	hooks_written=$(find "$CONSUMER/.claude/hooks" -type f 2>/dev/null | wc -l)
+	hooks_written=${hooks_written// /}
+	(( hooks_written > 0 )) || {
+		printf 'FAIL: no hooks were synced to the agents-less consumer\n' >&2
+		return 1
+	}
+}
+
+# AC4: pin the fix at its defect site, not just its symptom. Re-widen the
+# guard back to a bare `return` (the #641 regression) and confirm THIS test
+# suite catches it — mirrors the (#632 AC3) pattern above, where the fixture
+# proves the specific line is what stops the regression.
+@test "(#641 AC4) a bare 'return' in the patch_agents guard fails this suite" {
+	_make_fake_pipeline
+	_make_fake_consumer_no_agents
+
+	sed 's/\[\[ -d "\$agents_dir" \]\] || return 0/[[ -d "$agents_dir" ]] || return/' \
+		"$TEST_TMP/sync.sh" > "$TEST_TMP/sync-regressed.sh"
+	grep -qF '[[ -d "$agents_dir" ]] || return' \
+		"$TEST_TMP/sync-regressed.sh" || {
+		printf 'FAIL: regression fixture did not reintroduce the bare return\n' >&2
+		return 1
+	}
+	! grep -qF '[[ -d "$agents_dir" ]] || return 0' \
+		"$TEST_TMP/sync-regressed.sh" || {
+		printf 'FAIL: regression fixture still has the fixed "return 0"\n' >&2
+		return 1
+	}
+
+	run bash "$TEST_TMP/sync-regressed.sh" to "$CONSUMER"
+	[ "$status" -ne 0 ] || {
+		printf 'FAIL: regressed guard did not reproduce the exit-1 bug\n' >&2
+		return 1
+	}
+}
+
+# =============================================================================
 # Bundle regeneration inside the pipeline (issue #632, second gap)
 #
 # `./sync.sh bundle` is the generator, but nothing in the pipeline ran it, so
