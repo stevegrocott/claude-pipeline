@@ -7152,15 +7152,25 @@ _matches_frontend_pattern() {
     fi
 
     local pattern
+    local rc=1
     local IFS='|'
+
+    # The unquoted expansion below is word-split on IFS so each
+    # pattern becomes its own loop item. Without `set -f`, bash would
+    # also pathname-expand (glob) each word against files in the cwd,
+    # silently replacing a pattern like "web/src/*" with whatever real
+    # filenames happen to match it. Disable globbing for the loop and
+    # restore it unconditionally afterward, however we exit.
+    set -f
     for pattern in $FRONTEND_PATH_PATTERNS; do
         # shellcheck disable=SC2254
         case "$file" in
-            $pattern) return 0 ;;
+            $pattern) rc=0; break ;;
         esac
     done
+    set +f
 
-    return 1
+    return "$rc"
 }
 
 # Filter a newline-delimited file list to only implementation-relevant files.
