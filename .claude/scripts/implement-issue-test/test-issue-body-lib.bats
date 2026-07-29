@@ -126,8 +126,7 @@ valid_body() {
 @test "assert_issue_valid: accepts a bracketed App Router path ([step]/page.tsx)" {
 	# Defect 1 — the extractor char class must admit '[' ']' segments so the
 	# whole backtick token is not silently dropped.  Ancestor exists → resolves.
-	# mkdir depth kept within the 2-missing-segment ancestor-walk bound (#630).
-	mkdir -p "$ISSUE_BODY_REPO_ROOT/apps/frontend/src/app/onboarding"
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/apps/frontend/src/app"
 	local body
 	body="## Implementation Tasks
 
@@ -142,8 +141,7 @@ valid_body() {
 
 @test "assert_issue_valid: accepts a parenthesised route-group path ((public)/login/page.tsx)" {
 	# Defect 1 — '(' ')' route-group segments must match too.
-	# mkdir depth kept within the 2-missing-segment ancestor-walk bound (#630).
-	mkdir -p "$ISSUE_BODY_REPO_ROOT/apps/frontend/src/app/(public)"
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/apps/frontend/src/app"
 	local body
 	body="## Implementation Tasks
 
@@ -334,10 +332,10 @@ Some prose but no task checkboxes.
 	[ "$status" -eq 0 ]
 }
 
-@test "assert_issue_valid: fails when a path invents exactly 3 trailing segments beyond an existing ancestor" {
+@test "assert_issue_valid: accepts a path inventing exactly 3 trailing segments beyond an existing ancestor" {
 	# Boundary case — only 'src/' exists; 'made/up/file.ts' is exactly 3
-	# missing trailing segments, one past the bound, so this must not
-	# validate merely because 'src/' happens to exist.
+	# missing trailing segments, which is the bound (#630): a new framework
+	# route legitimately invents a feature dir, a dynamic segment and a file.
 	mkdir -p "$ISSUE_BODY_REPO_ROOT/src"
 	local body
 	body="## Implementation Tasks
@@ -348,8 +346,25 @@ Some prose but no task checkboxes.
 
 - [ ] done"
 	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: fails when a path invents 4 trailing segments beyond an existing ancestor" {
+	# One past the bound — only 'src/' exists and 'totally/made/up/file.ts' is
+	# four missing trailing segments, so it must not validate merely because
+	# 'src/' happens to exist (AC1).
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/src"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(M)** Edit — \`src/totally/made/up/file.ts\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"src/made/up/file.ts"* ]]
+	[[ "$output" == *"src/totally/made/up/file.ts"* ]]
 }
 
 @test "assert_issue_valid: fails when a path invents more than 2 trailing segments beyond an existing ancestor" {

@@ -274,13 +274,19 @@ _issue_body_extract_paths() {
 # `app/api/register/` does not yet — one missing trailing segment before the
 # file itself).
 #
-# The walk is bounded to at most 2 missing trailing segments (issue #630):
+# The walk is bounded to at most 3 missing trailing segments (issue #630):
 # unbounded ancestor walking made criterion 3 nearly unfalsifiable, since any
 # token rooted under an existing top-level directory (e.g.
-# `src/totally/made/up/file.ts` when only `src/` exists) would resolve no
-# matter how many invented directories separated it from that ancestor.
-# Bounding the walk keeps the genuinely-new-file/new-subdirectory cases
-# working while rejecting wholly invented deep paths.
+# `src/totally/made/up/file.ts` when only `src/` exists — four missing
+# segments) would resolve no matter how many invented directories separated it
+# from that ancestor.  Bounding the walk keeps the genuinely-new-file and
+# new-subdirectory cases working while rejecting wholly invented deep paths.
+#
+# Three rather than two: a new framework route legitimately invents three
+# trailing segments below a real ancestor — `app/(public)/shared-scenario/
+# [token]/page.tsx` beneath an existing `app/(public)/` invents the feature
+# directory, the dynamic segment and the file.  A bound of two rejected those,
+# regressing real open issue bodies in consuming repos (AC4).
 #
 # Arguments:
 #   $1 - extracted path token
@@ -292,7 +298,14 @@ _issue_body_extract_paths() {
 _issue_body_path_resolves() {
 	local path="$1" repo_root="$2" parent
 	local -i missing=0
-	local -ir max_missing_segments=2
+	# 3, not 2: a brand-new framework route legitimately invents three trailing
+	# segments below an existing ancestor — e.g. a Next.js App Router page at
+	# `app/(public)/shared-scenario/[token]/page.tsx` beneath an existing
+	# `app/(public)/` invents the feature dir, the dynamic segment and the file.
+	# A bound of 2 rejects those, which regressed real open issue bodies in
+	# consuming repos (see #630 AC4). Four or more remains rejected, so the
+	# wholly-invented `src/totally/made/up/file.ts` case still fails.
+	local -ir max_missing_segments=3
 	[[ -e "$repo_root/$path" ]] && return 0
 	parent="$path"
 	while [[ "$parent" == */* ]] && ((missing < max_missing_segments)); do
