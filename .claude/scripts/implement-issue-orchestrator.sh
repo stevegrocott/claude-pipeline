@@ -836,6 +836,8 @@ _status_lock_release() {
 # Returns non-zero and leaves $STATUS_FILE untouched if jq fails or the lock
 # times out.
 status_json_write() {
+    [[ -f "$STATUS_FILE" ]] || printf '{}' > "$STATUS_FILE"
+
     local tmp_file
     tmp_file=$(mktemp "${STATUS_FILE}.XXXXXX" 2>/dev/null) \
         || tmp_file="${STATUS_FILE}.tmp.$$"
@@ -5250,10 +5252,10 @@ _file_set_contained() {
 # AND a green test suite — file evidence alone cannot attribute a shared
 # diff to the task that produced it. Two conjuncts guard against that:
 #   - tests_green: derived from the in-memory DEGRADED_STAGES markers
-#     test_loop records this run (test:full_suite_red /
-#     test:bats_full_suite_red). Same limitation as every other
-#     DEGRADED_STAGES-based gate check in this file: invisible on a resumed
-#     run where test_loop completed in an earlier process.
+#     test_loop records this run — the Jest and BATS full-suite-red
+#     variants. Same limitation as every other DEGRADED_STAGES-based gate
+#     check in this file: invisible on a resumed run where test_loop
+#     completed in an earlier process.
 #   - containment: when several tasks declare the same file(s) — e.g. tasks
 #     1-3 of #620 all declaring implement-issue-orchestrator.sh — branch
 #     evidence for that file cannot tell which task's work it reflects. A
@@ -5284,7 +5286,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 	local ds_marker
 	for ds_marker in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
 		case "$ds_marker" in
-			test:full_suite_red|test:bats_full_suite_red)
+			test:*full_suite_red)
 				tests_green=0
 				break
 				;;
