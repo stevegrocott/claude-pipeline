@@ -56,7 +56,20 @@ if ! command -v setsid &>/dev/null; then
     setsid() {
         # Call setsid(2) via perl then exec the target command so that the
         # caller's $! resolves to the exec'd process (pid == pgid == sid).
-        exec perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- "$@"
+        #
+        # Perl's `exec` RETURNS (rather than aborting the interpreter) when
+        # the target can't be exec'd -- e.g. a missing exec bit -- so a bare
+        # `exec @ARGV` falls through to the end of the program and perl
+        # exits 0. That masked a non-executable orchestrator as a clean,
+        # silent, zero-output run (issue #653). Detect the fallthrough
+        # explicitly and exit 126 ("command found but not executable"),
+        # matching the shell's own convention for this error class.
+        exec perl -MPOSIX -e '
+            POSIX::setsid();
+            exec @ARGV;
+            print STDERR "setsid: failed to execute $ARGV[0]: $!\n";
+            exit 126;
+        ' -- "$@"
     }
 fi
 
@@ -1334,7 +1347,20 @@ process_issue() {
             fi
         fi
     else
-        impl_error="Status file not created"
+        # Distinguish "the orchestrator process never even started" from
+        # "it ran but exited before writing a status file" -- the former
+        # is a distinct, actionable failure (bad exec bit, bad interpreter,
+        # etc.) and must not be reported with the same generic diagnostic
+        # as the latter (issue #653).
+        if (( impl_exit != 0 )); then
+            impl_error="Orchestrator failed to execute (exit $impl_exit) — no status file was written"
+            log_error \
+                "Issue #$issue_num: implement-issue-orchestrator.sh failed" \
+                "to execute (exit $impl_exit); check its file mode and" \
+                "interpreter"
+        else
+            impl_error="Status file not created"
+        fi
     fi
 
     log "implement-issue status: $impl_status, PR: ${pr_number:-none}"
