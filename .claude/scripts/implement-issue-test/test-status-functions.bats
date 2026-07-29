@@ -388,3 +388,121 @@ teardown() {
     # No stray status.json should appear in the worktree subdirectory
     [ ! -f "./status.json" ]
 }
+
+# =============================================================================
+# CONCURRENT WRITERS (issue #642)
+#
+# status_json_write() gives every write its own mktemp temp path, which stops
+# two overlapping writers from clobbering each other's temp FILE -- it does
+# not, on its own, stop two overlapping read-modify-write cycles from losing
+# an update (writer B's jq read can predate writer A's mv, so B's write
+# silently overwrites A's). These tests drive REAL concurrent writers
+# (background subshells + wait) against one status.json and assert neither
+# failure mode from #642 occurs: a lost update, or a malformed status.json.
+# =============================================================================
+
+# Wait for a set of background PIDs, with a hard deadline so a stuck/
+# deadlocked writer fails the test instead of hanging the whole suite.
+# Usage: _wait_pids_or_fail <timeout_secs> <pid> [pid...]
+_wait_pids_or_fail() {
+    local timeout_secs="$1"
+    shift
+    local deadline=$((SECONDS + timeout_secs))
+    local pid
+    for pid in "$@"; do
+        while kill -0 "$pid" 2>/dev/null; do
+            if ((SECONDS >= deadline)); then
+                kill -9 "$pid" 2>/dev/null
+                fail "PID $pid did not finish within ${timeout_secs}s" \
+                    "(possible deadlock/stale lock)"
+            fi
+            sleep 0.1
+        done
+        wait "$pid"
+    done
+}
+
+@test "status_json_write: concurrent increments of the same counter are not lost" {
+    init_status
+
+    local n=20
+    local -a pids=()
+    local i
+    for ((i = 1; i <= n; i++)); do
+        increment_quality_iteration &
+        pids+=("$!")
+    done
+    _wait_pids_or_fail 30 "${pids[@]}"
+
+    jq -e '.' "$STATUS_FILE" >/dev/null 2>&1 \
+        || fail "status.json is not valid JSON after concurrent writers"
+
+    local count
+    count=$(jq -r '.quality_iterations' "$STATUS_FILE")
+    [ "$count" = "$n" ] || fail \
+        "expected quality_iterations=$n after $n concurrent increments," \
+        "got $count instead (an update was lost to a write race)"
+}
+
+@test "status_json_write: two concurrent writers to distinct fields both land their updates" {
+    init_status
+
+    (status_json_write --arg v "writer-a" '.merge_blocked_reason = $v') &
+    local pid_a=$!
+    (status_json_write --arg v "writer-b" '.branch = $v') &
+    local pid_b=$!
+    _wait_pids_or_fail 15 "$pid_a" "$pid_b"
+
+    jq -e '.' "$STATUS_FILE" >/dev/null 2>&1 \
+        || fail "status.json is not valid JSON after concurrent writers"
+
+    local reason branch
+    reason=$(jq -r '.merge_blocked_reason' "$STATUS_FILE")
+    branch=$(jq -r '.branch' "$STATUS_FILE")
+    [ "$reason" = "writer-a" ] || fail "writer-a's update is missing, got: $reason"
+    [ "$branch" = "writer-b" ] || fail "writer-b's update is missing, got: $branch"
+}
+
+@test "status.json stays valid JSON and both stages land after a parallel post-task-style run" {
+    # Mirrors run_parallel_post_task_stages: two independent stages started
+    # and completed from concurrent subshells (issue #642 AC2).
+    init_status
+
+    (
+        set_stage_started "e2e_verify"
+        set_stage_completed "e2e_verify"
+    ) &
+    local pid_e2e=$!
+    (
+        set_stage_started "acceptance_test"
+        set_stage_completed "acceptance_test"
+    ) &
+    local pid_accept=$!
+    _wait_pids_or_fail 15 "$pid_e2e" "$pid_accept"
+
+    jq -e '.' "$STATUS_FILE" >/dev/null 2>&1 \
+        || fail "status.json is not valid JSON after a parallel stage run"
+
+    local e2e_status accept_status
+    e2e_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    accept_status=$(jq -r '.stages.acceptance_test.status' "$STATUS_FILE")
+    [ "$e2e_status" = "completed" ] || fail "e2e_verify update is missing: $e2e_status"
+    [ "$accept_status" = "completed" ] || fail "acceptance_test update is missing: $accept_status"
+}
+
+@test "status_json_write: many concurrent writers never leave status.json truncated or corrupt" {
+    init_status
+
+    local n=30
+    local -a pids=()
+    local i
+    for ((i = 1; i <= n; i++)); do
+        update_stage "stress" "in_progress" "iter" "$i" &
+        pids+=("$!")
+    done
+    _wait_pids_or_fail 30 "${pids[@]}"
+
+    [ -s "$STATUS_FILE" ] || fail "status.json is empty after concurrent writers"
+    jq -e '.' "$STATUS_FILE" >/dev/null 2>&1 \
+        || fail "status.json is not valid JSON after $n concurrent writers"
+}
