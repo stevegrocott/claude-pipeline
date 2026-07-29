@@ -950,6 +950,81 @@ teardown() {
 }
 
 # =============================================================================
+# _matches_frontend_pattern() DISK-PREFIX REGRESSION TESTS (issue #650)
+#
+# The existing cases above all use a "web/..." prefix that never exists on
+# disk in the test sandbox, so an unquoted pattern list has nothing to
+# pathname-expand and the bug stays invisible. These cases create the
+# pattern's prefix directory for real (cwd is $TEST_TMP/repo, a git repo)
+# so a regression to unquoted expansion is caught: bash would replace the
+# pattern with literal directory entries before `case` ever sees it, and
+# any nested path would silently stop matching.
+# =============================================================================
+
+@test "_matches_frontend_pattern matches a nested path when the pattern's prefix exists on disk" {
+    export FRONTEND_PATH_PATTERNS="apps/frontend/*"
+
+    mkdir -p apps/frontend/src/components apps/backend
+    touch apps/frontend/components.json apps/frontend/Containerfile
+
+    run _matches_frontend_pattern "apps/frontend/src/components/Foo.tsx"
+    [ "$status" -eq 0 ] || fail \
+        "nested path under an on-disk prefix should match; got status $status"
+}
+
+@test "_matches_frontend_pattern still matches a top-level path when the prefix exists on disk" {
+    export FRONTEND_PATH_PATTERNS="apps/frontend/*"
+
+    mkdir -p apps/frontend/src/components apps/backend
+    touch apps/frontend/components.json apps/frontend/Containerfile
+
+    run _matches_frontend_pattern "apps/frontend/components.json"
+    [ "$status" -eq 0 ] || fail \
+        "top-level path under an on-disk prefix should match; got status $status"
+}
+
+@test "_matches_frontend_pattern still rejects a non-matching path when the prefix exists on disk" {
+    export FRONTEND_PATH_PATTERNS="apps/frontend/*"
+
+    mkdir -p apps/frontend/src/components apps/backend/src/routes
+    touch apps/frontend/components.json apps/frontend/Containerfile
+
+    run _matches_frontend_pattern "apps/backend/src/routes/crops.ts"
+    [ "$status" -eq 1 ] || fail \
+        "non-matching path should still be rejected; got status $status"
+}
+
+@test "_matches_frontend_pattern restores pathname expansion after a match" {
+    export FRONTEND_PATH_PATTERNS="apps/frontend/*"
+
+    mkdir -p apps/frontend/src/components
+    touch apps/frontend/components.json apps/frontend/Containerfile
+
+    # Not wrapped in `run`: a direct non-zero return would fail the test
+    # body itself, and only the post-call shell option state (`$-`) is
+    # under test here — the match outcome is covered separately above.
+    _matches_frontend_pattern "apps/frontend/src/components/Foo.tsx" || true
+
+    [[ "$-" != *f* ]] || fail \
+        "globbing (set -f) should be restored after a matching call"
+}
+
+@test "_matches_frontend_pattern restores pathname expansion after a non-match" {
+    export FRONTEND_PATH_PATTERNS="apps/frontend/*"
+
+    mkdir -p apps/frontend/src/components apps/backend
+    touch apps/frontend/components.json apps/frontend/Containerfile
+
+    # Not wrapped in `run`: a direct non-zero return would fail the test
+    # body itself, and only the post-call shell option state (`$-`) is
+    # under test here — the reject outcome is covered separately above.
+    _matches_frontend_pattern "apps/backend/index.ts" || true
+
+    [[ "$-" != *f* ]] || fail \
+        "globbing (set -f) should be restored after a non-matching call"
+}
+
+# =============================================================================
 # detect_change_scope() FRONTEND SCOPE TESTS
 # =============================================================================
 
