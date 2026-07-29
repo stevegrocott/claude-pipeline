@@ -2563,3 +2563,145 @@ EOF
         return 1
     }
 }
+
+# =============================================================================
+# INCOMPLETE BATS VERDICT — degraded, non-blocking (issue #666)
+#
+# A BATS suite forced to report before it reaches an exit code has no honest
+# way to say "passed" or "failed" — the schema's `incomplete` enum value
+# (added for this issue) exists so it doesn't have to. run_test_loop checks
+# bats_result on every iteration and, when it is 'incomplete', appends a
+# `test:bats_incomplete:iter=N` marker to DEGRADED_STAGES and posts an issue
+# comment — the same non-blocking DEGRADED_STAGES + comment_issue path the
+# full-suite BATS guard above already uses for `test:bats_full_suite_red` —
+# without touching test_status or loop_complete, so the run still finishes.
+#
+# These tests pin that contract:
+#   - static: the marker string is wired into the orchestrator source.
+#   - functional: driving the real run_test_loop with a stubbed run_stage
+#     that reports bats_result: incomplete records the marker; the same loop
+#     fed bats_result: passed or failed does NOT — proving "incomplete" is a
+#     distinct, non-passing outcome rather than being folded into either.
+# =============================================================================
+
+@test "run_test_loop wires test:bats_incomplete degraded marker into DEGRADED_STAGES" {
+	# Static: the orchestrator must append the bats-incomplete marker exactly
+	# once bats_result is 'incomplete' (issue #666).
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_incomplete:iter=$test_iteration")'* ]] || \
+		fail "Orchestrator must append test:bats_incomplete:iter=N to DEGRADED_STAGES on an incomplete BATS verdict"
+}
+
+# Minimal git fixture run_test_loop needs for its own git-diff-based
+# changed-file detection, independent of the pre-computed scope passed as its
+# 4th argument. Mirrors the fixture in test-smart-test-targeting.bats.
+_setup_bats_incomplete_repo() {
+	local feature_branch="$1"
+	mkdir -p "$TEST_TMP/repo"
+	cd "$TEST_TMP/repo" || return 1
+	git init -q
+	git checkout -q -b "$BASE_BRANCH"
+	echo "initial" > README.md
+	git add README.md
+	git commit -q -m initial
+	git checkout -q -b "$feature_branch"
+	echo "changed" > file.ts
+	git add file.ts
+	git commit -q -m "feature change"
+
+	comment_issue() { :; }
+	export -f comment_issue
+}
+
+@test "run_test_loop records test:bats_incomplete when bats_result is 'incomplete'" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-incomplete"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"651/2131 executed before forced report","validation_result":"skipped","bats_result":"incomplete","bats_summary":"651/2131 executed; 4 failures so far; remainder not run"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-incomplete" "" "mixed"
+
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_incomplete:iter=1' || \
+		fail "Expected test:bats_incomplete:iter=1 in DEGRADED_STAGES; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+@test "run_test_loop records test:bats_incomplete in status.json degraded_stages (visible to the merge gate)" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-incomplete-status"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"partial run","validation_result":"skipped","bats_result":"incomplete","bats_summary":"partial"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-incomplete-status" "" "mixed"
+
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+	local degraded_json
+	degraded_json=$(printf '%s\n' \
+		"${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| jq -R . | jq -s .)
+	jq --argjson degraded "$degraded_json" \
+		'.degraded_stages = $degraded' "$STATUS_FILE" \
+		> "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	run jq -r '.degraded_stages[]' "$STATUS_FILE"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"test:bats_incomplete:iter=1"* ]] || \
+		fail "Expected test:bats_incomplete:iter=1 in status.json .degraded_stages; got: $output"
+}
+
+@test "run_test_loop records NO bats_incomplete marker when bats_result is 'passed' (distinguishable from a pass)" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-passed"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"2131/2131 executed","validation_result":"skipped","bats_result":"passed","bats_summary":"all green"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-passed" "" "mixed"
+
+	local marker
+	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
+	[ "$marker" -eq 0 ] || \
+		fail "A fully-executed passing BATS run must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+@test "run_test_loop records NO bats_incomplete marker when bats_result is 'failed' (distinguishable from incomplete)" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-failed"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"observed failures","validation_result":"skipped","bats_result":"failed","bats_summary":"3 observed failures, run completed"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-failed" "" "mixed"
+
+	local marker
+	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
+	[ "$marker" -eq 0 ] || \
+		fail "A completed (though failed) BATS run must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
