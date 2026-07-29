@@ -267,25 +267,39 @@ _issue_body_extract_paths() {
 
 #
 # Resolves an extracted token against the repo: true (0) if the token itself
-# exists, or ANY ancestor directory exists.  Walking ancestors (not just the
-# immediate parent) lets a new file in a not-yet-existing subdirectory validate
-# so long as some ancestor is real (e.g. `app/api/register/route.ts` resolves
-# when `app/api/` exists but `app/api/register/` does not yet).
+# exists, or a NEAR ancestor directory exists.  Walking ancestors (not just
+# the immediate parent) lets a new file in a not-yet-existing subdirectory
+# validate so long as a nearby ancestor is real (e.g.
+# `app/api/register/route.ts` resolves when `app/api/` exists but
+# `app/api/register/` does not yet — one missing trailing segment before the
+# file itself).
+#
+# The walk is bounded to at most 2 missing trailing segments (issue #630):
+# unbounded ancestor walking made criterion 3 nearly unfalsifiable, since any
+# token rooted under an existing top-level directory (e.g.
+# `src/totally/made/up/file.ts` when only `src/` exists) would resolve no
+# matter how many invented directories separated it from that ancestor.
+# Bounding the walk keeps the genuinely-new-file/new-subdirectory cases
+# working while rejecting wholly invented deep paths.
 #
 # Arguments:
 #   $1 - extracted path token
 #   $2 - repo root
 # Returns:
-#   0 if the token or an ancestor directory exists, 1 otherwise
+#   0 if the token or a near ancestor directory (within the bound) exists,
+#   1 otherwise
 #
 _issue_body_path_resolves() {
 	local path="$1" repo_root="$2" parent
+	local -i missing=0
+	local -ir max_missing_segments=2
 	[[ -e "$repo_root/$path" ]] && return 0
 	parent="$path"
-	while [[ "$parent" == */* ]]; do
+	while [[ "$parent" == */* ]] && ((missing < max_missing_segments)); do
 		parent="${parent%/*}"
 		[[ -z "$parent" ]] && break
 		[[ -d "$repo_root/$parent" ]] && return 0
+		((missing++))
 	done
 	return 1
 }
