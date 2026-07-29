@@ -64,6 +64,18 @@ setup_test_env() {
         cp "$SCRIPT_DIR/../config/platform.sh" "$TEST_TMP/.claude/config/platform.sh"
     fi
 
+    # Copy resolve-pipeline-root.sh — every platform/*.sh wrapper sources
+    # "$SCRIPT_DIR/../resolve-pipeline-root.sh" (one level up from platform/),
+    # so it must live at TEST_TMP/.claude/scripts/resolve-pipeline-root.sh
+    # for comment-issue.sh / comment-mr.sh to source successfully.
+    # Unrelated to #652 — pre-existing test-infra gap found while running the
+    # full suite for this branch; called out here rather than split out since
+    # it's additive and guarded by the -f check below.
+    if [[ -f "$SCRIPT_DIR/resolve-pipeline-root.sh" ]]; then
+        mkdir -p "$TEST_TMP/.claude/scripts"
+        cp "$SCRIPT_DIR/resolve-pipeline-root.sh" "$TEST_TMP/.claude/scripts/resolve-pipeline-root.sh"
+    fi
+
     # Copy platform wrapper scripts
     # Preserve directory structure: TEST_TMP/.claude/scripts/platform/
     if [[ -d "$SCRIPT_DIR/platform" ]]; then
