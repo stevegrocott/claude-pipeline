@@ -312,6 +312,44 @@ Some prose but no task checkboxes.
 	[ "$status" -eq 0 ]
 }
 
+# --- Issue #630: bound the ancestor walk to at most 2 missing trailing
+# segments, so a genuinely new file still resolves but a wholly invented
+# deep path no longer does merely because some far ancestor exists. ---
+
+@test "assert_issue_valid: accepts a path with exactly 2 new trailing segments under an existing ancestor" {
+	# AC2 — 'app/api/' exists; 'register/route.ts' (a new dir plus a new
+	# file) is exactly 2 missing trailing segments, still within bound.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/app/api"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Add the route handler — \`app/api/register/route.ts\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: fails when a path invents more than 2 trailing segments beyond an existing ancestor" {
+	# AC1 — only 'src/' exists; 'totally/made/up/file.ts' is 4 missing
+	# trailing segments, well past the bound, so this must no longer
+	# validate merely because 'src/' happens to exist.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/src"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(M)** Edit — \`src/totally/made/up/file.ts\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"src/totally/made/up/file.ts"* ]]
+}
+
 # =============================================================================
 # assert_issue_valid() — CRITERION 4: AC present
 # =============================================================================
