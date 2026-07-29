@@ -506,7 +506,7 @@ patch_agents() {
 	local dst="$1"
 	local agents_dir="$dst/agents"
 
-	[[ -d "$agents_dir" ]] || return
+	[[ -d "$agents_dir" ]] || return 0
 
 	local file first_line tmp
 	local patched=0
