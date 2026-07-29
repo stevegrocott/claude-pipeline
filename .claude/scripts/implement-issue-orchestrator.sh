@@ -5159,8 +5159,8 @@ _file_set_contained() {
 # AND a green test suite — file evidence alone cannot attribute a shared
 # diff to the task that produced it. Two conjuncts guard against that:
 #   - tests_green: derived from the in-memory DEGRADED_STAGES markers
-#     test_loop records this run (test:full_suite_red / the full-suite
-#     BATS red marker below). Same limitation as every other
+#     test_loop records this run (test:full_suite_red /
+#     test:bats_full_suite_red). Same limitation as every other
 #     DEGRADED_STAGES-based gate check in this file: invisible on a resumed
 #     run where test_loop completed in an earlier process.
 #   - containment: when several tasks declare the same file(s) — e.g. tasks
@@ -5193,7 +5193,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 	local ds_marker
 	for ds_marker in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
 		case "$ds_marker" in
-			test:full_suite_red|test:bats_full_suite_"red")
+			test:full_suite_red|test:bats_full_suite_red)
 				tests_green=0
 				break
 				;;
