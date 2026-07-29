@@ -764,8 +764,24 @@ emit_event() {
 # update — a lost update rather than corruption.  Bounded rather than
 # unbounded so a writer that hangs mid-transform cannot wedge every later
 # writer forever.  Env-overridable for tests / tuning.
-readonly STATUS_LOCK_TIMEOUT="${STATUS_LOCK_TIMEOUT:-10}"
+# Deliberately NOT readonly: bats helpers source this file twice in one shell,
+# and a second `readonly` assignment aborts with "readonly variable".
+STATUS_LOCK_TIMEOUT="${STATUS_LOCK_TIMEOUT:-10}"
 
+# Pid of the CURRENT shell or subshell.  `$$` is inherited unchanged by
+# subshells, so a status writer running inside a backgrounded `( ... ) &`
+# (run_parallel_post_task_stages) would record its PARENT's pid — a killed
+# writer would then leave a lockdir naming a still-live process and stale
+# detection would never fire.  `$BASHPID` is correct but only exists in bash
+# >= 4, and the mkdir fallback's main target (macOS without util-linux) ships
+# bash 3.2; there, `exec sh` replaces the command-substitution fork so sh's
+# $PPID is this very shell.  The idiom below is expanded INLINE at each call
+# site rather than wrapped in a helper function: called as $(_helper), the
+# BASHPID branch would report the ephemeral command-substitution subshell,
+# which is dead the instant it returns.
+#
+#     local self_pid="${BASHPID:-$(exec sh -c 'echo $PPID')}"
+#
 # _status_lock_acquire / _status_lock_release - mkdir-based advisory lock
 # used by status_json_write when flock(1) is unavailable (e.g. macOS without
 # util-linux).  Mirrors the locking in event-emit.sh's _mkdir_locked_append:
@@ -776,33 +792,73 @@ readonly STATUS_LOCK_TIMEOUT="${STATUS_LOCK_TIMEOUT:-10}"
 _status_lock_acquire() {
     local lockdir="${STATUS_FILE}.lockdir"
     local pidfile="${lockdir}/pid"
-    local attempts=0
+    local break_mutex="${STATUS_FILE}.lockdir.break"
+    local start_time=$SECONDS
+    # Defaulted here as well as at the top level: test fixtures source only the
+    # function bodies, so the top-level assignment may not be in scope. An
+    # empty value would make the deadline check below fire immediately.
+    local timeout="${STATUS_LOCK_TIMEOUT:-10}"
 
     while ! mkdir "$lockdir" 2>/dev/null; do
         if [[ -f "$pidfile" ]]; then
             local lock_pid
             lock_pid=$(cat "$pidfile" 2>/dev/null)
-            if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
-                # Owning process is gone — stale lock. Break it and retry.
-                rm -rf "$lockdir" 2>/dev/null || true
+            # Require a real pid before trusting kill -0: a blank or 0 pidfile
+            # (partial write) would otherwise make `kill -0 0` signal our own
+            # process group and report the dead lock as alive forever.
+            if [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]] \
+                && ! kill -0 "$lock_pid" 2>/dev/null; then
+                # Owning process is gone — stale lock. Only the waiter that
+                # wins this secondary mkdir mutex may break it, so two
+                # waiters can never both rm -rf the same lockdir and briefly
+                # both believe they hold the lock.
+                if mkdir "$break_mutex" 2>/dev/null; then
+                    # Re-read under the break mutex before destroying anything:
+                    # between sampling $lock_pid and getting here the dead
+                    # holder's lock may have been released and legitimately
+                    # re-acquired by a LIVE writer, and rm -rf'ing THAT lock
+                    # would hand a second writer the mutex and lose an update.
+                    # A fresh holder either has no pidfile yet (its mkdir only
+                    # succeeded after the old lockdir was removed) or a
+                    # different pid, so both cases fail this equality check.
+                    local recheck_pid
+                    recheck_pid=$(cat "$pidfile" 2>/dev/null)
+                    if [[ "$recheck_pid" == "$lock_pid" ]] \
+                        && ! kill -0 "$lock_pid" 2>/dev/null; then
+                        rm -rf "$lockdir" 2>/dev/null || true
+                    fi
+                    rmdir "$break_mutex" 2>/dev/null || true
+                fi
                 continue
             fi
         fi
 
-        if (( attempts >= STATUS_LOCK_TIMEOUT )); then
+        if (( SECONDS - start_time >= timeout )); then
             log_warn "status_json_write: timed out after" \
-                "${STATUS_LOCK_TIMEOUT}s waiting for lock on $STATUS_FILE"
+                "${timeout}s waiting for lock on $STATUS_FILE"
             return 1
         fi
-        sleep 1
-        (( attempts++ )) || true
+        # Sub-second backoff with jitter so contended writers don't lock-step
+        # on the same 1s cadence and starve each other under load.
+        sleep "0.$(( (RANDOM % 4) + 1 ))"
     done
 
-    printf '%d\n' "$$" > "$pidfile" 2>/dev/null || true
+    local self_pid="${BASHPID:-$(exec sh -c 'echo $PPID')}"
+    # Grouped so a failed redirection (lockdir removed under us) is silenced
+    # too — `2>/dev/null` on the bare printf is applied after the redirection
+    # that fails, so the shell's error would still leak to stderr.
+    { printf '%s\n' "$self_pid" > "$pidfile"; } 2>/dev/null || true
 }
 
 _status_lock_release() {
-    rm -rf "${STATUS_FILE}.lockdir" 2>/dev/null || true
+    local lockdir="${STATUS_FILE}.lockdir"
+    local self_pid="${BASHPID:-$(exec sh -c 'echo $PPID')}"
+    local held_pid
+    held_pid=$(cat "${lockdir}/pid" 2>/dev/null)
+    # Only remove the lockdir if it's still the one we created — guards
+    # against releasing a lock a different holder acquired after ours was
+    # broken as stale out from under us.
+    [[ "$held_pid" == "$self_pid" ]] && rm -rf "$lockdir" 2>/dev/null || true
 }
 
 # status_json_write - Atomically update $STATUS_FILE via jq (issue #642).
@@ -840,14 +896,18 @@ status_json_write() {
 
     local tmp_file
     tmp_file=$(mktemp "${STATUS_FILE}.XXXXXX" 2>/dev/null) \
-        || tmp_file="${STATUS_FILE}.tmp.$$"
+        || tmp_file="${STATUS_FILE}.tmp.${BASHPID:-$(exec sh -c 'echo $PPID')}"
 
     local rc
-    if command -v flock > /dev/null 2>&1; then
+    local lock_timeout="${STATUS_LOCK_TIMEOUT:-10}"
+    # STATUS_LOCK_IMPL=mkdir forces the fallback lock even where flock(1) is
+    # installed, so CI (which has flock) still exercises the mkdir path's
+    # stale-lock detection and backoff instead of leaving it untested.
+    if [[ "${STATUS_LOCK_IMPL:-auto}" != "mkdir" ]] && command -v flock > /dev/null 2>&1; then
         (
-            flock -x -w "$STATUS_LOCK_TIMEOUT" 200 || {
+            flock -x -w "$lock_timeout" 200 || {
                 log_warn "status_json_write: timed out after" \
-                    "${STATUS_LOCK_TIMEOUT}s waiting for lock on" \
+                    "${lock_timeout}s waiting for lock on" \
                     "$STATUS_FILE"
                 exit 1
             }
@@ -1621,6 +1681,15 @@ _rewrite_running_to_interrupted() {
 	sync_status_to_log
 }
 
+# _cleanup_status_lock_artifacts() — called from the EXIT trap to remove the
+# status-file lock artifacts (flock fd file, mkdir-lock directory, and its
+# break mutex) so worktree/temp runs don't leave them behind — .gitignore
+# only covers the repo-root names, not per-run copies.
+_cleanup_status_lock_artifacts() {
+	rm -f "${STATUS_FILE}.lock" 2>/dev/null || true
+	rm -rf "${STATUS_FILE}.lockdir" "${STATUS_FILE}.lockdir.break" 2>/dev/null || true
+}
+
 # _propagate_sigterm() — called from the TERM trap before exit 143 to forward
 # SIGTERM to every background task PID registered in _bg_pids.  Sending to
 # the process group (-PID) first ensures entire subtrees are torn down when
@@ -1989,7 +2058,8 @@ _bg_pids=()
 #      "interrupted_during_<stage>" before anything else reads it
 #   2. write_task_summary_to_status   — persist task summary
 #   3. export_metrics                 — emit metrics.json
-trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics' EXIT
+#   4. _cleanup_status_lock_artifacts — remove lock file/dir left on disk
+trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics; _cleanup_status_lock_artifacts' EXIT
 
 # Catch SIGTERM so the EXIT trap above fires properly.  Without this, bash may
 # not run the EXIT pseudo-signal handler when it is blocked waiting on a child

@@ -418,7 +418,9 @@ _wait_pids_or_fail() {
             fi
             sleep 0.1
         done
-        wait "$pid"
+        # A writer that returns non-zero lost its update (lock timeout / jq
+        # failure). Without this check a starved lock passes as green.
+        wait "$pid" || fail "PID $pid exited non-zero — its status write failed"
     done
 }
 
@@ -490,19 +492,97 @@ _wait_pids_or_fail() {
     [ "$accept_status" = "completed" ] || fail "acceptance_test update is missing: $accept_status"
 }
 
-@test "status_json_write: many concurrent writers never leave status.json truncated or corrupt" {
+@test "status_json_write: many concurrent writers all land their update and leave valid JSON" {
     init_status
 
     local n=30
     local -a pids=()
     local i
+    # Each writer sets its OWN key, so a lost update is visible as a missing
+    # key. Asserting only `jq -e .` would pass even if most writers timed out.
     for ((i = 1; i <= n; i++)); do
-        update_stage "stress" "in_progress" "iter" "$i" &
+        status_json_write --arg k "w$i" --arg v "done" '.stress[$k] = $v' &
         pids+=("$!")
     done
-    _wait_pids_or_fail 30 "${pids[@]}"
+    _wait_pids_or_fail 60 "${pids[@]}"
 
     [ -s "$STATUS_FILE" ] || fail "status.json is empty after concurrent writers"
     jq -e '.' "$STATUS_FILE" >/dev/null 2>&1 \
         || fail "status.json is not valid JSON after $n concurrent writers"
+
+    local landed
+    landed=$(jq -r '.stress | length' "$STATUS_FILE")
+    [ "$landed" = "$n" ] || fail \
+        "only $landed of $n concurrent updates landed (updates lost to a write race)"
+}
+
+# =============================================================================
+# MKDIR FALLBACK LOCK (issue #642 AC4)
+#
+# CI has flock(1), so status_json_write's mkdir fallback — the only path with
+# pidfile-based stale-lock detection — would otherwise never run here.
+# STATUS_LOCK_IMPL=mkdir forces it so both branches are covered.
+# =============================================================================
+
+# Poll until a file exists, or fail. Usage: _wait_for_file <path> <timeout>
+_wait_for_file() {
+    local path="$1" deadline=$((SECONDS + ${2:-10}))
+    while [[ ! -e "$path" ]]; do
+        ((SECONDS >= deadline)) && fail "timed out waiting for $path"
+        sleep 0.05
+    done
+}
+
+@test "status_json_write: mkdir fallback serialises concurrent writers without losing updates" {
+    export STATUS_LOCK_IMPL=mkdir
+    init_status
+
+    local n=15
+    local -a pids=()
+    local i
+    for ((i = 1; i <= n; i++)); do
+        increment_quality_iteration &
+        pids+=("$!")
+    done
+    _wait_pids_or_fail 60 "${pids[@]}"
+
+    local count
+    count=$(jq -r '.quality_iterations' "$STATUS_FILE")
+    [ "$count" = "$n" ] || fail \
+        "expected quality_iterations=$n under the mkdir lock, got $count" \
+        "(lost update, or waiters starved by a fixed-cadence backoff)"
+}
+
+@test "status_json_write: mkdir lock left by a killed writer is broken as stale" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=5
+    init_status
+
+    # A writer that dies while holding the lock (SIGKILL mid read-modify-write)
+    # leaves the lockdir behind. Its pidfile must name the SUBSHELL's pid --
+    # recording the parent shell's $$ would leave a live-looking pid, stale
+    # detection would never fire, and every later write would burn the timeout.
+    (
+        _status_lock_acquire
+        : > "$TEST_TMP/holder-ready"
+        sleep 60
+    ) &
+    local holder=$!
+    _wait_for_file "$TEST_TMP/holder-ready" 10
+
+    [ -d "${STATUS_FILE}.lockdir" ] || fail "holder did not create the lockdir"
+
+    kill -9 "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null || true
+
+    [ -d "${STATUS_FILE}.lockdir" ] \
+        || skip "lockdir vanished before the stale-lock path could be exercised"
+
+    run status_json_write --arg v "after-kill" '.branch = $v'
+    [ "$status" -eq 0 ] || fail \
+        "write after a killed lock holder failed (stale lock never broken): $output"
+
+    local branch
+    branch=$(jq -r '.branch' "$STATUS_FILE")
+    [ "$branch" = "after-kill" ] || fail "update lost after stale-lock recovery: $branch"
 }
