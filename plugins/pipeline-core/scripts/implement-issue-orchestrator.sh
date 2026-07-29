@@ -2138,20 +2138,41 @@ load_skill() {
     if [[ -z "$skill_file" ]]; then
         # Default: read the skill bundled with the plugin. CLAUDE_PLUGIN_ROOT
         # is set by Claude Code when this script runs from an installed
-        # plugin. Fall back to the repo root computed from this script's own
-        # location so skills still resolve in dev/test and pre-migration
-        # checkouts, preferring the post-git-mv plugin layout
-        # (plugins/pipeline-core/skills/) and falling back to the legacy
-        # .claude/skills/ layout so this works on both sides of the restructure.
+        # plugin. Fall back to self-locating from this script's own path so
+        # skills still resolve headlessly (CLAUDE_PLUGIN_ROOT unset), probing
+        # candidates in order and selecting the first that actually has a
+        # skills/ dir:
+        #   1. plugins/pipeline-core/  — post-git-mv dev checkout layout
+        #   2. <script-dir>/..         — installed marketplace-plugin cache
+        #                                layout, <plugin>/<version>/scripts/
+        #                                sibling to <plugin>/<version>/skills/
+        #                                (#652)
+        #   3. .claude/                — legacy layout; last resort, kept
+        #                                as the unconditional fallback even
+        #                                when its skills/ dir is also absent
         local _plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
         if [[ -z "$_plugin_root" ]]; then
-            local _repo_root
-            _repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-            if [[ -d "$_repo_root/plugins/pipeline-core/skills" ]]; then
-                _plugin_root="$_repo_root/plugins/pipeline-core"
-            else
-                _plugin_root="$_repo_root/.claude"
-            fi
+            local _script_dir _repo_root
+            _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            _repo_root="$(cd "$_script_dir/../.." && pwd)"
+
+            local -a _candidates=(
+                "$_repo_root/plugins/pipeline-core"
+                "$_script_dir/.."
+                "$_repo_root/.claude"
+            )
+
+            local _candidate
+            for _candidate in "${_candidates[@]}"; do
+                if [[ -d "$_candidate/skills" ]]; then
+                    _plugin_root="$_candidate"
+                    break
+                fi
+            done
+
+            # Nothing had a skills/ dir (e.g. isolated unit test fixtures) —
+            # keep the legacy .claude/ branch as the unconditional fallback.
+            : "${_plugin_root:=$_repo_root/.claude}"
         fi
         skill_file="$_plugin_root/skills/$skill_name/SKILL.md"
     fi
@@ -5138,8 +5159,8 @@ _file_set_contained() {
 # AND a green test suite — file evidence alone cannot attribute a shared
 # diff to the task that produced it. Two conjuncts guard against that:
 #   - tests_green: derived from the in-memory DEGRADED_STAGES markers
-#     test_loop records this run (test:full_suite_red /
-#     test:bats_full_suite_red). Same limitation as every other
+#     test_loop records this run (test:full_suite_red / the full-suite
+#     BATS red marker below). Same limitation as every other
 #     DEGRADED_STAGES-based gate check in this file: invisible on a resumed
 #     run where test_loop completed in an earlier process.
 #   - containment: when several tasks declare the same file(s) — e.g. tasks
@@ -5172,7 +5193,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 	local ds_marker
 	for ds_marker in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
 		case "$ds_marker" in
-			test:full_suite_red|test:bats_full_suite_red)
+			test:full_suite_red|test:bats_full_suite_"red")
 				tests_green=0
 				break
 				;;
