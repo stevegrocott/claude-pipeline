@@ -4527,6 +4527,17 @@ compute_pipeline_profile() {
 #
 _normalize_agent_name() {
 	local name="$1"
+
+	# "default" is the reserved fallback sentinel, not a resolvable agent —
+	# no consumer repo ships agents/default.md and none should have to. Short-
+	# circuit before the lookup so it resolves silently instead of tripping
+	# the unknown-agent warning on every task that legitimately declares it
+	# (issue #648).
+	if [[ "$name" == "${_AGENT_SENTINEL_DEFAULT:-default}" ]]; then
+		printf '%s' "$name"
+		return
+	fi
+
 	# Resolve the consumer's agents dir rather than <script-dir>/../agents
 	# (issue #631).  The bundle ships no agents/ tree, so a bundle-relative
 	# path resolves to nothing in a plugin-consuming repo and every project
