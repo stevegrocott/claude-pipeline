@@ -295,7 +295,7 @@ _issue_body_path_resolves() {
 	local -ir max_missing_segments=2
 	[[ -e "$repo_root/$path" ]] && return 0
 	parent="$path"
-	while [[ "$parent" == */* ]] && ((missing < max_missing_segments)); do
+	while [[ "$parent" == */* ]] && ((missing <= max_missing_segments)); do
 		parent="${parent%/*}"
 		[[ -z "$parent" ]] && break
 		[[ -d "$repo_root/$parent" ]] && return 0
