@@ -53,8 +53,13 @@ _source_orch_budget_fns() {
 	# set_run_budget_exceeded and _apply_stage_action (issue #617): the stage
 	# key is canonicalised and each dispatched run_stage call persists its own
 	# spend.  They must be sourced too or those callers abort on 127.
+	# status_json_write / _status_lock_acquire / _status_lock_release are the
+	# serialised status.json writer (issue #642): every status_json_write
+	# call site above depends on them, so they must be sourced too or those
+	# callers abort on 127.
 	for fn in _stage_key _stage_acc_dir _stage_acc_file _stage_acc_add \
-		_persist_stage_call check_run_budget set_run_budget_exceeded \
+		_persist_stage_call status_json_write _status_lock_acquire \
+		_status_lock_release check_run_budget set_run_budget_exceeded \
 		set_final_state _apply_stage_action; do
 		_extract_function_body "$fn" "$ORCHESTRATOR_SCRIPT" >> "$out"
 		printf '\n' >> "$out"
