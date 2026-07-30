@@ -10502,16 +10502,6 @@ $pr_creation_skill}"
             break
         fi
 
-        if (( pr_iteration > pr_review_max_iter )); then
-            log_warn "PR review loop exceeded max iterations ($pr_review_max_iter). Soft-failing and continuing."
-            set_final_state "max_iterations_pr_review"
-            DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
-            persist_merge_blocked_reason \
-                "PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
-            pr_approved=true
-            break
-        fi
-
         log "PR review iteration $pr_iteration"
 
         # -------------------------------------------------------------------------
@@ -10734,6 +10724,24 @@ $review_summary$followup_comment" "code-reviewer"
             pr_approved=true
             log "PR approved on iteration $pr_iteration"
         else
+            # Budget the verdict, not the round-trip (claude-pipeline#651).
+            # This check runs AFTER the review above already produced a
+            # verdict for the current state of the branch, so the loop can
+            # only land here once the previous fix (if any) has already been
+            # re-reviewed — a fix is never applied without a subsequent
+            # review confirming or refuting it. Exceeding the budget here
+            # means max_iter reviews have run; stop rather than apply one
+            # more fix that would go unreviewed.
+            if (( pr_iteration >= pr_review_max_iter )); then
+                log_warn "PR review loop exceeded max iterations ($pr_review_max_iter) after re-reviewing the last fix. Soft-failing and continuing."
+                set_final_state "max_iterations_pr_review"
+                DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
+                persist_merge_blocked_reason \
+                    "PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
+                pr_approved=true
+                break
+            fi
+
             log "PR review requested changes. Fixing..."
 
             # Collect feedback
