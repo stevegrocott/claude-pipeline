@@ -7590,11 +7590,27 @@ all_failures_environment_related() {
 # Appends "&& bats [--jobs N] tests/*.bats" when at least one *.bats file
 # exists in "$loop_dir/tests/".  Uses parallel execution via --jobs when the
 # installed bats version supports it; falls back to serial otherwise.
+#
+# When $2 (changed_bats_files) is a non-empty newline-separated list of
+# repo-relative *.bats paths, the command is narrowed to just those files
+# instead of globbing every suite.  The list is split by the two bats roots:
+#   - .claude/scripts/implement-issue-test/  (run via run-tests.sh, which cds
+#     into its own directory first — so it takes basenames, not full paths)
+#   - tests/  (run directly via bats, so full relative paths are kept as-is)
+# Only the halves with at least one member are emitted — a change confined to
+# one root must not invoke the other tool with zero arguments, since that
+# would run every suite instead of none. If every entry falls outside both
+# known roots (or the list is empty), the full-suite command below is
+# emitted unchanged.
+#
 # Outputs the constructed command string on stdout.
 # Arguments:
 #   $1 - loop_dir: working directory to inspect
+#   $2 - changed_bats_files: optional newline-separated list of repo-relative
+#        *.bats paths to target; omit (or pass empty) for the full suite
 _build_bash_test_command() {
 	local loop_dir="$1"
+	local changed_bats_files="${2:-}"
 	local bash_test_command
 	local bats_cmd
 
@@ -7617,6 +7633,49 @@ _build_bash_test_command() {
 		bats_cmd="bats --jobs $cpu_count"
 	else
 		bats_cmd="bats"
+	fi
+
+	# Split the changed-suite list by root and emit a targeted command when
+	# at least one changed file lands in a known root.
+	local -a targeted_impl_files=()
+	local -a targeted_tests_files=()
+	if [[ -n "$changed_bats_files" ]]; then
+		local suite_file
+		while IFS= read -r suite_file; do
+			[[ -z "$suite_file" ]] && continue
+			case "$suite_file" in
+				.claude/scripts/implement-issue-test/*.bats)
+					targeted_impl_files+=("${suite_file##*/}")
+					;;
+				tests/*.bats)
+					targeted_tests_files+=("$suite_file")
+					;;
+			esac
+		done <<< "$changed_bats_files"
+	fi
+
+	if (( ${#targeted_impl_files[@]} > 0 || ${#targeted_tests_files[@]} > 0 )); then
+		local -a command_parts=()
+		if (( ${#targeted_impl_files[@]} > 0 )); then
+			if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
+				command_parts+=("bash .claude/scripts/implement-issue-test/run-tests.sh ${targeted_impl_files[*]}")
+			else
+				local -a prefixed_impl_files=()
+				local impl_basename
+				for impl_basename in "${targeted_impl_files[@]}"; do
+					prefixed_impl_files+=(".claude/scripts/implement-issue-test/$impl_basename")
+				done
+				command_parts+=("$bats_cmd ${prefixed_impl_files[*]}")
+			fi
+		fi
+		if (( ${#targeted_tests_files[@]} > 0 )); then
+			command_parts+=("$bats_cmd ${targeted_tests_files[*]}")
+		fi
+
+		local joined_parts
+		printf -v joined_parts ' && %s' "${command_parts[@]}"
+		printf '%s\n' "${joined_parts# && }"
+		return 0
 	fi
 
 	if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
