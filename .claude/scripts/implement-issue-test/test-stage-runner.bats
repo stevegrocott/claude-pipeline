@@ -2222,6 +2222,123 @@ EOF
 }
 
 # =============================================================================
+# _BUILD_BASH_TEST_COMMAND — targeted changed-suite list (issue #686)
+#
+# $2 (changed_bats_files) is an optional newline-separated list of
+# repo-relative *.bats paths. When non-empty, the command narrows to just
+# those suites instead of globbing every file. The list is split by the two
+# bats roots:
+#   - .claude/scripts/implement-issue-test/ — run via run-tests.sh, which cds
+#     into its own directory first, so it is passed basenames only.
+#   - tests/ — run directly via bats, so full relative paths are kept as-is.
+# Only the halves with at least one member are emitted: a change confined to
+# one root must not invoke the other tool with zero arguments (that would run
+# every suite instead of none). An empty list, or a list whose entries fall
+# outside both known roots, falls back to the unchanged full-suite command.
+# =============================================================================
+
+@test "_build_bash_test_command targets a single implement-issue-test suite by basename" {
+	mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+	printf '#!/usr/bin/env bash\nexit 0\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+	chmod +x "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+
+	local result
+	result=$(_build_bash_test_command "$TEST_TMP" \
+		".claude/scripts/implement-issue-test/test-foo.bats")
+
+	[[ "$result" == *"run-tests.sh test-foo.bats"* ]] || \
+		fail "Expected run-tests.sh targeted with basename test-foo.bats. Got: $result"
+	[[ "$result" != *"tests/"* ]] || \
+		fail "Must not invoke the tests/ root when no changed file is under it. Got: $result"
+}
+
+@test "_build_bash_test_command joins multiple implement-issue-test suites as separate basenames" {
+	mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test"
+	printf '#!/usr/bin/env bash\nexit 0\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+	chmod +x "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+
+	local changed
+	changed=$(printf '%s\n' \
+		".claude/scripts/implement-issue-test/test-foo.bats" \
+		".claude/scripts/implement-issue-test/test-bar.bats")
+	local result
+	result=$(_build_bash_test_command "$TEST_TMP" "$changed")
+
+	[[ "$result" == *"test-foo.bats"* ]] || \
+		fail "Expected test-foo.bats in command. Got: $result"
+	[[ "$result" == *"test-bar.bats"* ]] || \
+		fail "Expected test-bar.bats in command. Got: $result"
+	[[ "$result" != *"implement-issue-test/test-foo.bats"* ]] || \
+		fail "Expected basename, not full path, passed to run-tests.sh. Got: $result"
+}
+
+@test "_build_bash_test_command targets a tests/ suite directly without invoking run-tests.sh" {
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/bar.bats"
+
+	local result
+	result=$(_build_bash_test_command "$TEST_TMP" "tests/bar.bats")
+
+	[[ "$result" == *"tests/bar.bats"* ]] || \
+		fail "Expected tests/bar.bats targeted directly. Got: $result"
+	[[ "$result" != *"implement-issue-test"* ]] || \
+		fail "Must not invoke the implement-issue-test root with zero arguments. Got: $result"
+	[[ "$result" != *"&&"* ]] || \
+		fail "A single-root change must not compose the other root. Got: $result"
+}
+
+@test "_build_bash_test_command runs both halves when the changed list spans both roots" {
+	mkdir -p "$TEST_TMP/.claude/scripts/implement-issue-test" "$TEST_TMP/tests"
+	printf '#!/usr/bin/env bash\nexit 0\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+	chmod +x "$TEST_TMP/.claude/scripts/implement-issue-test/run-tests.sh"
+	touch "$TEST_TMP/tests/bar.bats"
+
+	local changed
+	changed=$(printf '%s\n' \
+		".claude/scripts/implement-issue-test/test-foo.bats" \
+		"tests/bar.bats")
+	local result
+	result=$(_build_bash_test_command "$TEST_TMP" "$changed")
+
+	[[ "$result" == *"run-tests.sh test-foo.bats"* ]] || \
+		fail "Expected the implement-issue-test half targeted. Got: $result"
+	[[ "$result" == *"tests/bar.bats"* ]] || \
+		fail "Expected the tests/ half targeted. Got: $result"
+	[[ "$result" == *"&&"* ]] || \
+		fail "Expected both root halves composed with &&. Got: $result"
+}
+
+@test "_build_bash_test_command falls back to the full suite when the changed list is empty" {
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/foo.bats"
+
+	local baseline targeted
+	baseline=$(_build_bash_test_command "$TEST_TMP")
+	targeted=$(_build_bash_test_command "$TEST_TMP" "")
+
+	[ "$targeted" == "$baseline" ] || \
+		fail "Empty changed list must fall back to the unchanged full-suite command." \
+			"Baseline: $baseline / Targeted: $targeted"
+}
+
+@test "_build_bash_test_command falls back to the full suite when no entry matches a known root" {
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/foo.bats"
+
+	local baseline targeted
+	baseline=$(_build_bash_test_command "$TEST_TMP")
+	targeted=$(_build_bash_test_command "$TEST_TMP" \
+		".claude/scripts/some-other-script.sh")
+
+	[ "$targeted" == "$baseline" ] || \
+		fail "A changed list with no entry under a known bats root must fall back" \
+			"to the unchanged full-suite command. Baseline: $baseline / Targeted: $targeted"
+}
+
+# =============================================================================
 # NON-BLOCKING FULL-SUITE BATS CHECK — non-bash scope → degraded signal
 #
 # The smart-targeted test loop only runs the pipeline's own *.bats suite when
