@@ -455,3 +455,142 @@ _install_failing_then_passing_run_stage() {
 	expect_ok "empty changed_test_files must not imply pre-existing when detection never ran" \
 		test "$(< "$FIX_CALLED_FILE")" = "true"
 }
+
+# =============================================================================
+# NARROWED BASH COMMAND ATTRIBUTION (#686)
+#
+# #686 narrows _build_bash_test_command to the PR-changed BATS suites instead
+# of running the full 2,425-test suite every iteration. The failure-attribution
+# logic above (#636) keys off changed_test_files alone, never off which
+# command actually ran, so a narrowed command must be routed through that SAME
+# path a full-suite run uses -- no separate "narrowed" skip branch may exist.
+# _build_bash_test_command is stubbed here to stand in for the narrowed
+# builder (tasks 1/2), so this pins the wiring ahead of/independent of that
+# builder change: whatever command it returns must (a) reach the agent
+# prompt verbatim and (b) have its reported failures dispatched to the fix
+# agent with no pre-existing skip.
+# =============================================================================
+
+# Stand in for #686 tasks 1/2's narrowed builder: return a single targeted
+# suite invocation instead of the full-directory glob.
+#
+# NOTE: the replacement command must be exported as a plain variable, not
+# captured as a `local` -- a `local` goes out of scope the moment this
+# function returns, so the nested function body would expand it to empty
+# at call time rather than at definition time (bash has no closures).
+_stub_narrowed_bash_test_command() {
+	NARROWED_BASH_TEST_COMMAND="$1"
+	export NARROWED_BASH_TEST_COMMAND
+	_build_bash_test_command() { printf '%s\n' "$NARROWED_BASH_TEST_COMMAND"; }
+	export -f _build_bash_test_command
+}
+
+# Like _install_failing_then_passing_run_stage, but also captures the
+# test-iter-1 prompt (arg 2) so a test can assert the narrowed command was
+# actually embedded in what the agent is told to run.
+_install_failing_then_passing_run_stage_capture_prompt() {
+	local failures_json="$1"
+
+	FIX_CALLED_FILE="$TEST_TMP/fix_called"
+	TEST_ITER_FILE="$TEST_TMP/test_iters"
+	PROMPT_CAPTURE_FILE="$TEST_TMP/captured_prompt"
+	export FIX_CALLED_FILE TEST_ITER_FILE PROMPT_CAPTURE_FILE
+	printf 'false\n' > "$FIX_CALLED_FILE"
+	printf '0\n' > "$TEST_ITER_FILE"
+	: > "$PROMPT_CAPTURE_FILE"
+
+	STUB_FAILURES_JSON="$failures_json"
+	export STUB_FAILURES_JSON
+
+	run_stage() {
+		local stage_name="$1"
+		local prompt="$2"
+		local count
+		case "$stage_name" in
+			test-iter-*)
+				count=$(< "$TEST_ITER_FILE")
+				count=$((count + 1))
+				printf '%s\n' "$count" > "$TEST_ITER_FILE"
+				if (( count <= 1 )); then
+					printf '%s' "$prompt" > "$PROMPT_CAPTURE_FILE"
+					printf '%s' "{\"status\":\"success\",\"output\":{\"result\":\"failed\",\"failures\":$STUB_FAILURES_JSON,\"summary\":\"failures\",\"validation_result\":\"skipped\"}}"
+				else
+					printf '%s' '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}}'
+				fi
+				;;
+			fix-tests-*)
+				printf 'true\n' > "$FIX_CALLED_FILE"
+				printf '%s' '{"status":"success","output":{"summary":"Fixed"}}'
+				;;
+			*)
+				printf '%s' '{"status":"success","output":{"summary":"noop"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	comment_issue() { :; }
+	export -f comment_issue
+}
+
+@test "narrowed bash command: failure from a targeted suite is attributed to the PR, not skipped as pre-existing" {
+	_setup_test_loop_repo
+	git checkout -q -b feature-narrowed-bats
+
+	mkdir -p tests
+	printf '@test "red" { false; }\n' > tests/new-suite.bats
+	git add tests/new-suite.bats
+	git commit -q -m "add failing bats suite"
+
+	_stub_narrowed_bash_test_command "bash run-tests.sh new-suite.bats && bats tests/new-suite.bats"
+	_install_failing_then_passing_run_stage_capture_prompt \
+		'[{"title":"new-suite","description":"not ok 1 red"}]'
+
+	run_test_loop "$TEST_TMP/repo" "feature-narrowed-bats" "" "bash"
+
+	expect_ok "the narrowed command must reach the agent verbatim" \
+		grep -qF "bash run-tests.sh new-suite.bats && bats tests/new-suite.bats" \
+			"$PROMPT_CAPTURE_FILE"
+	expect_ok "fix agent must be dispatched for a failure surfaced by the narrowed command" \
+		test "$(< "$FIX_CALLED_FILE")" = "true"
+	expect_not_ok "no pre-existing skip path may fire for a narrowed-command failure" \
+		grep -q "pre-existing failure" "$LOG_FILE"
+	expect_not_ok "no pre-existing skip path may fire for a narrowed-command failure" \
+		grep -q "All test failures are pre-existing" "$LOG_FILE"
+}
+
+# Unlike the test above (which stubs _build_bash_test_command to pin
+# downstream attribution), this exercises the REAL builder end-to-end: the
+# caller must pass changed_test_files into it, and the resulting command —
+# not just the changed-file list — must be what gets logged and embedded in
+# the agent prompt.
+@test "bash scope: run_test_loop passes changed_test_files into the real builder and logs the narrowed command" {
+	_setup_test_loop_repo
+
+	# A pre-existing suite already on main, untouched by the PR.
+	mkdir -p tests
+	printf '@test "pre-existing" { true; }\n' > tests/other-suite.bats
+	git add tests/other-suite.bats
+	git commit -q -m "pre-existing suite on main"
+
+	git checkout -q -b feature-narrowed-real-builder
+	printf '@test "red" { false; }\n' > tests/new-suite.bats
+	git add tests/new-suite.bats
+	git commit -q -m "add failing bats suite"
+
+	_install_failing_then_passing_run_stage_capture_prompt \
+		'[{"title":"new-suite","description":"not ok 1 red"}]'
+
+	run_test_loop "$TEST_TMP/repo" "feature-narrowed-real-builder" "" "bash"
+
+	expect_ok "the real builder's narrowed command must reach the agent prompt" \
+		grep -qF "tests/new-suite.bats" "$PROMPT_CAPTURE_FILE"
+	expect_not_ok "the narrowed command must not fall back to the full tests/ glob" \
+		grep -qF "tests/*.bats" "$PROMPT_CAPTURE_FILE"
+	expect_not_ok "the narrowed command must not include the untouched pre-existing suite" \
+		grep -qF "tests/other-suite.bats" "$PROMPT_CAPTURE_FILE"
+	expect_ok "the log must show the narrowed command, not only the changed-file list" \
+		grep -q "Narrowed BATS command" "$LOG_FILE"
+	expect_ok "the logged narrowed command must target the changed suite" \
+		grep -q "Narrowed BATS command:.*tests/new-suite.bats" "$LOG_FILE"
+}

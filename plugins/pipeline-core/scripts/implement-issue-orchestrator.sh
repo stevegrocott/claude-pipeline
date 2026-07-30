@@ -7590,11 +7590,27 @@ all_failures_environment_related() {
 # Appends "&& bats [--jobs N] tests/*.bats" when at least one *.bats file
 # exists in "$loop_dir/tests/".  Uses parallel execution via --jobs when the
 # installed bats version supports it; falls back to serial otherwise.
+#
+# When $2 (changed_bats_files) is a non-empty newline-separated list of
+# repo-relative *.bats paths, the command is narrowed to just those files
+# instead of globbing every suite.  The list is split by the two bats roots:
+#   - .claude/scripts/implement-issue-test/  (run via run-tests.sh, which cds
+#     into its own directory first — so it takes basenames, not full paths)
+#   - tests/  (run directly via bats, so full relative paths are kept as-is)
+# Only the halves with at least one member are emitted — a change confined to
+# one root must not invoke the other tool with zero arguments, since that
+# would run every suite instead of none. If every entry falls outside both
+# known roots (or the list is empty), the full-suite command below is
+# emitted unchanged.
+#
 # Outputs the constructed command string on stdout.
 # Arguments:
 #   $1 - loop_dir: working directory to inspect
+#   $2 - changed_bats_files: optional newline-separated list of repo-relative
+#        *.bats paths to target; omit (or pass empty) for the full suite
 _build_bash_test_command() {
 	local loop_dir="$1"
+	local changed_bats_files="${2:-}"
 	local bash_test_command
 	local bats_cmd
 
@@ -7617,6 +7633,49 @@ _build_bash_test_command() {
 		bats_cmd="bats --jobs $cpu_count"
 	else
 		bats_cmd="bats"
+	fi
+
+	# Split the changed-suite list by root and emit a targeted command when
+	# at least one changed file lands in a known root.
+	local -a targeted_impl_files=()
+	local -a targeted_tests_files=()
+	if [[ -n "$changed_bats_files" ]]; then
+		local suite_file
+		while IFS= read -r suite_file; do
+			[[ -z "$suite_file" ]] && continue
+			case "$suite_file" in
+				.claude/scripts/implement-issue-test/*.bats)
+					targeted_impl_files+=("${suite_file##*/}")
+					;;
+				tests/*.bats)
+					targeted_tests_files+=("$suite_file")
+					;;
+			esac
+		done <<< "$changed_bats_files"
+	fi
+
+	if (( ${#targeted_impl_files[@]} > 0 || ${#targeted_tests_files[@]} > 0 )); then
+		local -a command_parts=()
+		if (( ${#targeted_impl_files[@]} > 0 )); then
+			if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
+				command_parts+=("bash .claude/scripts/implement-issue-test/run-tests.sh ${targeted_impl_files[*]}")
+			else
+				local -a prefixed_impl_files=()
+				local impl_basename
+				for impl_basename in "${targeted_impl_files[@]}"; do
+					prefixed_impl_files+=(".claude/scripts/implement-issue-test/$impl_basename")
+				done
+				command_parts+=("$bats_cmd ${prefixed_impl_files[*]}")
+			fi
+		fi
+		if (( ${#targeted_tests_files[@]} > 0 )); then
+			command_parts+=("$bats_cmd ${targeted_tests_files[*]}")
+		fi
+
+		local joined_parts
+		printf -v joined_parts ' && %s' "${command_parts[@]}"
+		printf '%s\n' "${joined_parts# && }"
+		return 0
 	fi
 
 	if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
@@ -7713,9 +7772,10 @@ run_test_loop() {
         return 0
     fi
 
-    # Build the test command based on scope
+    # Build the test command based on scope. bash_test_command itself is
+    # assigned below, once changed_test_files is known — the bash scope
+    # narrows it to the PR-changed suites.
     local test_command bash_test_command
-    bash_test_command=$(_build_bash_test_command "$loop_dir")
 
     local safe_dir safe_branch
     safe_dir=$(printf '%q' "$loop_dir")
@@ -7764,29 +7824,37 @@ run_test_loop() {
     fi
 
     if [[ "$change_scope" == "bash" ]]; then
-        # BATS always runs every suite, so the changed list is used purely to
-        # attribute failures to the PR — never to narrow the command.
+        # Pass the detected changed BATS files into the builder so it can
+        # narrow the command to just the PR-changed suites. The builder
+        # falls back to the full-suite command on its own when the list is
+        # empty or every entry falls outside the known bats roots (see its
+        # docstring) — so this is safe to call unconditionally.
+        bash_test_command=$(_build_bash_test_command "$loop_dir" "$changed_test_files")
         if [[ -n "$changed_test_files" ]]; then
-            log "Changed BATS test files: $(echo "$changed_test_files" | tr '\n' ' ')"
+            log "Narrowed BATS command: $bash_test_command"
         else
             log "No changed BATS test files found — BATS failures will be treated as pre-existing"
         fi
-    elif [[ "$changed_test_detection_attempted" == true ]]; then
-        # Split: Playwright specs (in e2e/ directories) vs Jest unit tests
-        local file
-        while IFS= read -r file; do
-            [[ -z "$file" ]] && continue
-            if _is_playwright_spec "$file"; then
-                playwright_test_files="${playwright_test_files:+$playwright_test_files
-}$file"
-            else
-                jest_test_files="${jest_test_files:+$jest_test_files
-}$file"
-            fi
-        done <<< "$changed_test_files"
+    else
+        bash_test_command=$(_build_bash_test_command "$loop_dir")
 
-        if [[ -n "$playwright_test_files" ]]; then
-            log "Playwright specs detected (excluded from Jest): $(echo "$playwright_test_files" | tr '\n' ' ')"
+        if [[ "$changed_test_detection_attempted" == true ]]; then
+            # Split: Playwright specs (in e2e/ directories) vs Jest unit tests
+            local file
+            while IFS= read -r file; do
+                [[ -z "$file" ]] && continue
+                if _is_playwright_spec "$file"; then
+                    playwright_test_files="${playwright_test_files:+$playwright_test_files
+}$file"
+                else
+                    jest_test_files="${jest_test_files:+$jest_test_files
+}$file"
+                fi
+            done <<< "$changed_test_files"
+
+            if [[ -n "$playwright_test_files" ]]; then
+                log "Playwright specs detected (excluded from Jest): $(echo "$playwright_test_files" | tr '\n' ' ')"
+            fi
         fi
     fi
 
@@ -10212,18 +10280,19 @@ $full_scope_failures
 
         # ---------------------------------------------------------------------
         # NON-BLOCKING FULL-SUITE BATS CHECK (informational + degraded signal)
-        # The smart-targeted test_loop runs BATS only for `bash`-scoped branches.
-        # A typescript/mixed/config branch that touches a `.sh`/`.bats` file (e.g.
-        # this orchestrator itself) runs Jest only, so a broken pipeline BATS
-        # suite can merge unnoticed — the mirror image of the Jest gap above. Run
-        # the FULL BATS suite via run-tests.sh once here for any NON-`bash` scope
-        # to surface that. Kept NON-BLOCKING because the base branch itself may
-        # legitimately be red; failures are posted as a comment AND recorded in
-        # DEGRADED_STAGES so they show up in the pipeline summary instead of being
-        # silently reported green.
+        # Issue #686 narrows the bash-scope test loop to the PR's changed *.bats
+        # suites instead of the full run, so a broken suite outside that changed
+        # list (e.g. a long-red test-verdict-parsing.bats, #17/#524) would no
+        # longer be caught inside the loop for ANY scope — not just
+        # typescript/mixed/config branches that touch a `.sh`/`.bats` file and
+        # only run Jest. Run the FULL BATS suite via run-tests.sh once here for
+        # EVERY scope, bash included, to surface that. Kept NON-BLOCKING because
+        # the base branch itself may legitimately be red; failures are posted as
+        # a comment AND recorded in DEGRADED_STAGES so they show up in the
+        # pipeline summary instead of being silently reported green.
         # ---------------------------------------------------------------------
         local bats_runner=".claude/scripts/implement-issue-test/run-tests.sh"
-        if [[ "$branch_scope" != "bash" && -f "$bats_runner" ]]; then
+        if [[ -f "$bats_runner" ]]; then
             log "Running informational full-suite BATS check (non-blocking)..."
             local bats_full_output bats_full_rc
             bats_full_output=$(bash "$bats_runner" 2>&1)
@@ -10234,7 +10303,7 @@ $full_scope_failures
                 bats_full_failures=$(printf '%s' "$bats_full_output" | tail -40)
                 DEGRADED_STAGES+=("test:bats_full_suite_red")
                 comment_issue "Full-Suite BATS Check: pipeline tests are RED (non-blocking)" \
-                    "⚠️ The full BATS suite (\`bash $bats_runner\`) failed on this branch. The smart-targeted test loop runs BATS only for \`bash\`-scoped branches, so these failures were not caught there (scope: \`$branch_scope\`). They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
+                    "⚠️ The full BATS suite (\`bash $bats_runner\`) failed on this branch. The smart-targeted test loop only runs BATS suites related to the changed files (scope: \`$branch_scope\`), so these failures were not caught there. They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
 
 <details>
 <summary>Failure details (last 40 lines)</summary>
