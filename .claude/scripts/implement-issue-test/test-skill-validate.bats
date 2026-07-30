@@ -378,8 +378,18 @@ typo_field: oops"
 
 _real_skill_run() {
 	local skill_name="$1"
-	local real_skills="$SCRIPT_DIR/../skills"
+	local canonical_skills="$SCRIPT_DIR/../skills"
+	local bundle_skills="$SCRIPT_DIR/../../plugins/pipeline-core/skills"
 	local real_schema="$SCRIPT_DIR/schemas/skill-frontmatter.json"
+	local real_skills="$canonical_skills"
+
+	# Some skills (e.g. writing-agents) ship only inside the plugin bundle
+	# and are never copied into the canonical .claude/skills tree. Resolve
+	# those from the bundle instead of requiring a canonical copy.
+	if [[ ! -f "$canonical_skills/$skill_name/SKILL.md" ]] \
+		&& [[ -f "$bundle_skills/$skill_name/SKILL.md" ]]; then
+		real_skills="$bundle_skills"
+	fi
 
 	run env \
 		SKILLS_DIR="$real_skills" \
