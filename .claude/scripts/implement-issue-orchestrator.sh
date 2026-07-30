@@ -10280,18 +10280,19 @@ $full_scope_failures
 
         # ---------------------------------------------------------------------
         # NON-BLOCKING FULL-SUITE BATS CHECK (informational + degraded signal)
-        # The smart-targeted test_loop runs BATS only for `bash`-scoped branches.
-        # A typescript/mixed/config branch that touches a `.sh`/`.bats` file (e.g.
-        # this orchestrator itself) runs Jest only, so a broken pipeline BATS
-        # suite can merge unnoticed — the mirror image of the Jest gap above. Run
-        # the FULL BATS suite via run-tests.sh once here for any NON-`bash` scope
-        # to surface that. Kept NON-BLOCKING because the base branch itself may
-        # legitimately be red; failures are posted as a comment AND recorded in
-        # DEGRADED_STAGES so they show up in the pipeline summary instead of being
-        # silently reported green.
+        # Issue #686 narrows the bash-scope test loop to the PR's changed *.bats
+        # suites instead of the full run, so a broken suite outside that changed
+        # list (e.g. a long-red test-verdict-parsing.bats, #17/#524) would no
+        # longer be caught inside the loop for ANY scope — not just
+        # typescript/mixed/config branches that touch a `.sh`/`.bats` file and
+        # only run Jest. Run the FULL BATS suite via run-tests.sh once here for
+        # EVERY scope, bash included, to surface that. Kept NON-BLOCKING because
+        # the base branch itself may legitimately be red; failures are posted as
+        # a comment AND recorded in DEGRADED_STAGES so they show up in the
+        # pipeline summary instead of being silently reported green.
         # ---------------------------------------------------------------------
         local bats_runner=".claude/scripts/implement-issue-test/run-tests.sh"
-        if [[ "$branch_scope" != "bash" && -f "$bats_runner" ]]; then
+        if [[ -f "$bats_runner" ]]; then
             log "Running informational full-suite BATS check (non-blocking)..."
             local bats_full_output bats_full_rc
             bats_full_output=$(bash "$bats_runner" 2>&1)
@@ -10302,7 +10303,7 @@ $full_scope_failures
                 bats_full_failures=$(printf '%s' "$bats_full_output" | tail -40)
                 DEGRADED_STAGES+=("test:bats_full_suite_red")
                 comment_issue "Full-Suite BATS Check: pipeline tests are RED (non-blocking)" \
-                    "⚠️ The full BATS suite (\`bash $bats_runner\`) failed on this branch. The smart-targeted test loop runs BATS only for \`bash\`-scoped branches, so these failures were not caught there (scope: \`$branch_scope\`). They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
+                    "⚠️ The full BATS suite (\`bash $bats_runner\`) failed on this branch. The smart-targeted test loop only runs BATS suites related to the changed files (scope: \`$branch_scope\`), so these failures were not caught there. They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
 
 <details>
 <summary>Failure details (last 40 lines)</summary>
