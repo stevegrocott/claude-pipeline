@@ -585,6 +585,62 @@ teardown() {
 }
 
 # =============================================================================
+# PARALLEL TASK WALL CLOCK vs SERIAL STAGE TIMEOUT (issue #673)
+#
+# MAX_TASK_WALL_TIME_SECS bounds a task run in PARALLEL (the watchdog in
+# run_task_in_worktree's launcher); get_stage_timeout("implement-task-*")
+# bounds the same task retried SERIALLY after a failed parallel batch. The
+# two are set independently — one in platform.sh's config override, the
+# other as the orchestrator's in-source ${:-1800} fallback — and drifted
+# apart once already (platform.sh stayed at 900 after the orchestrator
+# default rose 900->1800). When the parallel ceiling is tighter, a task
+# that would succeed serially gets killed in parallel, the whole batch is
+# discarded, and every task in it re-runs serially, paying for the work
+# twice.
+#
+# setup()'s source_orchestrator_functions call sources the REAL
+# .claude/config/platform.sh (via the config/ -> .claude/config symlink
+# installed by setup_test_env) BEFORE the orchestrator's own fallback line,
+# the same order production sourcing uses — so MAX_TASK_WALL_TIME_SECS
+# below reflects whatever this repo's platform.sh actually resolves to, and
+# these tests fail the instant it drops below the serial timeout again.
+# =============================================================================
+
+@test "serial implement-task stage timeout is 1800s (issue #673 baseline)" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local serial_timeout
+    serial_timeout=$(get_stage_timeout "implement-task-1" "")
+    [ "$serial_timeout" -eq 1800 ] || \
+        fail "Expected serial implement-task timeout=1800, got: $serial_timeout"
+}
+
+@test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local serial_timeout
+    serial_timeout=$(get_stage_timeout "implement-task-1" "")
+
+    (( MAX_TASK_WALL_TIME_SECS >= serial_timeout )) || \
+        fail "MAX_TASK_WALL_TIME_SECS=${MAX_TASK_WALL_TIME_SECS}s <" \
+            "serial stage timeout=${serial_timeout}s — a task that would" \
+            "succeed serially is killed in parallel and the whole batch" \
+            "re-runs serially (issue #673)"
+}
+
+@test "a MAX_TASK_WALL_TIME_SECS below the serial timeout fails the invariant" {
+    # Proves the guard above actually discriminates rather than trivially
+    # passing: reproduce the pre-fix drift (platform.sh pinned at 900,
+    # serial timeout at 1800) and confirm the same comparison reports it.
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local serial_timeout drifted_value
+    serial_timeout=$(get_stage_timeout "implement-task-1" "")
+    drifted_value=900
+
+    ! (( drifted_value >= serial_timeout )) || \
+        fail "Expected drifted MAX_TASK_WALL_TIME_SECS=$drifted_value to be" \
+            "caught as below serial_timeout=$serial_timeout"
+}
+
+# =============================================================================
 # SELECTIVE GIT ADD — sanitize_worktree_commits (AC4)
 # =============================================================================
 
