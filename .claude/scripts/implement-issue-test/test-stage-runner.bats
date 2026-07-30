@@ -2711,6 +2711,31 @@ _setup_bats_incomplete_repo() {
 		fail "Expected test:bats_incomplete:iter=1 when bats_result is an empty string on a mixed-scope response; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
+# The bash scope builds a BLOCKING bats_section (distinct wording/behaviour
+# from mixed's informational-only section — see the "bash scope bats_section
+# is labelled BLOCKING" tests above), but the missing-bats_result guard keys
+# only on bats_section being non-empty. Confirm the omission is caught on
+# the bash branch too, not just on mixed.
+@test "run_test_loop records test:bats_incomplete when bats_result is missing on bash scope" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-bash-missing-key"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-bash-missing-key" "" "bash"
+
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_incomplete:iter=1' || \
+		fail "Expected test:bats_incomplete:iter=1 when bats_result is absent from a bash-scope response; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
 # A scope that never asks the agent to run BATS at all (bats_section is
 # empty) has no BATS verdict to be missing — a response with no bats_result
 # key is simply the normal case, not a degraded one.
@@ -2733,6 +2758,36 @@ _setup_bats_incomplete_repo() {
 	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
 	[ "$marker" -eq 0 ] || \
 		fail "typescript scope never runs BATS; must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# config scope is even more distinct: run_test_loop bails out at its own
+# early "Config/markdown-only changes detected" check before bats_section is
+# ever built or run_stage is ever invoked for a test iteration. A response
+# reporting no bats_result at all must still leave the run passing clean —
+# there is no BATS verdict to be missing because BATS was never asked for.
+@test "run_test_loop still passes for a config-scope run reporting no bats_result" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-config-scope"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-config-scope" "" "config"
+	local loop_status=$?
+
+	[ "$loop_status" -eq 0 ] || \
+		fail "Expected run_test_loop to pass (exit 0) for config scope; got exit $loop_status"
+
+	local marker
+	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
+	[ "$marker" -eq 0 ] || \
+		fail "config scope never runs BATS; must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
 # AC3: the marker run_test_loop records must change a merge-gate decision,
