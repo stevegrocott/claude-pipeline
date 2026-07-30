@@ -557,3 +557,64 @@ EOF
         fail "Expected 'tests/*.bats' in command. Got: $result"
 }
 
+# =============================================================================
+# guard_commit_path_allowlist() — EXTRA_COMMIT_PATHS expansion (issue #669)
+# =============================================================================
+#
+# guard_commit_path_allowlist() runs under `set -uo pipefail` in the real
+# orchestrator, but bats itself does not enable `set -u`. These tests spawn a
+# standalone wrapper script that sources the extracted functions and turns on
+# `set -uo pipefail` explicitly, so a regression to the unguarded
+# `for ep in "${_extra[@]}"` form is actually caught: on bash 3.2 (macOS
+# system bash) expanding a completely empty array under `set -u` aborts the
+# whole process with an "unbound variable" error before `bad+=("$path")`
+# ever runs.
+
+@test "guard_commit_path_allowlist flags an unexpected path when EXTRA_COMMIT_PATHS is unset" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-669-unset
+    echo "some,csv,data" > data.csv
+    git add data.csv
+    git commit -q -m "add data.csv"
+
+    local wrapper="$TEST_TMP/guard_unset_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+unset EXTRA_COMMIT_PATHS
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+
+    run "$wrapper"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"data.csv"* ]] || \
+        fail "Expected bad path 'data.csv' flagged in output. Got: $output"
+    [[ "$output" != *"unbound variable"* ]] || \
+        fail "Regression: unguarded _extra[@] expansion errored. Got: $output"
+}
+
+@test "guard_commit_path_allowlist exempts a path matching a set EXTRA_COMMIT_PATHS" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-669-set
+    echo "some,csv,data" > data.csv
+    git add data.csv
+    git commit -q -m "add data.csv"
+
+    local wrapper="$TEST_TMP/guard_set_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+export EXTRA_COMMIT_PATHS="data.csv"
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+
+    run "$wrapper"
+    [ "$status" -eq 0 ]
+}
+
