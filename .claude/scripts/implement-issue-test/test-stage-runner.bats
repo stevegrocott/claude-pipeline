@@ -2634,9 +2634,44 @@ _setup_bats_incomplete_repo() {
 		fail "Expected test:bats_incomplete:iter=1 in DEGRADED_STAGES; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
-@test "run_test_loop records test:bats_incomplete in status.json degraded_stages (visible to the merge gate)" {
+# A BATS verdict that DID reach an exit code — pass or fail — must never be
+# recorded as incomplete. Table-driven: both rows exercise the same branch
+# with the only meaningful difference being the reported bats_result.
+@test "run_test_loop records NO bats_incomplete marker for a BATS run that reached an exit code" {
+	local row
+	for row in "passed|2131/2131 executed, all green" \
+	           "failed|3 observed failures, run completed"; do
+		local verdict="${row%%|*}" summary="${row#*|}"
+		local -a DEGRADED_STAGES=()
+		_setup_bats_incomplete_repo "feature-bats-$verdict"
+
+		eval "run_stage() {
+			case \"\$1\" in
+				test-iter-*)
+					echo '{\"status\":\"success\",\"output\":{\"result\":\"passed\",\"summary\":\"$summary\",\"validation_result\":\"skipped\",\"bats_result\":\"$verdict\",\"bats_summary\":\"$summary\"}}'
+					;;
+			esac
+		}"
+		export -f run_stage
+
+		run_test_loop "$TEST_TMP/repo" "feature-bats-$verdict" "" "mixed"
+
+		local marker
+		marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
+		[ "$marker" -eq 0 ] || \
+			fail "bats_result '$verdict' completed its run and must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+
+		rm -rf "$TEST_TMP/repo"
+	done
+}
+
+# AC3: the marker run_test_loop records must change a merge-gate decision,
+# not just appear in status.json. reconcile_failed_tasks_with_branch_evidence
+# is the shipped consumer — it refuses to promote a failed-but-evidenced task
+# while the suite is not green, exactly as it does for test:*full_suite_red.
+@test "the bats_incomplete marker run_test_loop records blocks branch-evidence promotion in the merge gate" {
 	local -a DEGRADED_STAGES=()
-	_setup_bats_incomplete_repo "feature-bats-incomplete-status"
+	_setup_bats_incomplete_repo "feature-bats-incomplete-gate"
 
 	run_stage() {
 		case "$1" in
@@ -2647,61 +2682,49 @@ _setup_bats_incomplete_repo() {
 	}
 	export -f run_stage
 
-	run_test_loop "$TEST_TMP/repo" "feature-bats-incomplete-status" "" "mixed"
+	run_test_loop "$TEST_TMP/repo" "feature-bats-incomplete-gate" "" "mixed"
 
-	printf '{"state":"running"}\n' > "$STATUS_FILE"
-	local degraded_json
-	degraded_json=$(printf '%s\n' \
-		"${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-		| jq -R . | jq -s .)
-	jq --argjson degraded "$degraded_json" \
-		'.degraded_stages = $degraded' "$STATUS_FILE" \
-		> "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+	# Fixture: one failed task whose declared file IS present on the branch
+	# (file.ts, committed by _setup_bats_incomplete_repo). Without the marker
+	# this task promotes to "completed"; the assertion below is on
+	# reconcile's output, not on anything this test wrote.
+	jq -n '{tasks: [{id: 1, description: "task one", status: "failed", affected_files: ["file.ts"]}]}' \
+		> "$STATUS_FILE"
 
-	run jq -r '.degraded_stages[]' "$STATUS_FILE"
-	[ "$status" -eq 0 ]
-	[[ "$output" == *"test:bats_incomplete:iter=1"* ]] || \
-		fail "Expected test:bats_incomplete:iter=1 in status.json .degraded_stages; got: $output"
+	local reconciled
+	reconciled=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	[ "$reconciled" -eq 0 ] || \
+		fail "An incomplete BATS run must block branch-evidence promotion; reconciled $reconciled task(s)"
+
+	local task_status
+	task_status=$(jq -r '(.tasks[] | select(.id == 1)).status' "$STATUS_FILE")
+	[ "$task_status" = "failed" ] || \
+		fail "Expected task 1 to stay failed while the BATS suite is incomplete; got: $task_status"
 }
 
-@test "run_test_loop records NO bats_incomplete marker when bats_result is 'passed' (distinguishable from a pass)" {
-	local -a DEGRADED_STAGES=()
-	_setup_bats_incomplete_repo "feature-bats-passed"
+# AC1: the persisted test_loop stage status must be distinguishable from a
+# genuinely finished run. Drives the shipped finalize_test_loop_stage_status()
+# the orchestrator calls after the loop, not a test-local mirror.
+@test "finalize_test_loop_stage_status records test_loop as degraded when a bats_incomplete marker is present" {
+	printf '{"stages":{}}\n' > "$STATUS_FILE"
+	local -a DEGRADED_STAGES=("test:bats_incomplete:iter=1")
 
-	run_stage() {
-		case "$1" in
-			test-iter-*)
-				echo '{"status":"success","output":{"result":"passed","summary":"2131/2131 executed","validation_result":"skipped","bats_result":"passed","bats_summary":"all green"}}'
-				;;
-		esac
-	}
-	export -f run_stage
+	finalize_test_loop_stage_status
 
-	run_test_loop "$TEST_TMP/repo" "feature-bats-passed" "" "mixed"
-
-	local marker
-	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
-	[ "$marker" -eq 0 ] || \
-		fail "A fully-executed passing BATS run must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+	local stage_status
+	stage_status=$(jq -r '.stages.test_loop.status' "$STATUS_FILE")
+	[ "$stage_status" = "degraded" ] || \
+		fail "Expected test_loop status 'degraded' with an incomplete BATS run; got: $stage_status"
 }
 
-@test "run_test_loop records NO bats_incomplete marker when bats_result is 'failed' (distinguishable from incomplete)" {
+@test "finalize_test_loop_stage_status records test_loop as completed with no bats_incomplete marker" {
+	printf '{"stages":{}}\n' > "$STATUS_FILE"
 	local -a DEGRADED_STAGES=()
-	_setup_bats_incomplete_repo "feature-bats-failed"
 
-	run_stage() {
-		case "$1" in
-			test-iter-*)
-				echo '{"status":"success","output":{"result":"passed","summary":"observed failures","validation_result":"skipped","bats_result":"failed","bats_summary":"3 observed failures, run completed"}}'
-				;;
-		esac
-	}
-	export -f run_stage
+	finalize_test_loop_stage_status
 
-	run_test_loop "$TEST_TMP/repo" "feature-bats-failed" "" "mixed"
-
-	local marker
-	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
-	[ "$marker" -eq 0 ] || \
-		fail "A completed (though failed) BATS run must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+	local stage_status
+	stage_status=$(jq -r '.stages.test_loop.status' "$STATUS_FILE")
+	[ "$stage_status" = "completed" ] || \
+		fail "Expected test_loop status 'completed' for a finished run; got: $stage_status"
 }
