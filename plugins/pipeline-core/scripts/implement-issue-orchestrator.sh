@@ -5334,7 +5334,8 @@ _file_set_contained() {
 # diff to the task that produced it. Two conjuncts guard against that:
 #   - tests_green: derived from the in-memory DEGRADED_STAGES markers
 #     test_loop records this run — the Jest and BATS full-suite-red
-#     variants. Same limitation as every other DEGRADED_STAGES-based gate
+#     variants, plus an incomplete (never-finished) BATS run. Same
+#     limitation as every other DEGRADED_STAGES-based gate
 #     check in this file: invisible on a resumed run where test_loop
 #     completed in an earlier process.
 #   - containment: when several tasks declare the same file(s) — e.g. tasks
@@ -5367,7 +5368,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 	local ds_marker
 	for ds_marker in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
 		case "$ds_marker" in
-			test:*full_suite_red)
+			test:*full_suite_red|test:bats_incomplete:*)
 				tests_green=0
 				break
 				;;
@@ -7552,6 +7553,31 @@ _build_bash_test_command() {
 	printf '%s\n' "$bash_test_command"
 }
 
+# finalize_test_loop_stage_status() — persist the test_loop stage verdict
+# (issue #666 AC1).
+#
+# The stage is normally recorded "completed". When run_test_loop recorded a
+# test:bats_incomplete:* marker this run, the BATS suite never reached an
+# exit code, so "completed" would read as a clean pass to any consumer of
+# status.json. Downgrade the persisted status to "degraded" so the two are
+# distinguishable. Kept non-blocking: the marker itself is what the merge
+# gate consults (see reconcile_failed_tasks_with_branch_evidence).
+# Globals:
+#   DEGRADED_STAGES - scanned for the bats_incomplete marker
+#   STATUS_FILE     - stage status written here
+finalize_test_loop_stage_status() {
+    set_stage_completed "test_loop"
+
+    local _ds_bats_final
+    for _ds_bats_final in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+        if [[ "$_ds_bats_final" == test:bats_incomplete:* ]]; then
+            update_stage "test_loop" "degraded"
+            return 0
+        fi
+    done
+    return 0
+}
+
 # Run the test loop (test+validate -> fix, repeat until pass)
 # Called once after all tasks complete
 # Flow:
@@ -7580,6 +7606,7 @@ run_test_loop() {
     local loop_complete=false
     local test_iteration=0
     local validation_fix_iteration=0
+    local _bats_incomplete_commented=""
     local max_test_iter
     max_test_iter=$(apply_profile_to_test_max_iter \
         "$loop_profile" "$MAX_TEST_ITERATIONS")
@@ -7811,7 +7838,9 @@ Run the pipeline BATS tests:
 cd $safe_dir && $bash_test_command
 
 BATS failures ARE a test failure — set result to 'failed' if any BATS test fails.
-Include bats_result ('passed', 'failed', or 'skipped') and bats_summary in output.
+Include bats_result ('passed', 'failed', 'skipped', or 'incomplete') and bats_summary in output.
+If the suite did not reach an exit code within your available time (a partial run cut short),
+set bats_result to 'incomplete' — do NOT report 'passed' or 'skipped' for a partial run.
 
 "
         elif [[ "$change_scope" == "mixed" ]]; then
@@ -7820,7 +7849,9 @@ Run the pipeline BATS tests:
 cd $safe_dir && $bash_test_command
 
 Report pass/fail. BATS failures are INFORMATIONAL ONLY — they do NOT count as overall test failure.
-Include bats_result ('passed', 'failed', or 'skipped') and bats_summary in output.
+Include bats_result ('passed', 'failed', 'skipped', or 'incomplete') and bats_summary in output.
+If the suite did not reach an exit code within your available time (a partial run cut short),
+set bats_result to 'incomplete' — do NOT report 'passed' or 'skipped' for a partial run.
 Do NOT set result to 'failed' based on BATS test failures alone.
 
 "
@@ -7973,7 +8004,8 @@ Output both test results and validation findings in one structured response.
 - validation_summary: summary of validation findings
 - e2e_result: 'passed', 'failed', or 'skipped' (from E2E execution, if applicable)
 - e2e_summary: summary of E2E test findings (if applicable)
-- bats_result: 'passed', 'failed', or 'skipped' (from BATS pipeline tests, informational only)
+- bats_result: 'passed', 'failed', 'skipped', or 'incomplete' (from BATS pipeline tests, informational only).
+  Use 'incomplete' when the suite did not reach an exit code — never report 'passed' or 'skipped' for a partial run.
 - bats_summary: summary of BATS test findings (informational only)"
 
         local test_result
@@ -8005,9 +8037,12 @@ Output both test results and validation findings in one structured response.
         # be reported "✅ Tests: passed" — exactly the false-green case this
         # issue exists to close. Recorded non-blocking, reusing the same
         # DEGRADED_STAGES + comment_issue marker path the post-loop
-        # full-suite guard already uses for `test:full_suite_red` (see
-        # L10010-10028): a degraded marker plus an issue comment, without
-        # touching loop_complete or test_status.
+        # full-suite guard already uses for the bats_full_suite_red check
+        # (see reconcile_failed_tasks_with_branch_evidence's test:*full_suite_red
+        # match): a degraded marker plus an issue comment, without touching
+        # loop_complete or test_status. Commented once per run (not once per
+        # iteration) to avoid flooding the issue when the suite stays
+        # incomplete across retries.
         # -----------------------------------------------------------------
         local bats_status bats_summary_out
         bats_status=$(printf '%s' "$test_result" | jq -r '.output.bats_result // ""')
@@ -8015,10 +8050,13 @@ Output both test results and validation findings in one structured response.
 
         if [[ "$bats_status" == "incomplete" ]]; then
             DEGRADED_STAGES+=("test:bats_incomplete:iter=$test_iteration")
-            comment_issue "Test Loop: BATS run incomplete ($test_iteration/$max_test_iter)" \
-                "⚠️ The BATS suite did not reach an exit code before this iteration's report was due. This is **not a pass** — no confirmed pass/fail count is available for the untested remainder. Recorded as a degraded stage; **review before merge; do not assume green.**
+            if [[ -z "${_bats_incomplete_commented:-}" ]]; then
+                comment_issue "Test Loop: BATS run incomplete ($test_iteration/$max_test_iter)" \
+                    "⚠️ The BATS suite did not reach an exit code before this iteration's report was due. This is **not a pass** — no confirmed pass/fail count is available for the untested remainder. Recorded as a degraded stage; **review before merge; do not assume green.**
 
 $bats_summary_out" "default"
+                _bats_incomplete_commented=1
+            fi
             log "WARN: BATS run incomplete on iteration $test_iteration (non-blocking, recorded as degraded)"
         fi
 
@@ -10130,7 +10168,10 @@ $e2e_changed
             fi
         fi
 
-        set_stage_completed "test_loop"
+        # Records "completed", or "degraded" when the BATS suite never
+        # reached an exit code this run (issue #666 AC1).
+        finalize_test_loop_stage_status
+
         log "Test loop complete."
     fi
 
