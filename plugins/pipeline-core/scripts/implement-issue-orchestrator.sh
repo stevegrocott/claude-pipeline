@@ -4477,7 +4477,11 @@ get_pr_review_config() {
 }
 
 # Apply pipeline profile to PR review max iterations.
-# For minimal profile, caps max_iter at 1 regardless of get_pr_review_config() output.
+# For minimal profile, caps max_iter at 2 regardless of get_pr_review_config()
+# output. Flooring at 2 (not 1) matters as of issue #651: the max-iterations
+# check now runs after a rejected review, so a max_iter of 1 would block on
+# the first rejection with zero fix attempts. A floor of 2 guarantees at
+# least one fix gets applied and re-reviewed before the loop can block.
 # For standard and full profiles, keeps the dynamic value unchanged.
 #
 # Arguments:
@@ -4489,7 +4493,7 @@ apply_profile_to_pr_review_max_iter() {
 	local profile="$1"
 	local config_max_iter="$2"
 	if [[ "$profile" == "minimal" ]]; then
-		printf '%s' "1"
+		printf '%s' "2"
 	else
 		printf '%s' "$config_max_iter"
 	fi
@@ -10508,6 +10512,22 @@ $pr_creation_skill}"
         local pr_review_loop_start
         pr_review_loop_start=$(date +%s)
 
+        # Resume safety (issue #651): pr_review_iterations persists in the
+        # status file across runs. If a prior run already exhausted the
+        # max-iterations budget (and this run is resuming into an
+        # incomplete pr_review stage), block immediately instead of
+        # running one more unbounded review.
+        local pr_review_iterations_at_entry
+        pr_review_iterations_at_entry=$(jq -r '.pr_review_iterations // 0' "$STATUS_FILE")
+        if (( pr_review_iterations_at_entry >= pr_review_max_iter )); then
+            log_warn "PR review already at max iterations ($pr_review_max_iter) from a prior run — blocking without an additional review"
+            set_final_state "max_iterations_pr_review"
+            DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_review_iterations_at_entry")
+            persist_merge_blocked_reason \
+                "PR review loop had already exhausted its max-iterations budget in a prior run (pr_review:max_iterations:iter=$pr_review_iterations_at_entry)."
+            pr_approved=true
+        fi
+
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
         local pr_iteration
@@ -10518,12 +10538,17 @@ $pr_creation_skill}"
         # NOT yet been re-reviewed. Name this explicitly in the operator
         # message — it is budget exhaustion without a confirming
         # re-review, not a reviewer rejection, and may be a false block.
+        # The "last fix" wording only applies once a fix has actually been
+        # applied (pr_iteration > 1); on the first iteration nothing has
+        # been fixed yet, so that clause is dropped.
         if ! check_wall_timeout; then
             log_warn "Wall-clock timeout in PR review loop at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            local wall_timeout_clause=""
+            (( pr_iteration > 1 )) && wall_timeout_clause=" before the last fix could be re-reviewed"
             persist_merge_blocked_reason \
-                "PR review loop hit its wall-clock timeout before the last fix could be re-reviewed — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."
+                "PR review loop hit the global orchestrator wall-clock timeout${wall_timeout_clause} — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -10533,8 +10558,10 @@ $pr_creation_skill}"
             log_warn "PR-review budget timeout at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            local pr_review_wall_timeout_clause=""
+            (( pr_iteration > 1 )) && pr_review_wall_timeout_clause=" before the last fix could be re-reviewed"
             persist_merge_blocked_reason \
-                "PR review loop hit its wall-clock budget before the last fix could be re-reviewed — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."
+                "PR review loop hit its own PR-review wall-clock budget${pr_review_wall_timeout_clause} — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -10639,6 +10666,15 @@ Approve or request changes. Output a summary suitable for an issue comment."
         if is_stage_timeout "$review_result"; then
             log_warn "PR review timed out on iteration $pr_iteration — retrying next iteration"
             comment_pr "$pr_number" "PR Review: Timeout (Iteration $pr_iteration)" "⏱️ Review stage timed out. Retrying on next iteration." "code-reviewer"
+            if (( pr_iteration >= pr_review_max_iter )); then
+                log_warn "PR review loop exceeded max iterations ($pr_review_max_iter) after repeated review timeouts. Soft-failing and continuing."
+                set_final_state "max_iterations_pr_review"
+                DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
+                persist_merge_blocked_reason \
+                    "PR review loop ended without an approved verdict after max iterations, following repeated review timeouts (pr_review:max_iterations:iter=$pr_iteration)."
+                pr_approved=true
+                break
+            fi
             continue
         fi
 
