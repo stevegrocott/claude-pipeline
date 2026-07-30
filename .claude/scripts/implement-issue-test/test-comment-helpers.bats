@@ -375,3 +375,31 @@ EOF
 
     [ ! -f "$gh_calls" ] || fail "gh should not have been called when QUIET=true"
 }
+
+@test "comment_issue still calls gh when QUIET=false" {
+    local gh_calls="$TEST_TMP/gh-calls.txt"
+    cat > "$TEST_TMP/bin/gh" << EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$gh_calls"
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/gh"
+
+    QUIET=false comment_issue "Test Title" "Test body"
+
+    [ -f "$gh_calls" ] || fail "gh should have been called when QUIET=false"
+}
+
+@test "comment_pr still calls gh when QUIET=false" {
+    local gh_calls="$TEST_TMP/gh-calls.txt"
+    cat > "$TEST_TMP/bin/gh" << EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$gh_calls"
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/gh"
+
+    QUIET=false comment_pr 456 "Test Title" "Test body"
+
+    [ -f "$gh_calls" ] || fail "gh should have been called when QUIET=false"
+}
