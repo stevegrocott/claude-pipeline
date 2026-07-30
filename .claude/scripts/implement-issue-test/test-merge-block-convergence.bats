@@ -706,8 +706,23 @@ teardown() {
 	script_content=$(< "$ORCHESTRATOR_SCRIPT")
 
 	[[ "$script_content" == *'"PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."'* ]]
-	[[ "$script_content" == *'"PR review loop hit wall-clock timeout without an approved verdict (pr_review:wall_timeout)."'* ]]
-	[[ "$script_content" == *'"PR review loop hit its wall-clock budget without an approved verdict (pr_review:wall_timeout)."'* ]]
+	[[ "$script_content" == *'"PR review loop hit its wall-clock timeout before the last fix could be re-reviewed — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."'* ]]
+	[[ "$script_content" == *'"PR review loop hit its wall-clock budget before the last fix could be re-reviewed — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."'* ]]
+}
+
+@test "wall_timeout messages name budget-exhaustion-without-re-review; max_iterations names rejection (issue #651 AC4)" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	# wall_timeout: the situation is budget exhaustion before a
+	# confirming re-review ran — explicitly NOT a reviewer rejection.
+	[[ "$script_content" == *'budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)'* ]]
+
+	# max_iterations: the situation is that every review iteration ran
+	# and re-reviewed the last fix, yet none approved — a genuine
+	# rejection outcome, not a budget artifact.
+	[[ "$script_content" == *'after max iterations (pr_review:max_iterations:iter=$pr_iteration)'* ]]
+	[[ "$script_content" == *'after re-reviewing the last fix'* ]]
 }
 
 @test "max_iterations and wall_timeout DEGRADED_STAGES tags use distinct prefixes" {
@@ -766,12 +781,58 @@ teardown() {
 
 @test "persist_merge_blocked_reason stores distinct text for wall_timeout vs max_iterations" {
 	persist_merge_blocked_reason \
-		"PR review loop hit its wall-clock budget without an approved verdict (pr_review:wall_timeout)."
+		"PR review loop hit its wall-clock budget before the last fix could be re-reviewed — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."
 
 	local stored
 	stored=$(jq -r '.merge_blocked_reason' "$STATUS_FILE")
 
 	[[ "$stored" == *"wall-clock budget"* ]]
 	[[ "$stored" == *"pr_review:wall_timeout"* ]]
+	[[ "$stored" == *"without re-review"* ]]
 	[[ "$stored" != *"max iterations"* ]]
+}
+
+# =============================================================================
+# FUNCTIONAL: wall-clock budget re-derived for the verdict-budgeted worst
+# case — max_iter reviews AND (max_iter-1) fixes (issue #651 AC3)
+# =============================================================================
+
+@test "calc_orchestrator_wall_time includes the fix term so wall_timeout doesn't replace max_iterations as the block kind" {
+	# Worst case per the #651 accounting: MAX_PR_REVIEW_ITERATIONS reviews,
+	# MAX_PR_REVIEW_ITERATIONS-1 fixes (the final rejected review blocks
+	# immediately instead of buying one more unreviewed fix). Omitting the
+	# fix term undercounts the loop's real wall-clock need.
+	export MAX_PR_REVIEW_ITERATIONS=2
+	unset PR_REVIEW_WALL_BUDGET TEST_LOOP_WALL_BUDGET
+
+	local pr_fix_timeout test_budget expected total
+	pr_fix_timeout=$(get_stage_timeout "fix-pr-review-iter" "")
+	test_budget=$(calc_test_loop_budget)
+	# pr_budget = 1200 * 2 reviews + pr_fix_timeout * 1 fix + slack
+	expected=$(( test_budget \
+		+ (1200 * 2 + pr_fix_timeout * 1 + PR_REVIEW_WALL_TIME_SLACK) \
+		+ 5700 ))
+
+	total=$(calc_orchestrator_wall_time)
+
+	[ "$total" -eq "$expected" ]
+}
+
+@test "calc_orchestrator_wall_time grows with MAX_PR_REVIEW_ITERATIONS (fix term scales with iterations, not just reviews)" {
+	unset PR_REVIEW_WALL_BUDGET TEST_LOOP_WALL_BUDGET
+
+	export MAX_PR_REVIEW_ITERATIONS=1
+	local total_one
+	total_one=$(calc_orchestrator_wall_time)
+
+	export MAX_PR_REVIEW_ITERATIONS=3
+	local total_three
+	total_three=$(calc_orchestrator_wall_time)
+
+	# Going from 1 to 3 iterations adds 2 more reviews AND 2 more fixes
+	# (max_iter-1 fixes), so the delta must exceed just the review term.
+	local review_only_delta=$(( 1200 * 2 ))
+	local actual_delta=$(( total_three - total_one ))
+
+	(( actual_delta > review_only_delta ))
 }
