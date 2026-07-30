@@ -2339,22 +2339,25 @@ EOF
 }
 
 # =============================================================================
-# NON-BLOCKING FULL-SUITE BATS CHECK — non-bash scope → degraded signal
+# NON-BLOCKING FULL-SUITE BATS CHECK — runs for every scope, bash included
 #
-# The smart-targeted test loop only runs the pipeline's own *.bats suite when
-# change_scope == "bash"; typescript/ts-frontend/mixed scopes run Jest and
-# never execute it. To stop infra-test regressions (e.g. a long-red
-# test-verdict-parsing.bats, #17/#524) from hiding, main() runs an
-# informational, NON-BLOCKING full-suite BATS check via run-tests.sh for every
-# non-`bash` scope and, on a red suite, records the degraded-stage signal
+# Issue #686 narrows the bash-scope test loop to the PR's changed *.bats
+# suites instead of the full run, so a broken suite outside that changed list
+# (e.g. a long-red test-verdict-parsing.bats, #17/#524) would no longer be
+# caught inside the loop for ANY scope, not just typescript/ts-frontend/mixed.
+# To stop that from hiding, main() runs an informational, NON-BLOCKING
+# full-suite BATS check via run-tests.sh unconditionally — no scope excludes
+# it, bash included — and, on a red suite, records the degraded-stage signal
 # `test:bats_full_suite_red` in DEGRADED_STAGES — mirroring the existing Jest
 # full-suite check at L7441-7465.
 #
 # These tests pin that contract:
 #   - static: the orchestrator wires the degraded signal into DEGRADED_STAGES
-#     and gates the check to non-`bash` scopes (binds to the real source).
-#   - functional: a non-`bash` scope with a red suite records the signal and
-#     writes it to status.json, while `bash` scope and a green suite do not.
+#     and runs the check unconditionally, with no scope gate excluding bash
+#     (binds to the real source).
+#   - functional: bash, typescript, and mixed scopes with a red suite all
+#     record the signal and write it to status.json; a green suite records
+#     nothing.
 #
 # The functional tests reproduce main()'s inline block (it is not a callable
 # function) — the same pattern used by the deploy-verify degraded-flag tests in
@@ -2362,13 +2365,14 @@ EOF
 # =============================================================================
 
 # Faithful reproduction of main()'s non-blocking full-suite BATS check
-# (issue #524). Runs the full bats suite for every non-`bash` scope; on a
-# non-zero run it appends the degraded-stage signal. Never returns non-zero —
-# the check is informational and must not halt the pipeline.
+# (issue #524, ungated for bash by #686). Runs the full bats suite
+# unconditionally — scope is accepted only for call-site readability, it no
+# longer gates anything; on a non-zero run it appends the degraded-stage
+# signal. Never returns non-zero — the check is informational and must not
+# halt the pipeline.
 _repro_full_suite_bats_check() {
 	local scope="$1"
 	local run_tests_cmd="$2"
-	[[ "$scope" == "bash" ]] && return 0
 	eval "$run_tests_cmd" > /dev/null 2>&1 \
 		|| DEGRADED_STAGES+=("test:bats_full_suite_red")
 	return 0
@@ -2383,10 +2387,11 @@ _repro_full_suite_bats_check() {
 		fail "Orchestrator must append test:bats_full_suite_red to DEGRADED_STAGES on a red full-suite BATS run"
 }
 
-@test "full-suite BATS check is gated to non-bash scope and runs the full bats suite" {
-	# Static: the degraded-signal block must be reachable only for non-`bash`
-	# scopes (so typescript/ts-frontend/mixed trigger it) and must run the full
-	# suite via run-tests.sh — mirroring the Jest full-suite check.
+@test "full-suite BATS check is not gated to non-bash scope and also runs for bash" {
+	# Static: issue #686 narrows the bash test loop to the PR's changed
+	# suites, so the degraded-signal block must now be reachable for EVERY
+	# scope, bash included, rather than excluding it — and must still run the
+	# full suite via run-tests.sh, mirroring the Jest full-suite check.
 	local window
 	local marker_line
 	local start_line
@@ -2396,10 +2401,8 @@ _repro_full_suite_bats_check() {
 	window=$(awk -v s="$start_line" -v e="$marker_line" \
 		'NR >= s && NR <= e' "$ORCHESTRATOR_SCRIPT")
 	[ -n "$window" ] || fail "Could not locate the full-suite BATS check block"
-	[[ "$window" == *scope* ]] || \
-		fail "Full-suite BATS check must be gated on branch scope. Window: $window"
-	[[ "$window" == *bash* ]] || \
-		fail "Full-suite BATS check must exclude the bash scope. Window: $window"
+	[[ "$window" != *'!= "bash"'* ]] || \
+		fail "Full-suite BATS check must no longer exclude the bash scope (#686). Window: $window"
 	[[ "$window" == *run-tests.sh* ]] || \
 		fail "Full-suite BATS check must invoke run-tests.sh (full suite). Window: $window"
 }
@@ -2457,10 +2460,12 @@ _repro_full_suite_bats_check() {
 		fail "mixed scope must trigger the full-suite BATS check; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
-@test "bash scope skips the full-suite BATS check (no degraded signal)" {
-	# Functional: the bash scope already runs the full bats suite via the test
-	# loop, so the informational check must NOT run — even with a red suite no
-	# degraded signal should be recorded (avoids double-counting).
+@test "bash scope also runs the full-suite BATS check and records the degraded signal" {
+	# Functional: issue #686 narrows the bash-scope test loop to the PR's
+	# changed suites, so the informational full-suite check must now cover
+	# bash too — a red run records test:bats_full_suite_red just like
+	# typescript/mixed, closing the gap a narrowed command would otherwise
+	# leave open.
 	local -a DEGRADED_STAGES=()
 	local red_suite="$TEST_TMP/run-tests-red.sh"
 	printf '#!/usr/bin/env bash\nexit 1\n' > "$red_suite"
@@ -2468,8 +2473,9 @@ _repro_full_suite_bats_check() {
 
 	_repro_full_suite_bats_check "bash" "bash '$red_suite'"
 
-	[ "${#DEGRADED_STAGES[@]}" -eq 0 ] || \
-		fail "bash scope must skip the full-suite BATS check; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_full_suite_red' || \
+		fail "bash scope must trigger the full-suite BATS check; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
 @test "non-bash scope with a green full-suite BATS run records no degraded signal" {
