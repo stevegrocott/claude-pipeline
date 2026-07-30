@@ -592,11 +592,17 @@ _mock_diff_count() {
 	local budget
 	budget=$(calc_orchestrator_wall_time)
 
-	# Default: test-loop(1500×3+120=4620) + pr-review(1200×2+120=2520)
-	#          + overhead(5700) = 12840  (test-iter raised 900→1500, issue #512)
-	[[ "$budget" -eq 12840 ]] || {
+	# Default: test-loop(1500×3+120=4620) + pr-review(1200×2+1800+120=4320)
+	#          + overhead(5700) = 14640
+	#
+	# The pr-review term gained the 1800s fix stage in issue #651: the budget
+	# check moved inside the changes_requested branch, so the worst case now
+	# includes a fix and its confirming re-review rather than reviews alone.
+	# This expectation was left at the pre-#651 value of 12840 and has been
+	# failing on main since 510da980.
+	[[ "$budget" -eq 14640 ]] || {
 		printf \
-			'FAIL: expected default budget=12840, got %s\n' \
+			'FAIL: expected default budget=14640, got %s\n' \
 			"$budget" >&2
 		return 1
 	}
