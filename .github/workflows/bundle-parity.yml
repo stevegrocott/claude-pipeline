@@ -51,6 +51,13 @@ jobs:
       - name: Run bundle generator tests
         run: bats tests/sync-bundle.bats
 
+      # Guards against the silent-backlog-re-accumulation problem in issue #670:
+      # without this, a red orchestrator suite on main goes unnoticed until it
+      # becomes load-bearing for every unrelated PR that touches a .bats file.
+      - name: Run orchestrator BATS suite
+        run: ./run-tests.sh
+        working-directory: .claude/scripts/implement-issue-test
+
       # The bundle is PRODUCED, not hand-edited: regenerating it from the
       # canonical tree must be a no-op on a correct commit. This catches a
       # bundle-only edit that happens to keep the trees byte-identical only

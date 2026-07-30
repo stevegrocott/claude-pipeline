@@ -8125,6 +8125,16 @@ Output both test results and validation findings in one structured response.
         bats_status=$(printf '%s' "$test_result" | jq -r '.output.bats_result // ""')
         bats_summary_out=$(printf '%s' "$test_result" | jq -r '.output.bats_summary // ""')
 
+        # A missing or empty bats_result on a scope that actually ran the
+        # BATS command (bats_section non-empty, i.e. bash/mixed scope) means
+        # the agent never reported a verdict at all. That is just as
+        # unconfirmed as an explicit 'incomplete' and must not fall through
+        # to the "TESTS PASSED" branch below as a silent pass.
+        if [[ -n "$bats_section" && -z "$bats_status" ]]; then
+            bats_status="incomplete"
+            bats_summary_out="${bats_summary_out:-No bats_result reported for this iteration.}"
+        fi
+
         if [[ "$bats_status" == "incomplete" ]]; then
             DEGRADED_STAGES+=("test:bats_incomplete:iter=$test_iteration")
             if [[ -z "${_bats_incomplete_commented:-}" ]]; then
