@@ -2665,6 +2665,76 @@ _setup_bats_incomplete_repo() {
 	done
 }
 
+# A scope that actually runs the BATS command (bash/mixed) but whose agent
+# comes back with no bats_result at all — or an empty string — must be
+# treated the same as an explicit 'incomplete' verdict. Silently defaulting
+# a missing key to "" (as the `// ""` jq fallback alone would) lets that
+# response fall straight past the incomplete check into the "TESTS PASSED"
+# branch, reporting green with zero confirmed BATS pass/fail evidence.
+@test "run_test_loop records test:bats_incomplete when bats_result is missing from the agent response" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-missing-key"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-missing-key" "" "mixed"
+
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_incomplete:iter=1' || \
+		fail "Expected test:bats_incomplete:iter=1 when bats_result is absent from a mixed-scope response; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+@test "run_test_loop records test:bats_incomplete when bats_result is an empty string" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-empty-string"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped","bats_result":"","bats_summary":""}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-empty-string" "" "mixed"
+
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_incomplete:iter=1' || \
+		fail "Expected test:bats_incomplete:iter=1 when bats_result is an empty string on a mixed-scope response; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# A scope that never asks the agent to run BATS at all (bats_section is
+# empty) has no BATS verdict to be missing — a response with no bats_result
+# key is simply the normal case, not a degraded one.
+@test "run_test_loop does NOT record bats_incomplete when the scope never runs BATS" {
+	local -a DEGRADED_STAGES=()
+	_setup_bats_incomplete_repo "feature-bats-not-run"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*)
+				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
+				;;
+		esac
+	}
+	export -f run_stage
+
+	run_test_loop "$TEST_TMP/repo" "feature-bats-not-run" "" "typescript"
+
+	local marker
+	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
+	[ "$marker" -eq 0 ] || \
+		fail "typescript scope never runs BATS; must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
 # AC3: the marker run_test_loop records must change a merge-gate decision,
 # not just appear in status.json. reconcile_failed_tasks_with_branch_evidence
 # is the shipped consumer — it refuses to promote a failed-but-evidenced task
