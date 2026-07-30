@@ -50,6 +50,10 @@ setup() {
 
 teardown() {
 	teardown_test_env
+	unset ISSUE_BODY_AGENTS_DIR
+	unset ISSUE_BODY_REPO_ROOT
+	unset DEPLOY_VERIFY_CMD
+	unset FRONTEND_PATH_PATTERNS
 }
 
 # ---------------------------------------------------------------------------
