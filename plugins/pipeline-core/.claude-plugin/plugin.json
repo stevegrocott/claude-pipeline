@@ -1,6 +1,6 @@
 {
   "name": "pipeline-core",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Core explore -> issue -> implement engine for the Claude Pipeline: self-contained bundle of scripts + schemas (scripts/), bin/ entrypoints, and hooks. Scripts self-locate via BASH_SOURCE (CLAUDE_PLUGIN_ROOT is not relied on at runtime).",
   "skills": "./skills"
 }
