@@ -267,6 +267,12 @@ _patch_create_issue_no_url_guard() {
 		-e '}' \
 		"$CREATE_ISSUE_SH" > "$scripts_dir/create-issue.sh"
 	chmod +x "$scripts_dir/create-issue.sh"
+
+	# create-issue.sh sources "$SCRIPT_DIR/../resolve-pipeline-root.sh"
+	# (one level up from platform/), so the patched copy needs that sibling
+	# file too — same gap documented in helpers/test-helper.bash.
+	cp "$(dirname "$CREATE_ISSUE_SH")/../resolve-pipeline-root.sh" \
+		"$scripts_dir/../resolve-pipeline-root.sh"
 }
 
 @test "issue_num non-numeric guard: emits WARNING and skips sub-issue POST" {

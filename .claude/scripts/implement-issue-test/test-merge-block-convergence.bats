@@ -528,11 +528,16 @@ teardown() {
 	local script_content
 	script_content=$(< "$ORCHESTRATOR_SCRIPT")
 
+	# Two `if (( pr_iteration >= pr_review_max_iter )); then` guards exist
+	# (issue #651 follow-up): an earlier one in the review-timeout retry
+	# branch (bounds repeated timeouts, runs before any verdict), and the
+	# verdict-based one in the changes_requested branch this test targets
+	# — take the LAST occurrence to reach the latter.
 	local review_comment_pos maxiter_check_pos
 	review_comment_pos=$(grep -n 'comment_pr "\$pr_number" "PR Review (Iteration \$pr_iteration)"' \
 		<<< "$script_content" | head -1 | cut -d: -f1)
 	maxiter_check_pos=$(grep -n 'if (( pr_iteration >= pr_review_max_iter )); then' \
-		<<< "$script_content" | head -1 | cut -d: -f1)
+		<<< "$script_content" | tail -1 | cut -d: -f1)
 
 	[[ -n "$review_comment_pos" ]]
 	[[ -n "$maxiter_check_pos" ]]
@@ -576,124 +581,50 @@ teardown() {
 	[[ "$between" != *'pr_iteration > pr_review_max_iter'* ]]
 }
 
-# =============================================================================
-# FUNCTIONAL: re-review runs after the final fix before a max_iterations block
-# (issue #651)
-# =============================================================================
-# Simulates the loop's own control flow (mirrored from the real else-branch
-# ordering above) to prove that every fix is followed by a review, and the
-# loop only ever blocks after that review has run.
+@test "review-timeout retry branch bounds pr_iteration before its continue (issue #651 follow-up)" {
+	# Moving the max_iterations check into the changes_requested branch left
+	# the timeout branch unbounded: it `continue`s without ever reaching a
+	# verdict, so repeated review timeouts could burn more review stages than
+	# max_iter and exit as pr_review:wall_timeout instead of max_iterations.
+	local script_content timeout_start continue_pos timeout_block
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
 
-@test "simulated loop re-reviews every fix before blocking on max_iterations" {
-	local pr_review_max_iter=3
-	local pr_iteration=0
-	local pr_approved=false
-	local review_count=0
-	local fix_count=0
-	local blocked_reason=""
+	timeout_start=$(grep -n 'log_warn "PR review timed out on iteration \$pr_iteration' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
+	[[ -n "$timeout_start" ]]
 
-	while [[ "$pr_approved" != "true" ]]; do
-		pr_iteration=$(( pr_iteration + 1 ))
+	# First `continue` at or after the timeout log ends this branch.
+	continue_pos=$(awk -v s="$timeout_start" \
+		'NR >= s && $1 == "continue" { print NR; exit }' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$continue_pos" ]]
 
-		# Every review in this simulation requests changes, forcing the
-		# loop to run all the way to the max_iterations block.
-		review_count=$(( review_count + 1 ))
-		local review_verdict="changes_requested"
+	timeout_block=$(sed -n "${timeout_start},${continue_pos}p" "$ORCHESTRATOR_SCRIPT")
 
-		if [[ "$review_verdict" == "approved" ]]; then
-			pr_approved=true
-		else
-			if (( pr_iteration >= pr_review_max_iter )); then
-				blocked_reason="PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
-				pr_approved=true
-				break
-			fi
-			fix_count=$(( fix_count + 1 ))
-		fi
-
-		(( pr_iteration > 10 )) && break  # test-only safety valve
-	done
-
-	# Every fix (2, since iteration 3 blocks instead of fixing) was
-	# followed by a review before the loop could block: review_count is
-	# exactly fix_count + 1 — the review of the final fix.
-	[[ "$review_count" -eq 3 ]]
-	[[ "$fix_count" -eq 2 ]]
-	[[ "$review_count" -eq $(( fix_count + 1 )) ]]
-	[[ "$blocked_reason" == *"max_iterations:iter=3"* ]]
+	[[ "$timeout_block" == *'if (( pr_iteration >= pr_review_max_iter )); then'* ]]
+	[[ "$timeout_block" == *'pr_review:max_iterations:iter=$pr_iteration'* ]]
+	[[ "$timeout_block" == *'pr_approved=true'* ]]
 }
 
-@test "simulated loop applies no fix without a following review (max_iter=1, immediate block)" {
-	local pr_review_max_iter=1
-	local pr_iteration=0
-	local pr_approved=false
-	local review_count=0
-	local fix_count=0
-	local blocked_reason=""
+@test "persisted pr_review_iterations are re-checked on resume before the loop runs a review" {
+	# pr_review_iterations survives in status.json across runs. Without an
+	# entry guard, every resume increments and performs one more full review
+	# before the in-branch check can block, so repeated resumes each buy an
+	# extra review beyond the configured cap.
+	local script_content loop_start_pos entry_guard_pos before_loop
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
 
-	while [[ "$pr_approved" != "true" ]]; do
-		pr_iteration=$(( pr_iteration + 1 ))
-		review_count=$(( review_count + 1 ))
-		local review_verdict="changes_requested"
+	loop_start_pos=$(grep -n 'while \[\[ "\$pr_approved" != "true" \]\]; do' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
+	entry_guard_pos=$(grep -n 'pr_review_iterations_at_entry >= pr_review_max_iter' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
 
-		if [[ "$review_verdict" == "approved" ]]; then
-			pr_approved=true
-		else
-			if (( pr_iteration >= pr_review_max_iter )); then
-				blocked_reason="PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
-				pr_approved=true
-				break
-			fi
-			fix_count=$(( fix_count + 1 ))
-		fi
+	[[ -n "$entry_guard_pos" ]]
+	# The guard must run BEFORE the loop, not inside it.
+	(( entry_guard_pos < loop_start_pos ))
 
-		(( pr_iteration > 10 )) && break
-	done
-
-	# With max_iter=1 the single review already ran before the block fires,
-	# and no fix is ever applied without a subsequent review.
-	[[ "$review_count" -eq 1 ]]
-	[[ "$fix_count" -eq 0 ]]
-	[[ "$blocked_reason" == *"max_iterations:iter=1"* ]]
-}
-
-@test "simulated loop applies final fix and re-reviews it, then approves (no block)" {
-	local pr_review_max_iter=3
-	local pr_iteration=0
-	local pr_approved=false
-	local review_count=0
-	local fix_count=0
-	local blocked_reason=""
-
-	# changes_requested, changes_requested, approved
-	local -a verdicts=("changes_requested" "changes_requested" "approved")
-
-	while [[ "$pr_approved" != "true" ]]; do
-		pr_iteration=$(( pr_iteration + 1 ))
-		review_count=$(( review_count + 1 ))
-		local review_verdict="${verdicts[$((pr_iteration - 1))]}"
-
-		if [[ "$review_verdict" == "approved" ]]; then
-			pr_approved=true
-		else
-			if (( pr_iteration >= pr_review_max_iter )); then
-				blocked_reason="PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
-				pr_approved=true
-				break
-			fi
-			fix_count=$(( fix_count + 1 ))
-		fi
-
-		(( pr_iteration > 10 )) && break
-	done
-
-	# The final fix (applied after iteration 2) is re-reviewed on
-	# iteration 3, which approves — no block, and the last review count
-	# still reflects one review per fix plus the approving review.
-	[[ "$review_count" -eq 3 ]]
-	[[ "$fix_count" -eq 2 ]]
-	[[ -z "$blocked_reason" ]]
-	[[ "$pr_approved" == "true" ]]
+	before_loop=$(sed -n "1,${loop_start_pos}p" "$ORCHESTRATOR_SCRIPT")
+	[[ "$before_loop" == *'.pr_review_iterations // 0'* ]]
+	[[ "$before_loop" == *'pr_review:max_iterations:iter=$pr_review_iterations_at_entry'* ]]
 }
 
 # =============================================================================
@@ -706,8 +637,8 @@ teardown() {
 	script_content=$(< "$ORCHESTRATOR_SCRIPT")
 
 	[[ "$script_content" == *'"PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."'* ]]
-	[[ "$script_content" == *'"PR review loop hit its wall-clock timeout before the last fix could be re-reviewed — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."'* ]]
-	[[ "$script_content" == *'"PR review loop hit its wall-clock budget before the last fix could be re-reviewed — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."'* ]]
+	[[ "$script_content" == *'"PR review loop hit the global orchestrator wall-clock timeout${wall_timeout_clause} — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."'* ]]
+	[[ "$script_content" == *'"PR review loop hit its own PR-review wall-clock budget${pr_review_wall_timeout_clause} — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."'* ]]
 }
 
 @test "wall_timeout messages name budget-exhaustion-without-re-review; max_iterations names rejection (issue #651 AC4)" {
