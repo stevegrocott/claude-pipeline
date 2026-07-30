@@ -34,6 +34,8 @@
 #   cleanup_worktree:
 #     1. removes worktree directory and branch
 #     2. tolerates missing worktree without error
+#     3. tags unmerged commits as salvage/issue-<n>-task<m> before delete
+#     4. does not create a salvage tag when branch has no unmerged commits
 #
 #   execute_batch_serial:
 #     1. returns completed array with task IDs (mocked run_stage)
@@ -399,6 +401,60 @@ teardown() {
 
 	run cleanup_worktree "/nonexistent/path" "nonexistent-branch"
 	[ "$status" -eq 0 ]
+}
+
+@test "cleanup_worktree: tags unmerged commits as salvage/issue-<n>-task<m>" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/salvage-test main
+
+	local wt_base="$TEST_TMP/worktrees"
+	local wt_branch="wt-i42-t7"
+	create_task_worktree "$wt_base" "feature/salvage-test" "7" "42" \
+		>/dev/null
+
+	# Commit work on the worktree branch that a merge conflict would
+	# otherwise leave stranded once the branch is deleted.
+	printf 'salvage me\n' > "${wt_base}/task-7/salvage.txt"
+	git -C "${wt_base}/task-7" add salvage.txt
+	git -C "${wt_base}/task-7" commit -q -m "unmerged work"
+
+	local unmerged_sha
+	unmerged_sha=$(git rev-parse "$wt_branch")
+
+	cleanup_worktree "${wt_base}/task-7" "$wt_branch" "42" "7" \
+		"feature/salvage-test"
+
+	# Branch and worktree are gone
+	[[ ! -d "${wt_base}/task-7" ]]
+	! git rev-parse --verify "$wt_branch" 2>/dev/null
+
+	# Salvage tag exists and points at the unmerged commit
+	run git rev-parse "salvage/issue-42-task7"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$unmerged_sha" ]
+
+	git checkout -q main
+	git tag -d "salvage/issue-42-task7" 2>/dev/null || true
+	git branch -D feature/salvage-test 2>/dev/null || true
+}
+
+@test "cleanup_worktree: no salvage tag when branch has no unmerged commits" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/no-salvage-test main
+
+	local wt_base="$TEST_TMP/worktrees"
+	local wt_branch="wt-i42-t8"
+	create_task_worktree "$wt_base" "feature/no-salvage-test" "8" "42" \
+		>/dev/null
+
+	cleanup_worktree "${wt_base}/task-8" "$wt_branch" "42" "8" \
+		"feature/no-salvage-test"
+
+	run git rev-parse "salvage/issue-42-task8"
+	[ "$status" -ne 0 ]
+
+	git checkout -q main
+	git branch -D feature/no-salvage-test 2>/dev/null || true
 }
 
 # =============================================================================
@@ -899,8 +955,17 @@ _setup_parallel_stage_mocks() {
 	[[ "$total_classified" -eq 2 ]]
 	[[ "$conflicted_count" -ge 1 ]]
 
+	# The conflicted task's worktree branch was deleted by cleanup_worktree,
+	# but its commits must remain addressable via a salvage tag.
+	local conflicted_id
+	conflicted_id=$(printf '%s' "$result" | jq -r '.conflicted[0]')
+	run git rev-parse "salvage/issue-${ISSUE_NUMBER}-task${conflicted_id}"
+	[ "$status" -eq 0 ]
+
 	git worktree prune 2>/dev/null || true
 	git checkout -q main 2>/dev/null || true
+	git tag -d "salvage/issue-${ISSUE_NUMBER}-task${conflicted_id}" \
+		2>/dev/null || true
 	git branch -D feature/conf-fallback 2>/dev/null || true
 	git branch -D wt-task-10 2>/dev/null || true
 	git branch -D wt-task-11 2>/dev/null || true
