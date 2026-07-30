@@ -7772,9 +7772,10 @@ run_test_loop() {
         return 0
     fi
 
-    # Build the test command based on scope
+    # Build the test command based on scope. bash_test_command itself is
+    # assigned below, once changed_test_files is known — the bash scope
+    # narrows it to the PR-changed suites.
     local test_command bash_test_command
-    bash_test_command=$(_build_bash_test_command "$loop_dir")
 
     local safe_dir safe_branch
     safe_dir=$(printf '%q' "$loop_dir")
@@ -7823,29 +7824,37 @@ run_test_loop() {
     fi
 
     if [[ "$change_scope" == "bash" ]]; then
-        # BATS always runs every suite, so the changed list is used purely to
-        # attribute failures to the PR — never to narrow the command.
+        # Pass the detected changed BATS files into the builder so it can
+        # narrow the command to just the PR-changed suites. The builder
+        # falls back to the full-suite command on its own when the list is
+        # empty or every entry falls outside the known bats roots (see its
+        # docstring) — so this is safe to call unconditionally.
+        bash_test_command=$(_build_bash_test_command "$loop_dir" "$changed_test_files")
         if [[ -n "$changed_test_files" ]]; then
-            log "Changed BATS test files: $(echo "$changed_test_files" | tr '\n' ' ')"
+            log "Narrowed BATS command: $bash_test_command"
         else
             log "No changed BATS test files found — BATS failures will be treated as pre-existing"
         fi
-    elif [[ "$changed_test_detection_attempted" == true ]]; then
-        # Split: Playwright specs (in e2e/ directories) vs Jest unit tests
-        local file
-        while IFS= read -r file; do
-            [[ -z "$file" ]] && continue
-            if _is_playwright_spec "$file"; then
-                playwright_test_files="${playwright_test_files:+$playwright_test_files
-}$file"
-            else
-                jest_test_files="${jest_test_files:+$jest_test_files
-}$file"
-            fi
-        done <<< "$changed_test_files"
+    else
+        bash_test_command=$(_build_bash_test_command "$loop_dir")
 
-        if [[ -n "$playwright_test_files" ]]; then
-            log "Playwright specs detected (excluded from Jest): $(echo "$playwright_test_files" | tr '\n' ' ')"
+        if [[ "$changed_test_detection_attempted" == true ]]; then
+            # Split: Playwright specs (in e2e/ directories) vs Jest unit tests
+            local file
+            while IFS= read -r file; do
+                [[ -z "$file" ]] && continue
+                if _is_playwright_spec "$file"; then
+                    playwright_test_files="${playwright_test_files:+$playwright_test_files
+}$file"
+                else
+                    jest_test_files="${jest_test_files:+$jest_test_files
+}$file"
+                fi
+            done <<< "$changed_test_files"
+
+            if [[ -n "$playwright_test_files" ]]; then
+                log "Playwright specs detected (excluded from Jest): $(echo "$playwright_test_files" | tr '\n' ' ')"
+            fi
         fi
     fi
 

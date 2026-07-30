@@ -558,3 +558,39 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 	expect_not_ok "no pre-existing skip path may fire for a narrowed-command failure" \
 		grep -q "All test failures are pre-existing" "$LOG_FILE"
 }
+
+# Unlike the test above (which stubs _build_bash_test_command to pin
+# downstream attribution), this exercises the REAL builder end-to-end: the
+# caller must pass changed_test_files into it, and the resulting command —
+# not just the changed-file list — must be what gets logged and embedded in
+# the agent prompt.
+@test "bash scope: run_test_loop passes changed_test_files into the real builder and logs the narrowed command" {
+	_setup_test_loop_repo
+
+	# A pre-existing suite already on main, untouched by the PR.
+	mkdir -p tests
+	printf '@test "pre-existing" { true; }\n' > tests/other-suite.bats
+	git add tests/other-suite.bats
+	git commit -q -m "pre-existing suite on main"
+
+	git checkout -q -b feature-narrowed-real-builder
+	printf '@test "red" { false; }\n' > tests/new-suite.bats
+	git add tests/new-suite.bats
+	git commit -q -m "add failing bats suite"
+
+	_install_failing_then_passing_run_stage_capture_prompt \
+		'[{"title":"new-suite","description":"not ok 1 red"}]'
+
+	run_test_loop "$TEST_TMP/repo" "feature-narrowed-real-builder" "" "bash"
+
+	expect_ok "the real builder's narrowed command must reach the agent prompt" \
+		grep -qF "tests/new-suite.bats" "$PROMPT_CAPTURE_FILE"
+	expect_not_ok "the narrowed command must not fall back to the full tests/ glob" \
+		grep -qF "tests/*.bats" "$PROMPT_CAPTURE_FILE"
+	expect_not_ok "the narrowed command must not include the untouched pre-existing suite" \
+		grep -qF "tests/other-suite.bats" "$PROMPT_CAPTURE_FILE"
+	expect_ok "the log must show the narrowed command, not only the changed-file list" \
+		grep -q "Narrowed BATS command" "$LOG_FILE"
+	expect_ok "the logged narrowed command must target the changed suite" \
+		grep -q "Narrowed BATS command:.*tests/new-suite.bats" "$LOG_FILE"
+}
