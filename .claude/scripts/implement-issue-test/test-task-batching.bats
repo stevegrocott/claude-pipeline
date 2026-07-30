@@ -34,6 +34,8 @@
 #   cleanup_worktree:
 #     1. removes worktree directory and branch
 #     2. tolerates missing worktree without error
+#     3. tags unmerged commits as salvage/issue-<n>-task<m> before delete
+#     4. does not create a salvage tag when branch has no unmerged commits
 #
 #   execute_batch_serial:
 #     1. returns completed array with task IDs (mocked run_stage)
@@ -399,6 +401,60 @@ teardown() {
 
 	run cleanup_worktree "/nonexistent/path" "nonexistent-branch"
 	[ "$status" -eq 0 ]
+}
+
+@test "cleanup_worktree: tags unmerged commits as salvage/issue-<n>-task<m>" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/salvage-test main
+
+	local wt_base="$TEST_TMP/worktrees"
+	local wt_branch="wt-i42-t7"
+	create_task_worktree "$wt_base" "feature/salvage-test" "7" "42" \
+		>/dev/null
+
+	# Commit work on the worktree branch that a merge conflict would
+	# otherwise leave stranded once the branch is deleted.
+	printf 'salvage me\n' > "${wt_base}/task-7/salvage.txt"
+	git -C "${wt_base}/task-7" add salvage.txt
+	git -C "${wt_base}/task-7" commit -q -m "unmerged work"
+
+	local unmerged_sha
+	unmerged_sha=$(git rev-parse "$wt_branch")
+
+	cleanup_worktree "${wt_base}/task-7" "$wt_branch" "42" "7" \
+		"feature/salvage-test"
+
+	# Branch and worktree are gone
+	[[ ! -d "${wt_base}/task-7" ]]
+	! git rev-parse --verify "$wt_branch" 2>/dev/null
+
+	# Salvage tag exists and points at the unmerged commit
+	run git rev-parse "salvage/issue-42-task7"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$unmerged_sha" ]
+
+	git checkout -q main
+	git tag -d "salvage/issue-42-task7" 2>/dev/null || true
+	git branch -D feature/salvage-test 2>/dev/null || true
+}
+
+@test "cleanup_worktree: no salvage tag when branch has no unmerged commits" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/no-salvage-test main
+
+	local wt_base="$TEST_TMP/worktrees"
+	local wt_branch="wt-i42-t8"
+	create_task_worktree "$wt_base" "feature/no-salvage-test" "8" "42" \
+		>/dev/null
+
+	cleanup_worktree "${wt_base}/task-8" "$wt_branch" "42" "8" \
+		"feature/no-salvage-test"
+
+	run git rev-parse "salvage/issue-42-task8"
+	[ "$status" -ne 0 ]
+
+	git checkout -q main
+	git branch -D feature/no-salvage-test 2>/dev/null || true
 }
 
 # =============================================================================
@@ -899,11 +955,268 @@ _setup_parallel_stage_mocks() {
 	[[ "$total_classified" -eq 2 ]]
 	[[ "$conflicted_count" -ge 1 ]]
 
+	# The conflicted task's worktree branch was deleted by cleanup_worktree,
+	# but its commits must remain addressable via a salvage tag.
+	local conflicted_id
+	conflicted_id=$(printf '%s' "$result" | jq -r '.conflicted[0]')
+	run git rev-parse "salvage/issue-${ISSUE_NUMBER}-task${conflicted_id}"
+	[ "$status" -eq 0 ]
+
 	git worktree prune 2>/dev/null || true
 	git checkout -q main 2>/dev/null || true
+	git tag -d "salvage/issue-${ISSUE_NUMBER}-task${conflicted_id}" \
+		2>/dev/null || true
 	git branch -D feature/conf-fallback 2>/dev/null || true
 	git branch -D wt-task-10 2>/dev/null || true
 	git branch -D wt-task-11 2>/dev/null || true
+}
+
+# =============================================================================
+# conflicted merge retains commits under a named salvage ref (issue #667)
+# A conflicted worktree branch must not be force-deleted outright: its
+# commits stay reachable by name and the run logs the SHA plus a recovery
+# command, instead of orphaning the work as raw unreferenced SHAs.
+# =============================================================================
+
+@test "execute_batch_parallel: conflicted merge retains the commit under a named salvage ref (AC1)" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/conf-salvage main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'shared content\n' > shared.ts
+	git add shared.ts
+	git commit -q -m "add shared"
+
+	# Two tasks both touching shared.ts: task 30 merges cleanly, task 31
+	# conflicts because shared.ts was already changed by task 30's merge.
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf 'task %s changes\n' "$task_id" > shared.ts
+		git add shared.ts
+		git commit -q -m "task $task_id changes shared.ts"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":30,"description":"Modify shared.ts","agent":"default","batch":1},
+		{"id":31,"description":"Modify shared.ts","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/conf-salvage" "main" \
+		2>/dev/null) || true
+
+	local conflicted_ids
+	conflicted_ids=$(printf '%s' "$result" | jq -c '.conflicted')
+	[[ "$conflicted_ids" == "[31]" ]]
+
+	# The SHA the losing worktree actually committed (from its result log).
+	local worktree_sha
+	worktree_sha=$(jq -r '.commit' "${LOG_BASE}/stages/task-31-worktree.log")
+
+	# Commits from a conflicted merge must remain reachable by NAME
+	# (ISSUE_NUMBER=99 in this test env), not only recoverable by raw SHA.
+	run git rev-parse --verify "salvage/issue-99-task31"
+	[ "$status" -eq 0 ]
+	[[ "$output" == "$worktree_sha"* ]]
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git tag -d salvage/issue-99-task31 2>/dev/null || true
+	git branch -D feature/conf-salvage 2>/dev/null || true
+	git branch -D wt-task-30 2>/dev/null || true
+	git branch -D wt-task-31 2>/dev/null || true
+}
+
+@test "execute_batch_parallel: conflicted merge still removes the worktree directory (AC2)" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/conf-salvage-dir main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'shared content\n' > shared.ts
+	git add shared.ts
+	git commit -q -m "add shared"
+
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf 'task %s changes\n' "$task_id" > shared.ts
+		git add shared.ts
+		git commit -q -m "task $task_id changes shared.ts"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":40,"description":"Modify shared.ts","agent":"default","batch":1},
+		{"id":41,"description":"Modify shared.ts","agent":"default","batch":1}
+	]'
+
+	execute_batch_parallel 1 "$tasks" "feature/conf-salvage-dir" "main" \
+		>/dev/null 2>/dev/null || true
+
+	# Retaining the ref must not leave the disposable worktree directory behind.
+	[[ ! -d "${LOG_BASE}/worktrees/task-41" ]]
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git tag -d salvage/issue-99-task41 2>/dev/null || true
+	git branch -D feature/conf-salvage-dir 2>/dev/null || true
+	git branch -D wt-task-40 2>/dev/null || true
+	git branch -D wt-task-41 2>/dev/null || true
+}
+
+@test "execute_batch_parallel: conflicted merge logs the retained SHA and a recovery command (AC3)" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/conf-salvage-log main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'shared content\n' > shared.ts
+	git add shared.ts
+	git commit -q -m "add shared"
+
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf 'task %s changes\n' "$task_id" > shared.ts
+		git add shared.ts
+		git commit -q -m "task $task_id changes shared.ts"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":50,"description":"Modify shared.ts","agent":"default","batch":1},
+		{"id":51,"description":"Modify shared.ts","agent":"default","batch":1}
+	]'
+
+	execute_batch_parallel 1 "$tasks" "feature/conf-salvage-log" "main" \
+		>/dev/null 2>/dev/null || true
+
+	local worktree_sha
+	worktree_sha=$(jq -r '.commit' "${LOG_BASE}/stages/task-51-worktree.log")
+
+	# The run must log the retained SHA plus a cherry-pick recovery command,
+	# so the conflict is not merely silent-and-discoverable-by-luck.
+	grep -q "$worktree_sha" "$LOG_FILE"
+	grep -qi "cherry-pick" "$LOG_FILE"
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git tag -d salvage/issue-99-task51 2>/dev/null || true
+	git branch -D feature/conf-salvage-log 2>/dev/null || true
+	git branch -D wt-task-50 2>/dev/null || true
+	git branch -D wt-task-51 2>/dev/null || true
+}
+
+@test "execute_batch_parallel: successful merge deletes its branch and leaves no salvage ref behind (AC4)" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/salvage-success main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'alpha\n' > alpha.ts
+	printf 'beta\n' > beta.ts
+	git add alpha.ts beta.ts
+	git commit -q -m "add source files"
+
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf 'task %s output\n' "$task_id" > "task-${task_id}-out.txt"
+		git add "task-${task_id}-out.txt"
+		git commit -q -m "task $task_id"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":60,"description":"Modify alpha.ts","agent":"default","batch":1},
+		{"id":61,"description":"Modify beta.ts","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/salvage-success" "main" \
+		2>/dev/null) || true
+
+	local comp_count
+	comp_count=$(printf '%s' "$result" | jq '.completed | length')
+	[[ "$comp_count" -eq 2 ]]
+
+	# No salvage ref for a task whose merge actually succeeded.
+	run git rev-parse --verify "salvage/issue-99-task60"
+	[ "$status" -ne 0 ]
+	run git rev-parse --verify "salvage/issue-99-task61"
+	[ "$status" -ne 0 ]
+
+	# The worktree branches themselves must be gone (no reprieve on success).
+	run git rev-parse --verify "wt-task-60"
+	[ "$status" -ne 0 ]
+	run git rev-parse --verify "wt-task-61"
+	[ "$status" -ne 0 ]
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/salvage-success 2>/dev/null || true
 }
 
 @test "execute_batch_parallel: success-reported task with no commit lands in failed (no-op guard)" {
