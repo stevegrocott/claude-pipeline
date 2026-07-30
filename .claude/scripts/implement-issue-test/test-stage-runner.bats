@@ -2614,6 +2614,35 @@ _setup_bats_incomplete_repo() {
 	export -f comment_issue
 }
 
+# Shared driver for the scope rows below: they differ only in scope and in the
+# stubbed agent response, so the identical run_stage stub lives here once.
+# DEGRADED_STAGES stays declared in the caller — run_test_loop appends to it via
+# dynamic scoping, which reaches into a subshell but not back out of one, so
+# this must not be wrapped in `run` or $( ).
+_run_loop_with_stubbed_test_response() {
+	local branch="$1" scope="$2"
+	export STUBBED_TEST_RESPONSE="$3"
+
+	_setup_bats_incomplete_repo "$branch"
+
+	run_stage() {
+		case "$1" in
+			test-iter-*) printf '%s\n' "$STUBBED_TEST_RESPONSE" ;;
+		esac
+	}
+	export -f run_stage
+
+	local loop_status=0
+	run_test_loop "$TEST_TMP/repo" "$branch" "" "$scope" || loop_status=$?
+	return "$loop_status"
+}
+
+# Number of bats_incomplete markers in the caller's DEGRADED_STAGES.
+_count_bats_incomplete_markers() {
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -c '^test:bats_incomplete:' || true
+}
+
 @test "run_test_loop records test:bats_incomplete when bats_result is 'incomplete'" {
 	local -a DEGRADED_STAGES=()
 	_setup_bats_incomplete_repo "feature-bats-incomplete"
@@ -2671,93 +2700,38 @@ _setup_bats_incomplete_repo() {
 # a missing key to "" (as the `// ""` jq fallback alone would) lets that
 # response fall straight past the incomplete check into the "TESTS PASSED"
 # branch, reporting green with zero confirmed BATS pass/fail evidence.
-@test "run_test_loop records test:bats_incomplete when bats_result is missing from the agent response" {
-	local -a DEGRADED_STAGES=()
-	_setup_bats_incomplete_repo "feature-bats-missing-key"
+#
+# Table-driven over the scopes that build a bats_section — mixed, and bash
+# whose section is labelled BLOCKING (distinct wording/behaviour, see the
+# "bash scope bats_section is labelled BLOCKING" tests above) — plus one that
+# never builds one (typescript), where a response with no bats_result key is
+# simply the normal case rather than a degraded one. Adding a scope here is a
+# one-line row.
+@test "run_test_loop records bats_incomplete for an unreported BATS verdict on exactly the scopes that run BATS" {
+	local no_key='{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
+	local empty_key='{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped","bats_result":"","bats_summary":""}}'
 
-	run_stage() {
-		case "$1" in
-			test-iter-*)
-				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
-				;;
-		esac
-	}
-	export -f run_stage
+	# scope|label|stubbed agent response|expected bats_incomplete marker count
+	local row
+	for row in \
+		"mixed|missing-key|$no_key|1" \
+		"mixed|empty-string|$empty_key|1" \
+		"bash|missing-key|$no_key|1" \
+		"typescript|missing-key|$no_key|0"
+	do
+		local scope label response expected
+		IFS='|' read -r scope label response expected <<< "$row"
 
-	run_test_loop "$TEST_TMP/repo" "feature-bats-missing-key" "" "mixed"
+		local -a DEGRADED_STAGES=()
+		_run_loop_with_stubbed_test_response "feature-bats-$scope-$label" "$scope" "$response"
 
-	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-		| grep -qx 'test:bats_incomplete:iter=1' || \
-		fail "Expected test:bats_incomplete:iter=1 when bats_result is absent from a mixed-scope response; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
-}
+		local marker
+		marker=$(_count_bats_incomplete_markers)
+		[ "$marker" -eq "$expected" ] || \
+			fail "scope '$scope' with a $label bats_result: expected $expected bats_incomplete marker(s), got $marker; DEGRADED_STAGES: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 
-@test "run_test_loop records test:bats_incomplete when bats_result is an empty string" {
-	local -a DEGRADED_STAGES=()
-	_setup_bats_incomplete_repo "feature-bats-empty-string"
-
-	run_stage() {
-		case "$1" in
-			test-iter-*)
-				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped","bats_result":"","bats_summary":""}}'
-				;;
-		esac
-	}
-	export -f run_stage
-
-	run_test_loop "$TEST_TMP/repo" "feature-bats-empty-string" "" "mixed"
-
-	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-		| grep -qx 'test:bats_incomplete:iter=1' || \
-		fail "Expected test:bats_incomplete:iter=1 when bats_result is an empty string on a mixed-scope response; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
-}
-
-# The bash scope builds a BLOCKING bats_section (distinct wording/behaviour
-# from mixed's informational-only section — see the "bash scope bats_section
-# is labelled BLOCKING" tests above), but the missing-bats_result guard keys
-# only on bats_section being non-empty. Confirm the omission is caught on
-# the bash branch too, not just on mixed.
-@test "run_test_loop records test:bats_incomplete when bats_result is missing on bash scope" {
-	local -a DEGRADED_STAGES=()
-	_setup_bats_incomplete_repo "feature-bats-bash-missing-key"
-
-	run_stage() {
-		case "$1" in
-			test-iter-*)
-				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
-				;;
-		esac
-	}
-	export -f run_stage
-
-	run_test_loop "$TEST_TMP/repo" "feature-bats-bash-missing-key" "" "bash"
-
-	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-		| grep -qx 'test:bats_incomplete:iter=1' || \
-		fail "Expected test:bats_incomplete:iter=1 when bats_result is absent from a bash-scope response; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
-}
-
-# A scope that never asks the agent to run BATS at all (bats_section is
-# empty) has no BATS verdict to be missing — a response with no bats_result
-# key is simply the normal case, not a degraded one.
-@test "run_test_loop does NOT record bats_incomplete when the scope never runs BATS" {
-	local -a DEGRADED_STAGES=()
-	_setup_bats_incomplete_repo "feature-bats-not-run"
-
-	run_stage() {
-		case "$1" in
-			test-iter-*)
-				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
-				;;
-		esac
-	}
-	export -f run_stage
-
-	run_test_loop "$TEST_TMP/repo" "feature-bats-not-run" "" "typescript"
-
-	local marker
-	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
-	[ "$marker" -eq 0 ] || \
-		fail "typescript scope never runs BATS; must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+		rm -rf "$TEST_TMP/repo"
+	done
 }
 
 # config scope is even more distinct: run_test_loop bails out at its own
@@ -2767,27 +2741,94 @@ _setup_bats_incomplete_repo() {
 # there is no BATS verdict to be missing because BATS was never asked for.
 @test "run_test_loop still passes for a config-scope run reporting no bats_result" {
 	local -a DEGRADED_STAGES=()
-	_setup_bats_incomplete_repo "feature-bats-config-scope"
+	local no_key='{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
 
-	run_stage() {
-		case "$1" in
-			test-iter-*)
-				echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped"}}'
-				;;
-		esac
-	}
-	export -f run_stage
-
-	run_test_loop "$TEST_TMP/repo" "feature-bats-config-scope" "" "config"
-	local loop_status=$?
+	# `run` is intentionally not used here: it captures output via a
+	# subshell, which would discard run_test_loop's writes to the DEGRADED_STAGES
+	# array declared above (bash's dynamic scoping only reaches into
+	# subshells, not back out of them), breaking the marker assertion below.
+	# `|| loop_status=$?` captures a non-zero exit without a subshell and
+	# without tripping bats' errexit abort, so the assertion below can
+	# actually observe a failing exit code.
+	local loop_status=0
+	_run_loop_with_stubbed_test_response "feature-bats-config-scope" "config" "$no_key" || loop_status=$?
 
 	[ "$loop_status" -eq 0 ] || \
 		fail "Expected run_test_loop to pass (exit 0) for config scope; got exit $loop_status"
 
 	local marker
-	marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" | grep -c '^test:bats_incomplete:' || true)
+	marker=$(_count_bats_incomplete_markers)
 	[ "$marker" -eq 0 ] || \
 		fail "config scope never runs BATS; must not record test:bats_incomplete; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# AC4: the omission must be rejected at the CLI boundary, not only by the
+# post-hoc guard above. run_stage hands its schema argument to the CLI as the
+# output schema, so "rejected" is expressed as bats_result appearing in the
+# schema's `required` list. Only the variant used by scopes that run the BATS
+# command carries the constraint — the base schema must stay unchanged so a
+# config/TypeScript-only run is not forced to report a verdict it was never
+# asked to produce.
+@test "the BATS-scope test schema requires bats_result and the base schema does not" {
+	local base="$SCHEMA_DIR/implement-issue-test-validate.json"
+	local bats_variant="$SCHEMA_DIR/implement-issue-test-validate-bats.json"
+
+	[ -f "$bats_variant" ] || fail "Missing schema: $bats_variant"
+
+	jq -e '.required | index("bats_result")' "$bats_variant" >/dev/null || \
+		fail "implement-issue-test-validate-bats.json must list bats_result as required; got: $(jq -c '.required' "$bats_variant")"
+
+	if jq -e '.required | index("bats_result")' "$base" >/dev/null; then
+		fail "implement-issue-test-validate.json must NOT require bats_result — non-BATS scopes have no verdict to report; got: $(jq -c '.required' "$base")"
+	fi
+
+	# The two files are hand-maintained copies of one contract; only the
+	# `required` list may differ, or the variant silently drops fields the
+	# base gained.
+	diff <(jq -S '.properties' "$base") <(jq -S '.properties' "$bats_variant") || \
+		fail "The two test-validate schemas' properties have drifted apart"
+}
+
+# The constraint is only load-bearing if the loop actually selects the
+# stricter schema for the scopes that run BATS — and leaves every other scope
+# on the base schema.
+@test "run_test_loop passes the bats_result-requiring schema only for scopes that run BATS" {
+	local passing='{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"skipped","bats_result":"passed","bats_summary":"all green"}}'
+
+	# scope|schema file run_stage must be handed
+	local row
+	for row in \
+		"mixed|implement-issue-test-validate-bats.json" \
+		"bash|implement-issue-test-validate-bats.json" \
+		"typescript|implement-issue-test-validate.json"
+	do
+		local scope="${row%%|*}" expected_schema="${row##*|}"
+		local -a DEGRADED_STAGES=()
+
+		SCHEMA_CAPTURE="$TEST_TMP/schema-arg-$scope.txt"
+		export SCHEMA_CAPTURE
+		: > "$SCHEMA_CAPTURE"
+
+		export STUBBED_TEST_RESPONSE="$passing"
+		_setup_bats_incomplete_repo "feature-schema-$scope"
+
+		run_stage() {
+			case "$1" in
+				test-iter-*)
+					printf '%s\n' "$3" >> "$SCHEMA_CAPTURE"
+					printf '%s\n' "$STUBBED_TEST_RESPONSE"
+					;;
+			esac
+		}
+		export -f run_stage
+
+		run_test_loop "$TEST_TMP/repo" "feature-schema-$scope" "" "$scope"
+
+		grep -qx "$expected_schema" "$SCHEMA_CAPTURE" || \
+			fail "scope '$scope' must run the test stage against $expected_schema; got: $(cat "$SCHEMA_CAPTURE")"
+
+		rm -rf "$TEST_TMP/repo"
+	done
 }
 
 # AC3: the marker run_test_loop records must change a merge-gate decision,

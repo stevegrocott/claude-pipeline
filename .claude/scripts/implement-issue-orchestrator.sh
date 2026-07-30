@@ -7934,6 +7934,17 @@ Do NOT set result to 'failed' based on BATS test failures alone.
 "
         fi
 
+        # A scope that runs the BATS command (bash/mixed, same condition as
+        # bats_section above) must have bats_result rejected at the CLI
+        # boundary when omitted, not just caught by the post-hoc incomplete
+        # check below (issue #677 AC4). Scopes that never run BATS keep the
+        # base schema so they aren't forced to report a verdict they have
+        # nothing to say about.
+        local test_schema="implement-issue-test-validate.json"
+        if [[ "$change_scope" == "bash" || "$change_scope" == "mixed" ]]; then
+            test_schema="implement-issue-test-validate-bats.json"
+        fi
+
         # Build validation section for the combined prompt
         local validation_section=""
         if [[ -n "$changed_files" ]]; then
@@ -8086,7 +8097,7 @@ Output both test results and validation findings in one structured response.
 - bats_summary: summary of BATS test findings (informational only)"
 
         local test_result
-        test_result=$(run_stage "test-iter-$test_iteration" "$test_prompt" "implement-issue-test-validate.json" "default" "$loop_complexity")
+        test_result=$(run_stage "test-iter-$test_iteration" "$test_prompt" "$test_schema" "default" "$loop_complexity")
         _halt_if_budget_exceeded
 
         # Handle timeout: skip result inspection and retry on next iteration
@@ -8130,6 +8141,13 @@ Output both test results and validation findings in one structured response.
         # the agent never reported a verdict at all. That is just as
         # unconfirmed as an explicit 'incomplete' and must not fall through
         # to the "TESTS PASSED" branch below as a silent pass.
+        #
+        # Invariant: bats_section is non-empty exactly when change_scope is
+        # bash/mixed — the same condition that embeds $bash_test_command into
+        # the prompt above and that selects $test_schema. bash_test_command
+        # itself is always non-empty regardless of scope, so it cannot be
+        # used as the key here — a future informational-only bats_section
+        # that stops embedding a runnable command must update this guard too.
         if [[ -n "$bats_section" && -z "$bats_status" ]]; then
             bats_status="incomplete"
             bats_summary_out="${bats_summary_out:-No bats_result reported for this iteration.}"
