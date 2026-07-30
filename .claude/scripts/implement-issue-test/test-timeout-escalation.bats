@@ -604,6 +604,14 @@ teardown() {
 # the same order production sourcing uses — so MAX_TASK_WALL_TIME_SECS
 # below reflects whatever this repo's platform.sh actually resolves to, and
 # these tests fail the instant it drops below the serial timeout again.
+#
+# This file is one of the two curated bats paths in
+# .github/workflows/orchestrator-guards.yml's run step — that workflow is
+# the CI job that actually executes this drift guard on every push/PR.
+# Kept in lockstep the same way PARITY_SUBDIRS and BUNDLE_SCRIPT_SUBDIRS
+# are (test-bundle-parity.bats:23): if this file moves or is renamed,
+# update the workflow's curated list too, or the guard silently stops
+# running in CI.
 # =============================================================================
 
 @test "serial implement-task stage timeout is 1800s (issue #673 baseline)" {
