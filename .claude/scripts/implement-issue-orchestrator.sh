@@ -6808,6 +6808,28 @@ execute_batch_parallel() {
 			completed+=("$tid")
 		else
 			conflicted+=("$tid")
+
+			# Commits on $wb never reached $feature_branch and
+			# cleanup_worktree is about to force-delete the branch
+			# (retaining them only as the salvage/issue-<n>-task<m>
+			# tag). Log the SHA and the exact recovery command now,
+			# while the branch tip is still known, so the run output
+			# — not just a greppable tag — tells the operator how to
+			# get the work back.
+			local conflict_sha
+			conflict_sha=$(jq -r '.commit // empty' \
+				"$rf" 2>/dev/null)
+			if [[ -z "$conflict_sha" ]]; then
+				conflict_sha=$(git rev-parse --short "$wb" \
+					2>/dev/null)
+			fi
+			if [[ -n "$conflict_sha" ]]; then
+				log_warn "Task $tid: merge conflict —" \
+					"commit $conflict_sha retained as tag" \
+					"salvage/issue-${ISSUE_NUMBER}-task${tid}." \
+					"Recover with: git cherry-pick --no-commit" \
+					"$conflict_sha && git commit -C $conflict_sha"
+			fi
 		fi
 
 		cleanup_worktree "$wp" "$wb" \

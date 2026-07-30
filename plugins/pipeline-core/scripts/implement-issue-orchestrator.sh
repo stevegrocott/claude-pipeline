@@ -6576,13 +6576,42 @@ merge_worktree_branch() {
 
 # Clean up a git worktree and its branch.
 #
+# If the branch carries commits that never landed in feature_branch
+# (a merge conflict aborted the merge, or the task failed/timed out
+# after committing partial work), tag it as
+# salvage/issue-<n>-task<m> before deleting the branch. Without this,
+# `git branch -D` leaves those commits unreachable and the work is
+# effectively lost; the tag keeps it addressable.
+#
 # Arguments:
 #   $1 - worktree_path
 #   $2 - wt_branch
+#   $3 - issue_number (used to build the salvage tag; may be empty)
+#   $4 - task_id (used to build the salvage tag; may be empty)
+#   $5 - feature_branch to diff against; defaults to HEAD
 #
 cleanup_worktree() {
 	local wt_path="$1"
 	local wt_branch="$2"
+	local issue_num="$3"
+	local task_id="$4"
+	local feature_branch="${5:-HEAD}"
+
+	if git show-ref --verify --quiet \
+		"refs/heads/$wt_branch" 2>/dev/null; then
+		if [[ -n "$(git rev-list \
+			"${feature_branch}..${wt_branch}" 2>/dev/null)" ]]; then
+			local salvage_tag="salvage/issue-${issue_num}-task${task_id}"
+			if git tag -f "$salvage_tag" "$wt_branch" \
+				>/dev/null 2>&1; then
+				log "Salvaged unmerged commits on" \
+					"$wt_branch as tag $salvage_tag"
+			else
+				log_warn "Failed to tag $wt_branch" \
+					"as $salvage_tag"
+			fi
+		fi
+	fi
 
 	if [[ -d "$wt_path" ]]; then
 		git worktree remove --force "$wt_path" \
@@ -6650,7 +6679,8 @@ execute_batch_parallel() {
 			log_error "Could not create worktree" \
 				"for task $tid"
 			# Clean up any partially-created branch
-			cleanup_worktree "" "$wt_branch"
+			cleanup_worktree "" "$wt_branch" \
+				"$ISSUE_NUMBER" "$tid" "$feature_branch"
 			printf '%s' \
 				'{"status":"failed","review_attempts":0}' \
 				> "$result_file"
@@ -6733,7 +6763,8 @@ execute_batch_parallel() {
 		if [[ ! -f "$rf" ]]; then
 			log_error "No result file for task $tid"
 			failed+=("$tid")
-			cleanup_worktree "$wp" "$wb"
+			cleanup_worktree "$wp" "$wb" \
+				"$ISSUE_NUMBER" "$tid" "$feature_branch"
 			continue
 		fi
 
@@ -6744,13 +6775,15 @@ execute_batch_parallel() {
 			log_error "Task $tid TIMED OUT" \
 				"(exceeded ${MAX_TASK_WALL_TIME_SECS}s wall time)"
 			failed+=("$tid")
-			cleanup_worktree "$wp" "$wb"
+			cleanup_worktree "$wp" "$wb" \
+				"$ISSUE_NUMBER" "$tid" "$feature_branch"
 			continue
 		elif [[ "$rstatus" != "success" ]]; then
 			log_error "Task $tid failed in worktree" \
 				"(status: $rstatus)"
 			failed+=("$tid")
-			cleanup_worktree "$wp" "$wb"
+			cleanup_worktree "$wp" "$wb" \
+				"$ISSUE_NUMBER" "$tid" "$feature_branch"
 			continue
 		fi
 
@@ -6764,7 +6797,8 @@ execute_batch_parallel() {
 			log_error "Task $tid reported success but produced no commits" \
 				"— marking failed (silent no-op guard)"
 			failed+=("$tid")
-			cleanup_worktree "$wp" "$wb"
+			cleanup_worktree "$wp" "$wb" \
+				"$ISSUE_NUMBER" "$tid" "$feature_branch"
 			continue
 		fi
 
@@ -6774,9 +6808,32 @@ execute_batch_parallel() {
 			completed+=("$tid")
 		else
 			conflicted+=("$tid")
+
+			# Commits on $wb never reached $feature_branch and
+			# cleanup_worktree is about to force-delete the branch
+			# (retaining them only as the salvage/issue-<n>-task<m>
+			# tag). Log the SHA and the exact recovery command now,
+			# while the branch tip is still known, so the run output
+			# — not just a greppable tag — tells the operator how to
+			# get the work back.
+			local conflict_sha
+			conflict_sha=$(jq -r '.commit // empty' \
+				"$rf" 2>/dev/null)
+			if [[ -z "$conflict_sha" ]]; then
+				conflict_sha=$(git rev-parse --short "$wb" \
+					2>/dev/null)
+			fi
+			if [[ -n "$conflict_sha" ]]; then
+				log_warn "Task $tid: merge conflict —" \
+					"commit $conflict_sha retained as tag" \
+					"salvage/issue-${ISSUE_NUMBER}-task${tid}." \
+					"Recover with: git cherry-pick --no-commit" \
+					"$conflict_sha && git commit -C $conflict_sha"
+			fi
 		fi
 
-		cleanup_worktree "$wp" "$wb"
+		cleanup_worktree "$wp" "$wb" \
+			"$ISSUE_NUMBER" "$tid" "$feature_branch"
 	done
 
 	# Build result JSON
