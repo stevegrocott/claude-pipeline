@@ -32,6 +32,18 @@ if [[ "$BODY" == *"<!-- pipeline-autocreated -->"* ]] || \
   [[ "$BODY" == *"## Implementation Tasks"* ]]; then
   # shellcheck source=../issue-body-lib.sh
   source "$SCRIPT_DIR/../issue-body-lib.sh"
+  # assert_issue_valid resolves task file paths against ISSUE_BODY_REPO_ROOT,
+  # which defaults to "." — the caller's $PWD, not this script's location. A
+  # caller that invokes create-issue.sh from any directory other than the
+  # repo root (e.g. a test runner that cds into its own suite directory
+  # first) would then see every valid path rejected as unresolved. Resolve
+  # the repo root from this script's own location instead, unless the caller
+  # already set an explicit override.
+  if [[ -z "${ISSUE_BODY_REPO_ROOT:-}" ]]; then
+    ISSUE_BODY_REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    ISSUE_BODY_REPO_ROOT="${ISSUE_BODY_REPO_ROOT:-$SCRIPT_DIR/../../..}"
+    export ISSUE_BODY_REPO_ROOT
+  fi
   if ! assert_issue_valid "$BODY"; then
     echo "ERROR: body failed structural validation — issue not created" >&2
     exit 1
