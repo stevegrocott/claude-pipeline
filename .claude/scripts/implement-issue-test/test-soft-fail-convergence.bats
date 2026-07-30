@@ -83,7 +83,7 @@ teardown() {
 	[ "$MAX_TEST_ITERATIONS" -eq 7 ]
 	[ "$MAX_PR_REVIEW_ITERATIONS" -eq 2 ]
 	# platform.sh sets MAX_ORCHESTRATOR_WALL_TIME=10800 (3h) before the
-	# orchestrator's own ${VAR:-12840} default runs, so the orchestrator
+	# orchestrator's own ${VAR:-14640} default runs, so the orchestrator
 	# default is a no-op and the effective runtime value is platform's 10800.
 	[ "$MAX_ORCHESTRATOR_WALL_TIME" -eq 10800 ]
 }
@@ -106,7 +106,7 @@ teardown() {
 	[[ "$script_content" == *'MAX_QUALITY_ITERATIONS="${MAX_QUALITY_ITERATIONS:-5}"'* ]]
 	[[ "$script_content" == *'MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"'* ]]
 	[[ "$script_content" == *'MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"'* ]]
-	[[ "$script_content" == *'MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-12840}"'* ]]
+	[[ "$script_content" == *'MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-14640}"'* ]]
 }
 
 # =============================================================================

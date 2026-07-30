@@ -501,3 +501,269 @@ teardown() {
 	grep -q 'degraded_stages' "$skill_file"
 	grep -q 'quality:convergence_failure' "$skill_file"
 }
+
+# =============================================================================
+# STATIC ANALYSIS: max-iterations check runs after that iteration's review
+# (issue #651 — budget the verdict, not the round-trip)
+# =============================================================================
+# The check must sit in the changes_requested (else) branch, after the PR
+# comment for the current iteration's review has already been posted — so a
+# fix applied on iteration N is always followed by a review on iteration N+1
+# before the loop can block on max_iterations. A check at the top of the
+# loop (before that iteration's review runs) would let the loop exit without
+# ever re-reviewing the final fix, which is the bug #651 fixed.
+
+@test "max_iterations check is inside the changes_requested branch, not at loop top" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	# The review-verdict branch and the max_iterations check must both be
+	# present, and the check must reference the current iteration's fix
+	# guard (pr_iteration >= pr_review_max_iter), not the pre-#651
+	# strictly-greater-than top-of-loop form.
+	[[ "$script_content" == *'if (( pr_iteration >= pr_review_max_iter )); then'* ]]
+}
+
+@test "max_iterations check follows the current-iteration PR review comment (re-review before block)" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	# Two `if (( pr_iteration >= pr_review_max_iter )); then` guards exist
+	# (issue #651 follow-up): an earlier one in the review-timeout retry
+	# branch (bounds repeated timeouts, runs before any verdict), and the
+	# verdict-based one in the changes_requested branch this test targets
+	# — take the LAST occurrence to reach the latter.
+	local review_comment_pos maxiter_check_pos
+	review_comment_pos=$(grep -n 'comment_pr "\$pr_number" "PR Review (Iteration \$pr_iteration)"' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
+	maxiter_check_pos=$(grep -n 'if (( pr_iteration >= pr_review_max_iter )); then' \
+		<<< "$script_content" | tail -1 | cut -d: -f1)
+
+	[[ -n "$review_comment_pos" ]]
+	[[ -n "$maxiter_check_pos" ]]
+	# The check must come AFTER the review comment for the same iteration,
+	# proving the review already ran before the loop can block.
+	(( maxiter_check_pos > review_comment_pos ))
+}
+
+@test "max_iterations check is guarded by review_verdict != approved" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	# Extract the review-verdict branch and confirm the max_iterations
+	# check lives in the else (changes_requested) arm, not the approved arm.
+	local verdict_block
+	verdict_block=$(awk \
+		'/if \[\[ "\$review_verdict" == "approved" \]\]; then/,/log "PR review requested changes\. Fixing\.\.\."/' \
+		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+
+	[[ "$verdict_block" == *'pr_approved=true'* ]]
+	[[ "$verdict_block" == *'if (( pr_iteration >= pr_review_max_iter )); then'* ]]
+	[[ "$verdict_block" == *'pr_review:max_iterations:iter=$pr_iteration'* ]]
+}
+
+@test "no stale top-of-loop max_iterations check precedes the current-iteration review (regression)" {
+	# Pre-#651 bug: a strictly-greater-than check ran at the top of the loop,
+	# before that iteration's review, so a fix could go unreviewed. Guard
+	# against reintroducing a check that fires before the review comment.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	local loop_start_pos review_comment_pos
+	loop_start_pos=$(grep -n 'while \[\[ "\$pr_approved" != "true" \]\]; do' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
+	review_comment_pos=$(grep -n 'comment_pr "\$pr_number" "PR Review (Iteration \$pr_iteration)"' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
+
+	local between
+	between=$(sed -n "${loop_start_pos},${review_comment_pos}p" "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$between" != *'pr_iteration > pr_review_max_iter'* ]]
+}
+
+@test "review-timeout retry branch bounds pr_iteration before its continue (issue #651 follow-up)" {
+	# Moving the max_iterations check into the changes_requested branch left
+	# the timeout branch unbounded: it `continue`s without ever reaching a
+	# verdict, so repeated review timeouts could burn more review stages than
+	# max_iter and exit as pr_review:wall_timeout instead of max_iterations.
+	local script_content timeout_start continue_pos timeout_block
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	timeout_start=$(grep -n 'log_warn "PR review timed out on iteration \$pr_iteration' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
+	[[ -n "$timeout_start" ]]
+
+	# First `continue` at or after the timeout log ends this branch.
+	continue_pos=$(awk -v s="$timeout_start" \
+		'NR >= s && $1 == "continue" { print NR; exit }' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$continue_pos" ]]
+
+	timeout_block=$(sed -n "${timeout_start},${continue_pos}p" "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$timeout_block" == *'if (( pr_iteration >= pr_review_max_iter )); then'* ]]
+	[[ "$timeout_block" == *'pr_review:max_iterations:iter=$pr_iteration'* ]]
+	[[ "$timeout_block" == *'pr_approved=true'* ]]
+}
+
+@test "persisted pr_review_iterations are re-checked on resume before the loop runs a review" {
+	# pr_review_iterations survives in status.json across runs. Without an
+	# entry guard, every resume increments and performs one more full review
+	# before the in-branch check can block, so repeated resumes each buy an
+	# extra review beyond the configured cap.
+	local script_content loop_start_pos entry_guard_pos before_loop
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	loop_start_pos=$(grep -n 'while \[\[ "\$pr_approved" != "true" \]\]; do' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
+	entry_guard_pos=$(grep -n 'pr_review_iterations_at_entry >= pr_review_max_iter' \
+		<<< "$script_content" | head -1 | cut -d: -f1)
+
+	[[ -n "$entry_guard_pos" ]]
+	# The guard must run BEFORE the loop, not inside it.
+	(( entry_guard_pos < loop_start_pos ))
+
+	before_loop=$(sed -n "1,${loop_start_pos}p" "$ORCHESTRATOR_SCRIPT")
+	[[ "$before_loop" == *'.pr_review_iterations // 0'* ]]
+	[[ "$before_loop" == *'pr_review:max_iterations:iter=$pr_review_iterations_at_entry'* ]]
+}
+
+# =============================================================================
+# FUNCTIONAL + STATIC: the two block reasons (max_iterations vs wall_timeout)
+# are textually and structurally distinguishable (issue #651)
+# =============================================================================
+
+@test "max_iterations and wall_timeout block-reason messages are distinct strings" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'"PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."'* ]]
+	[[ "$script_content" == *'"PR review loop hit the global orchestrator wall-clock timeout${wall_timeout_clause} — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."'* ]]
+	[[ "$script_content" == *'"PR review loop hit its own PR-review wall-clock budget${pr_review_wall_timeout_clause} — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."'* ]]
+}
+
+@test "wall_timeout messages name budget-exhaustion-without-re-review; max_iterations names rejection (issue #651 AC4)" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	# wall_timeout: the situation is budget exhaustion before a
+	# confirming re-review ran — explicitly NOT a reviewer rejection.
+	[[ "$script_content" == *'budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)'* ]]
+
+	# max_iterations: the situation is that every review iteration ran
+	# and re-reviewed the last fix, yet none approved — a genuine
+	# rejection outcome, not a budget artifact.
+	[[ "$script_content" == *'after max iterations (pr_review:max_iterations:iter=$pr_iteration)'* ]]
+	[[ "$script_content" == *'after re-reviewing the last fix'* ]]
+}
+
+@test "max_iterations and wall_timeout DEGRADED_STAGES tags use distinct prefixes" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *'DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")'* ]]
+	[[ "$script_content" == *'DEGRADED_STAGES+=("pr_review:wall_timeout")'* ]]
+}
+
+@test "persisted max_iterations and wall_timeout reasons are distinguishable by glob in the merge gate" {
+	# Mirrors the Gate B fallback scan (merge_pr): both tags are recognised,
+	# but the interpolated $_dsp preserves which situation actually fired.
+	local -a max_iter_case=("pr_review:max_iterations:iter=3")
+	local -a wall_timeout_case=("pr_review:wall_timeout")
+
+	local reason=""
+	local _dsp
+	for _dsp in "${max_iter_case[@]}"; do
+		if [[ "$_dsp" == pr_review:max_iterations:* || "$_dsp" == pr_review:wall_timeout ]]; then
+			reason="PR review loop ended without an approved verdict (degraded_stages: $_dsp)."
+			break
+		fi
+	done
+	local max_iter_reason="$reason"
+
+	reason=""
+	for _dsp in "${wall_timeout_case[@]}"; do
+		if [[ "$_dsp" == pr_review:max_iterations:* || "$_dsp" == pr_review:wall_timeout ]]; then
+			reason="PR review loop ended without an approved verdict (degraded_stages: $_dsp)."
+			break
+		fi
+	done
+	local wall_timeout_reason="$reason"
+
+	[[ -n "$max_iter_reason" ]]
+	[[ -n "$wall_timeout_reason" ]]
+	# Both reach the same generic prefix, but the embedded tag still
+	# distinguishes which situation occurred.
+	[[ "$max_iter_reason" != "$wall_timeout_reason" ]]
+	[[ "$max_iter_reason" == *"pr_review:max_iterations:iter=3"* ]]
+	[[ "$wall_timeout_reason" == *"pr_review:wall_timeout"* ]]
+}
+
+@test "persist_merge_blocked_reason stores distinct text for max_iterations vs wall_timeout" {
+	persist_merge_blocked_reason \
+		"PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=2)."
+
+	local stored
+	stored=$(jq -r '.merge_blocked_reason' "$STATUS_FILE")
+
+	[[ "$stored" == *"max iterations"* ]]
+	[[ "$stored" == *"pr_review:max_iterations:iter=2"* ]]
+	[[ "$stored" != *"wall-clock"* ]]
+}
+
+@test "persist_merge_blocked_reason stores distinct text for wall_timeout vs max_iterations" {
+	persist_merge_blocked_reason \
+		"PR review loop hit its wall-clock budget before the last fix could be re-reviewed — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."
+
+	local stored
+	stored=$(jq -r '.merge_blocked_reason' "$STATUS_FILE")
+
+	[[ "$stored" == *"wall-clock budget"* ]]
+	[[ "$stored" == *"pr_review:wall_timeout"* ]]
+	[[ "$stored" == *"without re-review"* ]]
+	[[ "$stored" != *"max iterations"* ]]
+}
+
+# =============================================================================
+# FUNCTIONAL: wall-clock budget re-derived for the verdict-budgeted worst
+# case — max_iter reviews AND (max_iter-1) fixes (issue #651 AC3)
+# =============================================================================
+
+@test "calc_orchestrator_wall_time includes the fix term so wall_timeout doesn't replace max_iterations as the block kind" {
+	# Worst case per the #651 accounting: MAX_PR_REVIEW_ITERATIONS reviews,
+	# MAX_PR_REVIEW_ITERATIONS-1 fixes (the final rejected review blocks
+	# immediately instead of buying one more unreviewed fix). Omitting the
+	# fix term undercounts the loop's real wall-clock need.
+	export MAX_PR_REVIEW_ITERATIONS=2
+	unset PR_REVIEW_WALL_BUDGET TEST_LOOP_WALL_BUDGET
+
+	local pr_fix_timeout test_budget expected total
+	pr_fix_timeout=$(get_stage_timeout "fix-pr-review-iter" "")
+	test_budget=$(calc_test_loop_budget)
+	# pr_budget = 1200 * 2 reviews + pr_fix_timeout * 1 fix + slack
+	expected=$(( test_budget \
+		+ (1200 * 2 + pr_fix_timeout * 1 + PR_REVIEW_WALL_TIME_SLACK) \
+		+ 5700 ))
+
+	total=$(calc_orchestrator_wall_time)
+
+	[ "$total" -eq "$expected" ]
+}
+
+@test "calc_orchestrator_wall_time grows with MAX_PR_REVIEW_ITERATIONS (fix term scales with iterations, not just reviews)" {
+	unset PR_REVIEW_WALL_BUDGET TEST_LOOP_WALL_BUDGET
+
+	export MAX_PR_REVIEW_ITERATIONS=1
+	local total_one
+	total_one=$(calc_orchestrator_wall_time)
+
+	export MAX_PR_REVIEW_ITERATIONS=3
+	local total_three
+	total_three=$(calc_orchestrator_wall_time)
+
+	# Going from 1 to 3 iterations adds 2 more reviews AND 2 more fixes
+	# (max_iter-1 fixes), so the delta must exceed just the review term.
+	local review_only_delta=$(( 1200 * 2 ))
+	local actual_delta=$(( total_three - total_one ))
+
+	(( actual_delta > review_only_delta ))
+}

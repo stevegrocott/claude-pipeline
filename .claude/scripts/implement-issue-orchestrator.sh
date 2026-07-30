@@ -116,11 +116,13 @@ MAX_ESCALATIONS_PER_RUN="${MAX_ESCALATIONS_PER_RUN:-5}"
 # Default = sum of per-phase budgets so the global cap never pre-empts
 # a loop that is within its own budget.  See calc_orchestrator_wall_time()
 # for the formula; the numeric default mirrors its calculation:
-#   test-loop  (1500s × 3 + 120s slack)              = 4620s
-#   pr-review  (1200s × 2 + 120s slack, 200+ lines)  = 2520s
+#   test-loop  (1500s × 3 + 120s slack)                        = 4620s
+#   pr-review  (1200s × 2 reviews + 1800s × 1 fix + 120s slack,
+#               200+ lines — issue #651 verdict-budgeted worst
+#               case: max_iter reviews, max_iter-1 fixes)       = 4320s
 #   overhead   (validate 1800 + implement 1800
 #               + task-review 900 + test 600 + pr 600) = 5700s
-#                                              Total : 12840s (~3.5h)
+#                                              Total : 14640s (~4.1h)
 # Recalculated at runtime by calc_orchestrator_wall_time() using the
 # actual env-overridden per-phase budget variables.  The invariant
 # MAX_ORCHESTRATOR_WALL_TIME >= calc_orchestrator_wall_time() must hold so
@@ -128,7 +130,7 @@ MAX_ESCALATIONS_PER_RUN="${MAX_ESCALATIONS_PER_RUN:-5}"
 # the default therefore tracks the test-iter timeout (raised 900→1500 in
 # issue #512, which the earlier 11040 default was never reconciled with).
 # Override via MAX_ORCHESTRATOR_WALL_TIME env to set a different base.
-MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-12840}"
+MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-14640}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
 # Slack added on top of the per-iteration timeout when computing the
 # PR-review loop wall-clock budget.  Override via env to tune.
@@ -379,8 +381,18 @@ calc_test_loop_budget() {
 #
 # Components:
 #   test loop   — calc_test_loop_budget() (respects TEST_LOOP_WALL_BUDGET)
-#   pr review   — PR_REVIEW_WALL_BUDGET when set; otherwise worst-case:
-#                 1200s × max(MAX_PR_REVIEW_ITERATIONS,1) +
+#   pr review   — PR_REVIEW_WALL_BUDGET when set; otherwise worst-case
+#                 (issue #651 — the loop budgets the verdict, not the
+#                 round-trip: the max_iterations check sits AFTER each
+#                 review, in the changes_requested branch, so a fix is
+#                 only ever applied when a rejected review still has
+#                 budget left. Worst case is therefore max_iter reviews
+#                 but only (max_iter-1) fixes — the final rejected
+#                 review blocks immediately instead of fixing once more
+#                 unreviewed):
+#                 1200s × max(MAX_PR_REVIEW_ITERATIONS,1) reviews +
+#                 get_stage_timeout("fix-pr-review-iter") ×
+#                 max(MAX_PR_REVIEW_ITERATIONS-1,0) fixes +
 #                 PR_REVIEW_WALL_TIME_SLACK  (200+ line diff, full iters)
 #   overhead    — stages outside the per-loop budgets (constants from
 #                 get_stage_timeout):
@@ -390,14 +402,18 @@ calc_test_loop_budget() {
 #
 # Output: minimum budget seconds to stdout
 calc_orchestrator_wall_time() {
-	local test_budget pr_budget pr_iter
+	local test_budget pr_budget pr_iter pr_fix_iter pr_fix_timeout
 	test_budget=$(calc_test_loop_budget)
 	if [[ -n "${PR_REVIEW_WALL_BUDGET:-}" ]]; then
 		pr_budget="$PR_REVIEW_WALL_BUDGET"
 	else
 		pr_iter=$(( MAX_PR_REVIEW_ITERATIONS > 1 \
 			? MAX_PR_REVIEW_ITERATIONS : 1 ))
-		pr_budget=$(( 1200 * pr_iter + PR_REVIEW_WALL_TIME_SLACK ))
+		pr_fix_iter=$(( pr_iter > 1 ? pr_iter - 1 : 0 ))
+		pr_fix_timeout=$(get_stage_timeout "fix-pr-review-iter" "")
+		pr_budget=$(( 1200 * pr_iter \
+			+ pr_fix_timeout * pr_fix_iter \
+			+ PR_REVIEW_WALL_TIME_SLACK ))
 	fi
 	printf '%s' "$(( test_budget + pr_budget + 5700 ))"
 }
@@ -4461,7 +4477,11 @@ get_pr_review_config() {
 }
 
 # Apply pipeline profile to PR review max iterations.
-# For minimal profile, caps max_iter at 1 regardless of get_pr_review_config() output.
+# For minimal profile, caps max_iter at 2 regardless of get_pr_review_config()
+# output. Flooring at 2 (not 1) matters as of issue #651: the max-iterations
+# check now runs after a rejected review, so a max_iter of 1 would block on
+# the first rejection with zero fix attempts. A floor of 2 guarantees at
+# least one fix gets applied and re-reviewed before the loop can block.
 # For standard and full profiles, keeps the dynamic value unchanged.
 #
 # Arguments:
@@ -4473,7 +4493,7 @@ apply_profile_to_pr_review_max_iter() {
 	local profile="$1"
 	local config_max_iter="$2"
 	if [[ "$profile" == "minimal" ]]; then
-		printf '%s' "1"
+		printf '%s' "2"
 	else
 		printf '%s' "$config_max_iter"
 	fi
@@ -10454,13 +10474,27 @@ $pr_creation_skill}"
         local review_history_file="$LOG_BASE/context/pr-review-history.json"
 
         # Compute the PR-review loop's own wall-clock budget.
-        # Formula: pr_review_timeout * max(max_iter, 1) + slack
-        # Each factor is diff-size-scaled (timeout) and profile-adjusted
-        # (max_iter), so the budget reflects actual expected work.
+        # Formula: pr_review_timeout * max(max_iter, 1) reviews
+        #          + fix_timeout * max(max_iter - 1, 0) fixes + slack
+        # Each factor is diff-size-scaled (review timeout) and
+        # profile-adjusted (max_iter), so the budget reflects actual
+        # expected work. The fix term matters as of issue #651: the
+        # max_iterations check now runs AFTER each review, in the
+        # changes_requested branch, so a fix is only applied when a
+        # rejected review still has budget left — worst case is max_iter
+        # reviews but only (max_iter - 1) fixes, since the final rejected
+        # review blocks immediately rather than applying one more
+        # unreviewed fix. Omitting the fix term (as the old formula did)
+        # undercounts the loop's real wall-clock need, so `wall_timeout`
+        # can fire before the guaranteed re-review even runs.
         # Override the entire budget with PR_REVIEW_WALL_BUDGET (env).
-        local pr_review_effective_iter
+        local pr_review_effective_iter pr_review_fix_iter
+        local pr_review_fix_timeout
         pr_review_effective_iter=$(( pr_review_max_iter > 1 \
             ? pr_review_max_iter : 1 ))
+        pr_review_fix_iter=$(( pr_review_effective_iter > 1 \
+            ? pr_review_effective_iter - 1 : 0 ))
+        pr_review_fix_timeout=$(get_stage_timeout "fix-pr-review-iter" "")
         local pr_review_wall_budget
         if [[ -n "$PR_REVIEW_WALL_BUDGET" ]]; then
             pr_review_wall_budget="$PR_REVIEW_WALL_BUDGET"
@@ -10468,25 +10502,53 @@ $pr_creation_skill}"
         else
             pr_review_wall_budget=$(( pr_review_timeout \
                 * pr_review_effective_iter \
+                + pr_review_fix_timeout * pr_review_fix_iter \
                 + PR_REVIEW_WALL_TIME_SLACK ))
             log "PR review wall-clock budget: ${pr_review_wall_budget}s" \
-                "(${pr_review_timeout}s/iter × ${pr_review_effective_iter}" \
+                "(${pr_review_timeout}s/review × ${pr_review_effective_iter}" \
+                "+ ${pr_review_fix_timeout}s/fix × ${pr_review_fix_iter}" \
                 "+ ${PR_REVIEW_WALL_TIME_SLACK}s slack)"
         fi
         local pr_review_loop_start
         pr_review_loop_start=$(date +%s)
+
+        # Resume safety (issue #651): pr_review_iterations persists in the
+        # status file across runs. If a prior run already exhausted the
+        # max-iterations budget (and this run is resuming into an
+        # incomplete pr_review stage), block immediately instead of
+        # running one more unbounded review.
+        local pr_review_iterations_at_entry
+        pr_review_iterations_at_entry=$(jq -r '.pr_review_iterations // 0' "$STATUS_FILE")
+        if (( pr_review_iterations_at_entry >= pr_review_max_iter )); then
+            log_warn "PR review already at max iterations ($pr_review_max_iter) from a prior run — blocking without an additional review"
+            set_final_state "max_iterations_pr_review"
+            DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_review_iterations_at_entry")
+            persist_merge_blocked_reason \
+                "PR review loop had already exhausted its max-iterations budget in a prior run (pr_review:max_iterations:iter=$pr_review_iterations_at_entry)."
+            pr_approved=true
+        fi
 
     while [[ "$pr_approved" != "true" ]]; do
         increment_pr_review_iteration
         local pr_iteration
         pr_iteration=$(jq -r '.pr_review_iterations' "$STATUS_FILE")
 
+        # NOTE (issue #651): both wall-clock checks below fire BEFORE this
+        # iteration's review runs, so any fix applied last iteration has
+        # NOT yet been re-reviewed. Name this explicitly in the operator
+        # message — it is budget exhaustion without a confirming
+        # re-review, not a reviewer rejection, and may be a false block.
+        # The "last fix" wording only applies once a fix has actually been
+        # applied (pr_iteration > 1); on the first iteration nothing has
+        # been fixed yet, so that clause is dropped.
         if ! check_wall_timeout; then
             log_warn "Wall-clock timeout in PR review loop at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            local wall_timeout_clause=""
+            (( pr_iteration > 1 )) && wall_timeout_clause=" before the last fix could be re-reviewed"
             persist_merge_blocked_reason \
-                "PR review loop hit wall-clock timeout without an approved verdict (pr_review:wall_timeout)."
+                "PR review loop hit the global orchestrator wall-clock timeout${wall_timeout_clause} — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -10496,18 +10558,10 @@ $pr_creation_skill}"
             log_warn "PR-review budget timeout at iteration $pr_iteration"
             set_final_state "wall_timeout_pr_review"
             DEGRADED_STAGES+=("pr_review:wall_timeout")
+            local pr_review_wall_timeout_clause=""
+            (( pr_iteration > 1 )) && pr_review_wall_timeout_clause=" before the last fix could be re-reviewed"
             persist_merge_blocked_reason \
-                "PR review loop hit its wall-clock budget without an approved verdict (pr_review:wall_timeout)."
-            pr_approved=true
-            break
-        fi
-
-        if (( pr_iteration > pr_review_max_iter )); then
-            log_warn "PR review loop exceeded max iterations ($pr_review_max_iter). Soft-failing and continuing."
-            set_final_state "max_iterations_pr_review"
-            DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
-            persist_merge_blocked_reason \
-                "PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
+                "PR review loop hit its own PR-review wall-clock budget${pr_review_wall_timeout_clause} — budget exhausted without re-review, not a confirmed reviewer rejection (pr_review:wall_timeout)."
             pr_approved=true
             break
         fi
@@ -10612,6 +10666,15 @@ Approve or request changes. Output a summary suitable for an issue comment."
         if is_stage_timeout "$review_result"; then
             log_warn "PR review timed out on iteration $pr_iteration — retrying next iteration"
             comment_pr "$pr_number" "PR Review: Timeout (Iteration $pr_iteration)" "⏱️ Review stage timed out. Retrying on next iteration." "code-reviewer"
+            if (( pr_iteration >= pr_review_max_iter )); then
+                log_warn "PR review loop exceeded max iterations ($pr_review_max_iter) after repeated review timeouts. Soft-failing and continuing."
+                set_final_state "max_iterations_pr_review"
+                DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
+                persist_merge_blocked_reason \
+                    "PR review loop ended without an approved verdict after max iterations, following repeated review timeouts (pr_review:max_iterations:iter=$pr_iteration)."
+                pr_approved=true
+                break
+            fi
             continue
         fi
 
@@ -10734,6 +10797,24 @@ $review_summary$followup_comment" "code-reviewer"
             pr_approved=true
             log "PR approved on iteration $pr_iteration"
         else
+            # Budget the verdict, not the round-trip (claude-pipeline#651).
+            # This check runs AFTER the review above already produced a
+            # verdict for the current state of the branch, so the loop can
+            # only land here once the previous fix (if any) has already been
+            # re-reviewed — a fix is never applied without a subsequent
+            # review confirming or refuting it. Exceeding the budget here
+            # means max_iter reviews have run; stop rather than apply one
+            # more fix that would go unreviewed.
+            if (( pr_iteration >= pr_review_max_iter )); then
+                log_warn "PR review loop exceeded max iterations ($pr_review_max_iter) after re-reviewing the last fix. Soft-failing and continuing."
+                set_final_state "max_iterations_pr_review"
+                DEGRADED_STAGES+=("pr_review:max_iterations:iter=$pr_iteration")
+                persist_merge_blocked_reason \
+                    "PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=$pr_iteration)."
+                pr_approved=true
+                break
+            fi
+
             log "PR review requested changes. Fixing..."
 
             # Collect feedback
