@@ -6538,7 +6538,7 @@ guard_commit_path_allowlist() {
 				continue ;;
 			*.c | *.cpp | *.h | *.hpp) continue ;;
 			*)
-				for ep in "${_extra[@]}"; do
+				for ep in "${_extra[@]+"${_extra[@]}"}"; do
 					# shellcheck disable=SC2254
 					case "$path" in
 						$ep) continue 2 ;;
