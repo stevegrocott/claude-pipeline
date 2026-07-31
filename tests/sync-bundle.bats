@@ -707,3 +707,87 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# The structural test above only proves the fix-stage call site exists; it
+# says nothing about whether a regeneration run at THAT point in history
+# actually lands the trees in sync. This drives the extracted hook through
+# the full #666/#651 replay — an implementation commit, the pre-PR
+# regeneration, then a fix-pr-review commit touching the same canonical
+# script — and asserts the bundle matches at the moment a push would carry
+# it (AC1/AC2).
+@test "(#675) a fix-pr-review commit touching a canonical script leaves the bundle in sync at push time" {
+	_init_pipeline_git_repo
+
+	# Implementation commit, pre-PR (#666 / #651 replay).
+	git -C "$TEST_TMP" checkout -q -b wt/i675
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: implementation commit"
+
+	# The #632 pre-PR call site.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'pre-PR regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+	diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null || {
+		printf 'FAIL: fixture bundle not in sync after the pre-PR regeneration\n' >&2
+		return 1
+	}
+
+	# The PR is now open. A fix-pr-review-iterN commit lands afterwards and
+	# edits the same canonical script again — the entire #675 failure mode.
+	printf '#!/usr/bin/env bash\necho orchestrator v3 (fix-pr-review)\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix-pr-review-iter1: address review comment"
+
+	# Precondition: the fix commit re-diverged the bundle, i.e. the state
+	# that went red in #620 / #666 / #651 and needed a human to run
+	# sync.sh by hand.
+	! diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null 2>&1 || {
+		printf 'FAIL: fixture did not reproduce the post-PR re-divergence\n' >&2
+		return 1
+	}
+
+	# The fix-stage's guarding call, immediately before its push.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'fix-stage regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# AC1/AC2: at push time — right now, since a real push carries whatever
+	# HEAD holds — the bundle matches the canonical tree.
+	diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null || {
+		printf 'FAIL: bundle still stale at push time after the fix-stage commit\n' >&2
+		return 1
+	}
+
+	# The regenerated bundle must be committed — a push carries HEAD, not
+	# the working tree.
+	local dirty
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: regenerated bundle left uncommitted at push time:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+
+	# CI equivalence: Bundle Parity & Syntax would be green on the commit
+	# that gets pushed.
+	bash "$TEST_TMP/sync.sh" bundle > /dev/null
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: Bundle Parity & Syntax would still be red:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+}
