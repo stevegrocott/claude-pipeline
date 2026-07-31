@@ -2042,13 +2042,19 @@ if [[ "$IMPLEMENT_FOLLOWUPS" == true ]]; then
 	sweep_implement_followups
 fi
 
-# Final state
+# Final state (issue #690: a batch that skipped work is not fully clean,
+# even when nothing outright failed — progress.skipped must be consulted
+# here, not just progress.failed, so an all-skipped batch stops reporting
+# "completed").
 final_failed=$(jq '.progress.failed' "$STATUS_FILE")
+final_skipped=$(jq '.progress.skipped' "$STATUS_FILE")
 if (( exit_code == 2 )); then
     # Circuit breaker already set state
     :
 elif (( final_failed > 0 )); then
     set_state "completed_with_errors"
+elif (( final_skipped > 0 )); then
+    set_state "completed_with_skips"
 else
     set_state "completed"
 fi

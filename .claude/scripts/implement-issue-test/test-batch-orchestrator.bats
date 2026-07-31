@@ -2644,3 +2644,101 @@ GHEOF
 	[[ "$rc" -eq 0 ]]
 	[[ "$_PREFLIGHT_SKIPPED" == false ]]
 }
+
+# =============================================================================
+# ISSUE #690 (AC3): terminal-state decision must consult progress.skipped
+# =============================================================================
+#
+# Prior to the fix, the "Final state" block at the bottom of the batch loop
+# only inspected progress.failed: zero failures always produced state
+# "completed", even when every issue in the batch had been preflight-skipped
+# and nothing was actually implemented. The fix reads progress.skipped too,
+# so a batch with skipped work — but no true failures — reports a distinct
+# "completed_with_skips" state instead of presenting as fully clean.
+#
+# The block lives at the top level of the script (not inside a function), so
+# it is extracted by anchor and sourced with set_state mocked to capture its
+# argument, mirroring the process_issue-call-site extraction technique used
+# above.
+
+# Extracts the "# Final state ... fi" block from the bottom of the batch
+# loop. Returns 1 (without aborting) if the anchor is not found so callers
+# can skip rather than false-fail on an unrelated script change.
+_extract_final_state_block() {
+	local block_file="$TEST_TMP/final_state_block.bash"
+	awk '/^# Final state/,/^fi$/' "$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'set_state' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources the extracted block with set_state mocked to capture its argument
+# to a file, and STATUS_FILE pointed at a fixture carrying the given
+# progress.failed / progress.skipped counts.
+_run_final_state_block() {
+	local block_file="$1"
+	local failed_count="$2"
+	local skipped_count="$3"
+	local exit_code_in="${4:-0}"
+
+	set_state() { printf '%s\n' "$*" >> "$TEST_TMP/final_state.out"; }
+	: > "$TEST_TMP/final_state.out"
+
+	jq -n --argjson failed "$failed_count" --argjson skipped "$skipped_count" \
+		'{progress: {failed: $failed, skipped: $skipped}}' \
+		> "$STATUS_FILE"
+
+	exit_code="$exit_code_in"
+
+	# shellcheck disable=SC1090
+	source "$block_file"
+}
+
+@test "final state: all-skipped batch does not set state to completed" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 0 2
+
+	! grep -qx 'completed' "$TEST_TMP/final_state.out"
+}
+
+@test "final state: all-skipped batch sets a distinct completed_with_skips state" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 0 2
+
+	grep -qx 'completed_with_skips' "$TEST_TMP/final_state.out"
+}
+
+@test "final state: failures still take priority over skips" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 1 2
+
+	grep -qx 'completed_with_errors' "$TEST_TMP/final_state.out"
+}
+
+@test "final state: no failures and no skips still reports completed" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 0 0
+
+	grep -qx 'completed' "$TEST_TMP/final_state.out"
+}
+
+@test "final state: circuit breaker exit code bypasses the skip/fail checks" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 0 2 2
+
+	[[ ! -s "$TEST_TMP/final_state.out" ]]
+}
