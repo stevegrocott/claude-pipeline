@@ -614,6 +614,28 @@ teardown() {
         fail "Expected serial implement-task timeout=1800, got: $serial_timeout"
 }
 
+# assert_wall_time_covers_serial <resolved_wall> <serial_timeout> <label>
+#
+# Shared issue #673 invariant: the resolved parallel wall time must never
+# be tighter than the serial implement-task stage timeout it stands in
+# for — otherwise a task that would succeed serially gets killed in
+# parallel and the whole batch re-runs serially. Extracted so the guard
+# test below (proving today's real values satisfy it) and the control
+# test further down (proving the same comparison actually catches a
+# drifted value) run the exact same check rather than two copies that
+# could silently diverge.
+assert_wall_time_covers_serial() {
+    local resolved_wall="$1"
+    local serial_timeout="$2"
+    local label="$3"
+
+    (( resolved_wall >= serial_timeout )) || \
+        fail "${label}: wall_time=${resolved_wall}s <" \
+            "serial stage timeout=${serial_timeout}s — a task that would" \
+            "succeed serially is killed in parallel and the whole batch" \
+            "re-runs serially (issue #673)"
+}
+
 @test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout, across all complexities" {
     # Parametrised over the full complexity axis ("" S M L) rather than
     # just the empty/default case: get_stage_timeout escalates the
@@ -641,11 +663,8 @@ teardown() {
         fi
 
         resolved_wall=$(get_task_wall_time "$cx")
-        (( resolved_wall >= serial_timeout )) || \
-            fail "complexity='${cx}': get_task_wall_time=${resolved_wall}s <" \
-                "serial stage timeout=${serial_timeout}s — a task that would" \
-                "succeed serially is killed in parallel and the whole batch" \
-                "re-runs serially (issue #673)"
+        assert_wall_time_covers_serial "$resolved_wall" "$serial_timeout" \
+            "complexity='${cx}'"
     done
 }
 
@@ -678,15 +697,44 @@ teardown() {
 @test "a MAX_TASK_WALL_TIME_SECS below the serial timeout fails the invariant" {
     # Proves the guard above actually discriminates rather than trivially
     # passing: reproduce the pre-fix drift (platform.sh pinned at 900,
-    # serial timeout at 1800) and confirm the same comparison reports it.
-    source "$MODEL_CONFIG_ARRAYS_FILE"
-    local serial_timeout drifted_value
-    serial_timeout=$(get_stage_timeout "implement-task-1" "")
-    drifted_value=900
+    # serial timeout risen to 1800) for real — pre-set
+    # MAX_TASK_WALL_TIME_SECS=900 in the environment and re-source the
+    # actual production platform.sh plus the extracted orchestrator
+    # functions in an ISOLATED subshell, then run the shared invariant
+    # helper against that live resolved value.
+    #
+    # This must NOT re-source .claude/scripts/model-config.sh in this
+    # test's own shell: setup()'s source_orchestrator_functions already
+    # sourced it once here, and a second source in the same (unforked)
+    # process hits the `readonly -a` array redeclaration hazard documented
+    # on MODEL_CONFIG_ARRAYS_FILE in helpers/test-helper.bash.
+    # get_stage_timeout/get_task_wall_time never touch model-config.sh, so
+    # the subshell below sources only platform.sh (for the drifted
+    # constant) and the orchestrator functions file — nothing that trips
+    # the guard.
+    run env MAX_TASK_WALL_TIME_SECS=900 bash -c '
+        source "$TEST_TMP/config/platform.sh"
+        source "$TEST_TMP/orchestrator_functions.bash"
+        printf "%s %s\n" \
+            "$MAX_TASK_WALL_TIME_SECS" \
+            "$(get_stage_timeout "implement-task-1" "")"
+    '
+    [ "$status" -eq 0 ] || \
+        fail "Isolated config/orchestrator-functions subshell failed:" \
+            "$output"
 
-    ! (( drifted_value >= serial_timeout )) || \
-        fail "Expected drifted MAX_TASK_WALL_TIME_SECS=$drifted_value to be" \
-            "caught as below serial_timeout=$serial_timeout"
+    local resolved_wall serial_timeout
+    read -r resolved_wall serial_timeout <<< "$output"
+
+    [ "$resolved_wall" = "900" ] || \
+        fail "Expected the re-sourced MAX_TASK_WALL_TIME_SECS to resolve" \
+            "to 900, got: $resolved_wall"
+
+    ! assert_wall_time_covers_serial "$resolved_wall" "$serial_timeout" \
+        "drift repro" || \
+        fail "Expected the shared invariant helper to report a" \
+            "violation for a live wall_time=${resolved_wall}s against" \
+            "serial_timeout=${serial_timeout}s"
 }
 
 # =============================================================================
