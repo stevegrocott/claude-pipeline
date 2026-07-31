@@ -791,3 +791,121 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# AC3: the fix-stage call site reuses the same hook as the pre-PR call, but
+# that must not be assumed — assert directly that a fix-pr-review commit
+# touching no canonical script triggers neither a regeneration nor a commit
+# at the point the fix-stage push would carry it. Without this, a future
+# change that makes the fix-stage call unconditional (e.g. dropping the base
+# diff) would slip a spurious "chore(bundle)" commit into every review-fix
+# push, unnoticed.
+@test "(#675 AC3) the fix-stage regeneration is a no-op when the fix-pr-review commit changes no canonical script" {
+	_init_pipeline_git_repo
+
+	# Implementation commit, pre-PR (#666 / #651 replay) — same setup as the
+	# AC1/AC2 test above, so the bundle is already in sync before the
+	# fix-pr-review commit under test lands.
+	git -C "$TEST_TMP" checkout -q -b wt/i675-ac3
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: implementation commit"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'pre-PR regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# A fix-pr-review-iterN commit that touches only non-canonical content —
+	# the case where the fix-stage call must do nothing.
+	printf '# review note\n' > "$TEST_TMP/README.md"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix-pr-review-iter1: address review comment"
+
+	local head_before
+	head_before=$(git -C "$TEST_TMP" rev-parse HEAD)
+
+	# The fix-stage's guarding call, immediately before its push.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'fix-stage regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# The hook diffs base_branch...HEAD (the whole PR so far), not just the
+	# latest commit, so it re-examines the earlier implementation commit here
+	# too — that is by design (#632) and cheap, per the #675 evaluation's own
+	# "negligible" framing. What AC3 actually forbids is an observable
+	# regeneration: a new commit, or the bundle tree changing underneath it.
+	[[ "$(git -C "$TEST_TMP" rev-parse HEAD)" == "$head_before" ]] || {
+		printf 'FAIL: fix-stage hook committed although no canonical script changed\n' >&2
+		return 1
+	}
+
+	local dirty
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: fix-stage hook left the working tree dirty on a no-op run:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+}
+
+# AC4: consumers install the orchestrator from the plugin bundle and have
+# neither sync.sh nor plugins/pipeline-core/ (#632 AC8). The fix-stage call
+# site must stay inert there too, across the same pre-PR-then-fix-pr-review
+# replay used by the AC1/AC2 and AC3 tests above — not just on a single call,
+# as the pre-existing (#632) inert test already covers.
+@test "(#675 AC4) the fix-stage regeneration stays inert across a fix-pr-review commit in a repo with no bundle generator" {
+	mkdir -p "$TEST_TMP/consumer-repo/.claude/scripts"
+	git -C "$TEST_TMP/consumer-repo" init -q -b main
+	git -C "$TEST_TMP/consumer-repo" config user.email "test@example.com"
+	git -C "$TEST_TMP/consumer-repo" config user.name "Test"
+	printf '#!/usr/bin/env bash\necho x\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "base"
+
+	# Implementation commit, pre-PR call — mirrors the pipeline-repo replay,
+	# but against a consumer with no generator.
+	git -C "$TEST_TMP/consumer-repo" checkout -q -b wt/i675-ac4
+	printf '#!/usr/bin/env bash\necho y\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "feat: implementation commit"
+
+	_run_regen_hook "$TEST_TMP/consumer-repo" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: pre-PR hook failed in a consumer repo (exit %d):\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+
+	# fix-pr-review-iterN commit touching the canonical-shaped path again —
+	# still must not blow up or fabricate a bundle in a repo with no
+	# generator.
+	printf '#!/usr/bin/env bash\necho z\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "fix-pr-review-iter1: address review comment"
+
+	local head_before
+	head_before=$(git -C "$TEST_TMP/consumer-repo" rev-parse HEAD)
+
+	_run_regen_hook "$TEST_TMP/consumer-repo" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: fix-stage hook failed in a consumer repo (exit %d):\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$(git -C "$TEST_TMP/consumer-repo" rev-parse HEAD)" == "$head_before" ]] || {
+		printf 'FAIL: fix-stage hook committed in a repo with no bundle generator\n' >&2
+		return 1
+	}
+	[[ ! -e "$TEST_TMP/consumer-repo/plugins" ]] || {
+		printf 'FAIL: fix-stage hook fabricated a plugins/ tree in a consumer repo\n' >&2
+		return 1
+	}
+}
