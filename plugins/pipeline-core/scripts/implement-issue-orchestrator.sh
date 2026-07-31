@@ -305,6 +305,10 @@ get_stage_timeout() {
 get_task_wall_time() {
     local complexity="${1:-}"
     local stage_timeout
+    # "implement-task" is not a real stage name — it's a synthetic name
+    # chosen only to hit the `implement*|fix*` prefix case in
+    # get_stage_timeout, since task execution is implement-shaped
+    # regardless of which concrete stage (implement/fix) runs it.
     stage_timeout=$(get_stage_timeout "implement-task" "$complexity")
 
     if (( stage_timeout > MAX_TASK_WALL_TIME_SECS )); then
