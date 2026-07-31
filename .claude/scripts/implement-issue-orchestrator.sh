@@ -296,6 +296,24 @@ get_stage_timeout() {
     esac
 }
 
+# get_task_wall_time - per-task watchdog wall-clock budget
+#
+# The parallel-batch watchdog previously killed every task at the flat
+# MAX_TASK_WALL_TIME_SECS, even large/complex tasks whose own stage
+# timeout (from get_stage_timeout) is longer. Take whichever is larger
+# so the watchdog never fires before the stage's own timeout would.
+get_task_wall_time() {
+    local complexity="${1:-}"
+    local stage_timeout
+    stage_timeout=$(get_stage_timeout "implement-task" "$complexity")
+
+    if (( stage_timeout > MAX_TASK_WALL_TIME_SECS )); then
+        printf '%s' "$stage_timeout"
+    else
+        printf '%s' "$MAX_TASK_WALL_TIME_SECS"
+    fi
+}
+
 # =============================================================================
 # GLOBAL WALL-CLOCK TIMEOUT
 # =============================================================================
@@ -6676,6 +6694,7 @@ execute_batch_parallel() {
 	local -a wt_paths=()
 	local -a wt_branches=()
 	local -a result_files=()
+	local -a task_walltimes=()
 
 	local i
 	for ((i = 0; i < batch_count; i++)); do
@@ -6687,6 +6706,8 @@ execute_batch_parallel() {
 		tdesc=$(printf '%s' "$task" | jq -r '.description')
 		tagent=$(printf '%s' "$task" | jq -r '.agent')
 		tsize=$(extract_task_size "$tdesc")
+		local twall
+		twall=$(get_task_wall_time "$tsize")
 
 		local wt_branch="wt-i${ISSUE_NUMBER}-t${tid}"
 		local result_file
@@ -6709,6 +6730,7 @@ execute_batch_parallel() {
 			wt_paths+=("")
 			wt_branches+=("$wt_branch")
 			result_files+=("$result_file")
+			task_walltimes+=("$twall")
 			continue
 		fi
 
@@ -6716,6 +6738,7 @@ execute_batch_parallel() {
 		wt_paths+=("$wt_path")
 		wt_branches+=("$wt_branch")
 		result_files+=("$result_file")
+		task_walltimes+=("$twall")
 
 		# Launch in background subshell with wall-time guard
 		(
@@ -6730,7 +6753,7 @@ execute_batch_parallel() {
 			_task_pid=$!
 			set +m
 			set -m
-			( sleep "${MAX_TASK_WALL_TIME_SECS}" && \
+			( sleep "${twall}" && \
 				kill -- -"$_task_pid" 2>/dev/null ) > /dev/null 2>&1 &
 			_watchdog_pid=$!
 			set +m
@@ -6744,7 +6767,7 @@ execute_batch_parallel() {
 			if [[ $_task_exit -eq 143 && \
 				! -f "$result_file" ]]; then
 				log_error "Task $tid TIMED OUT" \
-					"after ${MAX_TASK_WALL_TIME_SECS}s"
+					"after ${twall}s"
 				printf '%s' \
 					'{"status":"timeout","review_attempts":0}' \
 					> "$result_file"
@@ -6754,7 +6777,7 @@ execute_batch_parallel() {
 		pids+=("$last_pid")
 		_bg_pids+=("$last_pid")
 		log "Task $tid launched (PID $last_pid," \
-			"wall-time limit ${MAX_TASK_WALL_TIME_SECS}s)" \
+			"wall-time limit ${twall}s)" \
 			"in $wt_path"
 	done
 
@@ -6780,6 +6803,7 @@ execute_batch_parallel() {
 		local rf="${result_files[$i]}"
 		local wb="${wt_branches[$i]}"
 		local wp="${wt_paths[$i]}"
+		local twall="${task_walltimes[$i]}"
 
 		if [[ ! -f "$rf" ]]; then
 			log_error "No result file for task $tid"
@@ -6794,7 +6818,7 @@ execute_batch_parallel() {
 
 		if [[ "$rstatus" == "timeout" ]]; then
 			log_error "Task $tid TIMED OUT" \
-				"(exceeded ${MAX_TASK_WALL_TIME_SECS}s wall time)"
+				"(exceeded ${twall}s wall time)"
 			failed+=("$tid")
 			cleanup_worktree "$wp" "$wb" \
 				"$ISSUE_NUMBER" "$tid" "$feature_branch"
