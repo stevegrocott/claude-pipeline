@@ -915,3 +915,61 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# =============================================================================
+# AC5 parity guard test coverage (issue #696)
+#
+# regenerate_bundle_if_needed() (#675 AC5) diffs .claude/scripts/ against
+# plugins/pipeline-core/scripts/ itself after calling `sync.sh bundle`,
+# because the generator's own exit code lies when it silently skips a file
+# (e.g. a subdir added to .claude/scripts/ that BUNDLE_SCRIPT_SUBDIRS doesn't
+# know about yet): it exits 0 and `git status` on the untouched path stays
+# clean. Nothing exercised that branch, so the guard could regress to a
+# no-op — e.g. the `log_error` call deleted, or `_parity_in_sync` inverted —
+# and CI would only catch it as a red Bundle Parity & Syntax check on some
+# future PR, exactly the failure #675 exists to prevent.
+#
+# Stub sync.sh itself, rather than editing BUNDLE_SCRIPT_SUBDIRS, so this
+# test pins the guard at its actual defect site: a generator whose exit
+# status alone is not proof of parity.
+# =============================================================================
+
+@test "(#696 / #675 AC5) log_error parity guard fires when sync.sh bundle exits 0 without copying" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i696
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: edit canonical orchestrator"
+
+	# Replace the real generator with a stub that exits 0 but copies
+	# nothing — the exact failure mode AC5's guard exists to catch.
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	# Precondition: the stub really left the trees divergent, i.e. the state
+	# the guard exists to catch.
+	! diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null 2>&1 || {
+		printf 'FAIL: fixture did not reproduce a stale bundle\n' >&2
+		return 1
+	}
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"ERROR: sync.sh bundle exited 0 but"* ]] || {
+		printf 'FAIL: parity guard did not fire:\n%s\n' "$output" >&2
+		return 1
+	}
+	[[ "$output" == *"still does not match .claude/scripts/"* ]] || {
+		printf 'FAIL: parity guard message missing expected detail:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
