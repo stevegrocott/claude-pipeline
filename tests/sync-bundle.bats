@@ -700,7 +700,7 @@ _init_pipeline_git_repo() {
 	# call and the push — i.e. no commit can slip in after regeneration and
 	# before the push unnoticed.
 	between=$(sed -n "$((closest_regen + 1)),$((push_line - 1))p" \
-		"$ORCHESTRATOR" | grep -vE '^\s*(#|$|log ")' || true)
+		"$ORCHESTRATOR" | grep -vE '^[[:space:]]*(#|$|log ")' || true)
 	[[ -z "$between" ]] || {
 		printf 'FAIL: unexpected code between regeneration and push:\n%s\n' \
 			"$between" >&2
