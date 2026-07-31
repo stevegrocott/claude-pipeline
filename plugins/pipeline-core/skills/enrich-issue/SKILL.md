@@ -125,7 +125,7 @@ Break the chosen approach into implementable tasks following the same convention
 - Each task should target 5-30 minutes of subagent execution time
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small, M=medium, L=large
 - **Parseable format required:** Every task line in `## Implementation Tasks` MUST begin with `- [ ] \`[agent-name]\``
-- **Every task MUST include at least one file path**
+- **Every task MUST include at least one file path, written repo-relative from the repo root** (e.g. `` `.claude/scripts/model-config.sh` ``, never a bare basename like `` `model-config.sh` ``) — `assert_issue_valid` treats every backtick-quoted token as a file path and rejects bare basenames as unresolved
 
 ### Step 5: Rewrite Issue Body In Place
 
@@ -263,6 +263,8 @@ The `## Implementation Tasks` section must use this parseable convention (identi
 - [ ] `[agent-name]` **(M)** Task description — `src/path/file.ts:L10-40`
 ```
 
+**Paths must be repo-relative from the repo root** — `` `.claude/scripts/model-config.sh` ``, not a bare basename like `` `model-config.sh` ``. `assert_issue_valid` treats every backtick-quoted token as a file path and rejects bare basenames as unresolved.
+
 **Agent values** — use agents defined in `.claude/agents/`:
 
 | Agent | Use for |
@@ -304,3 +306,4 @@ The `## Implementation Tasks` section must use this parseable convention (identi
 | Remove label before rewriting body | Label removal signals completion; do it last |
 | Skip research, jump to planning | Plan won't account for existing patterns |
 | Task has no file paths | Subagent reads 13+ files to orient; include at least 1 file path per task |
+| File path is a bare basename, not repo-relative | `assert_issue_valid` rejects it as an unresolved path; write the full path from the repo root |

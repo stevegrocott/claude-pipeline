@@ -247,7 +247,7 @@ The `## Implementation Tasks` section must use this parseable convention:
 ```
 
 **Files suffix:** Append ` — \`path/to/file.ts:L10-40\`` (em dash, space, backtick-quoted path with optional line range) to every task description. Multiple files: ` — \`file1.ts:L5\`, \`file2.ts:L20-35\``. This tells subagents exactly where to look, eliminating broad codebase scans.
-- **Paths must be real repo paths** — verify each path exists in the repository before writing it. Never invent or guess file paths.
+- **Paths must be real repo paths, written repo-relative from the repo root** — verify each path exists in the repository before writing it. Never invent or guess file paths, and never write a bare basename like `` `model-config.sh` `` — use the full path (`` `.claude/scripts/model-config.sh` ``). `assert_issue_valid` treats every backtick-quoted token as a file path and rejects bare basenames as unresolved.
 - **Task descriptions must stay under ~200 characters** — keep the description concise; put details in the Research Findings section of the issue body instead.
 
 **Parser hardening (issue #584) — the section extractor is tolerant, the failure mode is loud:** the two mirrored parsers (`_parse_task_lines` in the orchestrator and `_issue_body_parse_tasks` in `issue-body-lib.sh`) stay behaviourally identical and both now:
@@ -296,7 +296,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 
 - **Prefer S-complexity tasks** — S and M tasks use sonnet; only L tasks use opus. Prefer S over M/L for smaller scope, not model savings.
 - **Split M/L tasks into multiple S tasks** when the work is decomposable into independent steps. **This is now enforced:** `assert_issue_valid` hard-rejects a decomposable M/L task (M/L hint AND >2 distinct file paths) and warns on the overall non-S mix — see the Task Format Specification. Decompose at explore time; do not rely on the gate to catch it.
-- **Every task MUST include at least one file path. This is now ENFORCED, not advised:** `assert_issue_valid` (`.claude/scripts/issue-body-lib.sh`) hard-rejects any OPEN task whose description yields zero file paths (the diagnostic names the offending task), so an issue with a path-less task is bounced before creation. Line-range suffixes count (`file.ts:L10-40` satisfies the rule) and directory-only paths count (`.claude/scripts/`); already-completed `[x]` tasks are exempt. Tasks without file paths otherwise cause subagents to scan broadly — the #1 token waste in the pipeline.
+- **Every task MUST include at least one file path, written repo-relative from the repo root. This is now ENFORCED, not advised:** `assert_issue_valid` (`.claude/scripts/issue-body-lib.sh`) hard-rejects any OPEN task whose description yields zero file paths (the diagnostic names the offending task), so an issue with a path-less task is bounced before creation. A bare basename like `` `model-config.sh` `` also fails as unresolved — write the full path (`` `.claude/scripts/model-config.sh` ``). Line-range suffixes count (`file.ts:L10-40` satisfies the rule) and directory-only paths count (`.claude/scripts/`); already-completed `[x]` tasks are exempt. Tasks without file paths otherwise cause subagents to scan broadly — the #1 token waste in the pipeline.
 - **Each task's affected file list reduces subagent exploration cost** — include file paths in the task description.
 
 ## Integration
@@ -317,6 +317,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Single task modifies 5+ files | Split into focused subtasks |
 | Task has no file paths | **Rejected by `assert_issue_valid`** — an OPEN task with zero file paths fails validation before the issue is created (subagents would otherwise read 13+ files to orient). Include at least 1 file path per task |
 | File path doesn't exist in repo | Subagent wastes a full search cycle; verify paths before writing them |
+| File path is a bare basename, not repo-relative | **Rejected by `assert_issue_valid`** as an unresolved path; write the full path from the repo root instead of just the filename |
 | Task description over ~200 chars | Truncated in UI and hard to scan; put details in the issue body instead |
 | Writing `[test-engineer]` as agent | Legacy alias — write `[playwright-test-developer]` for E2E or `[default]` for general tests |
 | Missing square brackets: `` `agent-name` `` instead of `` `[agent-name]` `` | Parser accepts it, but explicit brackets make intent clear — always use brackets |
