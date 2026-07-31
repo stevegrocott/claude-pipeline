@@ -618,13 +618,19 @@ teardown() {
     # Parametrised over the full complexity axis ("" S M L) rather than
     # just the empty/default case: get_stage_timeout escalates the
     # serial implement-task timeout to 3600s at complexity=L (see
-    # implement-issue-orchestrator.sh's get_stage_timeout), so the flat
-    # MAX_TASK_WALL_TIME_SECS parallel ceiling must also cover L, not
-    # just the "" S M tier that all resolve to 1800s.
+    # implement-issue-orchestrator.sh's get_stage_timeout). The flat
+    # MAX_TASK_WALL_TIME_SECS constant deliberately stays at 1800s (raising
+    # it would give small/medium tasks the same oversized watchdog as L
+    # tasks — see the wiring test below); per-task coverage comes from
+    # get_task_wall_time(), which takes max(MAX_TASK_WALL_TIME_SECS,
+    # get_stage_timeout("implement-task", cx)). Checking get_task_wall_time
+    # here (rather than the raw constant) still catches the #673 drift class
+    # for every complexity tier, without re-litigating what tests 37-40
+    # already prove about get_task_wall_time's own formula.
     source "$MODEL_CONFIG_ARRAYS_FILE"
 
     local -a complexities=("" "S" "M" "L")
-    local cx serial_timeout
+    local cx serial_timeout resolved_wall
     for cx in "${complexities[@]}"; do
         serial_timeout=$(get_stage_timeout "implement-task-1" "$cx")
 
@@ -634,8 +640,9 @@ teardown() {
                     "got: $serial_timeout"
         fi
 
-        (( MAX_TASK_WALL_TIME_SECS >= serial_timeout )) || \
-            fail "complexity='${cx}': MAX_TASK_WALL_TIME_SECS=${MAX_TASK_WALL_TIME_SECS}s <" \
+        resolved_wall=$(get_task_wall_time "$cx")
+        (( resolved_wall >= serial_timeout )) || \
+            fail "complexity='${cx}': get_task_wall_time=${resolved_wall}s <" \
                 "serial stage timeout=${serial_timeout}s — a task that would" \
                 "succeed serially is killed in parallel and the whole batch" \
                 "re-runs serially (issue #673)"
@@ -643,16 +650,17 @@ teardown() {
 }
 
 @test "parallel watchdog region resolves a per-task wall time for L, not the flat global (issue #673 wiring)" {
-    # The invariant above only checks that the flat MAX_TASK_WALL_TIME_SECS
-    # constant is >= the serial timeout. A "fix" that just raises that one
-    # global to 3600s for every task would satisfy the invariant while
-    # giving small (S/M) tasks the same oversized watchdog as L tasks —
-    # defeating the point of a wall-time guard. The real fix must resolve
-    # a PER-TASK wall time inside the watchdog launch (e.g. via
-    # get_stage_timeout, using the task's already-computed $tsize), not
-    # lean on the flat global alone.
+    # A "fix" that just raises MAX_TASK_WALL_TIME_SECS to 3600s for every
+    # task would satisfy a flat-constant invariant while giving small
+    # (S/M) tasks the same oversized watchdog as L tasks — defeating the
+    # point of a wall-time guard. The real fix (issue #678) resolves a
+    # PER-TASK wall time via get_task_wall_time() (using the task's
+    # already-computed $tsize), which itself wraps get_stage_timeout and
+    # is proven correct by the get_task_wall_time unit tests below. Search
+    # a window wide enough to cover both the per-task resolution (computed
+    # once per loop iteration, ahead of the launch) and the launch itself.
     local watchdog_region
-    watchdog_region=$(grep -A 20 -F \
+    watchdog_region=$(grep -B 40 -A 20 -F \
         'Launch in background subshell with wall-time guard' \
         "$ORCHESTRATOR_SCRIPT")
 
@@ -660,9 +668,9 @@ teardown() {
         fail "Could not locate the parallel watchdog launch region in" \
             "$ORCHESTRATOR_SCRIPT"
 
-    printf '%s\n' "$watchdog_region" | grep -q 'get_stage_timeout' || \
+    printf '%s\n' "$watchdog_region" | grep -q 'get_task_wall_time' || \
         fail "Expected the parallel watchdog region to resolve a" \
-            "per-task wall time via get_stage_timeout (using tsize)," \
+            "per-task wall time via get_task_wall_time (using tsize)," \
             "not rely solely on the flat MAX_TASK_WALL_TIME_SECS global." \
             $'\nRegion:\n'"$watchdog_region"
 }
