@@ -136,28 +136,28 @@ EOF
 #
 # process_issue() returns 0 on a preflight skip (see the validate_issue_for_
 # processing tests below, ~line 1043) so a skip does not trip the consecutive-
-# failure circuit breaker. That same 0 is indistinguishable from a real
+# failure circuit breaker. That same 0 was indistinguishable from a real
 # success to the caller loop's "if process_issue "$issue"; then" block
-# (":1961-1964"), which today unconditionally logs "processed successfully"
-# and emits outcome=success.
+# (originally ":1961-1964", now ~:1983-1991 after the fix), which used to
+# unconditionally log "processed successfully" and emit outcome=success.
 #
 # The call-site block lives in the top-level batch loop, not inside a
 # function, so it cannot be sourced directly. It is extracted by anchor and
 # exercised with mocked log/emit_event/process_issue, mirroring the
 # up-front-skip-gate extraction technique used elsewhere in this file.
 #
-# Signal contract assumed here (per the issue's Evaluation section — "signal
-# a preflight skip to the caller out-of-band while still returning 0"):
-# process_issue already leaves the global _SKIP_REASON set on every skip path
-# (validate_issue_for_processing resets it to "" on entry and only sets it on
-# failure — see the "_SKIP_REASON must be set" tests below), so a non-empty
-# _SKIP_REASON after a 0 return is the out-of-band skip signal.
+# Signal contract: process_issue() sets the dedicated global
+# _PREFLIGHT_SKIPPED=true immediately before its preflight-skip `return 0`,
+# and resets it to false at the top of every call (see batch-orchestrator.sh
+# ~:108-118, :1183-1211). The caller reads _PREFLIGHT_SKIPPED right after
+# process_issue() returns to distinguish a genuine success from a skip that
+# also returned 0.
 #
-# MAINTENANCE NOTE: if the fix lands with a different signal (e.g. a
-# dedicated flag instead of _SKIP_REASON) or different wording than
-# "outcome=skipped", update the mock setup / assertions below in lockstep —
-# see the maintenance note above the up-front skip gate tests for the
-# established convention this follows.
+# MAINTENANCE NOTE: if the fix changes to a different signal (e.g. back to a
+# non-empty _SKIP_REASON) or different wording than "outcome=skipped", update
+# the mock setup / assertions below in lockstep — see the maintenance note
+# above the up-front skip gate tests for the established convention this
+# follows.
 
 # Extracts the "if process_issue "$issue"; then ... fi" call-site block from
 # the top-level batch loop. Returns 1 (without aborting) if the anchor is not
@@ -178,7 +178,8 @@ _extract_process_issue_call_site() {
 _run_process_issue_call_site() {
 	local block_file="$1"
 	local process_issue_rc="$2"
-	local skip_reason="${3:-}"
+	local preflight_skipped="${3:-false}"
+	local skip_reason="${4:-}"
 
 	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
 	log_error() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
@@ -191,6 +192,10 @@ _run_process_issue_call_site() {
 	: > "$TEST_TMP/events.out"
 	: > "$TEST_TMP/state.out"
 
+	# _PREFLIGHT_SKIPPED is the out-of-band signal process_issue() leaves
+	# behind (see the maintenance note above); _SKIP_REASON is only used
+	# for the human-readable skip reason in the log line.
+	_PREFLIGHT_SKIPPED="$preflight_skipped"
 	_SKIP_REASON="$skip_reason"
 	issue=690
 	consecutive_failures="${CF_IN:-0}"
@@ -209,7 +214,7 @@ _run_process_issue_call_site() {
 		|| skip "process_issue call-site block not found (script changed)"
 
 	_run_process_issue_call_site \
-		"$block_file" 0 "body failed structural validation"
+		"$block_file" 0 true "body failed structural validation"
 
 	! grep -q 'processed successfully' "$TEST_TMP/log.out"
 }
@@ -220,7 +225,7 @@ _run_process_issue_call_site() {
 		|| skip "process_issue call-site block not found (script changed)"
 
 	_run_process_issue_call_site \
-		"$block_file" 0 "body failed structural validation"
+		"$block_file" 0 true "body failed structural validation"
 
 	grep -qi 'skip' "$TEST_TMP/log.out"
 }
@@ -231,7 +236,7 @@ _run_process_issue_call_site() {
 		|| skip "process_issue call-site block not found (script changed)"
 
 	_run_process_issue_call_site \
-		"$block_file" 0 "body failed structural validation"
+		"$block_file" 0 true "body failed structural validation"
 
 	! grep -q 'outcome=success' "$TEST_TMP/events.out"
 }
@@ -242,7 +247,7 @@ _run_process_issue_call_site() {
 		|| skip "process_issue call-site block not found (script changed)"
 
 	_run_process_issue_call_site \
-		"$block_file" 0 "body failed structural validation"
+		"$block_file" 0 true "body failed structural validation"
 
 	grep -q 'outcome=skipped' "$TEST_TMP/events.out"
 }
@@ -252,7 +257,7 @@ _run_process_issue_call_site() {
 	block_file=$(_extract_process_issue_call_site) \
 		|| skip "process_issue call-site block not found (script changed)"
 
-	_run_process_issue_call_site "$block_file" 0 ""
+	_run_process_issue_call_site "$block_file" 0 false ""
 
 	grep -q 'processed successfully' "$TEST_TMP/log.out"
 	grep -q 'outcome=success' "$TEST_TMP/events.out"
@@ -263,7 +268,7 @@ _run_process_issue_call_site() {
 	block_file=$(_extract_process_issue_call_site) \
 		|| skip "process_issue call-site block not found (script changed)"
 
-	CF_IN=4 _run_process_issue_call_site "$block_file" 1 ""
+	CF_IN=4 _run_process_issue_call_site "$block_file" 1 false ""
 
 	grep -q 'outcome=failed' "$TEST_TMP/events.out"
 	[[ "$consecutive_failures" -eq 5 ]]
