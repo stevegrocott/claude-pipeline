@@ -626,19 +626,39 @@ teardown() {
 # below reflects whatever this repo's platform.sh actually resolves to, and
 # these tests fail the instant it drops below the serial timeout again.
 #
-# Why the control test below ("a MAX_TASK_WALL_TIME_SECS below the serial
-# timeout fails the invariant") re-sources in an isolated `bash -c`
-# subprocess rather than reusing this shell: setup() already sourced
-# platform.sh once here, so MAX_TASK_WALL_TIME_SECS is already a set
-# variable in this process — assigning a new env override and re-running
-# the fallback in-place wouldn't cleanly prove the override actually flows
-# through `${:-1800}` the way a fresh process sees it. A genuinely fresh
-# `bash -c` process, given the override only via `env`, reproduces exactly
-# what a real invocation resolves to. It also sidesteps the `readonly -a`
-# array redeclaration hazard documented on that test's own re-source call
-# (see MODEL_CONFIG_ARRAYS_FILE in helpers/test-helper.bash) by sourcing
-# only platform.sh and the extracted orchestrator functions there — never
+# Why the control test below ("platform.sh's assignment actually drives
+# MAX_TASK_WALL_TIME_SECS") re-sources in an isolated `bash -c` subprocess
+# rather than reusing this shell: setup() already sourced platform.sh once
+# here, so MAX_TASK_WALL_TIME_SECS is already a set variable in this
+# process — re-running the fallback in-place wouldn't cleanly prove
+# anything flows through `${:-1800}` the way a fresh process sees it. A
+# genuinely fresh `bash -c` process reproduces exactly what a real
+# invocation resolves to. It also sidesteps the `readonly -a` array
+# redeclaration hazard documented on that test's own re-source call (see
+# MODEL_CONFIG_ARRAYS_FILE in helpers/test-helper.bash) by sourcing only
+# platform.sh and the extracted orchestrator functions there — never
 # model-config.sh a second time in a shell that already has it.
+#
+# An earlier version of this test set MAX_TASK_WALL_TIME_SECS=900 via
+# `env` and then asserted the resolved value was still 900 after sourcing
+# platform.sh. That was a false positive: the env var already equalled 900
+# before platform.sh's own `${MAX_TASK_WALL_TIME_SECS:-1800}` line ever
+# ran, so the fallback never fired — the assertion would hold identically
+# whether platform.sh was sourced or not, or even if its `source` line
+# were deleted outright. It proved the comparison logic worked, not that
+# platform.sh's place in the sourcing chain mattered.
+#
+# The test below fixes that: it overwrites the copied platform.sh fixture
+# with an UNCONDITIONAL assignment (no `${:-...}` guard, reproducing the
+# real #673 drift directly) and runs with the env var unset, so the
+# sentinel can only appear in the resolved value if platform.sh's line
+# actually executed and its assignment survived being sourced ahead of the
+# orchestrator's own fallback line. A second, contrasting subshell sources
+# the extracted orchestrator functions alone, without platform.sh, and
+# confirms that omitting it from the chain yields a DIFFERENT value (the
+# orchestrator's own hardcoded 1800 default) — proving the sentinel in the
+# first subshell is attributable to platform.sh's sourcing, not to
+# something the orchestrator functions would have produced unassisted.
 # =============================================================================
 
 @test "serial implement-task stage timeout is 1800s (issue #673 baseline)" {
@@ -748,15 +768,21 @@ assert_wall_time_covers_serial() {
             $'\nRegion:\n'"$watchdog_region"
 }
 
-@test "a MAX_TASK_WALL_TIME_SECS below the serial timeout fails the invariant" {
-    # Proves the guard above actually discriminates rather than trivially
-    # passing: reproduce the pre-fix drift (platform.sh pinned at 900,
-    # serial timeout risen to 1800) for real — pre-set
-    # MAX_TASK_WALL_TIME_SECS=900 in the environment and re-source the
-    # actual production platform.sh plus the extracted orchestrator
-    # functions in an ISOLATED subshell, then run the shared invariant
-    # helper against that live resolved value.
+@test "platform.sh's assignment actually drives MAX_TASK_WALL_TIME_SECS, not merely an injected env var" {
+    # Reproduce the pre-fix drift (platform.sh pinned at 900, serial
+    # timeout risen to 1800) for real, and prove it's platform.sh's own
+    # sourced line doing the work — not an env var that was already
+    # sitting at the target value before platform.sh ever ran.
     #
+    # Overwrite the copied platform.sh fixture with an UNCONDITIONAL
+    # assignment (no `${VAR:-...}` guard): this is what a genuinely
+    # drifted platform.sh looks like, and it means 900 can only end up in
+    # the resolved value via platform.sh's line actually executing.
+    local sentinel=900
+    cat > "$TEST_TMP/config/platform.sh" <<EOF
+MAX_TASK_WALL_TIME_SECS=$sentinel
+EOF
+
     # This must NOT re-source .claude/scripts/model-config.sh in this
     # test's own shell: setup()'s source_orchestrator_functions already
     # sourced it once here, and a second source in the same (unforked)
@@ -765,8 +791,10 @@ assert_wall_time_covers_serial() {
     # get_stage_timeout/get_task_wall_time never touch model-config.sh, so
     # the subshell below sources only platform.sh (for the drifted
     # constant) and the orchestrator functions file — nothing that trips
-    # the guard.
-    run env MAX_TASK_WALL_TIME_SECS=900 bash -c '
+    # the guard. MAX_TASK_WALL_TIME_SECS is explicitly unset first so
+    # nothing in the environment could supply the sentinel on its own.
+    run bash -c '
+        unset MAX_TASK_WALL_TIME_SECS
         source "$TEST_TMP/config/platform.sh"
         source "$TEST_TMP/orchestrator_functions.bash"
         printf "%s %s\n" \
@@ -780,10 +808,32 @@ assert_wall_time_covers_serial() {
     local resolved_wall serial_timeout
     read -r resolved_wall serial_timeout <<< "$output"
 
-    [ "$resolved_wall" = "900" ] || \
-        fail "Expected the re-sourced MAX_TASK_WALL_TIME_SECS to resolve" \
-            "to 900, got: $resolved_wall"
+    [ "$resolved_wall" = "$sentinel" ] || \
+        fail "Expected platform.sh's own assignment ($sentinel) to reach" \
+            "the resolved MAX_TASK_WALL_TIME_SECS, got: $resolved_wall"
 
+    # Control: source the SAME extracted orchestrator functions WITHOUT
+    # platform.sh in the chain at all. If platform.sh's sourcing were
+    # inert, this would also resolve to the sentinel; instead it must fall
+    # back to the orchestrator's own hardcoded 1800 default — a different
+    # value — proving the sentinel above came from platform.sh's line,
+    # not from the orchestrator functions alone.
+    run bash -c '
+        unset MAX_TASK_WALL_TIME_SECS
+        source "$TEST_TMP/orchestrator_functions.bash"
+        printf "%s\n" "$MAX_TASK_WALL_TIME_SECS"
+    '
+    [ "$status" -eq 0 ] || \
+        fail "Isolated orchestrator-functions-only subshell failed:" \
+            "$output"
+    [ "$output" != "$sentinel" ] || \
+        fail "Expected the orchestrator's own fallback (platform.sh NOT" \
+            "sourced) to differ from platform.sh's sentinel ($sentinel)." \
+            "Got the same value, so the sentinel can't be attributed to" \
+            "platform.sh's sourcing chain."
+
+    # Finally, confirm the shared invariant helper actually flags the
+    # drift reproduced above (900 < serial timeout).
     ! assert_wall_time_covers_serial "$resolved_wall" "$serial_timeout" \
         "drift repro" || \
         fail "Expected the shared invariant helper to report a" \
