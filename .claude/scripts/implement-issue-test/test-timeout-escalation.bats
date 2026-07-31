@@ -614,16 +614,57 @@ teardown() {
         fail "Expected serial implement-task timeout=1800, got: $serial_timeout"
 }
 
-@test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout" {
+@test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout, across all complexities" {
+    # Parametrised over the full complexity axis ("" S M L) rather than
+    # just the empty/default case: get_stage_timeout escalates the
+    # serial implement-task timeout to 3600s at complexity=L (see
+    # implement-issue-orchestrator.sh's get_stage_timeout), so the flat
+    # MAX_TASK_WALL_TIME_SECS parallel ceiling must also cover L, not
+    # just the "" S M tier that all resolve to 1800s.
     source "$MODEL_CONFIG_ARRAYS_FILE"
-    local serial_timeout
-    serial_timeout=$(get_stage_timeout "implement-task-1" "")
 
-    (( MAX_TASK_WALL_TIME_SECS >= serial_timeout )) || \
-        fail "MAX_TASK_WALL_TIME_SECS=${MAX_TASK_WALL_TIME_SECS}s <" \
-            "serial stage timeout=${serial_timeout}s — a task that would" \
-            "succeed serially is killed in parallel and the whole batch" \
-            "re-runs serially (issue #673)"
+    local -a complexities=("" "S" "M" "L")
+    local cx serial_timeout
+    for cx in "${complexities[@]}"; do
+        serial_timeout=$(get_stage_timeout "implement-task-1" "$cx")
+
+        if [[ "$cx" == "L" ]]; then
+            [ "$serial_timeout" -eq 3600 ] || \
+                fail "Expected get_stage_timeout(implement-task-1, L)=3600," \
+                    "got: $serial_timeout"
+        fi
+
+        (( MAX_TASK_WALL_TIME_SECS >= serial_timeout )) || \
+            fail "complexity='${cx}': MAX_TASK_WALL_TIME_SECS=${MAX_TASK_WALL_TIME_SECS}s <" \
+                "serial stage timeout=${serial_timeout}s — a task that would" \
+                "succeed serially is killed in parallel and the whole batch" \
+                "re-runs serially (issue #673)"
+    done
+}
+
+@test "parallel watchdog region resolves a per-task wall time for L, not the flat global (issue #673 wiring)" {
+    # The invariant above only checks that the flat MAX_TASK_WALL_TIME_SECS
+    # constant is >= the serial timeout. A "fix" that just raises that one
+    # global to 3600s for every task would satisfy the invariant while
+    # giving small (S/M) tasks the same oversized watchdog as L tasks —
+    # defeating the point of a wall-time guard. The real fix must resolve
+    # a PER-TASK wall time inside the watchdog launch (e.g. via
+    # get_stage_timeout, using the task's already-computed $tsize), not
+    # lean on the flat global alone.
+    local watchdog_region
+    watchdog_region=$(grep -A 20 -F \
+        'Launch in background subshell with wall-time guard' \
+        "$ORCHESTRATOR_SCRIPT")
+
+    [[ -n "$watchdog_region" ]] || \
+        fail "Could not locate the parallel watchdog launch region in" \
+            "$ORCHESTRATOR_SCRIPT"
+
+    printf '%s\n' "$watchdog_region" | grep -q 'get_stage_timeout' || \
+        fail "Expected the parallel watchdog region to resolve a" \
+            "per-task wall time via get_stage_timeout (using tsize)," \
+            "not rely solely on the flat MAX_TASK_WALL_TIME_SECS global." \
+            $'\nRegion:\n'"$watchdog_region"
 }
 
 @test "a MAX_TASK_WALL_TIME_SECS below the serial timeout fails the invariant" {
