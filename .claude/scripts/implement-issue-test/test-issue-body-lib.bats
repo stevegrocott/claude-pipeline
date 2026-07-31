@@ -187,6 +187,65 @@ valid_body() {
 	[[ "$output" == *"task has no file path"* ]]
 }
 
+# --- Issue #689: separator-less backticked filenames are name mentions, not
+# navigation targets, so they are exempt from resolution but still cannot
+# satisfy the >=1-path requirement on their own. ---
+
+@test "assert_issue_valid: a backticked filename with no directory separator, mentioned in prose, does not raise 'unresolved path'" {
+	# A slash-less filename named in ordinary prose (a warning not to touch
+	# it, not a navigation target — replaying the #679 shape) must not be
+	# resolution-checked.  The task's real navigation target is the files
+	# suffix, `.claude/scripts/model-config.sh`.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/.claude/scripts"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Re-source the real config path in an isolated subshell — do NOT re-source \`model-config.sh\` in the test shell, see readonly hazard — \`.claude/scripts/model-config.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"unresolved path"* ]]
+}
+
+@test "assert_issue_valid: a slash-bearing bad path still fails even with an exempt bare filename in the same task" {
+	# The exemption is narrow to separator-less tokens: a path with a
+	# directory component that does not resolve must still fail criterion 3,
+	# and the exemption on the bare filename must not leak into it.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** See \`README.md\` and edit — \`nope/missing/file.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"unresolved path: nope/missing/file.sh"* ]]
+	[[ "$output" != *"unresolved path: README.md"* ]]
+}
+
+@test "assert_issue_valid: a separator-less filename alone does NOT satisfy the >=1-path requirement" {
+	# Mirrors the bare /word rule (#600): demoting the token to prose means a
+	# task whose only path-like token is a separator-less filename must still
+	# fail criterion 7 — the exemption cannot be used to skip naming a real
+	# path.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Update \`config.yaml\` for the service
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"task has no file path"* ]]
+}
+
 @test "assert_issue_valid: accepts a new file in a not-yet-existing subdir when an ancestor exists" {
 	# Defect 4 — resolution walks ancestors: 'app/api/' exists but
 	# 'app/api/register/' does not yet, and the new file must still validate.
