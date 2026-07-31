@@ -920,6 +920,253 @@ _make_gh_skip_status_json() {
 }
 
 # =============================================================================
+# ISSUE #690 (task 5): preflight skips must not affect the circuit breaker,
+# and the pre-existing up-front skip gate must be unaffected by the fix
+# =============================================================================
+#
+# AC4 (issue #690): "Skips still do not increment consecutive failures and
+# still do not trip the circuit breaker — asserted directly, not inferred."
+# The tests below reuse the real call-site block (via
+# _extract_process_issue_call_site / _run_process_issue_call_site, defined
+# above) so the circuit-breaker arithmetic and the `break` statement under
+# test are the actual production code, not a re-implementation of it.
+#
+# AC5: "The up-front gate for already-closed issues and already-merged PRs
+# still records completion and is unaffected." That gate (~:1958-1981) uses
+# `continue` to bypass process_issue entirely, so it never sees
+# _PREFLIGHT_SKIPPED — the tests below confirm that stays true.
+
+@test "functional: a preflight skip does not increment consecutive_failures" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	CF_IN=2 _run_process_issue_call_site \
+		"$block_file" 0 true "body failed structural validation"
+
+	[[ "$consecutive_failures" -eq 0 ]]
+}
+
+@test "functional: a preflight skip at the failure threshold does not trip the circuit breaker" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	# consecutive_failures is already one below MAX_CONSECUTIVE_FAILURES —
+	# the case most likely to falsely trip if a skip were ever miscounted
+	# as a failure.
+	MAX_CONSECUTIVE_FAILURES=3 CF_IN=2 _run_process_issue_call_site \
+		"$block_file" 0 true "body failed structural validation"
+
+	! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+	[[ ! -s "$TEST_TMP/state.out" ]]
+	! grep -q 'batch_paused' "$TEST_TMP/events.out"
+	[[ "$exit_code" -eq 0 ]]
+}
+
+@test "functional: repeated preflight skips beyond MAX_CONSECUTIVE_FAILURES never trip the circuit breaker" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	MAX_CONSECUTIVE_FAILURES=3
+	local cf=0
+	local i
+	for ((i = 0; i < 5; i++)); do
+		CF_IN="$cf" _run_process_issue_call_site \
+			"$block_file" 0 true "body failed structural validation"
+		cf="$consecutive_failures"
+		! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+		[[ "$exit_code" -eq 0 ]]
+	done
+
+	[[ "$cf" -eq 0 ]]
+}
+
+@test "functional: a real failure at the threshold still trips the circuit breaker (contrast case)" {
+	# Establishes that the harness/circuit-breaker arithmetic can still
+	# fire at all — otherwise the skip tests above would pass vacuously.
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	MAX_CONSECUTIVE_FAILURES=3 CF_IN=2 _run_process_issue_call_site \
+		"$block_file" 1 false ""
+
+	grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+	grep -q 'circuit_breaker' "$TEST_TMP/state.out"
+	[[ "$exit_code" -eq 2 ]]
+}
+
+# --- The pre-existing up-front skip gate must remain unaffected ---
+
+# Extracts the up-front skip gate's "if [[ "${GIT_HOST:-github}" ...
+# ... fi" block from the main loop. Returns 1 (without aborting) if the
+# anchor is not found so callers skip rather than false-fail on an
+# unrelated script change.
+_extract_upfront_skip_gate_block() {
+	local block_file="$TEST_TMP/upfront_skip_gate.bash"
+	awk '/^    if \[\[ "\$\{GIT_HOST:-github\}"/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'gh issue view' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources the extracted up-front gate block inside a one-shot for-loop (so
+# `continue` has a loop to act on) with gh on PATH mocked by the caller, and
+# log/update_issue_field/update_progress mocked to capture calls instead of
+# touching the real filesystem. _process_issue_reached is set to true only
+# if the block falls through without hitting `continue` — mirroring how the
+# real loop would fall through to `if process_issue "$issue"; then`.
+_run_upfront_skip_gate() {
+	local block_file="$1"
+
+	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
+	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/update.out"
+	: > "$TEST_TMP/progress.out"
+
+	issue=690
+	consecutive_failures="${CF_IN:-2}"
+	_PREFLIGHT_SKIPPED="${PREFLIGHT_IN:-false}"
+	GIT_HOST=github
+	_process_issue_reached=false
+
+	for _once in 1; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+		_process_issue_reached=true
+	done
+}
+
+@test "functional: up-front gate (closed issue) does not set _PREFLIGHT_SKIPPED" {
+	local block_file
+	block_file=$(_extract_upfront_skip_gate_block) \
+		|| skip "up-front skip gate block not found (script changed)"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-closed"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'CLOSED\n' ;;
+	pr) printf '' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	PREFLIGHT_IN=false CF_IN=2 _run_upfront_skip_gate "$block_file"
+
+	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+}
+
+@test "functional: up-front gate (closed issue) leaves consecutive_failures untouched" {
+	local block_file
+	block_file=$(_extract_upfront_skip_gate_block) \
+		|| skip "up-front skip gate block not found (script changed)"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-closed-cf"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'CLOSED\n' ;;
+	pr) printf '' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	# Unlike a process_issue() success/skip (which resets to 0), the
+	# up-front gate must leave consecutive_failures exactly as it found it
+	# — it never calls process_issue at all.
+	PREFLIGHT_IN=false CF_IN=2 _run_upfront_skip_gate "$block_file"
+
+	[[ "$consecutive_failures" -eq 2 ]]
+}
+
+@test "functional: up-front gate (closed issue) bypasses process_issue via continue and still records completed" {
+	local block_file
+	block_file=$(_extract_upfront_skip_gate_block) \
+		|| skip "up-front skip gate block not found (script changed)"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-closed-continue"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'CLOSED\n' ;;
+	pr) printf '' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	_run_upfront_skip_gate "$block_file"
+
+	[[ "$_process_issue_reached" == false ]]
+	grep -q 'status' "$TEST_TMP/update.out"
+	grep -q 'completed' "$TEST_TMP/update.out"
+	[[ -s "$TEST_TMP/progress.out" ]]
+}
+
+@test "functional: up-front gate (merged PR) does not set _PREFLIGHT_SKIPPED and leaves consecutive_failures untouched" {
+	local block_file
+	block_file=$(_extract_upfront_skip_gate_block) \
+		|| skip "up-front skip gate block not found (script changed)"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-merged"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\n' ;;
+	pr) printf '123\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	PREFLIGHT_IN=false CF_IN=1 _run_upfront_skip_gate "$block_file"
+
+	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+	[[ "$consecutive_failures" -eq 1 ]]
+	[[ "$_process_issue_reached" == false ]]
+	grep -q 'completed' "$TEST_TMP/update.out"
+}
+
+@test "functional: up-front gate falls through to process_issue when issue is open and no PR is merged" {
+	local block_file
+	block_file=$(_extract_upfront_skip_gate_block) \
+		|| skip "up-front skip gate block not found (script changed)"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-open"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\n' ;;
+	pr) printf '' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	PREFLIGHT_IN=false CF_IN=1 _run_upfront_skip_gate "$block_file"
+
+	# No status write, and the block falls through to process_issue rather
+	# than skipping — leaving the preflight-skip signal to process_issue().
+	[[ "$_process_issue_reached" == true ]]
+	[[ ! -s "$TEST_TMP/update.out" ]]
+	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+	[[ "$consecutive_failures" -eq 1 ]]
+}
+
+# =============================================================================
 # ISSUE #397: surface deploy-verify failures in batch post-run summary
 # =============================================================================
 
