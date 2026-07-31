@@ -710,22 +710,41 @@ assert_wall_time_covers_serial() {
     # point of a wall-time guard. The real fix (issue #678) resolves a
     # PER-TASK wall time via get_task_wall_time() (using the task's
     # already-computed $tsize), which itself wraps get_stage_timeout and
-    # is proven correct by the get_task_wall_time unit tests below. Search
-    # a window wide enough to cover both the per-task resolution (computed
-    # once per loop iteration, ahead of the launch) and the launch itself.
+    # is proven correct by the get_task_wall_time unit tests below.
+    #
+    # issue #702: previously this searched -B 40 -A 20 around the "Launch
+    # in background subshell..." comment, which sits BETWEEN the twall
+    # assignment and the launch. Every line the loop grows in that gap
+    # (it already grew once — see the create_task_worktree failure
+    # branch below) eats into the -B budget, and once it silently
+    # exceeds 40 the region stops containing the twall assignment
+    # without any test failure pointing at why. Anchoring on the
+    # assignment itself and searching forward only means growth has to
+    # happen strictly AFTER the anchor to matter, and a generous -A
+    # margin covers that.
     local watchdog_region
-    watchdog_region=$(grep -B 40 -A 20 -F \
-        'Launch in background subshell with wall-time guard' \
+    watchdog_region=$(grep -A 80 -F \
+        'twall=$(get_task_wall_time' \
         "$ORCHESTRATOR_SCRIPT")
 
     [[ -n "$watchdog_region" ]] || \
-        fail "Could not locate the parallel watchdog launch region in" \
-            "$ORCHESTRATOR_SCRIPT"
+        fail "Could not locate the per-task wall-time resolution" \
+            "(twall=\$(get_task_wall_time ...)) in $ORCHESTRATOR_SCRIPT"
 
     printf '%s\n' "$watchdog_region" | grep -q 'get_task_wall_time' || \
         fail "Expected the parallel watchdog region to resolve a" \
             "per-task wall time via get_task_wall_time (using tsize)," \
             "not rely solely on the flat MAX_TASK_WALL_TIME_SECS global." \
+            $'\nRegion:\n'"$watchdog_region"
+
+    # A regression that computes twall but leaves the watchdog's sleep
+    # reading the flat MAX_TASK_WALL_TIME_SECS global would still pass
+    # the get_task_wall_time check above, since that string appears
+    # regardless of whether its result is ever used. Assert the
+    # resolved value actually reaches the sleep call.
+    printf '%s\n' "$watchdog_region" | grep -qF 'sleep "${twall}"' || \
+        fail "Expected the watchdog's sleep to use the resolved" \
+            "per-task twall, not the flat MAX_TASK_WALL_TIME_SECS global." \
             $'\nRegion:\n'"$watchdog_region"
 }
 
