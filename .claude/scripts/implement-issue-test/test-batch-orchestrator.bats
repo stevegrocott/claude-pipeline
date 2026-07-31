@@ -131,6 +131,145 @@ EOF
 }
 
 # =============================================================================
+# ISSUE #690: preflight-skipped issues must not be logged/emitted as success
+# =============================================================================
+#
+# process_issue() returns 0 on a preflight skip (see the validate_issue_for_
+# processing tests below, ~line 1043) so a skip does not trip the consecutive-
+# failure circuit breaker. That same 0 is indistinguishable from a real
+# success to the caller loop's "if process_issue "$issue"; then" block
+# (":1961-1964"), which today unconditionally logs "processed successfully"
+# and emits outcome=success.
+#
+# The call-site block lives in the top-level batch loop, not inside a
+# function, so it cannot be sourced directly. It is extracted by anchor and
+# exercised with mocked log/emit_event/process_issue, mirroring the
+# up-front-skip-gate extraction technique used elsewhere in this file.
+#
+# Signal contract assumed here (per the issue's Evaluation section — "signal
+# a preflight skip to the caller out-of-band while still returning 0"):
+# process_issue already leaves the global _SKIP_REASON set on every skip path
+# (validate_issue_for_processing resets it to "" on entry and only sets it on
+# failure — see the "_SKIP_REASON must be set" tests below), so a non-empty
+# _SKIP_REASON after a 0 return is the out-of-band skip signal.
+#
+# MAINTENANCE NOTE: if the fix lands with a different signal (e.g. a
+# dedicated flag instead of _SKIP_REASON) or different wording than
+# "outcome=skipped", update the mock setup / assertions below in lockstep —
+# see the maintenance note above the up-front skip gate tests for the
+# established convention this follows.
+
+# Extracts the "if process_issue "$issue"; then ... fi" call-site block from
+# the top-level batch loop. Returns 1 (without aborting) if the anchor is not
+# found so callers can skip rather than false-fail on an unrelated script
+# change.
+_extract_process_issue_call_site() {
+	local block_file="$TEST_TMP/process_issue_call_site.bash"
+	awk '/^    if process_issue /,/^    fi$/' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		> "$block_file"
+	grep -q 'process_issue' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources the extracted block inside a one-shot for-loop (so `break`, used by
+# the circuit-breaker arm, has a loop to break out of) with log/emit_event/
+# process_issue/set_state mocked to capture their arguments to files instead
+# of touching the real filesystem or git/gh.
+_run_process_issue_call_site() {
+	local block_file="$1"
+	local process_issue_rc="$2"
+	local skip_reason="${3:-}"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_error() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	emit_event() { printf '%s\n' "$*" >> "$TEST_TMP/events.out"; }
+	set_state() { printf '%s\n' "$*" >> "$TEST_TMP/state.out"; }
+	# shellcheck disable=SC2317
+	process_issue() { return "$process_issue_rc"; }
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/events.out"
+	: > "$TEST_TMP/state.out"
+
+	_SKIP_REASON="$skip_reason"
+	issue=690
+	consecutive_failures="${CF_IN:-0}"
+	exit_code=0
+	MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-5}"
+
+	for _once in 1; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+	done
+}
+
+@test "functional: process_issue call site does not log 'processed successfully' for a preflight skip" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site \
+		"$block_file" 0 "body failed structural validation"
+
+	! grep -q 'processed successfully' "$TEST_TMP/log.out"
+}
+
+@test "functional: process_issue call site logs a distinct skip message for a preflight skip" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site \
+		"$block_file" 0 "body failed structural validation"
+
+	grep -qi 'skip' "$TEST_TMP/log.out"
+}
+
+@test "functional: process_issue call site does not emit outcome=success for a preflight skip" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site \
+		"$block_file" 0 "body failed structural validation"
+
+	! grep -q 'outcome=success' "$TEST_TMP/events.out"
+}
+
+@test "functional: process_issue call site emits a skipped outcome for a preflight skip" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site \
+		"$block_file" 0 "body failed structural validation"
+
+	grep -q 'outcome=skipped' "$TEST_TMP/events.out"
+}
+
+@test "functional: process_issue call site still logs success for a real (non-skipped) success" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site "$block_file" 0 ""
+
+	grep -q 'processed successfully' "$TEST_TMP/log.out"
+	grep -q 'outcome=success' "$TEST_TMP/events.out"
+}
+
+@test "functional: process_issue call site still logs a failure and increments consecutive_failures" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	CF_IN=4 _run_process_issue_call_site "$block_file" 1 ""
+
+	grep -q 'outcome=failed' "$TEST_TMP/events.out"
+	[[ "$consecutive_failures" -eq 5 ]]
+}
+
+# =============================================================================
 # STATIC ANALYSIS: merge_blocked case arm
 # =============================================================================
 
