@@ -246,6 +246,59 @@ valid_body() {
 	[[ "$output" == *"task has no file path"* ]]
 }
 
+# --- Issue #689 AC2: regression fixtures replaying the #679 and #678 bodies
+# verbatim as they stood at rejection time (batch-20260730-212750,
+# 2026-07-30T21:28 local / 2026-07-30T11:28:01Z-11:28:08Z UTC). Recovered via
+# `gh api graphql` userContentEdits — the pre-fix snapshot immediately before
+# each issue was hand-edited to full paths minutes after preflight skipped
+# it. Bodies are reproduced byte-for-byte (including the bare `model-config.sh`,
+# `test-timeout-escalation.bats` and `test-bundle-parity.bats` mentions that
+# triggered "unresolved path"), not reconstructed, so this fixture would have
+# caught the regression before #689 was ever filed. ---
+
+@test "#689 AC2: replays the #679 body verbatim as rejected and it now validates" {
+	# Preflight log at rejection time (orchestrator.log):
+	#   WARN: Preflight #679: assert_issue_valid: unresolved path: model-config.sh
+	#   WARN: Skipping issue #679: body failed structural validation
+	#
+	# Fixture is the exact issue body live at rejection (2026-07-30T21:28:01
+	# local / 2026-07-30T11:28:01Z), recovered via `gh api graphql`
+	# userContentEdits (the snapshot immediately before a hand-edit minutes
+	# later rewrote the bare `model-config.sh` mention to a full path) — a
+	# byte-for-byte replay, not a reconstruction. Stored as a file rather than
+	# an inline heredoc: bash 3.2 (macOS default, what this suite runs under)
+	# misparses a single-quoted heredoc containing an odd number of literal
+	# apostrophes, which this prose body has several of.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/.claude/scripts/implement-issue-test"
+	local fixtures_dir
+	fixtures_dir="$(dirname "${BATS_TEST_FILENAME}")/fixtures"
+	local body
+	body=$(cat "$fixtures_dir/issue-679-rejected-body.md")
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"unresolved path"* ]]
+}
+
+@test "#689 AC2: replays the #678 body verbatim as rejected and it now validates" {
+	# Preflight log at rejection time (orchestrator.log):
+	#   WARN: Preflight #678: assert_issue_valid: unresolved path: test-bundle-parity.bats
+	#   WARN: Preflight #678: assert_issue_valid: unresolved path: test-timeout-escalation.bats
+	#   WARN: Skipping issue #678: body failed structural validation
+	#
+	# Fixture is the exact issue body live at rejection (2026-07-30T21:28:08
+	# local / 2026-07-30T11:28:08Z), recovered the same way as #679 above.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/.claude/scripts/implement-issue-test"
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts"
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/tests"
+	local fixtures_dir
+	fixtures_dir="$(dirname "${BATS_TEST_FILENAME}")/fixtures"
+	local body
+	body=$(cat "$fixtures_dir/issue-678-rejected-body.md")
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"unresolved path"* ]]
+}
+
 @test "assert_issue_valid: accepts a new file in a not-yet-existing subdir when an ancestor exists" {
 	# Defect 4 — resolution walks ancestors: 'app/api/' exists but
 	# 'app/api/register/' does not yet, and the new file must still validate.
