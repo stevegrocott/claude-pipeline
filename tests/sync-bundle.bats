@@ -654,3 +654,258 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# The AC7 hook only covers commits that exist before the PR is opened. A
+# PR-review fix stage commits AFTER that point and can touch a canonical
+# .claude/scripts/ file just as easily as the initial implementation — left
+# alone, that post-PR commit re-diverges the bundle and the push carries a
+# stale one. Assert a second call site exists, and that it sits immediately
+# before the fix-stage's push, not just somewhere in the file.
+@test "(#675) the regeneration hook also runs before the post-PR fix-stage push" {
+	local -a regen_lines
+	local push_line closest_regen line between
+
+	push_line=$(grep -n 'git push origin "\$branch"' "$ORCHESTRATOR" \
+		| head -1 | cut -d: -f1)
+	[[ -n "$push_line" ]] || {
+		printf 'FAIL: could not locate the fix-stage push in %s\n' \
+			"$ORCHESTRATOR" >&2
+		return 1
+	}
+
+	while IFS= read -r line; do
+		regen_lines+=("$line")
+	done < <(grep -n '^[[:space:]]*regenerate_bundle_if_needed "' \
+		"$ORCHESTRATOR" | cut -d: -f1)
+
+	(( ${#regen_lines[@]} >= 2 )) || {
+		printf 'FAIL: expected a pre-PR call and a fix-stage call, found %d\n' \
+			"${#regen_lines[@]}" >&2
+		return 1
+	}
+
+	# The regeneration call closest to (and before) the push is the one that
+	# must guard it.
+	closest_regen=0
+	for line in "${regen_lines[@]}"; do
+		(( line < push_line )) && closest_regen=$line
+	done
+	(( closest_regen > 0 )) || {
+		printf 'FAIL: no regenerate_bundle_if_needed call precedes the fix-stage push (line %s)\n' \
+			"$push_line" >&2
+		return 1
+	}
+
+	# Nothing but comments/blank lines/log lines sits between the guarding
+	# call and the push — i.e. no commit can slip in after regeneration and
+	# before the push unnoticed.
+	between=$(sed -n "$((closest_regen + 1)),$((push_line - 1))p" \
+		"$ORCHESTRATOR" | grep -vE '^\s*(#|$|log ")' || true)
+	[[ -z "$between" ]] || {
+		printf 'FAIL: unexpected code between regeneration and push:\n%s\n' \
+			"$between" >&2
+		return 1
+	}
+}
+
+# The structural test above only proves the fix-stage call site exists; it
+# says nothing about whether a regeneration run at THAT point in history
+# actually lands the trees in sync. This drives the extracted hook through
+# the full #666/#651 replay — an implementation commit, the pre-PR
+# regeneration, then a fix-pr-review commit touching the same canonical
+# script — and asserts the bundle matches at the moment a push would carry
+# it (AC1/AC2).
+@test "(#675) a fix-pr-review commit touching a canonical script leaves the bundle in sync at push time" {
+	_init_pipeline_git_repo
+
+	# Implementation commit, pre-PR (#666 / #651 replay).
+	git -C "$TEST_TMP" checkout -q -b wt/i675
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: implementation commit"
+
+	# The #632 pre-PR call site.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'pre-PR regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+	diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null || {
+		printf 'FAIL: fixture bundle not in sync after the pre-PR regeneration\n' >&2
+		return 1
+	}
+
+	# The PR is now open. A fix-pr-review-iterN commit lands afterwards and
+	# edits the same canonical script again — the entire #675 failure mode.
+	printf '#!/usr/bin/env bash\necho orchestrator v3 (fix-pr-review)\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix-pr-review-iter1: address review comment"
+
+	# Precondition: the fix commit re-diverged the bundle, i.e. the state
+	# that went red in #620 / #666 / #651 and needed a human to run
+	# sync.sh by hand.
+	! diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null 2>&1 || {
+		printf 'FAIL: fixture did not reproduce the post-PR re-divergence\n' >&2
+		return 1
+	}
+
+	# The fix-stage's guarding call, immediately before its push.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'fix-stage regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# AC1/AC2: at push time — right now, since a real push carries whatever
+	# HEAD holds — the bundle matches the canonical tree.
+	diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null || {
+		printf 'FAIL: bundle still stale at push time after the fix-stage commit\n' >&2
+		return 1
+	}
+
+	# The regenerated bundle must be committed — a push carries HEAD, not
+	# the working tree.
+	local dirty
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: regenerated bundle left uncommitted at push time:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+
+	# CI equivalence: Bundle Parity & Syntax would be green on the commit
+	# that gets pushed.
+	bash "$TEST_TMP/sync.sh" bundle > /dev/null
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: Bundle Parity & Syntax would still be red:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+}
+
+# AC3: the fix-stage call site reuses the same hook as the pre-PR call, but
+# that must not be assumed — assert directly that a fix-pr-review commit
+# touching no canonical script triggers neither a regeneration nor a commit
+# at the point the fix-stage push would carry it. Without this, a future
+# change that makes the fix-stage call unconditional (e.g. dropping the base
+# diff) would slip a spurious "chore(bundle)" commit into every review-fix
+# push, unnoticed.
+@test "(#675 AC3) the fix-stage regeneration is a no-op when the fix-pr-review commit changes no canonical script" {
+	_init_pipeline_git_repo
+
+	# Implementation commit, pre-PR (#666 / #651 replay) — same setup as the
+	# AC1/AC2 test above, so the bundle is already in sync before the
+	# fix-pr-review commit under test lands.
+	git -C "$TEST_TMP" checkout -q -b wt/i675-ac3
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: implementation commit"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'pre-PR regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# A fix-pr-review-iterN commit that touches only non-canonical content —
+	# the case where the fix-stage call must do nothing.
+	printf '# review note\n' > "$TEST_TMP/README.md"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix-pr-review-iter1: address review comment"
+
+	local head_before
+	head_before=$(git -C "$TEST_TMP" rev-parse HEAD)
+
+	# The fix-stage's guarding call, immediately before its push.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'fix-stage regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# The hook diffs base_branch...HEAD (the whole PR so far), not just the
+	# latest commit, so it re-examines the earlier implementation commit here
+	# too — that is by design (#632) and cheap, per the #675 evaluation's own
+	# "negligible" framing. What AC3 actually forbids is an observable
+	# regeneration: a new commit, or the bundle tree changing underneath it.
+	[[ "$(git -C "$TEST_TMP" rev-parse HEAD)" == "$head_before" ]] || {
+		printf 'FAIL: fix-stage hook committed although no canonical script changed\n' >&2
+		return 1
+	}
+
+	local dirty
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: fix-stage hook left the working tree dirty on a no-op run:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+}
+
+# AC4: consumers install the orchestrator from the plugin bundle and have
+# neither sync.sh nor plugins/pipeline-core/ (#632 AC8). The fix-stage call
+# site must stay inert there too, across the same pre-PR-then-fix-pr-review
+# replay used by the AC1/AC2 and AC3 tests above — not just on a single call,
+# as the pre-existing (#632) inert test already covers.
+@test "(#675 AC4) the fix-stage regeneration stays inert across a fix-pr-review commit in a repo with no bundle generator" {
+	mkdir -p "$TEST_TMP/consumer-repo/.claude/scripts"
+	git -C "$TEST_TMP/consumer-repo" init -q -b main
+	git -C "$TEST_TMP/consumer-repo" config user.email "test@example.com"
+	git -C "$TEST_TMP/consumer-repo" config user.name "Test"
+	printf '#!/usr/bin/env bash\necho x\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "base"
+
+	# Implementation commit, pre-PR call — mirrors the pipeline-repo replay,
+	# but against a consumer with no generator.
+	git -C "$TEST_TMP/consumer-repo" checkout -q -b wt/i675-ac4
+	printf '#!/usr/bin/env bash\necho y\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "feat: implementation commit"
+
+	_run_regen_hook "$TEST_TMP/consumer-repo" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: pre-PR hook failed in a consumer repo (exit %d):\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+
+	# fix-pr-review-iterN commit touching the canonical-shaped path again —
+	# still must not blow up or fabricate a bundle in a repo with no
+	# generator.
+	printf '#!/usr/bin/env bash\necho z\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "fix-pr-review-iter1: address review comment"
+
+	local head_before
+	head_before=$(git -C "$TEST_TMP/consumer-repo" rev-parse HEAD)
+
+	_run_regen_hook "$TEST_TMP/consumer-repo" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: fix-stage hook failed in a consumer repo (exit %d):\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$(git -C "$TEST_TMP/consumer-repo" rev-parse HEAD)" == "$head_before" ]] || {
+		printf 'FAIL: fix-stage hook committed in a repo with no bundle generator\n' >&2
+		return 1
+	}
+	[[ ! -e "$TEST_TMP/consumer-repo/plugins" ]] || {
+		printf 'FAIL: fix-stage hook fabricated a plugins/ tree in a consumer repo\n' >&2
+		return 1
+	}
+}

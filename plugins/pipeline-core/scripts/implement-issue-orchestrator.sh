@@ -9252,6 +9252,12 @@ leaving changes in the working tree. The reported fixes have NOT landed on
 regenerate_bundle_if_needed() {
 	local work_dir="$1" base_branch="$2"
 	local repo_root changed dirty
+	# Parity-check scratch state (kept local — this function is sourced and
+	# run standalone by tests/sync-bundle.bats, so it cannot reach a helper
+	# defined elsewhere in the file).
+	local _canonical_dir _bundle_scripts_dir _parity_in_sync
+	local -a _parity_subdirs=(platform prompts schemas)
+	local _parity_script _parity_rel _parity_counterpart _parity_sub
 
 	# Resolve the root once, then run every git call against it: the pathspecs
 	# below are repo-relative, so they must not depend on where the
@@ -9275,6 +9281,53 @@ regenerate_bundle_if_needed() {
 	if ! bash "$repo_root/sync.sh" bundle >/dev/null 2>&1; then
 		log_error "sync.sh bundle failed — bundle parity will be red on the PR"
 		return 0
+	fi
+
+	# The generator exited 0, but that alone doesn't prove the trees agree —
+	# a generator that silently skips a file (a subdir added to
+	# .claude/scripts/ but not yet to sync.sh's BUNDLE_SCRIPT_SUBDIRS, say)
+	# exits 0 and leaves `git status` clean for the path it never touched.
+	# Assert real parity explicitly, over the same top-level-*.sh-plus-subdirs
+	# scope sync.sh's BUNDLE_SCRIPT_SUBDIRS and test-bundle-parity.bats'
+	# PARITY_SUBDIRS already enforce, so a regeneration that silently fails to
+	# converge is loud here rather than discovered as a red Bundle Parity &
+	# Syntax check on the PR (issue #675 AC5).
+	_canonical_dir="$repo_root/.claude/scripts"
+	_bundle_scripts_dir="$repo_root/plugins/pipeline-core/scripts"
+	_parity_in_sync=1
+	for _parity_script in "$_canonical_dir"/*.sh; do
+		[[ -f "$_parity_script" ]] || continue
+		_parity_rel="${_parity_script#"$_canonical_dir"/}"
+		_parity_counterpart="$_bundle_scripts_dir/$_parity_rel"
+		if [[ ! -f "$_parity_counterpart" ]] || \
+			! diff -q "$_parity_script" "$_parity_counterpart" >/dev/null 2>&1
+		then
+			_parity_in_sync=0
+			break
+		fi
+	done
+	if ((_parity_in_sync)); then
+		for _parity_sub in "${_parity_subdirs[@]}"; do
+			[[ -d "$_canonical_dir/$_parity_sub" ]] || continue
+			while IFS= read -r _parity_script; do
+				_parity_rel="${_parity_script#"$_canonical_dir"/}"
+				_parity_counterpart="$_bundle_scripts_dir/$_parity_rel"
+				if [[ ! -f "$_parity_counterpart" ]] || \
+					! diff -q "$_parity_script" "$_parity_counterpart" \
+						>/dev/null 2>&1
+				then
+					_parity_in_sync=0
+					break
+				fi
+			done < <(find "$_canonical_dir/$_parity_sub" -type f)
+			((_parity_in_sync)) || break
+		done
+	fi
+	if ((! _parity_in_sync)); then
+		log_error "sync.sh bundle exited 0 but plugins/pipeline-core/scripts/" \
+			"still does not match .claude/scripts/ — bundle parity will be" \
+			"red on the PR; run ./sync.sh bundle by hand and inspect the" \
+			"generator"
 	fi
 
 	dirty=$(git -C "$repo_root" status --porcelain \
@@ -10973,6 +11026,15 @@ Fix the issues and commit. Output a summary of fixes applied."
             # its work uncommitted.
             if _handle_fix_stage_result "$pr_number" "$pr_iteration" \
                 "$branch" "$fix_head_before" "$fix_result"; then
+                # A review fix can edit a canonical .claude/scripts/ file just
+                # as easily as the initial implementation can — the pre-PR
+                # call above only covers commits that existed before the PR
+                # was opened. Regenerate here too, immediately before the
+                # push, so this post-PR commit cannot leave the bundle stale
+                # (issue #632 second-order case: the AC7 hook ran once, then
+                # a review-fix commit re-diverged the bundle).
+                regenerate_bundle_if_needed "." "$BASE_BRANCH"
+
                 # Push updates (quality loop skipped — re-review will catch remaining issues)
                 log "Pushing updates to PR..."
                 git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
