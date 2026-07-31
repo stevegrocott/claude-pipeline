@@ -973,3 +973,159 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# =============================================================================
+# Subdir list derived from sync.sh, not hardcoded (issue #693)
+#
+# regenerate_bundle_if_needed() used to check a literal
+# `_parity_subdirs=(platform prompts schemas)` — a THIRD hand-maintained copy
+# of the same list sync.sh's BUNDLE_SCRIPT_SUBDIRS and
+# test-bundle-parity.bats' PARITY_SUBDIRS already carry. A subdir added to
+# .claude/scripts/ and to sync.sh's allowlist, but forgotten in this literal,
+# would silently drop out of the orchestrator's own parity guard: drift under
+# that subdir would pass unnoticed here even though test-bundle-parity.bats
+# (a separate file, checked only in CI) would still catch it later.
+# =============================================================================
+
+@test "(#693) parity guard checks a subdir sync.sh's BUNDLE_SCRIPT_SUBDIRS names, not just platform/prompts/schemas" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i693
+
+	# A new bundled subdirectory, added under .claude/scripts/ and to
+	# sync.sh's own allowlist — nothing about it is hardcoded in the
+	# orchestrator, which is exactly the point being tested.
+	mkdir -p "$TEST_TMP/.claude/scripts/extras" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/extras"
+	printf '#!/usr/bin/env bash\necho canonical\n' \
+		> "$TEST_TMP/.claude/scripts/extras/tool.sh"
+	# The bundled counterpart drifts from canonical — the stub generator
+	# below never reconciles it, mirroring the AC5 fixture above.
+	printf '#!/usr/bin/env bash\necho stale\n' \
+		> "$TEST_TMP/plugins/pipeline-core/scripts/extras/tool.sh"
+
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: add extras/ under .claude/scripts/"
+
+	# Precondition: the two "extras" copies really differ.
+	! diff -q "$TEST_TMP/.claude/scripts/extras/tool.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/extras/tool.sh" \
+		> /dev/null 2>&1 || {
+		printf 'FAIL: fixture did not reproduce extras/ drift\n' >&2
+		return 1
+	}
+
+	# Stub the generator so it still TEXTUALLY declares
+	# BUNDLE_SCRIPT_SUBDIRS (including "extras") for the orchestrator's
+	# parser to read, but exits 0 without reconciling anything — the same
+	# "generator lies" shape as the AC5 test, extended to a subdir the
+	# orchestrator does not know about until it reads sync.sh.
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas extras)\n'
+		printf 'exit 0\n'
+	} > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"ERROR: sync.sh bundle exited 0 but"* ]] || {
+		printf 'FAIL: parity guard did not fire for extras/ drift:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# The failure mode #693 actually reports: a subdir added under
+# .claude/scripts/ and forgotten in sync.sh's BUNDLE_SCRIPT_SUBDIRS is
+# missing from BOTH lists, so deriving the guard's list from sync.sh alone
+# would stay just as silent as the old hardcoded literal. The generator never
+# copies such a subdir, so it ships to nobody — the guard has to enumerate
+# .claude/scripts/ as well and name it.
+@test "(#693) parity guard names a .claude/scripts subdir sync.sh's BUNDLE_SCRIPT_SUBDIRS forgot" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i693-unlisted
+
+	# A new subdir under the canonical tree only — no bundle counterpart,
+	# and deliberately absent from the generator's allowlist below.
+	mkdir -p "$TEST_TMP/.claude/scripts/extras"
+	printf '#!/usr/bin/env bash\necho canonical\n' \
+		> "$TEST_TMP/.claude/scripts/extras/tool.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: add unlisted extras/ subdir"
+
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)\n'
+		printf 'exit 0\n'
+	} > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"subdirectory 'extras' exists under"* ]] || {
+		printf 'FAIL: guard did not name the unlisted subdir:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	# And its contents are then diffed like any other bundled subdir, so
+	# the never-copied tool.sh surfaces as parity drift rather than as a
+	# silent omission.
+	[[ "$output" == *"ERROR: sync.sh bundle exited 0 but"* ]] || {
+		printf 'FAIL: unlisted subdir was named but not parity-checked:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# Enumerating .claude/scripts/*/ must not turn the repo's own test trees
+# (implement-issue-test/, platform-test/) into a false alarm on every single
+# run — they are unbundled by design, not forgotten.
+@test "(#693) parity guard stays quiet about unbundled test subdirs" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i693-tests
+
+	mkdir -p "$TEST_TMP/.claude/scripts/widget-test" \
+		"$TEST_TMP/.claude/scripts/fixtures"
+	printf '@test "x" { true; }\n' \
+		> "$TEST_TMP/.claude/scripts/widget-test/test-widget.bats"
+	# A test tree whose name does not follow the *-test convention is
+	# recognised by the .bats files it holds.
+	printf '@test "y" { true; }\n' \
+		> "$TEST_TMP/.claude/scripts/fixtures/test-fixture.bats"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "test: add unbundled test trees"
+
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)\n'
+		printf 'exit 0\n'
+	} > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" != *"subdirectory 'widget-test' exists under"* ]] || {
+		printf 'FAIL: guard flagged a *-test tree:\n%s\n' "$output" >&2
+		return 1
+	}
+	[[ "$output" != *"subdirectory 'fixtures' exists under"* ]] || {
+		printf 'FAIL: guard flagged a .bats-holding tree:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}

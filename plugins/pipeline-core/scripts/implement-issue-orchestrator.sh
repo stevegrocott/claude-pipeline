@@ -9280,8 +9280,19 @@ regenerate_bundle_if_needed() {
 	# run standalone by tests/sync-bundle.bats, so it cannot reach a helper
 	# defined elsewhere in the file).
 	local _canonical_dir _bundle_scripts_dir _parity_in_sync
-	local -a _parity_subdirs=(platform prompts schemas)
+	# Populated below from sync.sh's own BUNDLE_SCRIPT_SUBDIRS *and* from the
+	# subdirectories that actually exist under .claude/scripts/ (issue #693):
+	# a hardcoded second copy here would silently miss a subdir added to
+	# .claude/scripts/ and to sync.sh's list but forgotten in this file, and
+	# reading sync.sh alone would still miss one added to .claude/scripts/
+	# and forgotten in sync.sh — exactly the drift this check exists to catch.
+	local -a _parity_subdirs=()
+	# Space-delimited mirror of _parity_subdirs used for membership tests:
+	# bash 3.2 under `set -u` errors on "${empty_array[@]}", and the array is
+	# legitimately empty until the parse below succeeds.
+	local _parity_seen=" "
 	local _parity_script _parity_rel _parity_counterpart _parity_sub
+	local _parity_dir _parity_bats
 
 	# Resolve the root once, then run every git call against it: the pathspecs
 	# below are repo-relative, so they must not depend on where the
@@ -9318,6 +9329,70 @@ regenerate_bundle_if_needed() {
 	# Syntax check on the PR (issue #675 AC5).
 	_canonical_dir="$repo_root/.claude/scripts"
 	_bundle_scripts_dir="$repo_root/plugins/pipeline-core/scripts"
+
+	# Read BUNDLE_SCRIPT_SUBDIRS out of sync.sh itself rather than
+	# hardcoding a copy of it here. Handles both the single-line and
+	# one-entry-per-line array forms and strips trailing comments — the
+	# same parse test-bundle-parity.bats' _sync_array() uses to read
+	# sync.sh's hook allowlists, so one proven technique covers both.
+	while IFS= read -r _parity_sub; do
+		[[ -n "$_parity_sub" ]] || continue
+		_parity_subdirs+=("$_parity_sub")
+		_parity_seen+="$_parity_sub "
+	done < <(awk '
+		index($0, "BUNDLE_SCRIPT_SUBDIRS=(") == 1 {
+			inside = 1
+			sub(/^[^(]*\(/, "")
+		}
+		inside {
+			line = $0
+			sub(/#.*/, "", line)
+			closing = (index(line, ")") > 0)
+			sub(/\).*/, "", line)
+			n = split(line, parts, /[ \t]+/)
+			for (i = 1; i <= n; i++) {
+				if (parts[i] != "") print parts[i]
+			}
+			if (closing) exit
+		}
+	' "$repo_root/sync.sh")
+
+	if ((${#_parity_subdirs[@]} == 0)); then
+		log_error "could not read BUNDLE_SCRIPT_SUBDIRS from" \
+			"$repo_root/sync.sh — falling back to whatever" \
+			"subdirectories exist under .claude/scripts/"
+	fi
+
+	# sync.sh's list answers "what does the generator bundle?", never "what
+	# exists?". A subdir added under .claude/scripts/ but forgotten in
+	# BUNDLE_SCRIPT_SUBDIRS is absent from BOTH lists, so reading sync.sh
+	# alone reproduces the very blind spot this guard is meant to close
+	# (issue #693). Union in every real subdirectory too, so a forgotten one
+	# is named here instead of quietly never shipping to consumers.
+	#
+	# Test trees are the one deliberate exception: *-test/ directories, and
+	# any directory holding .bats files, are never bundled by design
+	# (.claude/scripts/implement-issue-test/, platform-test/), so reporting
+	# them would be noise on every run rather than a signal.
+	for _parity_dir in "$_canonical_dir"/*/; do
+		[[ -d "$_parity_dir" ]] || continue
+		_parity_sub="${_parity_dir%/}"
+		_parity_sub="${_parity_sub##*/}"
+
+		[[ "$_parity_seen" == *" $_parity_sub "* ]] && continue
+		[[ "$_parity_sub" == *-test ]] && continue
+		_parity_bats=$(find "$_parity_dir" -name '*.bats' 2>/dev/null \
+			| head -n 1)
+		[[ -n "$_parity_bats" ]] && continue
+
+		log_error "subdirectory '$_parity_sub' exists under" \
+			".claude/scripts/ but sync.sh's BUNDLE_SCRIPT_SUBDIRS does" \
+			"not list it, so the generator never bundles it — add it" \
+			"there if it should ship to consumers"
+		_parity_subdirs+=("$_parity_sub")
+		_parity_seen+="$_parity_sub "
+	done
+
 	_parity_in_sync=1
 	for _parity_script in "$_canonical_dir"/*.sh; do
 		[[ -f "$_parity_script" ]] || continue
@@ -9330,7 +9405,7 @@ regenerate_bundle_if_needed() {
 			break
 		fi
 	done
-	if ((_parity_in_sync)); then
+	if ((_parity_in_sync)) && ((${#_parity_subdirs[@]} > 0)); then
 		for _parity_sub in "${_parity_subdirs[@]}"; do
 			[[ -d "$_canonical_dir/$_parity_sub" ]] || continue
 			while IFS= read -r _parity_script; do
