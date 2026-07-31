@@ -682,6 +682,51 @@ teardown() {
 }
 
 # =============================================================================
+# get_task_wall_time() — per-task watchdog budget (issue #678)
+#
+# The tests above only assert the flat MAX_TASK_WALL_TIME_SECS constant
+# happens to be >= the serial implement-task timeout today; nothing stops
+# them drifting apart again the way #673 did. get_task_wall_time() removes
+# the drift risk structurally: the parallel watchdog now always takes
+# max(MAX_TASK_WALL_TIME_SECS, get_stage_timeout("implement-task", size)),
+# so an "L" task's watchdog can never be tighter than its own stage timeout.
+# =============================================================================
+
+@test "get_task_wall_time is defined" {
+    [ "$(type -t get_task_wall_time)" = "function" ]
+}
+
+@test "get_task_wall_time matches MAX_TASK_WALL_TIME_SECS for default size" {
+    local result
+    result=$(get_task_wall_time "")
+    [ "$result" -eq "$MAX_TASK_WALL_TIME_SECS" ] || \
+        fail "Expected get_task_wall_time('')=$MAX_TASK_WALL_TIME_SECS," \
+            "got: $result"
+}
+
+@test "get_task_wall_time widens the watchdog for L-complexity tasks" {
+    local result stage_timeout
+    stage_timeout=$(get_stage_timeout "implement-task" "L")
+    result=$(get_task_wall_time "L")
+    [ "$result" -eq "$stage_timeout" ] || \
+        fail "Expected get_task_wall_time('L')=$stage_timeout," \
+            "got: $result"
+    (( result >= MAX_TASK_WALL_TIME_SECS )) || \
+        fail "get_task_wall_time('L')=$result must never be tighter than" \
+            "MAX_TASK_WALL_TIME_SECS=$MAX_TASK_WALL_TIME_SECS"
+}
+
+@test "get_task_wall_time never returns less than MAX_TASK_WALL_TIME_SECS" {
+    # Simulate the #673 drift (platform.sh pinned low) and confirm the
+    # per-task watchdog still can't fall below the flat floor.
+    local result
+    result=$(MAX_TASK_WALL_TIME_SECS=900 get_task_wall_time "")
+    (( result >= 900 )) || \
+        fail "get_task_wall_time must not return below" \
+            "MAX_TASK_WALL_TIME_SECS=900, got: $result"
+}
+
+# =============================================================================
 # SELECTIVE GIT ADD — sanitize_worktree_commits (AC4)
 # =============================================================================
 
