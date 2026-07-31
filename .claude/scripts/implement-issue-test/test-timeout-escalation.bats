@@ -614,16 +614,65 @@ teardown() {
         fail "Expected serial implement-task timeout=1800, got: $serial_timeout"
 }
 
-@test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout" {
+@test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout, across all complexities" {
+    # Parametrised over the full complexity axis ("" S M L) rather than
+    # just the empty/default case: get_stage_timeout escalates the
+    # serial implement-task timeout to 3600s at complexity=L (see
+    # implement-issue-orchestrator.sh's get_stage_timeout). The flat
+    # MAX_TASK_WALL_TIME_SECS constant deliberately stays at 1800s (raising
+    # it would give small/medium tasks the same oversized watchdog as L
+    # tasks — see the wiring test below); per-task coverage comes from
+    # get_task_wall_time(), which takes max(MAX_TASK_WALL_TIME_SECS,
+    # get_stage_timeout("implement-task", cx)). Checking get_task_wall_time
+    # here (rather than the raw constant) still catches the #673 drift class
+    # for every complexity tier, without re-litigating what tests 37-40
+    # already prove about get_task_wall_time's own formula.
     source "$MODEL_CONFIG_ARRAYS_FILE"
-    local serial_timeout
-    serial_timeout=$(get_stage_timeout "implement-task-1" "")
 
-    (( MAX_TASK_WALL_TIME_SECS >= serial_timeout )) || \
-        fail "MAX_TASK_WALL_TIME_SECS=${MAX_TASK_WALL_TIME_SECS}s <" \
-            "serial stage timeout=${serial_timeout}s — a task that would" \
-            "succeed serially is killed in parallel and the whole batch" \
-            "re-runs serially (issue #673)"
+    local -a complexities=("" "S" "M" "L")
+    local cx serial_timeout resolved_wall
+    for cx in "${complexities[@]}"; do
+        serial_timeout=$(get_stage_timeout "implement-task-1" "$cx")
+
+        if [[ "$cx" == "L" ]]; then
+            [ "$serial_timeout" -eq 3600 ] || \
+                fail "Expected get_stage_timeout(implement-task-1, L)=3600," \
+                    "got: $serial_timeout"
+        fi
+
+        resolved_wall=$(get_task_wall_time "$cx")
+        (( resolved_wall >= serial_timeout )) || \
+            fail "complexity='${cx}': get_task_wall_time=${resolved_wall}s <" \
+                "serial stage timeout=${serial_timeout}s — a task that would" \
+                "succeed serially is killed in parallel and the whole batch" \
+                "re-runs serially (issue #673)"
+    done
+}
+
+@test "parallel watchdog region resolves a per-task wall time for L, not the flat global (issue #673 wiring)" {
+    # A "fix" that just raises MAX_TASK_WALL_TIME_SECS to 3600s for every
+    # task would satisfy a flat-constant invariant while giving small
+    # (S/M) tasks the same oversized watchdog as L tasks — defeating the
+    # point of a wall-time guard. The real fix (issue #678) resolves a
+    # PER-TASK wall time via get_task_wall_time() (using the task's
+    # already-computed $tsize), which itself wraps get_stage_timeout and
+    # is proven correct by the get_task_wall_time unit tests below. Search
+    # a window wide enough to cover both the per-task resolution (computed
+    # once per loop iteration, ahead of the launch) and the launch itself.
+    local watchdog_region
+    watchdog_region=$(grep -B 40 -A 20 -F \
+        'Launch in background subshell with wall-time guard' \
+        "$ORCHESTRATOR_SCRIPT")
+
+    [[ -n "$watchdog_region" ]] || \
+        fail "Could not locate the parallel watchdog launch region in" \
+            "$ORCHESTRATOR_SCRIPT"
+
+    printf '%s\n' "$watchdog_region" | grep -q 'get_task_wall_time' || \
+        fail "Expected the parallel watchdog region to resolve a" \
+            "per-task wall time via get_task_wall_time (using tsize)," \
+            "not rely solely on the flat MAX_TASK_WALL_TIME_SECS global." \
+            $'\nRegion:\n'"$watchdog_region"
 }
 
 @test "a MAX_TASK_WALL_TIME_SECS below the serial timeout fails the invariant" {
@@ -638,6 +687,51 @@ teardown() {
     ! (( drifted_value >= serial_timeout )) || \
         fail "Expected drifted MAX_TASK_WALL_TIME_SECS=$drifted_value to be" \
             "caught as below serial_timeout=$serial_timeout"
+}
+
+# =============================================================================
+# get_task_wall_time() — per-task watchdog budget (issue #678)
+#
+# The tests above only assert the flat MAX_TASK_WALL_TIME_SECS constant
+# happens to be >= the serial implement-task timeout today; nothing stops
+# them drifting apart again the way #673 did. get_task_wall_time() removes
+# the drift risk structurally: the parallel watchdog now always takes
+# max(MAX_TASK_WALL_TIME_SECS, get_stage_timeout("implement-task", size)),
+# so an "L" task's watchdog can never be tighter than its own stage timeout.
+# =============================================================================
+
+@test "get_task_wall_time is defined" {
+    [ "$(type -t get_task_wall_time)" = "function" ]
+}
+
+@test "get_task_wall_time matches MAX_TASK_WALL_TIME_SECS for default size" {
+    local result
+    result=$(get_task_wall_time "")
+    [ "$result" -eq "$MAX_TASK_WALL_TIME_SECS" ] || \
+        fail "Expected get_task_wall_time('')=$MAX_TASK_WALL_TIME_SECS," \
+            "got: $result"
+}
+
+@test "get_task_wall_time widens the watchdog for L-complexity tasks" {
+    local result stage_timeout
+    stage_timeout=$(get_stage_timeout "implement-task" "L")
+    result=$(get_task_wall_time "L")
+    [ "$result" -eq "$stage_timeout" ] || \
+        fail "Expected get_task_wall_time('L')=$stage_timeout," \
+            "got: $result"
+    (( result >= MAX_TASK_WALL_TIME_SECS )) || \
+        fail "get_task_wall_time('L')=$result must never be tighter than" \
+            "MAX_TASK_WALL_TIME_SECS=$MAX_TASK_WALL_TIME_SECS"
+}
+
+@test "get_task_wall_time never returns less than MAX_TASK_WALL_TIME_SECS" {
+    # Simulate the #673 drift (platform.sh pinned low) and confirm the
+    # per-task watchdog still can't fall below the flat floor.
+    local result
+    result=$(MAX_TASK_WALL_TIME_SECS=900 get_task_wall_time "")
+    (( result >= 900 )) || \
+        fail "get_task_wall_time must not return below" \
+            "MAX_TASK_WALL_TIME_SECS=900, got: $result"
 }
 
 # =============================================================================
