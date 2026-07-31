@@ -654,3 +654,56 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# The AC7 hook only covers commits that exist before the PR is opened. A
+# PR-review fix stage commits AFTER that point and can touch a canonical
+# .claude/scripts/ file just as easily as the initial implementation — left
+# alone, that post-PR commit re-diverges the bundle and the push carries a
+# stale one. Assert a second call site exists, and that it sits immediately
+# before the fix-stage's push, not just somewhere in the file.
+@test "(#675) the regeneration hook also runs before the post-PR fix-stage push" {
+	local -a regen_lines
+	local push_line closest_regen line between
+
+	push_line=$(grep -n 'git push origin "\$branch"' "$ORCHESTRATOR" \
+		| head -1 | cut -d: -f1)
+	[[ -n "$push_line" ]] || {
+		printf 'FAIL: could not locate the fix-stage push in %s\n' \
+			"$ORCHESTRATOR" >&2
+		return 1
+	}
+
+	while IFS= read -r line; do
+		regen_lines+=("$line")
+	done < <(grep -n '^[[:space:]]*regenerate_bundle_if_needed "' \
+		"$ORCHESTRATOR" | cut -d: -f1)
+
+	(( ${#regen_lines[@]} >= 2 )) || {
+		printf 'FAIL: expected a pre-PR call and a fix-stage call, found %d\n' \
+			"${#regen_lines[@]}" >&2
+		return 1
+	}
+
+	# The regeneration call closest to (and before) the push is the one that
+	# must guard it.
+	closest_regen=0
+	for line in "${regen_lines[@]}"; do
+		(( line < push_line )) && closest_regen=$line
+	done
+	(( closest_regen > 0 )) || {
+		printf 'FAIL: no regenerate_bundle_if_needed call precedes the fix-stage push (line %s)\n' \
+			"$push_line" >&2
+		return 1
+	}
+
+	# Nothing but comments/blank lines/log lines sits between the guarding
+	# call and the push — i.e. no commit can slip in after regeneration and
+	# before the push unnoticed.
+	between=$(sed -n "$((closest_regen + 1)),$((push_line - 1))p" \
+		"$ORCHESTRATOR" | grep -vE '^\s*(#|$|log ")' || true)
+	[[ -z "$between" ]] || {
+		printf 'FAIL: unexpected code between regeneration and push:\n%s\n' \
+			"$between" >&2
+		return 1
+	}
+}

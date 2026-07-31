@@ -10973,6 +10973,15 @@ Fix the issues and commit. Output a summary of fixes applied."
             # its work uncommitted.
             if _handle_fix_stage_result "$pr_number" "$pr_iteration" \
                 "$branch" "$fix_head_before" "$fix_result"; then
+                # A review fix can edit a canonical .claude/scripts/ file just
+                # as easily as the initial implementation can — the pre-PR
+                # call above only covers commits that existed before the PR
+                # was opened. Regenerate here too, immediately before the
+                # push, so this post-PR commit cannot leave the bundle stale
+                # (issue #632 second-order case: the AC7 hook ran once, then
+                # a review-fix commit re-diverged the bundle).
+                regenerate_bundle_if_needed "." "$BASE_BRANCH"
+
                 # Push updates (quality loop skipped — re-review will catch remaining issues)
                 log "Pushing updates to PR..."
                 git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
