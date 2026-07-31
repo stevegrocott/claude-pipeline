@@ -598,12 +598,47 @@ teardown() {
 # discarded, and every task in it re-runs serially, paying for the work
 # twice.
 #
+# Environment-override sourcing path: BOTH copies of the fallback —
+# platform.sh:140 and implement-issue-orchestrator.sh:134 — use the exact
+# same `${MAX_TASK_WALL_TIME_SECS:-1800}` pattern, and production sources
+# platform.sh first (orchestrator.sh:70) before reaching its own line 134.
+# So an operator's env-var override has exactly one live entry point:
+# platform.sh's line resolves env-var-or-default, and by the time the
+# orchestrator reaches its own line the var is already set, making that
+# second fallback an inert no-op re-assignment there — PROVIDED platform.sh
+# is actually in the sourcing chain, which implement-issue-orchestrator.sh
+# itself always guarantees (it loud-aborts at line ~63 if platform.sh can't
+# be resolved). The orchestrator's own fallback only does real work when
+# something sources its functions WITHOUT going through that guard —
+# exactly what source_orchestrator_functions() below does: it awk-extracts
+# MAX_* declarations into orchestrator_functions.bash, and that extraction
+# drops the `source platform.sh` line along with it, which is why setup()
+# has to source the real platform.sh itself, in the right order, before
+# sourcing the extracted file. This mirrors the drift-prone gap #673 fell
+# into: platform.sh's override capped parallel tasks at 900s while the
+# orchestrator's own fallback (only reachable when platform.sh isn't in
+# the chain) had moved on to 1800s.
+#
 # setup()'s source_orchestrator_functions call sources the REAL
 # .claude/config/platform.sh (via the config/ -> .claude/config symlink
 # installed by setup_test_env) BEFORE the orchestrator's own fallback line,
 # the same order production sourcing uses — so MAX_TASK_WALL_TIME_SECS
 # below reflects whatever this repo's platform.sh actually resolves to, and
 # these tests fail the instant it drops below the serial timeout again.
+#
+# Why the control test below ("a MAX_TASK_WALL_TIME_SECS below the serial
+# timeout fails the invariant") re-sources in an isolated `bash -c`
+# subprocess rather than reusing this shell: setup() already sourced
+# platform.sh once here, so MAX_TASK_WALL_TIME_SECS is already a set
+# variable in this process — assigning a new env override and re-running
+# the fallback in-place wouldn't cleanly prove the override actually flows
+# through `${:-1800}` the way a fresh process sees it. A genuinely fresh
+# `bash -c` process, given the override only via `env`, reproduces exactly
+# what a real invocation resolves to. It also sidesteps the `readonly -a`
+# array redeclaration hazard documented on that test's own re-source call
+# (see MODEL_CONFIG_ARRAYS_FILE in helpers/test-helper.bash) by sourcing
+# only platform.sh and the extracted orchestrator functions there — never
+# model-config.sh a second time in a shell that already has it.
 # =============================================================================
 
 @test "serial implement-task stage timeout is 1800s (issue #673 baseline)" {
