@@ -696,13 +696,19 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 
-	# Nothing but comments/blank lines/log lines sits between the guarding
-	# call and the push — i.e. no commit can slip in after regeneration and
-	# before the push unnoticed.
+	# No `git commit`/`git add` may sit between the guarding call and the
+	# push — that would slip a commit past the regeneration hook and
+	# re-diverge the bundle right before the push carries it. Other
+	# additions between the two calls (retry logic, status logging) are
+	# fine and must not fail this test, so assert on the specific hazard
+	# (a commit slipping past the guard) rather than on any code at all
+	# sitting between them.
 	between=$(sed -n "$((closest_regen + 1)),$((push_line - 1))p" \
-		"$ORCHESTRATOR" | grep -vE '^\s*(#|$|log ")' || true)
+		"$ORCHESTRATOR" \
+		| grep -E '\bgit([[:space:]]+-C[[:space:]]+\S+)?[[:space:]]+(commit|add)\b' \
+		|| true)
 	[[ -z "$between" ]] || {
-		printf 'FAIL: unexpected code between regeneration and push:\n%s\n' \
+		printf 'FAIL: git commit/add between regeneration and push:\n%s\n' \
 			"$between" >&2
 		return 1
 	}
