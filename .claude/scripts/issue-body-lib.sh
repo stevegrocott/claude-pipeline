@@ -780,6 +780,14 @@ assert_issue_valid() {
 		# The parser already skips checked [x] tasks, so only OPEN tasks are
 		# gated here; the diagnostic names the offending task.
 		#
+		# Strictness (#689): a separator-less filename (e.g. a bare
+		# `config.yaml` mentioned in prose) is demoted to prose by
+		# _issue_body_is_repo_path and so cannot be the task's sole path
+		# token here either — mirroring the pre-existing bare `/word` rule
+		# that already kept an extension-less non-resolving token from
+		# satisfying this same criterion.  A task must still name at least
+		# one real, slash-bearing path.
+		#
 		# Exemption (issue #634): a task that declares a NON-COMMIT
 		# deliverable — `deliverable:comment:<marker>` — has no file to name;
 		# its artefact is the marker, and the orchestrator verifies that
