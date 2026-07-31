@@ -108,6 +108,15 @@ ACTIVE_ORCH_PGID=""
 # to log and record why an issue was skipped in status.json.
 _SKIP_REASON=""
 
+# Out-of-band preflight-skip signal set by process_issue() when
+# validate_issue_for_processing() rejects an issue. process_issue() still
+# returns 0 for a preflight skip (so consecutive_failures / the circuit
+# breaker are unaffected — see issue #690), but callers need a way to tell
+# a genuine "processed successfully" 0 apart from a "skipped without ever
+# running" 0. Reset to false at the top of every process_issue() call; read
+# by the caller immediately after process_issue() returns.
+_PREFLIGHT_SKIPPED=false
+
 # Epic-scope signal set by validate_issue_for_processing() when an issue is
 # flagged as epic-scope (see EPIC_SCOPE_MAX_TASKS). Epic issues concentrate
 # spend, so they are routed to split-first (skipped from a wholesale run)
@@ -1170,6 +1179,11 @@ process_issue() {
     local issue_num="$1"
     local issue_log="$LOG_BASE/issue-$issue_num.log"
 
+    # Reset the out-of-band preflight-skip signal for this call. Callers
+    # must read _PREFLIGHT_SKIPPED immediately after process_issue()
+    # returns, before any other process_issue() invocation overwrites it.
+    _PREFLIGHT_SKIPPED=false
+
     log "=========================================="
     log "Starting issue #$issue_num"
     log "=========================================="
@@ -1181,7 +1195,9 @@ process_issue() {
     # A validation failure is non-fatal (returns 0 to the caller) so
     # it does NOT increment consecutive_failures or trigger the
     # circuit breaker. When ENRICH_FOLLOWUPS=true the issue is
-    # enriched inline rather than skipped.
+    # enriched inline rather than skipped. _PREFLIGHT_SKIPPED is set
+    # out-of-band (issue #690) so the caller can distinguish this from
+    # a genuine success while the return code stays 0.
     # ---------------------------------------------------------------
     if ! validate_issue_for_processing "$issue_num"; then
         log_warn \
@@ -1192,6 +1208,7 @@ process_issue() {
             "$issue_num" "error" \
             "${_SKIP_REASON:-preflight validation failed}"
         update_progress
+        _PREFLIGHT_SKIPPED=true
         return 0
     fi
 
@@ -1818,7 +1835,12 @@ sweep_implement_followups() {
 
 		log "Sweep: implementing follow-up #$issue_num"
 		if process_issue "$issue_num"; then
-			log "Sweep: follow-up #$issue_num processed successfully"
+			if [[ "$_PREFLIGHT_SKIPPED" == true ]]; then
+				log "Sweep: follow-up #$issue_num skipped" \
+					"(preflight): ${_SKIP_REASON:-unknown reason}"
+			else
+				log "Sweep: follow-up #$issue_num processed successfully"
+			fi
 		else
 			log_warn \
 				"Sweep: follow-up #$issue_num failed" \
@@ -1960,8 +1982,13 @@ for issue in "${ISSUE_ARRAY[@]}"; do
 
     if process_issue "$issue"; then
         consecutive_failures=0
-        log "Issue #$issue processed successfully"
-        emit_event "issue_end" "issue_num=$issue" "outcome=success"
+        if [[ "$_PREFLIGHT_SKIPPED" == true ]]; then
+            log "Issue #$issue skipped (preflight): ${_SKIP_REASON:-unknown reason}"
+            emit_event "issue_end" "issue_num=$issue" "outcome=skipped"
+        else
+            log "Issue #$issue processed successfully"
+            emit_event "issue_end" "issue_num=$issue" "outcome=success"
+        fi
     else
         consecutive_failures=$((consecutive_failures + 1))
         exit_code=1

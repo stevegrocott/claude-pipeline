@@ -2093,3 +2093,163 @@ _simulate_missing_status_file_error() {
 	grep -Fq 'Orchestrator failed to execute (exit $impl_exit)' \
 		"$BATCH_ORCHESTRATOR_SCRIPT"
 }
+
+# =============================================================================
+# ISSUE #690: preflight skip out-of-band signal (_PREFLIGHT_SKIPPED)
+# =============================================================================
+#
+# process_issue() must keep returning 0 on a preflight skip (validate_issue_
+# for_processing failure) so consecutive_failures / the circuit breaker stay
+# unaffected. But a bare 0 does not let a caller tell "genuinely processed"
+# apart from "skipped without ever running" — the main batch loop and
+# sweep_implement_followups() were both logging/emitting a plain success for
+# skipped issues. _PREFLIGHT_SKIPPED is the out-of-band fix: reset to false
+# at the top of every process_issue() call, set true only in the preflight-
+# skip branch immediately before `return 0`, and read by callers right after
+# process_issue() returns.
+
+# --- Static analysis: declaration, reset, and set-before-return ordering ---
+
+@test "_PREFLIGHT_SKIPPED global is declared before process_issue" {
+	local decl_line process_line
+	decl_line=$(grep -n '^_PREFLIGHT_SKIPPED=' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	process_line=$(grep -n '^process_issue()' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	[[ -n "$decl_line" && -n "$process_line" ]]
+	(( decl_line < process_line ))
+}
+
+@test "process_issue resets _PREFLIGHT_SKIPPED to false at the top of the call" {
+	local body
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'_PREFLIGHT_SKIPPED=false'* ]]
+}
+
+@test "process_issue sets _PREFLIGHT_SKIPPED=true before returning 0 on preflight skip" {
+	local body skip_block set_line return_line
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	skip_block=$(printf '%s\n' "$body" \
+		| awk '/validate_issue_for_processing/,/return 0/' \
+		| head -15)
+	[[ "$skip_block" == *'_PREFLIGHT_SKIPPED=true'* ]]
+	set_line=$(printf '%s\n' "$skip_block" \
+		| grep -n '_PREFLIGHT_SKIPPED=true' | head -1 | cut -d: -f1)
+	return_line=$(printf '%s\n' "$skip_block" \
+		| grep -n 'return 0' | head -1 | cut -d: -f1)
+	[[ -n "$set_line" && -n "$return_line" ]]
+	(( set_line < return_line ))
+}
+
+# --- Static analysis: callers read the signal instead of trusting rc alone ---
+
+@test "main batch loop reads _PREFLIGHT_SKIPPED after calling process_issue" {
+	local loop_block
+	loop_block=$(awk '/^for issue in "\$\{ISSUE_ARRAY\[@\]\}"/,0' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -80)
+	[[ "$loop_block" == *'_PREFLIGHT_SKIPPED'* ]]
+}
+
+@test "main batch loop emits outcome=skipped for preflight-skipped issues" {
+	grep -Fq 'outcome=skipped' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "main batch loop still emits outcome=success for genuine successes" {
+	grep -Fq 'outcome=success' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "sweep_implement_followups reads _PREFLIGHT_SKIPPED after calling process_issue" {
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'_PREFLIGHT_SKIPPED'* ]]
+}
+
+# --- Functional: real validate_issue_for_processing + the real signal logic ---
+#
+# These replicate process_issue()'s preflight block verbatim (reset, call
+# the real sourced validate_issue_for_processing(), branch, set-then-return)
+# so the assertions exercise the actual validation function rather than a
+# hand-rolled stand-in.
+
+@test "functional: preflight skip sets _PREFLIGHT_SKIPPED=true while still returning 0" {
+	local mock_bin="$TEST_TMP/mock-bin-signal-skip"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"body":"No Implementation Tasks heading at all.","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	source_validate_issue_for_processing \
+		|| skip "validate_issue_for_processing() not yet present"
+
+	log()                { :; }
+	log_warn()           { :; }
+	update_issue_field() { :; }
+	update_progress()    { :; }
+	dispatch_composition() { return 1; }
+	export ENRICH_FOLLOWUPS=false
+	unset DEPLOY_VERIFY_CMD
+
+	# Replicate process_issue()'s preflight block.
+	_PREFLIGHT_SKIPPED=false
+	local rc=0
+	if ! validate_issue_for_processing 99; then
+		update_issue_field 99 "status" "skipped"
+		update_issue_field 99 "error" \
+			"${_SKIP_REASON:-preflight validation failed}"
+		update_progress
+		_PREFLIGHT_SKIPPED=true
+		rc=0
+	fi
+
+	[[ "$rc" -eq 0 ]]
+	[[ "$_PREFLIGHT_SKIPPED" == true ]]
+}
+
+@test "functional: a valid issue body leaves _PREFLIGHT_SKIPPED=false" {
+	local mock_bin="$TEST_TMP/mock-bin-signal-ok"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing — `.claude/scripts/x.sh`\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	source_validate_issue_for_processing \
+		|| skip "validate_issue_for_processing() not yet present"
+
+	log()                { :; }
+	log_warn()           { :; }
+	update_issue_field() { :; }
+	update_progress()    { :; }
+	dispatch_composition() { return 1; }
+	export ENRICH_FOLLOWUPS=false
+	unset DEPLOY_VERIFY_CMD
+	# This test only sources the extracted validate_issue_for_processing
+	# function body, not the whole script, so the top-level default
+	# (batch-orchestrator.sh:129: EPIC_SCOPE_MAX_TASKS="${EPIC_SCOPE_MAX_TASKS:-20}")
+	# never runs. Without it EPIC_SCOPE_MAX_TASKS is unset/0 and Check 1b
+	# treats this body's single task checkbox as oversized, misrouting it
+	# to the epic-scope skip path instead of exercising the valid-body case
+	# under test. Set the same default explicitly.
+	local EPIC_SCOPE_MAX_TASKS=20
+
+	# Replicate process_issue()'s preflight block.
+	_PREFLIGHT_SKIPPED=false
+	local rc=0
+	if ! validate_issue_for_processing 99; then
+		update_issue_field 99 "status" "skipped"
+		update_issue_field 99 "error" \
+			"${_SKIP_REASON:-preflight validation failed}"
+		update_progress
+		_PREFLIGHT_SKIPPED=true
+		rc=0
+	fi
+
+	[[ "$rc" -eq 0 ]]
+	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+}
