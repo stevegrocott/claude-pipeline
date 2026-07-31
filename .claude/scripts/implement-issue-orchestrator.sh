@@ -9292,7 +9292,7 @@ regenerate_bundle_if_needed() {
 	# legitimately empty until the parse below succeeds.
 	local _parity_seen=" "
 	local _parity_script _parity_rel _parity_counterpart _parity_sub
-	local _parity_dir _parity_bats
+	local _parity_dir _parity_bats _parity_bundle_script
 
 	# Resolve the root once, then run every git call against it: the pathspecs
 	# below are repo-relative, so they must not depend on where the
@@ -9422,6 +9422,46 @@ regenerate_bundle_if_needed() {
 			((_parity_in_sync)) || break
 		done
 	fi
+
+	# Reverse sweep (issue #694): the loops above only ever walk
+	# .claude/scripts/**, so a canonical file that was DELETED never gets
+	# visited — its leftover bundle copy would pass the checks above in
+	# silence. sync.sh's own removal step normally cleans this up, but this
+	# guard exists precisely because a generator that exits 0 is not proof
+	# of parity (same rationale as the forward check above), so it must
+	# verify the reverse direction itself rather than trust the generator
+	# removed everything it should have. Mirrors test-bundle-parity.bats'
+	# "every bundled script has a canonical counterpart" — the same failure
+	# the Bundle Parity & Syntax CI check flags.
+	for _parity_bundle_script in "$_bundle_scripts_dir"/*.sh; do
+		[[ -f "$_parity_bundle_script" ]] || continue
+		_parity_rel="${_parity_bundle_script#"$_bundle_scripts_dir"/}"
+		[[ -f "$_canonical_dir/$_parity_rel" ]] && continue
+		_parity_in_sync=0
+		log_error "bundled file '$_parity_rel' has no canonical" \
+			"counterpart in .claude/scripts/ — remove it from" \
+			"plugins/pipeline-core/scripts/ or restore the canonical source"
+	done
+	# Guarded on length for the same reason the forward subdir loop is: this
+	# file runs under `set -u`, and bash 3.2 (the macOS system bash) treats
+	# "${empty_array[@]}" as an unbound variable, which would abort the run
+	# one stage before the PR — the opposite of this function's "always
+	# return 0" contract.
+	if ((${#_parity_subdirs[@]} > 0)); then
+		for _parity_sub in "${_parity_subdirs[@]}"; do
+			[[ -d "$_bundle_scripts_dir/$_parity_sub" ]] || continue
+			while IFS= read -r _parity_bundle_script; do
+				_parity_rel="${_parity_bundle_script#"$_bundle_scripts_dir"/}"
+				[[ -f "$_canonical_dir/$_parity_rel" ]] && continue
+				_parity_in_sync=0
+				log_error "bundled file '$_parity_rel' has no canonical" \
+					"counterpart in .claude/scripts/ — remove it from" \
+					"plugins/pipeline-core/scripts/ or restore the" \
+					"canonical source"
+			done < <(find "$_bundle_scripts_dir/$_parity_sub" -type f)
+		done
+	fi
+
 	if ((! _parity_in_sync)); then
 		log_error "sync.sh bundle exited 0 but plugins/pipeline-core/scripts/" \
 			"still does not match .claude/scripts/ — bundle parity will be" \

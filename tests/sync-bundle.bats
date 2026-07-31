@@ -1129,3 +1129,151 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# =============================================================================
+# Reverse sweep (issue #694) — a bundled file whose canonical source was
+# deleted must be caught, not just a canonical file whose bundle copy is
+# stale or missing. The forward loop above only ever walks
+# .claude/scripts/**, so it is structurally blind to a file that used to
+# exist there and no longer does: nothing in that loop ever visits the
+# leftover bundle copy. The real sync.sh's own removal step normally cleans
+# this up, but (as with AC5 above) this guard must not take the generator's
+# word for it — a generator that skips the removal (or is stubbed out, as
+# here) must be caught by this guard's own diff, exactly like
+# test-bundle-parity.bats' "every bundled script has a canonical
+# counterpart" catches it in CI.
+# =============================================================================
+
+@test "(#694) parity guard flags a bundled file whose canonical source was deleted" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i694
+
+	# Canonical source deleted; the bundle copy is left behind — the exact
+	# drift this reverse sweep exists to catch.
+	rm "$TEST_TMP/.claude/scripts/platform/create-issue.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix: remove obsolete canonical platform script"
+
+	# Stub sync.sh so the generator's own removal step never runs — this
+	# guard must not rely on the generator to have cleaned up (same
+	# rationale as the AC5 stub above: exit 0 alone proves nothing).
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	# Precondition: the orphan really exists, i.e. the state the guard
+	# exists to catch.
+	[[ ! -f "$TEST_TMP/.claude/scripts/platform/create-issue.sh" ]] || {
+		printf 'FAIL: fixture did not delete the canonical source\n' >&2
+		return 1
+	}
+	[[ -f "$TEST_TMP/plugins/pipeline-core/scripts/platform/create-issue.sh" ]] || {
+		printf 'FAIL: fixture did not leave an orphaned bundle copy\n' >&2
+		return 1
+	}
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"platform/create-issue.sh"*"no canonical counterpart"* ]] || {
+		printf 'FAIL: reverse sweep did not flag the orphaned bundle file:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(#694) parity guard flags a top-level bundled script whose canonical source was deleted" {
+	_init_pipeline_git_repo
+
+	# A second top-level script, in BOTH trees, committed on the BASE branch.
+	# It has to pre-date the branch: the hook gates on
+	# `git diff base...HEAD -- .claude/scripts`, so adding and deleting
+	# helper.sh on the same branch nets out to no canonical change at all and
+	# the hook returns before it ever reaches the parity sweep.
+	printf '#!/usr/bin/env bash\necho helper\n' \
+		> "$TEST_TMP/.claude/scripts/helper.sh"
+	cp "$TEST_TMP/.claude/scripts/helper.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/helper.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: add canonical helper.sh"
+
+	git -C "$TEST_TMP" checkout -q -b wt/i694-top-level
+
+	rm "$TEST_TMP/.claude/scripts/helper.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix: remove obsolete canonical helper.sh"
+
+	# Stub sync.sh so the generator's own removal step never runs (same
+	# rationale as the AC5 stub above).
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	[[ ! -f "$TEST_TMP/.claude/scripts/helper.sh" ]] || {
+		printf 'FAIL: fixture did not delete the canonical source\n' >&2
+		return 1
+	}
+	[[ -f "$TEST_TMP/plugins/pipeline-core/scripts/helper.sh" ]] || {
+		printf 'FAIL: fixture did not leave an orphaned bundle copy\n' >&2
+		return 1
+	}
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"helper.sh"*"no canonical counterpart"* ]] || {
+		printf 'FAIL: reverse sweep did not flag the top-level orphan:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# The orchestrator runs under `set -u`, and bash 3.2 (the macOS system bash)
+# treats "${empty_array[@]}" as an unbound variable rather than an empty
+# expansion. _parity_subdirs is legitimately empty whenever the
+# BUNDLE_SCRIPT_SUBDIRS parse finds nothing AND no bundleable subdirectory
+# exists, so an unguarded reverse-sweep loop over it kills the run one stage
+# before the PR — strictly worse than the stale bundle this whole function
+# exists to prevent, and the opposite of its "returns 0 always" contract.
+@test "(#694) reverse sweep survives an empty bundled-subdir list under set -u" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i694-empty-subdirs
+
+	# Drop every subdirectory from BOTH trees so the union of "what sync.sh
+	# lists" and "what actually exists" is empty.
+	rm -rf "$TEST_TMP/.claude/scripts/platform" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/platform"
+
+	# A canonical edit, mirrored into the bundle, so the hook gets past its
+	# "did .claude/scripts change?" gate with the trees already in parity —
+	# an empty subdir list is then the only thing under test.
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	cp "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: edit canonical orchestrator"
+
+	# A generator with no BUNDLE_SCRIPT_SUBDIRS at all, so the awk parse
+	# yields nothing and the array stays empty.
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" != *"unbound variable"* ]] || {
+		printf 'FAIL: empty subdir array expanded under set -u:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
