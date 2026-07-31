@@ -817,6 +817,26 @@ assert_wall_time_covers_serial() {
             "MAX_TASK_WALL_TIME_SECS=900, got: $result"
 }
 
+@test "get_task_wall_time takes the flat floor even for L-complexity when it exceeds the stage timeout" {
+    # The "widens the watchdog for L-complexity tasks" test above only ever
+    # exercises the ceiling branch (stage_timeout=3600 > default
+    # MAX_TASK_WALL_TIME_SECS=1800), and the "never returns less than" test
+    # above only exercises the floor branch for the default ("") complexity,
+    # where get_stage_timeout("implement-task", "")=1800 happens to equal
+    # MAX_TASK_WALL_TIME_SECS. Neither proves the floor branch is reachable
+    # for an "L" task specifically. Pin MAX_TASK_WALL_TIME_SECS above the L
+    # stage timeout (3600) to force max() to pick the flat floor
+    # (5400) instead of the L stage timeout, actually exercising the
+    # floor-vs-ceiling `if (( stage_timeout > MAX_TASK_WALL_TIME_SECS ))`
+    # branch for a non-default complexity.
+    local result
+    result=$(MAX_TASK_WALL_TIME_SECS=5400 get_task_wall_time "L")
+    [ "$result" -eq 5400 ] || \
+        fail "Expected get_task_wall_time('L')=5400 when" \
+            "MAX_TASK_WALL_TIME_SECS=5400 exceeds the L stage timeout" \
+            "(3600), got: $result"
+}
+
 # =============================================================================
 # SELECTIVE GIT ADD — sanitize_worktree_commits (AC4)
 # =============================================================================
