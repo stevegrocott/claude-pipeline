@@ -598,12 +598,47 @@ teardown() {
 # discarded, and every task in it re-runs serially, paying for the work
 # twice.
 #
+# Environment-override sourcing path: BOTH copies of the fallback —
+# platform.sh:140 and implement-issue-orchestrator.sh:134 — use the exact
+# same `${MAX_TASK_WALL_TIME_SECS:-1800}` pattern, and production sources
+# platform.sh first (orchestrator.sh:70) before reaching its own line 134.
+# So an operator's env-var override has exactly one live entry point:
+# platform.sh's line resolves env-var-or-default, and by the time the
+# orchestrator reaches its own line the var is already set, making that
+# second fallback an inert no-op re-assignment there — PROVIDED platform.sh
+# is actually in the sourcing chain, which implement-issue-orchestrator.sh
+# itself always guarantees (it loud-aborts at line ~63 if platform.sh can't
+# be resolved). The orchestrator's own fallback only does real work when
+# something sources its functions WITHOUT going through that guard —
+# exactly what source_orchestrator_functions() below does: it awk-extracts
+# MAX_* declarations into orchestrator_functions.bash, and that extraction
+# drops the `source platform.sh` line along with it, which is why setup()
+# has to source the real platform.sh itself, in the right order, before
+# sourcing the extracted file. This mirrors the drift-prone gap #673 fell
+# into: platform.sh's override capped parallel tasks at 900s while the
+# orchestrator's own fallback (only reachable when platform.sh isn't in
+# the chain) had moved on to 1800s.
+#
 # setup()'s source_orchestrator_functions call sources the REAL
 # .claude/config/platform.sh (via the config/ -> .claude/config symlink
 # installed by setup_test_env) BEFORE the orchestrator's own fallback line,
 # the same order production sourcing uses — so MAX_TASK_WALL_TIME_SECS
 # below reflects whatever this repo's platform.sh actually resolves to, and
 # these tests fail the instant it drops below the serial timeout again.
+#
+# Why the control test below ("a MAX_TASK_WALL_TIME_SECS below the serial
+# timeout fails the invariant") re-sources in an isolated `bash -c`
+# subprocess rather than reusing this shell: setup() already sourced
+# platform.sh once here, so MAX_TASK_WALL_TIME_SECS is already a set
+# variable in this process — assigning a new env override and re-running
+# the fallback in-place wouldn't cleanly prove the override actually flows
+# through `${:-1800}` the way a fresh process sees it. A genuinely fresh
+# `bash -c` process, given the override only via `env`, reproduces exactly
+# what a real invocation resolves to. It also sidesteps the `readonly -a`
+# array redeclaration hazard documented on that test's own re-source call
+# (see MODEL_CONFIG_ARRAYS_FILE in helpers/test-helper.bash) by sourcing
+# only platform.sh and the extracted orchestrator functions there — never
+# model-config.sh a second time in a shell that already has it.
 # =============================================================================
 
 @test "serial implement-task stage timeout is 1800s (issue #673 baseline)" {
@@ -612,6 +647,28 @@ teardown() {
     serial_timeout=$(get_stage_timeout "implement-task-1" "")
     [ "$serial_timeout" -eq 1800 ] || \
         fail "Expected serial implement-task timeout=1800, got: $serial_timeout"
+}
+
+# assert_wall_time_covers_serial <resolved_wall> <serial_timeout> <label>
+#
+# Shared issue #673 invariant: the resolved parallel wall time must never
+# be tighter than the serial implement-task stage timeout it stands in
+# for — otherwise a task that would succeed serially gets killed in
+# parallel and the whole batch re-runs serially. Extracted so the guard
+# test below (proving today's real values satisfy it) and the control
+# test further down (proving the same comparison actually catches a
+# drifted value) run the exact same check rather than two copies that
+# could silently diverge.
+assert_wall_time_covers_serial() {
+    local resolved_wall="$1"
+    local serial_timeout="$2"
+    local label="$3"
+
+    (( resolved_wall >= serial_timeout )) || \
+        fail "${label}: wall_time=${resolved_wall}s <" \
+            "serial stage timeout=${serial_timeout}s — a task that would" \
+            "succeed serially is killed in parallel and the whole batch" \
+            "re-runs serially (issue #673)"
 }
 
 @test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout, across all complexities" {
@@ -641,11 +698,8 @@ teardown() {
         fi
 
         resolved_wall=$(get_task_wall_time "$cx")
-        (( resolved_wall >= serial_timeout )) || \
-            fail "complexity='${cx}': get_task_wall_time=${resolved_wall}s <" \
-                "serial stage timeout=${serial_timeout}s — a task that would" \
-                "succeed serially is killed in parallel and the whole batch" \
-                "re-runs serially (issue #673)"
+        assert_wall_time_covers_serial "$resolved_wall" "$serial_timeout" \
+            "complexity='${cx}'"
     done
 }
 
@@ -678,15 +732,44 @@ teardown() {
 @test "a MAX_TASK_WALL_TIME_SECS below the serial timeout fails the invariant" {
     # Proves the guard above actually discriminates rather than trivially
     # passing: reproduce the pre-fix drift (platform.sh pinned at 900,
-    # serial timeout at 1800) and confirm the same comparison reports it.
-    source "$MODEL_CONFIG_ARRAYS_FILE"
-    local serial_timeout drifted_value
-    serial_timeout=$(get_stage_timeout "implement-task-1" "")
-    drifted_value=900
+    # serial timeout risen to 1800) for real — pre-set
+    # MAX_TASK_WALL_TIME_SECS=900 in the environment and re-source the
+    # actual production platform.sh plus the extracted orchestrator
+    # functions in an ISOLATED subshell, then run the shared invariant
+    # helper against that live resolved value.
+    #
+    # This must NOT re-source .claude/scripts/model-config.sh in this
+    # test's own shell: setup()'s source_orchestrator_functions already
+    # sourced it once here, and a second source in the same (unforked)
+    # process hits the `readonly -a` array redeclaration hazard documented
+    # on MODEL_CONFIG_ARRAYS_FILE in helpers/test-helper.bash.
+    # get_stage_timeout/get_task_wall_time never touch model-config.sh, so
+    # the subshell below sources only platform.sh (for the drifted
+    # constant) and the orchestrator functions file — nothing that trips
+    # the guard.
+    run env MAX_TASK_WALL_TIME_SECS=900 bash -c '
+        source "$TEST_TMP/config/platform.sh"
+        source "$TEST_TMP/orchestrator_functions.bash"
+        printf "%s %s\n" \
+            "$MAX_TASK_WALL_TIME_SECS" \
+            "$(get_stage_timeout "implement-task-1" "")"
+    '
+    [ "$status" -eq 0 ] || \
+        fail "Isolated config/orchestrator-functions subshell failed:" \
+            "$output"
 
-    ! (( drifted_value >= serial_timeout )) || \
-        fail "Expected drifted MAX_TASK_WALL_TIME_SECS=$drifted_value to be" \
-            "caught as below serial_timeout=$serial_timeout"
+    local resolved_wall serial_timeout
+    read -r resolved_wall serial_timeout <<< "$output"
+
+    [ "$resolved_wall" = "900" ] || \
+        fail "Expected the re-sourced MAX_TASK_WALL_TIME_SECS to resolve" \
+            "to 900, got: $resolved_wall"
+
+    ! assert_wall_time_covers_serial "$resolved_wall" "$serial_timeout" \
+        "drift repro" || \
+        fail "Expected the shared invariant helper to report a" \
+            "violation for a live wall_time=${resolved_wall}s against" \
+            "serial_timeout=${serial_timeout}s"
 }
 
 # =============================================================================
