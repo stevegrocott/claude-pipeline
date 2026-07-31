@@ -1106,6 +1106,164 @@ teardown() {
 }
 
 # =============================================================================
+# ISSUE #659: detect_change_scope() + e2e_verify STAGE SELECTION INTEGRATION
+# (AC3/AC4 of issue #650's fix, PR #656)
+#
+# The _matches_frontend_pattern() glob-corruption bug (fixed in #656) let an
+# unquoted `for pattern in $FRONTEND_PATH_PATTERNS` expansion get
+# pathname-expanded against files that already existed on disk under the
+# pattern's own prefix, silently replacing the intended glob with literal
+# filenames before a nested path was ever compared. That misclassified a
+# nested frontend file as non-frontend, and because bash/.sh extensions are
+# checked independently of the frontend match, the file fell through to
+# scope=bash — which in turn made run_parallel_post_task_stages() SKIP
+# e2e_verify instead of running it.
+#
+# This test drives both detect_change_scope() and the real
+# run_parallel_post_task_stages() skip-condition logic end-to-end, using an
+# on-disk prefix (mirroring the #650 regression setup) so any regression to
+# unquoted glob expansion would be caught here too.
+# =============================================================================
+
+# Install spies around run_parallel_post_task_stages() so the stage-selection
+# decision is observable without running any real agent, container rebuild, or
+# issue comment. Every call is appended to $1 as a "kind:value" line so tests
+# can assert on ORDER, not just presence.
+#
+# Only the stage's collaborators are stubbed — the skip/run decision logic
+# under test is the real orchestrator code.
+_install_e2e_stage_spies() {
+    local calls_file="$1"
+    : > "$calls_file"
+    export E2E_SPY_CALLS="$calls_file"
+
+    is_stage_completed()   { return 1; }
+    set_stage_started()    { printf 'started:%s\n'   "$1" >> "$E2E_SPY_CALLS"; }
+    set_stage_completed()  { printf 'completed:%s\n' "$1" >> "$E2E_SPY_CALLS"; }
+    log()                  { printf 'log:%s\n' "$*"  >> "$E2E_SPY_CALLS"; }
+    log_warn()             { printf 'log:%s\n' "$*"  >> "$E2E_SPY_CALLS"; }
+    log_error()            { printf 'log:%s\n' "$*"  >> "$E2E_SPY_CALLS"; }
+    comment_issue()            { :; }
+    verify_on_feature_branch() { return 0; }
+    rebuild_and_health_check() {
+        printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+    }
+    _build_targeted_e2e_cmd()  { printf '%s' "$TEST_E2E_CMD"; }
+
+    # Shape must match what the orchestrator parses (.output.result /
+    # .output.summary); a flat object would read back as null and mask a
+    # regression in the result handling.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        printf '{"output":{"result":"passed","summary":"e2e ok"}}'
+    }
+}
+
+@test "detect_change_scope classifies a nested frontend file as frontend (not bash), and e2e_verify runs instead of being skipped" {
+    export FRONTEND_PATH_PATTERNS="web/e2e/*"
+
+    cd "$TEST_TMP/repo"
+
+    # Pre-populate sibling files under the pattern's own prefix on disk —
+    # reproduces the exact conditions of the #650 glob-corruption bug.
+    mkdir -p web/e2e/flows
+    touch web/e2e/existing-spec.js
+
+    git checkout -q -b feature-issue-659-e2e
+
+    # A nested frontend file with a .sh extension: if _matches_frontend_pattern
+    # regresses, this file's extension alone (*.sh) would classify it "bash"
+    # instead of "frontend".
+    printf '#!/usr/bin/env bash\nnpx playwright test login\n' \
+        > web/e2e/flows/login-flow.sh
+    git add web/e2e/flows/login-flow.sh
+    git commit -q -m "add nested e2e flow script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "frontend" ] || fail \
+        "expected nested frontend file to classify as 'frontend', got '$scope'"
+    [ "$scope" != "bash" ] || fail \
+        "nested frontend file regressed to 'bash' classification"
+
+    # --- e2e_verify stage selection ------------------------------------
+    # Feed the real computed scope into run_parallel_post_task_stages() and
+    # assert the e2e-verify stage actually runs (calls run_stage) rather
+    # than being marked skipped.
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-stage-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-659-e2e" "$scope" "minimal" "S" || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    # ORDERING, not mere presence: the skip path also emits
+    # started:e2e_verify followed immediately by completed:e2e_verify, so
+    # grepping for those alone would pass even when the stage is skipped.
+    # Requiring run_stage:e2e-verify BETWEEN them is only satisfiable by
+    # the real run path.
+    local sequence expected
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    expected='*started:e2e_verify*run_stage:e2e-verify*completed:e2e_verify*'
+    # shellcheck disable=SC2254
+    [[ "$sequence" == $expected ]] \
+        || fail "e2e_verify was skipped, not run. Call sequence: $sequence"
+
+    # The skip branches log a distinctive message — its absence confirms
+    # no skip condition fired for a frontend-scoped branch.
+    if grep -q "log:Skipping e2e_verify" "$calls_file"; then
+        local skips
+        skips=$(grep 'log:Skipping' "$calls_file")
+        fail "e2e_verify hit a skip branch: $skips"
+    fi
+}
+
+# Negative control for the test above. Without this, an e2e_verify stage
+# that ran unconditionally (ignoring scope entirely) would still satisfy
+# the positive assertions. A non-frontend nested path must still skip.
+@test "detect_change_scope classifies a non-frontend nested file as bash, and e2e_verify is skipped" {
+    export FRONTEND_PATH_PATTERNS="web/e2e/*"
+
+    cd "$TEST_TMP/repo"
+    mkdir -p tools/deploy
+    git checkout -q -b feature-issue-659-nonfe
+
+    printf '#!/usr/bin/env bash\necho deploy\n' > tools/deploy/release.sh
+    git add tools/deploy/release.sh
+    git commit -q -m "add deploy script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "bash" ] || fail \
+        "expected non-frontend .sh file to classify as 'bash', got '$scope'"
+
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-stage-calls-skip.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-659-nonfe" "$scope" "minimal" "S" || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    if grep -q "^run_stage:e2e-verify$" "$calls_file"; then
+        fail "e2e_verify ran for non-frontend scope '$scope' — it must skip"
+    fi
+    grep -q "log:Skipping e2e_verify" "$calls_file" || fail \
+        "expected a skip log for non-frontend scope, got: $(< "$calls_file")"
+}
+
+# =============================================================================
 # E2E PROMPT INJECTION TESTS
 # =============================================================================
 
