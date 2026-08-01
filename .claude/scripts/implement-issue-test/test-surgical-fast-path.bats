@@ -934,3 +934,60 @@ JSON
     # git add -A must have been used to stage the prior invocation's changes.
     grep -qF -- '-A' "$TEST_TMP/git-add-args"
 }
+
+# ============================================================================
+# STATUS-CHECK ROLLUP: distinguish pending checks from concluded failures
+# ============================================================================
+
+@test "29 mergeStateStatus BLOCKED with only pending checks → retries and merges" {
+    # A required check still running reports mergeStateStatus=BLOCKED just
+    # like a check that has already failed. The rollup fetched alongside
+    # mergeStateStatus must let the loop tell them apart: an empty/pending
+    # rollup should be retried, not treated as a bail-worthy failure.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    export MOCK_GH_MERGE_STATE_SEQ="BLOCKED,BLOCKED,CLEAN"
+    export MOCK_GH_MERGE_STATE_CTR="$TEST_TMP/merge_ctr"
+    export MOCK_GH_CHECK_ROLLUP='[{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":null,"name":"ci-test"}]'
+    export MOCK_GH_PR_NUMBER=42
+    export FAST_PATH_MERGE_CHECK_ATTEMPTS=5
+    export FAST_PATH_MERGE_CHECK_DELAY=0
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'completed'
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_merge.status' 'completed'
+    # Counter should record at least 3 polls (the third returned CLEAN).
+    polls=$(cat "$TEST_TMP/merge_ctr" 2>/dev/null || echo 0)
+    [[ "$polls" -ge 3 ]]
+}
+
+@test "30 mergeStateStatus BLOCKED with concluded check failure → bails without exhausting attempts" {
+    # Once a check in the rollup has concluded (status=COMPLETED) with a
+    # failing conclusion, further polling can't help — bail on the first
+    # attempt instead of burning the whole retry budget.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    export MOCK_GH_MERGE_STATE_SEQ="BLOCKED,BLOCKED,BLOCKED,BLOCKED"
+    export MOCK_GH_MERGE_STATE_CTR="$TEST_TMP/merge_ctr"
+    export MOCK_GH_CHECK_ROLLUP='[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"ci-test"}]'
+    export FAST_PATH_MERGE_CHECK_ATTEMPTS=4
+    export FAST_PATH_MERGE_CHECK_DELAY=0
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -ne 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'failed'
+    err=$(jq -r '.error // ""' "$STATUS_FILE")
+    [[ "$err" == "unsafe_merge_state_BLOCKED" ]]
+    # Merge must NOT have run.
+    merge_status=$(jq -r '.stages.fast_path_merge.status // "pending"' "$STATUS_FILE")
+    [[ "$merge_status" != "completed" ]]
+    # Only one poll should have happened — the concluded failure short-
+    # circuits the retry loop instead of exhausting all 4 attempts.
+    polls=$(cat "$TEST_TMP/merge_ctr" 2>/dev/null || echo 0)
+    [[ "$polls" -eq 1 ]]
+}

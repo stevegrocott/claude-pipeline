@@ -387,6 +387,29 @@ fi
 
 # --- 7-8. Mergeability check + squash-merge (skip if already completed) ---
 
+# Returns success when any entry in a statusCheckRollup JSON array has
+# concluded in a failing state. CheckRun entries report status/conclusion
+# (conclusion is only trustworthy once status is COMPLETED); legacy
+# commit-status entries report state directly. Mirrors merge-mr.sh's
+# _has_concluded_check_failure so a still-running check (mergeStateStatus
+# stuck at BLOCKED/UNSTABLE while checks are in progress) is retried instead
+# of being treated the same as a check that already failed.
+_fast_path_check_concluded_failure() {
+    local rollup_json="$1"
+
+    jq -e '
+        [.[]? |
+            if .__typename == "CheckRun" then
+                (select(.status == "COMPLETED") | .conclusion)
+            else
+                .state
+            end
+        ] | any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or
+            . == "TIMED_OUT" or . == "ACTION_REQUIRED" or
+            . == "STARTUP_FAILURE")
+    ' <<<"$rollup_json" >/dev/null 2>&1
+}
+
 if is_stage_completed fast_path_merge; then
     log "fast_path_merge already completed — pipeline already finished (resume)"
 else
@@ -401,8 +424,15 @@ else
     merge_state="UNKNOWN"
 
     for ((attempt=1; attempt<=merge_check_attempts; attempt++)); do
-        merge_state=$(gh pr view "$pr_number" --json mergeStateStatus 2>/dev/null \
-            | jq -r '.mergeStateStatus // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+        # Fetch mergeStateStatus and statusCheckRollup in the same query so
+        # a non-clean state can be classified: a required check still
+        # running is worth retrying, while one that already concluded in
+        # failure should bail immediately instead of burning the remaining
+        # attempts.
+        pr_view_json=$(gh pr view "$pr_number" \
+            --json mergeStateStatus,statusCheckRollup 2>/dev/null || echo "{}")
+        merge_state=$(jq -r '.mergeStateStatus // "UNKNOWN"' \
+            <<<"$pr_view_json" 2>/dev/null || echo "UNKNOWN")
         case "$merge_state" in
             CLEAN|HAS_HOOKS) break ;;
             UNKNOWN)
@@ -411,7 +441,20 @@ else
                     sleep "$merge_check_delay"
                 fi
                 ;;
-            *) break ;;  # DIRTY, BLOCKED, BEHIND, etc. — bail without retry
+            *)
+                check_rollup=$(jq -c '.statusCheckRollup // []' \
+                    <<<"$pr_view_json" 2>/dev/null || echo "[]")
+                if _fast_path_check_concluded_failure "$check_rollup"; then
+                    break  # a check has already failed — bail without retry
+                elif (( attempt < merge_check_attempts )); then
+                    log "mergeStateStatus=$merge_state with checks still" \
+                        "pending (attempt $attempt/$merge_check_attempts) —" \
+                        "retrying in ${merge_check_delay}s"
+                    sleep "$merge_check_delay"
+                else
+                    break  # pending checks never settled within the budget
+                fi
+                ;;
         esac
     done
 
