@@ -1071,3 +1071,35 @@ JSON
     polls=$(cat "$TEST_TMP/merge_ctr" 2>/dev/null || echo 0)
     [[ "$polls" -ge 3 ]]
 }
+
+@test "33 mergeStateStatus UNSTABLE with concluded check failure → bails without exhausting attempts" {
+    # Issue #714 AC3: UNSTABLE is ambiguous on its own — it fires both while
+    # a required check is still running (test 32, retried) and once one has
+    # already concluded in failure (this test). Once the rollup shows a
+    # concluded failure, further polling can't help — bail on the first
+    # attempt instead of burning the retry budget and merging over a red
+    # check once it happens to settle.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    export MOCK_GH_MERGE_STATE_SEQ="UNSTABLE,UNSTABLE,UNSTABLE,UNSTABLE"
+    export MOCK_GH_MERGE_STATE_CTR="$TEST_TMP/merge_ctr"
+    export MOCK_GH_CHECK_ROLLUP='[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"ci-test"}]'
+    export FAST_PATH_MERGE_CHECK_ATTEMPTS=4
+    export FAST_PATH_MERGE_CHECK_DELAY=0
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -ne 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'failed'
+    err=$(jq -r '.error // ""' "$STATUS_FILE")
+    [[ "$err" == "unsafe_merge_state_UNSTABLE" ]]
+    # Merge must NOT have run.
+    merge_status=$(jq -r '.stages.fast_path_merge.status // "pending"' "$STATUS_FILE")
+    [[ "$merge_status" != "completed" ]]
+    # Only one poll should have happened — the concluded failure short-
+    # circuits the retry loop instead of exhausting all 4 attempts, so a
+    # later retry of this same PR cannot merge over the red check.
+    polls=$(cat "$TEST_TMP/merge_ctr" 2>/dev/null || echo 0)
+    [[ "$polls" -eq 1 ]]
+}
