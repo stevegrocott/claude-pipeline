@@ -459,9 +459,10 @@ teardown() {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-ts-testfiles
 
-    # Add an implementation file and a test file
+    # Add an implementation file and a test file that exercises it
     echo "export const add = (a, b) => a + b;" > math.ts
-    echo "test('adds', () => expect(1+1).toBe(2));" > math.test.ts
+    echo "import { add } from './math';
+test('adds', () => expect(add(2, 3)).toBe(5));" > math.test.ts
     git add math.ts math.test.ts
     git commit -q -m "add ts with test"
 
@@ -611,10 +612,13 @@ teardown() {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-mixed-testfiles
 
-    # Add TS test file and bash script
-    echo "test('adds', () => expect(1+1).toBe(2));" > math.test.ts
+    # Add a TS implementation file, a test file that exercises it, and a
+    # bash script
+    echo "export const add = (a, b) => a + b;" > math.ts
+    echo "import { add } from './math';
+test('adds', () => expect(add(2, 3)).toBe(5));" > math.test.ts
     echo "#!/bin/bash" > deploy.sh
-    git add math.test.ts deploy.sh
+    git add math.ts math.test.ts deploy.sh
     git commit -q -m "add mixed with test"
 
     local prompt_file="$TEST_TMP/mixed_prompt"
@@ -1183,8 +1187,6 @@ _install_e2e_stage_spies() {
     scope=$(detect_change_scope "." "main")
     [ "$scope" = "frontend" ] || fail \
         "expected nested frontend file to classify as 'frontend', got '$scope'"
-    [ "$scope" != "bash" ] || fail \
-        "nested frontend file regressed to 'bash' classification"
 
     # --- e2e_verify stage selection ------------------------------------
     # Feed the real computed scope into run_parallel_post_task_stages() and
