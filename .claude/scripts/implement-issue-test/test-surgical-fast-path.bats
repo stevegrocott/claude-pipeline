@@ -1044,3 +1044,30 @@ JSON
         [[ "$polls" -eq 1 ]]
     done
 }
+
+@test "32 mergeStateStatus UNSTABLE with only pending checks → retries and merges" {
+    # Issue #714: UNSTABLE is the state that actually fired in production
+    # (issue #695 / PR #713) and was entirely uncovered before this fix — the
+    # fast-path bailed on it immediately instead of retrying. Mirrors the
+    # UNKNOWN retry pattern (test 21) and test 29's BLOCKED coverage of the
+    # same ambiguous-state branch: a required check still running must be
+    # waited out, not treated as terminal.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    export MOCK_GH_MERGE_STATE_SEQ="UNSTABLE,UNSTABLE,CLEAN"
+    export MOCK_GH_MERGE_STATE_CTR="$TEST_TMP/merge_ctr"
+    export MOCK_GH_CHECK_ROLLUP='[{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":null,"name":"ci-test"}]'
+    export MOCK_GH_PR_NUMBER=42
+    export FAST_PATH_MERGE_CHECK_ATTEMPTS=5
+    export FAST_PATH_MERGE_CHECK_DELAY=0
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'completed'
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_merge.status' 'completed'
+    # Counter should record at least 3 polls (the third returned CLEAN).
+    polls=$(cat "$TEST_TMP/merge_ctr" 2>/dev/null || echo 0)
+    [[ "$polls" -ge 3 ]]
+}
