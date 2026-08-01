@@ -1157,8 +1157,18 @@ _install_e2e_stage_spies() {
     # Shape must match what the orchestrator parses (.output.result /
     # .output.summary); a flat object would read back as null and mask a
     # regression in the result handling.
+    #
+    # $2/$3/$4 (prompt/schema/agent) are captured to sidecar files rather
+    # than appended to $E2E_SPY_CALLS: the prompt is multi-line, and folding
+    # it into the calls file would corrupt the "one call = one line"
+    # ordering assertions that key off run_stage:e2e-verify. Sidecar files
+    # keep those assertions intact while still letting callers verify the
+    # real args the orchestrator hands to run_stage for e2e_verify.
     run_stage() {
         printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        printf '%s' "$2" > "$E2E_SPY_CALLS.prompt"
+        printf '%s' "$3" > "$E2E_SPY_CALLS.schema"
+        printf '%s' "$4" > "$E2E_SPY_CALLS.agent"
         printf '{"output":{"result":"passed","summary":"e2e ok"}}'
     }
 }
@@ -1216,6 +1226,28 @@ _install_e2e_stage_spies() {
     # shellcheck disable=SC2254
     [[ "$sequence" == $expected ]] \
         || fail "e2e_verify was skipped, not run. Call sequence: $sequence"
+
+    # The orchestrator must hand run_stage the real e2e-validate schema and
+    # the playwright-test-developer agent — not just call it with any args.
+    # A regression that swapped in the wrong schema/agent (or lost them)
+    # would still satisfy the "run_stage was called" assertion above, so
+    # assert the actual $3/$4 values captured by the spy.
+    local captured_schema captured_agent captured_prompt
+    captured_schema=$(< "$calls_file.schema")
+    captured_agent=$(< "$calls_file.agent")
+    captured_prompt=$(< "$calls_file.prompt")
+
+    [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || fail \
+        "expected schema implement-issue-e2e-validate.json, got '$captured_schema'"
+    [ "$captured_agent" = "playwright-test-developer" ] || fail \
+        "expected agent playwright-test-developer, got '$captured_agent'"
+
+    # Prompt must actually be built from this run's context (issue number
+    # and the targeted E2E command), not a stale/hardcoded string.
+    [[ "$captured_prompt" == *"issue #$ISSUE_NUMBER"* ]] || fail \
+        "expected prompt to reference issue #$ISSUE_NUMBER: $captured_prompt"
+    [[ "$captured_prompt" == *"$TEST_E2E_CMD"* ]] || fail \
+        "expected prompt to include the targeted E2E command '$TEST_E2E_CMD': $captured_prompt"
 
     # Structural skip marker: every skip branch records started:e2e_verify
     # immediately followed by completed:e2e_verify with no run_stage call
