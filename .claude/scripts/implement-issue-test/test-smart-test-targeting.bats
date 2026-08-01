@@ -1312,6 +1312,64 @@ _install_e2e_stage_spies() {
         || fail "$skip_msg"
 }
 
+# Companion coverage for the 'frontend' branch tested above: the skip guard
+# in run_parallel_post_task_stages() checks
+# `branch_scope != "frontend" && branch_scope != "ts-frontend"`, so a
+# regression that dropped the "ts-frontend" arm would still pass every test
+# above (they only ever exercise "frontend" and "bash") while silently
+# skipping e2e_verify for TS+frontend projects. detect_change_scope's own
+# mapping to "ts-frontend" is already covered elsewhere (see the TSX test
+# above), so this test supplies the scope directly and asserts on the
+# skip-guard's behavior in isolation.
+@test "run_parallel_post_task_stages runs e2e_verify for ts-frontend scope (not just frontend)" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-712-ts-frontend
+
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-stage-calls-ts-frontend.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-712-ts-frontend" "ts-frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    # ORDERING, not mere presence: the skip path also emits
+    # started:e2e_verify followed immediately by completed:e2e_verify, so
+    # grepping for those alone would pass even when the stage is skipped.
+    local sequence expected
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    expected='*started:e2e_verify*run_stage:e2e-verify*completed:e2e_verify*'
+    local run_msg
+    run_msg="e2e_verify was skipped for scope 'ts-frontend', expected it"
+    run_msg+=" to run. Call sequence: $sequence"
+    # shellcheck disable=SC2254
+    [[ "$sequence" == $expected ]] || fail "$run_msg"
+
+    # The orchestrator must hand run_stage the real e2e-validate schema and
+    # the playwright-test-developer agent for ts-frontend, same as frontend.
+    local captured_schema captured_agent
+    captured_schema=$(< "$calls_file.schema")
+    captured_agent=$(< "$calls_file.agent")
+
+    [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || fail \
+        "expected schema implement-issue-e2e-validate.json, got '$captured_schema'"
+    [ "$captured_agent" = "playwright-test-developer" ] || fail \
+        "expected agent playwright-test-developer, got '$captured_agent'"
+
+    # Structural skip marker must be absent: its presence would mean a skip
+    # branch fired even though the ordering check above passed.
+    local skip_msg
+    skip_msg="e2e_verify hit a skip branch for scope 'ts-frontend': $sequence"
+    [[ "$sequence" != *'started:e2e_verify completed:e2e_verify'* ]] \
+        || fail "$skip_msg"
+}
+
 # =============================================================================
 # E2E PROMPT INJECTION TESTS
 # =============================================================================
