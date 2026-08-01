@@ -705,7 +705,7 @@ _init_pipeline_git_repo() {
 	# sitting between them.
 	between=$(sed -n "$((closest_regen + 1)),$((push_line - 1))p" \
 		"$ORCHESTRATOR" \
-		| grep -E '\bgit([[:space:]]+-C[[:space:]]+\S+)?[[:space:]]+(commit|add)\b' \
+		| grep -E '\bgit([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+(commit|add)\b' \
 		|| true)
 	[[ -z "$between" ]] || {
 		printf 'FAIL: git commit/add between regeneration and push:\n%s\n' \
