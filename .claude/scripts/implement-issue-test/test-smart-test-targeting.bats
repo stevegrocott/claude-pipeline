@@ -1183,8 +1183,6 @@ _install_e2e_stage_spies() {
     scope=$(detect_change_scope "." "main")
     [ "$scope" = "frontend" ] || fail \
         "expected nested frontend file to classify as 'frontend', got '$scope'"
-    [ "$scope" != "bash" ] || fail \
-        "nested frontend file regressed to 'bash' classification"
 
     # --- e2e_verify stage selection ------------------------------------
     # Feed the real computed scope into run_parallel_post_task_stages() and
