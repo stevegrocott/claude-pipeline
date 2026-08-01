@@ -410,6 +410,22 @@ _fast_path_check_concluded_failure() {
     ' <<<"$rollup_json" >/dev/null 2>&1
 }
 
+# Returns the name of the first check in a statusCheckRollup JSON array that
+# concluded in a failing state, or "unknown check" if none is identifiable.
+_fast_path_failed_check_name() {
+    local rollup_json="$1"
+
+    jq -r '
+        [.[]? |
+            if .__typename == "CheckRun" then
+                (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
+            else
+                (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
+            end
+        ] | first // "unknown check"
+    ' <<<"$rollup_json" 2>/dev/null || echo "unknown check"
+}
+
 if is_stage_completed fast_path_merge; then
     log "fast_path_merge already completed — pipeline already finished (resume)"
 else
@@ -453,9 +469,23 @@ else
                 # reports both while a required check is still running, and
                 # only settles once it concludes. Defer to the rollup to
                 # tell "still pending" from "already failed".
+                #
+                # NOTE: the issue's AC4 lists BLOCKED alongside DIRTY/BEHIND
+                # as genuinely terminal. This is an intentional, deliberate
+                # broadening beyond AC4: GitHub also reports BLOCKED while a
+                # required check is still pending (not only for conflicts or
+                # branch-protection blocks), so treating it as immediately
+                # terminal would re-introduce the same false-failure bug
+                # this issue fixes for UNSTABLE. See tests 29/30, which
+                # cover BLOCKED retrying to CLEAN and BLOCKED bailing on a
+                # concluded check failure respectively.
                 check_rollup=$(jq -c '.statusCheckRollup // []' \
                     <<<"$pr_view_json" 2>/dev/null || echo "[]")
                 if _fast_path_check_concluded_failure "$check_rollup"; then
+                    failed_check=$(_fast_path_failed_check_name "$check_rollup")
+                    log "PR #$pr_number has check \"$failed_check\" that" \
+                        "concluded in failure (mergeStateStatus:" \
+                        "$merge_state); bailing without retry"
                     break  # a check has already failed — bail without retry
                 elif (( attempt < merge_check_attempts )); then
                     log "mergeStateStatus=$merge_state with checks still" \
@@ -471,7 +501,13 @@ else
 
     case "$merge_state" in
         CLEAN|HAS_HOOKS) ;;
-        *) bail "unsafe_merge_state_${merge_state}" ;;
+        *)
+            if [[ -n "${failed_check:-}" ]]; then
+                bail "unsafe_merge_state_${merge_state}: check \"${failed_check}\" concluded in failure"
+            else
+                bail "unsafe_merge_state_${merge_state}"
+            fi
+            ;;
     esac
 
     if ! gh pr merge "$pr_number" --squash --delete-branch 2>>"$LOG_FILE"; then

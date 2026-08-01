@@ -630,6 +630,11 @@ invoke_fast_path_script() {
         # empty_changed_paths and never reaches the merge-state check this
         # test targets — set it so the run actually gets to that gate.
         export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+        # BLOCKED falls into the ambiguous retry branch (no rollup set here,
+        # so it never finds a concluded failure and exhausts the default
+        # retry budget before bailing) — force delay=0 so that doesn't add
+        # real wall-clock time to the suite.
+        export FAST_PATH_MERGE_CHECK_DELAY=0
 
         run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -1003,7 +1008,8 @@ JSON
     [ "$status" -ne 0 ]
     assert_json_field "$STATUS_FILE" '.state' 'failed'
     err=$(jq -r '.error // ""' "$STATUS_FILE")
-    [[ "$err" == "unsafe_merge_state_BLOCKED" ]]
+    # Error names both the merge state and the offending check (AC3).
+    [[ "$err" == "unsafe_merge_state_BLOCKED: check \"ci-test\" concluded in failure" ]]
     # Merge must NOT have run.
     merge_status=$(jq -r '.stages.fast_path_merge.status // "pending"' "$STATUS_FILE")
     [[ "$merge_status" != "completed" ]]
@@ -1093,7 +1099,8 @@ JSON
     [ "$status" -ne 0 ]
     assert_json_field "$STATUS_FILE" '.state' 'failed'
     err=$(jq -r '.error // ""' "$STATUS_FILE")
-    [[ "$err" == "unsafe_merge_state_UNSTABLE" ]]
+    # Error names both the merge state and the offending check (AC3).
+    [[ "$err" == "unsafe_merge_state_UNSTABLE: check \"ci-test\" concluded in failure" ]]
     # Merge must NOT have run.
     merge_status=$(jq -r '.stages.fast_path_merge.status // "pending"' "$STATUS_FILE")
     [[ "$merge_status" != "completed" ]]
