@@ -608,19 +608,40 @@ invoke_fast_path_script() {
     assert_json_field "$STATUS_FILE" '.error' 'push_rejected'
 }
 
-@test "16 fast-path bails when mergeStateStatus is not CLEAN/HAS_HOOKS → no merge attempted" {
-    export MOCK_GH_MERGE_STATE=DIRTY
+@test "16 fast-path bails on genuinely terminal merge states → no merge attempted" {
+    # DIRTY, BLOCKED and BEHIND are genuinely terminal — no amount of
+    # waiting resolves a real conflict, so the fast-path must bail
+    # immediately for each. UNSTABLE is deliberately NOT covered here: it
+    # is what GitHub reports while required checks are still running and
+    # resolves to CLEAN once they pass, so treating it as an immediate-bail
+    # terminal state would re-encode the #714 defect this test exists to
+    # guard against. UNSTABLE's retry-then-bail-only-on-a-failed-check
+    # behavior gets its own coverage alongside tests 21/22.
+    for state in DIRTY BLOCKED BEHIND; do
+        rm -f "$STATUS_FILE"
+        init_status
+        # A prior iteration's impl-ran marker would make the git-status mock
+        # return the same "post-impl" content for both the pre- and
+        # post-implement snapshot this run, producing an empty delta (bail
+        # empty_changed_paths) instead of reaching the merge-state check.
+        rm -f "$TEST_TMP/impl-ran" "$TEST_TMP/git-add-args"
+        export MOCK_GH_MERGE_STATE="$state"
+        # Without a post-implement delta the script bails earlier with
+        # empty_changed_paths and never reaches the merge-state check this
+        # test targets — set it so the run actually gets to that gate.
+        export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
-    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+        run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
-    [ "$status" -ne 0 ]
-    assert_json_field "$STATUS_FILE" '.state' 'failed'
-    # Specific error name documents what blocked
-    err=$(jq -r '.error // ""' "$STATUS_FILE")
-    [[ "$err" == *"merge"* ]] || [[ "$err" == *"unsafe"* ]]
-    # fast_path_merge must NOT be marked completed
-    merge_status=$(jq -r '.stages.fast_path_merge.status // "pending"' "$STATUS_FILE")
-    [[ "$merge_status" != "completed" ]]
+        [ "$status" -ne 0 ]
+        assert_json_field "$STATUS_FILE" '.state' 'failed'
+        # Specific error name documents what blocked, per state.
+        assert_json_field "$STATUS_FILE" '.error' "unsafe_merge_state_${state}"
+        # fast_path_merge must NOT be marked completed
+        merge_status=$(jq -r '.stages.fast_path_merge.status // "pending"' \
+            "$STATUS_FILE")
+        [[ "$merge_status" != "completed" ]]
+    done
 }
 
 @test "17 fast-path happy path → branch + PR + merge succeed, state=completed" {
