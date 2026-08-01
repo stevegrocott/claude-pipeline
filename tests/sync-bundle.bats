@@ -1130,6 +1130,98 @@ _init_pipeline_git_repo() {
 	}
 }
 
+# The BUNDLE_SCRIPT_SUBDIRS awk parse used to require the declaration to
+# start at column 1 of its line, so a tab-indented `declare -a` inside a
+# function (e.g. sync.sh's bundle_scripts()) would parse as "nothing found"
+# rather than as the real list — silently degrading into the total-parse-
+# failure fallback on every run, long after the real declaration still
+# named every subdirectory correctly.
+@test "(#720) parity guard parses an indented declare -a BUNDLE_SCRIPT_SUBDIRS inside a function" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i720-indented
+
+	# A subdir absent from the (indented, declare -a, in-function) list
+	# below — present only so a successful parse has something to name as
+	# forgotten. If the parse instead silently failed and fell back to
+	# "whatever exists", this subdir would be added without complaint.
+	mkdir -p "$TEST_TMP/.claude/scripts/extras"
+	printf '#!/usr/bin/env bash\necho canonical\n' \
+		> "$TEST_TMP/.claude/scripts/extras/tool.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: add unlisted extras/ subdir"
+
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'bundle_scripts() {\n'
+		printf '\tdeclare -a BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)\n'
+		printf '}\n'
+		printf 'exit 0\n'
+	} > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" != *"PARSE FAILURE"* ]] || {
+		printf 'FAIL: indented declare -a form was treated as unparsable:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ "$output" == *"subdirectory 'extras' exists under"* ]] || {
+		printf 'FAIL: indented declare -a form was not parsed, so extras/' \
+			>&2
+		printf ' was not identified as forgotten:\n%s\n' "$output" >&2
+		return 1
+	}
+}
+
+# A total parse failure (no BUNDLE_SCRIPT_SUBDIRS=( ... ) anywhere in
+# sync.sh) is a different failure mode than "sync.sh's list parsed fine but
+# forgot this one subdirectory" — the two must not be conflated. Before this
+# fix, a total parse failure fell back to enumerating every real
+# subdirectory and reported each one individually as "sync.sh ... does not
+# list it", indistinguishable from N genuine per-subdir omissions.
+@test "(#720) total BUNDLE_SCRIPT_SUBDIRS parse failure reports one distinct error, not one per subdir" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i720-parse-failure
+
+	# A canonical edit so the hook's "did .claude/scripts change?" gate
+	# passes — parse behavior is what's under test, not that gate.
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: edit canonical orchestrator"
+
+	# No BUNDLE_SCRIPT_SUBDIRS declaration anywhere — the awk parse finds
+	# nothing at all, as distinct from finding a list that omits a subdir.
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"PARSE FAILURE"* ]] || {
+		printf 'FAIL: total parse failure did not report a distinct error:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ "$output" != *"does not list it"* ]] || {
+		printf 'FAIL: total parse failure was conflated with per-subdir' \
+			>&2
+		printf ' omissions (one "does not list it" per real subdir):\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
 # =============================================================================
 # Reverse sweep (issue #694) — a bundled file whose canonical source was
 # deleted must be caught, not just a canonical file whose bundle copy is

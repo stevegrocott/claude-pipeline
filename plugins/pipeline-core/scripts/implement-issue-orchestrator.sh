@@ -9297,6 +9297,12 @@ regenerate_bundle_if_needed() {
 	local _parity_seen=" "
 	local _parity_script _parity_rel _parity_counterpart _parity_sub
 	local _parity_dir _parity_bats _parity_bundle_script
+	# Set when the awk parse below finds no BUNDLE_SCRIPT_SUBDIRS=( ... )
+	# declaration at all, as distinct from a declaration that parses fine but
+	# omits a real subdirectory. Conflating the two used to make a total
+	# parse failure masquerade as "sync.sh forgot every single subdirectory"
+	# — see the union loop below.
+	local _parity_parse_failed=0
 
 	# Resolve the root once, then run every git call against it: the pathspecs
 	# below are repo-relative, so they must not depend on where the
@@ -9339,14 +9345,23 @@ regenerate_bundle_if_needed() {
 	# one-entry-per-line array forms and strips trailing comments — the
 	# same parse test-bundle-parity.bats' _sync_array() uses to read
 	# sync.sh's hook allowlists, so one proven technique covers both.
+	#
+	# The trigger match tolerates indentation (a tab-indented declaration
+	# inside a function, say) and a `declare -a ` prefix — it only requires
+	# "BUNDLE_SCRIPT_SUBDIRS=(" to appear somewhere on the line, not at
+	# column 1, and strips everything up to and including that substring
+	# rather than up to the first "(" (which a leading "declare -a" would
+	# otherwise satisfy prematurely). A commented-out declaration is
+	# ignored so it can't be picked up as real.
 	while IFS= read -r _parity_sub; do
 		[[ -n "$_parity_sub" ]] || continue
 		_parity_subdirs+=("$_parity_sub")
 		_parity_seen+="$_parity_sub "
 	done < <(awk '
-		index($0, "BUNDLE_SCRIPT_SUBDIRS=(") == 1 {
+		!inside && /^[ \t]*#/ { next }
+		!inside && index($0, "BUNDLE_SCRIPT_SUBDIRS=(") > 0 {
 			inside = 1
-			sub(/^[^(]*\(/, "")
+			sub(/^.*BUNDLE_SCRIPT_SUBDIRS=\(/, "")
 		}
 		inside {
 			line = $0
@@ -9361,10 +9376,21 @@ regenerate_bundle_if_needed() {
 		}
 	' "$repo_root/sync.sh")
 
+	# A total parse failure (no BUNDLE_SCRIPT_SUBDIRS=( ... ) declaration
+	# found anywhere in sync.sh) is a different failure mode than the
+	# per-subdirectory "sync.sh forgot to list this one" check below, and
+	# must be reported as such rather than conflated with it: if this branch
+	# fires, the union loop right after it cannot tell "sync.sh forgot this
+	# subdir" from "sync.sh's list was never read", so it is skipped there
+	# and every real subdirectory is added to the fallback list in silence,
+	# with a single loud error here instead of one false "does not list it"
+	# error per subdirectory.
 	if ((${#_parity_subdirs[@]} == 0)); then
-		log_error "could not read BUNDLE_SCRIPT_SUBDIRS from" \
-			"$repo_root/sync.sh — falling back to whatever" \
-			"subdirectories exist under .claude/scripts/"
+		_parity_parse_failed=1
+		log_error "PARSE FAILURE: no BUNDLE_SCRIPT_SUBDIRS=( ... )" \
+			"declaration found in $repo_root/sync.sh — falling back to" \
+			"whatever subdirectories exist under .claude/scripts/ for" \
+			"the parity check, without claiming sync.sh omits any of them"
 	fi
 
 	# sync.sh's list answers "what does the generator bundle?", never "what
@@ -9389,10 +9415,17 @@ regenerate_bundle_if_needed() {
 			| head -n 1)
 		[[ -n "$_parity_bats" ]] && continue
 
-		log_error "subdirectory '$_parity_sub' exists under" \
-			".claude/scripts/ but sync.sh's BUNDLE_SCRIPT_SUBDIRS does" \
-			"not list it, so the generator never bundles it — add it" \
-			"there if it should ship to consumers"
+		# Only claim sync.sh forgot this specific subdirectory when its
+		# list was actually readable — when the parse totally failed above,
+		# EVERY real subdirectory lands here, and reporting each one
+		# individually would misrepresent a parse failure as sync.sh having
+		# omitted every subdirectory it bundles.
+		if ((! _parity_parse_failed)); then
+			log_error "subdirectory '$_parity_sub' exists under" \
+				".claude/scripts/ but sync.sh's BUNDLE_SCRIPT_SUBDIRS does" \
+				"not list it, so the generator never bundles it — add it" \
+				"there if it should ship to consumers"
+		fi
 		_parity_subdirs+=("$_parity_sub")
 		_parity_seen+="$_parity_sub "
 	done
