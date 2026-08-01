@@ -9411,8 +9411,15 @@ regenerate_bundle_if_needed() {
 
 		[[ "$_parity_seen" == *" $_parity_sub "* ]] && continue
 		[[ "$_parity_sub" == *-test ]] && continue
-		_parity_bats=$(find "$_parity_dir" -name '*.bats' 2>/dev/null \
-			| head -n 1)
+		# Bounded to two levels (the subdir itself, plus one level of
+		# nested helper/fixture dirs like implement-issue-test/helpers/)
+		# rather than an unbounded recursive walk: every *.bats file in
+		# this tree today lives at one of those two levels, and without
+		# -maxdepth this find re-walks every file under subdirs like
+		# platform/ and schemas/ on every bundle regen even though they
+		# hold no .bats files at all.
+		_parity_bats=$(find "$_parity_dir" -maxdepth 2 -name '*.bats' \
+			2>/dev/null | head -n 1)
 		[[ -n "$_parity_bats" ]] && continue
 
 		# Only claim sync.sh forgot this specific subdirectory when its
