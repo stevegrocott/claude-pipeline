@@ -1215,13 +1215,17 @@ _install_e2e_stage_spies() {
     [[ "$sequence" == $expected ]] \
         || fail "e2e_verify was skipped, not run. Call sequence: $sequence"
 
-    # The skip branches log a distinctive message — its absence confirms
-    # no skip condition fired for a frontend-scoped branch.
-    if grep -q "log:Skipping e2e_verify" "$calls_file"; then
-        local skips
-        skips=$(grep 'log:Skipping' "$calls_file")
-        fail "e2e_verify hit a skip branch: $skips"
-    fi
+    # Structural skip marker: every skip branch records started:e2e_verify
+    # immediately followed by completed:e2e_verify with no run_stage call
+    # between them (see the skip-handling block in
+    # run_parallel_post_task_stages()). Assert that adjacent pair is absent
+    # instead of matching any particular log wording — its presence would
+    # mean a skip branch fired even though the ordering check above passed.
+    local skip_msg
+    skip_msg="e2e_verify hit a skip branch (started immediately followed"
+    skip_msg+=" by completed, no run_stage in between): $sequence"
+    [[ "$sequence" != *'started:e2e_verify completed:e2e_verify'* ]] \
+        || fail "$skip_msg"
 }
 
 # Negative control for the test above. Without this, an e2e_verify stage
@@ -1259,8 +1263,19 @@ _install_e2e_stage_spies() {
     if grep -q "^run_stage:e2e-verify$" "$calls_file"; then
         fail "e2e_verify ran for non-frontend scope '$scope' — it must skip"
     fi
-    grep -q "log:Skipping e2e_verify" "$calls_file" || fail \
-        "expected a skip log for non-frontend scope, got: $(< "$calls_file")"
+
+    # Structural skip marker: a skipped stage records started:e2e_verify
+    # immediately followed by completed:e2e_verify with no run_stage call
+    # between them (see the skip-handling block in
+    # run_parallel_post_task_stages()). Assert on that call-order marker
+    # instead of matching the log message's exact wording.
+    local sequence skip_msg
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    skip_msg="expected e2e_verify to be skipped (started immediately"
+    skip_msg+=" followed by completed, no run_stage call) for"
+    skip_msg+=" non-frontend scope, got: $sequence"
+    [[ "$sequence" == *'started:e2e_verify completed:e2e_verify'* ]] \
+        || fail "$skip_msg"
 }
 
 # =============================================================================
