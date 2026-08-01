@@ -1173,6 +1173,29 @@ _install_e2e_stage_spies() {
     }
 }
 
+# Read a prompt/schema/agent sidecar file written by the run_stage() spy
+# above. A missing sidecar means the spy's run_stage() was never invoked at
+# all (e2e_verify was skipped, or the orchestrator called run_stage with a
+# different stage first) -- reading it with plain `$(< file)` would instead
+# fail silently, returning an empty string that only surfaces later as a
+# confusing "got ''" mismatch against the expected value. Fail here with the
+# missing path and the reason, so the real cause is obvious immediately.
+_read_e2e_sidecar() {
+    local calls_file="$1"
+    local kind="$2"
+    local sidecar="$calls_file.$kind"
+    local msg
+
+    if [ ! -f "$sidecar" ]; then
+        msg="missing $kind sidecar file '$sidecar' -- run_stage() was"
+        msg+=" never invoked for e2e-verify (the stage likely didn't run)"
+        fail "$msg"
+        return 1
+    fi
+
+    cat "$sidecar"
+}
+
 @test "detect_change_scope classifies a nested frontend file as frontend (not bash), and e2e_verify runs instead of being skipped" {
     export FRONTEND_PATH_PATTERNS="web/e2e/*"
 
@@ -1233,9 +1256,9 @@ _install_e2e_stage_spies() {
     # would still satisfy the "run_stage was called" assertion above, so
     # assert the actual $3/$4 values captured by the spy.
     local captured_schema captured_agent captured_prompt
-    captured_schema=$(< "$calls_file.schema")
-    captured_agent=$(< "$calls_file.agent")
-    captured_prompt=$(< "$calls_file.prompt")
+    captured_schema=$(_read_e2e_sidecar "$calls_file" schema) || return 1
+    captured_agent=$(_read_e2e_sidecar "$calls_file" agent) || return 1
+    captured_prompt=$(_read_e2e_sidecar "$calls_file" prompt) || return 1
 
     [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || fail \
         "expected schema implement-issue-e2e-validate.json, got '$captured_schema'"
@@ -1354,8 +1377,8 @@ _install_e2e_stage_spies() {
     # The orchestrator must hand run_stage the real e2e-validate schema and
     # the playwright-test-developer agent for ts-frontend, same as frontend.
     local captured_schema captured_agent
-    captured_schema=$(< "$calls_file.schema")
-    captured_agent=$(< "$calls_file.agent")
+    captured_schema=$(_read_e2e_sidecar "$calls_file" schema) || return 1
+    captured_agent=$(_read_e2e_sidecar "$calls_file" agent) || return 1
 
     [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || fail \
         "expected schema implement-issue-e2e-validate.json, got '$captured_schema'"
