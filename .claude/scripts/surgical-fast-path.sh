@@ -441,7 +441,18 @@ else
                     sleep "$merge_check_delay"
                 fi
                 ;;
+            DIRTY|BEHIND)
+                # A real merge conflict or a branch that has fallen behind
+                # base — neither is check-related, so no amount of polling
+                # resolves it. Bail on the first attempt instead of burning
+                # the retry budget.
+                break
+                ;;
             *)
+                # BLOCKED and UNSTABLE are ambiguous on their own — GitHub
+                # reports both while a required check is still running, and
+                # only settles once it concludes. Defer to the rollup to
+                # tell "still pending" from "already failed".
                 check_rollup=$(jq -c '.statusCheckRollup // []' \
                     <<<"$pr_view_json" 2>/dev/null || echo "[]")
                 if _fast_path_check_concluded_failure "$check_rollup"; then

@@ -1012,3 +1012,35 @@ JSON
     polls=$(cat "$TEST_TMP/merge_ctr" 2>/dev/null || echo 0)
     [[ "$polls" -eq 1 ]]
 }
+
+@test "31 DIRTY/BEHIND bail on the first poll — no check-rollup wait" {
+    # DIRTY (a real merge conflict) and BEHIND (branch is stale vs base) are
+    # not check-related — no rollup, however it settles, changes either
+    # fact. Unlike BLOCKED/UNSTABLE they must bail on attempt 1 rather than
+    # burning the retry budget waiting for checks that were never the cause.
+    [ -x "$REAL_SCRIPT_DIR/surgical-fast-path.sh" ] || skip "fast-path not present"
+
+    for state in DIRTY BEHIND; do
+        rm -f "$STATUS_FILE" "$TEST_TMP/merge_ctr" \
+            "$TEST_TMP/impl-ran" "$TEST_TMP/git-add-args"
+        init_status
+        export MOCK_GH_MERGE_STATE_SEQ="$state,$state,$state,$state"
+        export MOCK_GH_MERGE_STATE_CTR="$TEST_TMP/merge_ctr"
+        export FAST_PATH_MERGE_CHECK_ATTEMPTS=4
+        export FAST_PATH_MERGE_CHECK_DELAY=0
+        export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+        run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+        [ "$status" -ne 0 ]
+        assert_json_field "$STATUS_FILE" '.state' 'failed'
+        assert_json_field "$STATUS_FILE" '.error' "unsafe_merge_state_${state}"
+        merge_status=$(jq -r '.stages.fast_path_merge.status // "pending"' \
+            "$STATUS_FILE")
+        [[ "$merge_status" != "completed" ]]
+        # Exactly one poll — proves the bail was immediate, not the last
+        # of an exhausted retry budget.
+        polls=$(cat "$TEST_TMP/merge_ctr" 2>/dev/null || echo 0)
+        [[ "$polls" -eq 1 ]]
+    done
+}
