@@ -8700,13 +8700,23 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.summary // "E2E verification completed"')
 
 			# Issue #745: a verdict is only as good as the counts
-			# behind it. Zero tests run, or a passed+failed total
-			# short of tests_run, means the run did not finish — a
-			# self-reported 'passed' or 'failed' in that state is
-			# unsupported, not a measurement. Override to
-			# 'unmeasured' rather than trust the self-report, and
-			# route it to e2e_unmeasured_file instead of
-			# e2e_fail_file so it never enters the fix loop.
+			# behind it. A 'failed' verdict with tests_failed == 0
+			# claims a failure the counts never recorded (issue-5536:
+			# failed, 0/0/0 — the run never finished). A passed+failed
+			# total short of tests_run means some targeted specs never
+			# executed, whether the self-reported verdict was 'passed'
+			# or 'failed' (issue-5531: passed, 6+0 of 12 — half the
+			# suite was skipped for missing browsers). Either case is
+			# unsupported, not a measurement — override to 'unmeasured'
+			# rather than trust the self-report, and route it to
+			# e2e_unmeasured_file instead of e2e_fail_file so it never
+			# enters the fix loop.
+			#
+			# A genuine zero-spec run (0 run, 0 passed, 0 failed) is
+			# neither: nothing failed, and passed+failed (0) is not
+			# short of tests_run (0). Keying the check on the counts'
+			# own consistency, rather than a bare `tests_run == 0`,
+			# lets that legitimate pass stand (AC4).
 			local e2e_tests_run e2e_tests_passed e2e_tests_failed
 			e2e_tests_run=$(printf '%s' "$e2e_verify_result" \
 				| jq -r '.output.tests_run // 0')
@@ -8714,7 +8724,8 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.tests_passed // 0')
 			e2e_tests_failed=$(printf '%s' "$e2e_verify_result" \
 				| jq -r '.output.tests_failed // 0')
-			if ((e2e_tests_run == 0)) \
+			if [[ "$e2e_verify_status" == "failed" \
+				&& "$e2e_tests_failed" -eq 0 ]] \
 				|| ((e2e_tests_passed + e2e_tests_failed \
 					< e2e_tests_run)); then
 				e2e_verify_status="unmeasured"

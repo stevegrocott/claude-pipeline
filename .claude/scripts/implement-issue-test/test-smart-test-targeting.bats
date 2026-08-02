@@ -1521,6 +1521,129 @@ _assert_e2e_verify_runs_for_scope() {
         "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
+# A self-reported 'passed' whose passed+failed total falls short of
+# tests_run means part of the suite never ran -- not that it observed a
+# clean pass. Trusting it verbatim closes the issue with its E2E
+# acceptance criteria unverified (the issue-5531 evidence in #745: 6 of
+# 12 specs ran, tests_failed: 0, browsers missing for the rest, verdict
+# still reported 'passed'). This must be swept up by the same
+# e2e_verify:unmeasured guard as the failed/zero-tests case above (AC2).
+@test "run_parallel_post_task_stages records unmeasured and dispatches no fix for a passed verdict with skipped specs" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-skipped-specs-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    # Replay the issue-5531 payload verbatim: result "passed" but only
+    # 6 of the 12 targeted specs ran (tests_passed + tests_failed = 6 <
+    # tests_run = 12) because the browser executables were missing. Any
+    # run_stage call beyond the initial e2e-verify (a fix or rerun
+    # stage) means the fix loop was entered, which must NOT happen for
+    # an unmeasured verdict.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"passed","summary":"Tests skipped: 6 (due to missing browser executables)","tests_run":12,"tests_passed":6,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- an unmeasured" \
+                    "verdict must dispatch no fix iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-skipped-specs" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    # No fix iteration and no rerun dispatched -- only the single initial
+    # e2e-verify call should appear in the log.
+    local calls
+    calls=$(tr '\n' ' ' < "$calls_file")
+    if grep -q '^run_stage:fix-e2e-iter-1$' "$calls_file"; then
+        fail "a passed verdict unsupported by its counts (6+0 of 12" \
+            "specs) must not dispatch a fix iteration; calls: $calls"
+    fi
+    if grep -q '^run_stage:e2e-verify-rerun-iter-1$' "$calls_file"; then
+        fail "an unmeasured verdict must not enter the rerun path" \
+            "either; calls: $calls"
+    fi
+    [[ "$calls" == *'run_stage:e2e-verify'* ]] || fail \
+        "expected the initial e2e-verify call to still run; calls: $calls"
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' || fail \
+        "Expected e2e_verify:unmeasured in DEGRADED_STAGES (a passed" \
+        "verdict with only 6+0 of 12 specs run must not record a" \
+        "pass); got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# Negative control for the test above (AC4): a run that legitimately
+# matched no specs at all (0 run, 0 passed, 0 failed) must still be
+# recorded as a pass, not swept up with the partly-skipped payload just
+# above. Nothing failed, and passed+failed (0) is not short of
+# tests_run (0) -- the unmeasured guard is keyed on that count
+# consistency, not on a bare `tests_run == 0`, so this legitimate pass
+# stands.
+@test "run_parallel_post_task_stages still records a pass for a genuine no-specs run" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-no-specs-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"passed","summary":"No E2E specs matched this change.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- a genuine" \
+                    "no-specs pass must not dispatch a fix iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-no-specs" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    local calls
+    calls=$(tr '\n' ' ' < "$calls_file")
+    if grep -q '^run_stage:fix-e2e-iter-1$' "$calls_file"; then
+        fail "a genuine no-specs pass must not dispatch a fix" \
+            "iteration; calls: $calls"
+    fi
+    if grep -q '^run_stage:e2e-verify-rerun-iter-1$' "$calls_file"; then
+        fail "a genuine no-specs pass must not enter the rerun path" \
+            "either; calls: $calls"
+    fi
+    [[ "$calls" == *'run_stage:e2e-verify'* ]] || fail \
+        "expected the initial e2e-verify call to still run; calls: $calls"
+
+    local marker
+    marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -c '^e2e_verify:unmeasured$' || true)
+    [ "$marker" -eq 0 ] || fail \
+        "a genuine zero-spec pass must not be recorded as unmeasured;" \
+        "got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
 # =============================================================================
 # E2E PROMPT INJECTION TESTS
 # =============================================================================
