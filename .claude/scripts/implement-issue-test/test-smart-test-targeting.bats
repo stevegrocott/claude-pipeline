@@ -1196,6 +1196,75 @@ _read_e2e_sidecar() {
     cat "$sidecar"
 }
 
+# Shared assertion logic for the 'frontend' and 'ts-frontend' e2e_verify
+# skip-guard test cases below. The skip guard in
+# run_parallel_post_task_stages() checks
+# `branch_scope != "frontend" && branch_scope != "ts-frontend"`, so both
+# scopes must exercise the exact same run/ordering/schema/agent
+# assertions -- only the branch name, scope, and calls file differ per
+# test. Callers that need additional scope-specific assertions (e.g. the
+# 'frontend' test's prompt-content checks) can read $calls_file again
+# afterward via _read_e2e_sidecar().
+_assert_e2e_verify_runs_for_scope() {
+    local branch_name="$1"
+    local scope="$2"
+    local calls_file="$3"
+
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    _install_e2e_stage_spies "$calls_file"
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "$branch_name" "$scope" "minimal" "S" || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    # ORDERING, not mere presence: the skip path also emits
+    # started:e2e_verify followed immediately by completed:e2e_verify, so
+    # grepping for those alone would pass even when the stage is skipped.
+    # Requiring run_stage:e2e-verify BETWEEN them is only satisfiable by
+    # the real run path.
+    local sequence expected run_msg
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    expected='*started:e2e_verify*run_stage:e2e-verify*completed:e2e_verify*'
+    run_msg="e2e_verify was skipped for scope '$scope', expected it to"
+    run_msg+=" run. Call sequence: $sequence"
+    # shellcheck disable=SC2254
+    [[ "$sequence" == $expected ]] || fail "$run_msg"
+
+    # The orchestrator must hand run_stage the real e2e-validate schema and
+    # the playwright-test-developer agent for this scope -- not just call
+    # it with any args. A regression that swapped in the wrong
+    # schema/agent (or lost them) would still satisfy the "run_stage was
+    # called" assertion above, so assert the actual $3/$4 values captured
+    # by the spy.
+    local captured_schema captured_agent
+    captured_schema=$(_read_e2e_sidecar "$calls_file" schema) || return 1
+    captured_agent=$(_read_e2e_sidecar "$calls_file" agent) || return 1
+
+    [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || fail \
+        "expected schema implement-issue-e2e-validate.json, got '$captured_schema'"
+    [ "$captured_agent" = "playwright-test-developer" ] || fail \
+        "expected agent playwright-test-developer, got '$captured_agent'"
+
+    # Structural skip marker: every skip branch records started:e2e_verify
+    # immediately followed by completed:e2e_verify with no run_stage call
+    # between them (see the skip-handling block in
+    # run_parallel_post_task_stages()). Assert that adjacent pair is
+    # absent instead of matching any particular log wording -- its
+    # presence would mean a skip branch fired even though the ordering
+    # check above passed.
+    local skip_msg
+    skip_msg="e2e_verify hit a skip branch for scope '$scope' (started"
+    skip_msg+=" immediately followed by completed, no run_stage in"
+    skip_msg+=" between): $sequence"
+    [[ "$sequence" != *'started:e2e_verify completed:e2e_verify'* ]] \
+        || fail "$skip_msg"
+}
+
 @test "detect_change_scope classifies a nested frontend file as frontend (not bash), and e2e_verify runs instead of being skipped" {
     export FRONTEND_PATH_PATTERNS="web/e2e/*"
 
@@ -1224,65 +1293,25 @@ _read_e2e_sidecar() {
     # --- e2e_verify stage selection ------------------------------------
     # Feed the real computed scope into run_parallel_post_task_stages() and
     # assert the e2e-verify stage actually runs (calls run_stage) rather
-    # than being marked skipped.
-    export TEST_E2E_CMD="npx playwright test"
-    export BASE_BRANCH=main
-    unset RESUME_MODE
-
+    # than being marked skipped. See _assert_e2e_verify_runs_for_scope()
+    # above for the shared run/ordering/schema/agent assertions -- also
+    # exercised by the ts-frontend companion test below.
     local calls_file="$TEST_TMP/e2e-stage-calls.txt"
-    _install_e2e_stage_spies "$calls_file"
-
-    local exit_code=0
-    run_parallel_post_task_stages \
-        "feature-issue-659-e2e" "$scope" "minimal" "S" || exit_code=$?
-    [ "$exit_code" -eq 0 ] || fail \
-        "run_parallel_post_task_stages exited $exit_code, expected 0"
-
-    # ORDERING, not mere presence: the skip path also emits
-    # started:e2e_verify followed immediately by completed:e2e_verify, so
-    # grepping for those alone would pass even when the stage is skipped.
-    # Requiring run_stage:e2e-verify BETWEEN them is only satisfiable by
-    # the real run path.
-    local sequence expected
-    sequence=$(tr '\n' ' ' < "$calls_file")
-    expected='*started:e2e_verify*run_stage:e2e-verify*completed:e2e_verify*'
-    # shellcheck disable=SC2254
-    [[ "$sequence" == $expected ]] \
-        || fail "e2e_verify was skipped, not run. Call sequence: $sequence"
-
-    # The orchestrator must hand run_stage the real e2e-validate schema and
-    # the playwright-test-developer agent — not just call it with any args.
-    # A regression that swapped in the wrong schema/agent (or lost them)
-    # would still satisfy the "run_stage was called" assertion above, so
-    # assert the actual $3/$4 values captured by the spy.
-    local captured_schema captured_agent captured_prompt
-    captured_schema=$(_read_e2e_sidecar "$calls_file" schema) || return 1
-    captured_agent=$(_read_e2e_sidecar "$calls_file" agent) || return 1
-    captured_prompt=$(_read_e2e_sidecar "$calls_file" prompt) || return 1
-
-    [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || fail \
-        "expected schema implement-issue-e2e-validate.json, got '$captured_schema'"
-    [ "$captured_agent" = "playwright-test-developer" ] || fail \
-        "expected agent playwright-test-developer, got '$captured_agent'"
+    _assert_e2e_verify_runs_for_scope \
+        "feature-issue-659-e2e" "$scope" "$calls_file" || return 1
 
     # Prompt must actually be built from this run's context (issue number
-    # and the targeted E2E command), not a stale/hardcoded string.
+    # and the targeted E2E command), not a stale/hardcoded string. This
+    # check is specific to the 'frontend' scope (driven by the real
+    # detect_change_scope output above), so it stays out of the shared
+    # helper.
+    local captured_prompt
+    captured_prompt=$(_read_e2e_sidecar "$calls_file" prompt) || return 1
+
     [[ "$captured_prompt" == *"issue #$ISSUE_NUMBER"* ]] || fail \
         "expected prompt to reference issue #$ISSUE_NUMBER: $captured_prompt"
     [[ "$captured_prompt" == *"$TEST_E2E_CMD"* ]] || fail \
         "expected prompt to include the targeted E2E command '$TEST_E2E_CMD': $captured_prompt"
-
-    # Structural skip marker: every skip branch records started:e2e_verify
-    # immediately followed by completed:e2e_verify with no run_stage call
-    # between them (see the skip-handling block in
-    # run_parallel_post_task_stages()). Assert that adjacent pair is absent
-    # instead of matching any particular log wording — its presence would
-    # mean a skip branch fired even though the ordering check above passed.
-    local skip_msg
-    skip_msg="e2e_verify hit a skip branch (started immediately followed"
-    skip_msg+=" by completed, no run_stage in between): $sequence"
-    [[ "$sequence" != *'started:e2e_verify completed:e2e_verify'* ]] \
-        || fail "$skip_msg"
 }
 
 # Negative control for the test above. Without this, an e2e_verify stage
@@ -1348,49 +1377,12 @@ _read_e2e_sidecar() {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-issue-712-ts-frontend
 
-    export TEST_E2E_CMD="npx playwright test"
-    export BASE_BRANCH=main
-    unset RESUME_MODE
-
+    # See _assert_e2e_verify_runs_for_scope() above for the shared
+    # run/ordering/schema/agent assertions -- same as the 'frontend' test.
     local calls_file="$TEST_TMP/e2e-stage-calls-ts-frontend.txt"
-    _install_e2e_stage_spies "$calls_file"
-
-    local exit_code=0
-    run_parallel_post_task_stages \
-        "feature-issue-712-ts-frontend" "ts-frontend" "minimal" "S" \
-        || exit_code=$?
-    [ "$exit_code" -eq 0 ] || fail \
-        "run_parallel_post_task_stages exited $exit_code, expected 0"
-
-    # ORDERING, not mere presence: the skip path also emits
-    # started:e2e_verify followed immediately by completed:e2e_verify, so
-    # grepping for those alone would pass even when the stage is skipped.
-    local sequence expected
-    sequence=$(tr '\n' ' ' < "$calls_file")
-    expected='*started:e2e_verify*run_stage:e2e-verify*completed:e2e_verify*'
-    local run_msg
-    run_msg="e2e_verify was skipped for scope 'ts-frontend', expected it"
-    run_msg+=" to run. Call sequence: $sequence"
-    # shellcheck disable=SC2254
-    [[ "$sequence" == $expected ]] || fail "$run_msg"
-
-    # The orchestrator must hand run_stage the real e2e-validate schema and
-    # the playwright-test-developer agent for ts-frontend, same as frontend.
-    local captured_schema captured_agent
-    captured_schema=$(_read_e2e_sidecar "$calls_file" schema) || return 1
-    captured_agent=$(_read_e2e_sidecar "$calls_file" agent) || return 1
-
-    [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || fail \
-        "expected schema implement-issue-e2e-validate.json, got '$captured_schema'"
-    [ "$captured_agent" = "playwright-test-developer" ] || fail \
-        "expected agent playwright-test-developer, got '$captured_agent'"
-
-    # Structural skip marker must be absent: its presence would mean a skip
-    # branch fired even though the ordering check above passed.
-    local skip_msg
-    skip_msg="e2e_verify hit a skip branch for scope 'ts-frontend': $sequence"
-    [[ "$sequence" != *'started:e2e_verify completed:e2e_verify'* ]] \
-        || fail "$skip_msg"
+    _assert_e2e_verify_runs_for_scope \
+        "feature-issue-712-ts-frontend" "ts-frontend" "$calls_file" \
+        || return 1
 }
 
 # =============================================================================
