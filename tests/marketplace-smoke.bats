@@ -699,6 +699,86 @@ MAP
 	done
 }
 
+@test "skills: a task line built from the Task Format template passes assert_issue_valid" {
+	local lib="$REPO_ROOT/plugins/pipeline-core/scripts/issue-body-lib.sh"
+	[ -f "$lib" ] || skip "bundle issue-body-lib.sh not present"
+
+	local skills_dir="$REPO_ROOT/plugins/pipeline-core/skills"
+	[ -d "$skills_dir" ] || skip "bundle skills not present"
+
+	# Extract the fenced ```markdown block following a "## Task Format" (or
+	# "## Task Format Specification") heading from every skill file,
+	# verbatim, one block per temp file — restating the convention here
+	# instead of extracting it is exactly what let the explore/enrich-issue
+	# templates drift from the gate they document (issue #746 AC5).
+	local template_dir="$TEST_TMP/task-format-templates"
+	mkdir -p "$template_dir"
+	local skill
+	while IFS= read -r -d '' skill; do
+		awk -v outdir="$template_dir" -v src="$(basename "$(dirname "$skill")")" '
+			/^#+ Task Format/ { in_heading = 1; next }
+			in_heading && /^```markdown$/ {
+				in_fence = 1
+				n++
+				outfile = outdir "/" src "." n ".md"
+				next
+			}
+			in_fence && /^```$/ { in_fence = 0; in_heading = 0; close(outfile) }
+			in_fence { print > outfile }
+		' "$skill"
+	done < <(find "$skills_dir" -name SKILL.md -print0)
+
+	local templates=("$template_dir"/*.md)
+	[ -e "${templates[0]}" ] \
+		|| { echo "no '## Task Format' template found under $skills_dir" >&2
+			return 1; }
+
+	# A real, existing repo-relative path with a line-range suffix, to
+	# stand in for the template's own placeholder path (which is not a
+	# real file and would otherwise fail the gate for the wrong reason).
+	local real_path="tests/marketplace-smoke.bats:L1-10"
+
+	local template line task_line body
+	for template in "${templates[@]}"; do
+		line=$(grep -m1 '^- \[ \] `\[agent-name\]`' "$template") \
+			|| { echo "no canonical task line in template: $template" >&2
+				cat "$template" >&2
+				return 1; }
+
+		# Fill only the placeholders the template documents itself —
+		# the agent name and the example path — leaving every other
+		# character (backticks, em dash, bold marker) exactly as the
+		# skill wrote it, so the test binds to the skill's own words.
+		task_line="${line//agent-name/default}"
+		task_line="${task_line/src\/path\/file.ts:L10-40/$real_path}"
+
+		body=$(cat <<BODY
+## Implementation Tasks
+
+$task_line
+
+## Acceptance Criteria
+
+- [ ] AC1: it works
+BODY
+)
+
+		run env -u ISSUE_BODY_AGENTS_DIR -u PIPELINE_CONFIG_DIR \
+			-u CLAUDE_PLUGIN_ROOT -u DEPLOY_VERIFY_CMD \
+			bash -c '
+				cd "$1" || exit 1
+				source "$2"
+				assert_issue_valid "$3"
+			' _ "$REPO_ROOT" "$lib" "$body"
+
+		[ "$status" -eq 0 ] \
+			|| { echo "template task line failed assert_issue_valid: $template" >&2
+				echo "task line: $task_line" >&2
+				echo "$output" >&2
+				return 1; }
+	done
+}
+
 @test "bundle: no bundled script hardcodes ../config/platform.sh" {
 	local scripts_dir="$REPO_ROOT/plugins/pipeline-core/scripts"
 	[ -d "$scripts_dir" ] || skip "bundle scripts not present"
