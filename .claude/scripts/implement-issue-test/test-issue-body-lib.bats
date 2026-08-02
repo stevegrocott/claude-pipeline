@@ -187,6 +187,118 @@ valid_body() {
 	[[ "$output" == *"task has no file path"* ]]
 }
 
+# --- Issue #689: separator-less backticked filenames are name mentions, not
+# navigation targets, so they are exempt from resolution but still cannot
+# satisfy the >=1-path requirement on their own. ---
+
+@test "assert_issue_valid: a backticked filename with no directory separator, mentioned in prose, does not raise 'unresolved path'" {
+	# A slash-less filename named in ordinary prose (a warning not to touch
+	# it, not a navigation target — replaying the #679 shape) must not be
+	# resolution-checked.  The task's real navigation target is the files
+	# suffix, `.claude/scripts/model-config.sh`.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/.claude/scripts"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Re-source the real config path in an isolated subshell — do NOT re-source \`model-config.sh\` in the test shell, see readonly hazard — \`.claude/scripts/model-config.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"unresolved path"* ]]
+}
+
+@test "assert_issue_valid: a slash-bearing bad path still fails even with an exempt bare filename in the same task" {
+	# The exemption is narrow to separator-less tokens: a path with a
+	# directory component that does not resolve must still fail criterion 3,
+	# and the exemption on the bare filename must not leak into it.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** See \`README.md\` and edit — \`nope/missing/file.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"unresolved path: nope/missing/file.sh"* ]]
+	[[ "$output" != *"unresolved path: README.md"* ]]
+}
+
+@test "assert_issue_valid: a separator-less filename alone does NOT satisfy the >=1-path requirement" {
+	# Mirrors the bare /word rule (#600): demoting the token to prose means a
+	# task whose only path-like token is a separator-less filename must still
+	# fail criterion 7 — the exemption cannot be used to skip naming a real
+	# path.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Update \`config.yaml\` for the service
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"task has no file path"* ]]
+}
+
+# --- Issue #689 AC2: regression fixtures replaying the #679 and #678 bodies
+# verbatim as they stood at rejection time (batch-20260730-212750,
+# 2026-07-30T21:28 local / 2026-07-30T11:28:01Z-11:28:08Z UTC). Recovered via
+# `gh api graphql` userContentEdits — the pre-fix snapshot immediately before
+# each issue was hand-edited to full paths minutes after preflight skipped
+# it. Bodies are reproduced byte-for-byte (including the bare `model-config.sh`,
+# `test-timeout-escalation.bats` and `test-bundle-parity.bats` mentions that
+# triggered "unresolved path"), not reconstructed, so this fixture would have
+# caught the regression before #689 was ever filed. ---
+
+@test "#689 AC2: replays the #679 body verbatim as rejected and it now validates" {
+	# Preflight log at rejection time (orchestrator.log):
+	#   WARN: Preflight #679: assert_issue_valid: unresolved path: model-config.sh
+	#   WARN: Skipping issue #679: body failed structural validation
+	#
+	# Fixture is the exact issue body live at rejection (2026-07-30T21:28:01
+	# local / 2026-07-30T11:28:01Z), recovered via `gh api graphql`
+	# userContentEdits (the snapshot immediately before a hand-edit minutes
+	# later rewrote the bare `model-config.sh` mention to a full path) — a
+	# byte-for-byte replay, not a reconstruction. Stored as a file rather than
+	# an inline heredoc: bash 3.2 (macOS default, what this suite runs under)
+	# misparses a single-quoted heredoc containing an odd number of literal
+	# apostrophes, which this prose body has several of.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/.claude/scripts/implement-issue-test"
+	local fixtures_dir
+	fixtures_dir="$(dirname "${BATS_TEST_FILENAME}")/fixtures"
+	local body
+	body=$(cat "$fixtures_dir/issue-679-rejected-body.md")
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"unresolved path"* ]]
+}
+
+@test "#689 AC2: replays the #678 body verbatim as rejected and it now validates" {
+	# Preflight log at rejection time (orchestrator.log):
+	#   WARN: Preflight #678: assert_issue_valid: unresolved path: test-bundle-parity.bats
+	#   WARN: Preflight #678: assert_issue_valid: unresolved path: test-timeout-escalation.bats
+	#   WARN: Skipping issue #678: body failed structural validation
+	#
+	# Fixture is the exact issue body live at rejection (2026-07-30T21:28:08
+	# local / 2026-07-30T11:28:08Z), recovered the same way as #679 above.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/.claude/scripts/implement-issue-test"
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts"
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/tests"
+	local fixtures_dir
+	fixtures_dir="$(dirname "${BATS_TEST_FILENAME}")/fixtures"
+	local body
+	body=$(cat "$fixtures_dir/issue-678-rejected-body.md")
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"unresolved path"* ]]
+}
+
 @test "assert_issue_valid: accepts a new file in a not-yet-existing subdir when an ancestor exists" {
 	# Defect 4 — resolution walks ancestors: 'app/api/' exists but
 	# 'app/api/register/' does not yet, and the new file must still validate.

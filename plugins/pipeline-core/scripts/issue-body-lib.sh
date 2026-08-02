@@ -319,12 +319,20 @@ _issue_body_path_resolves() {
 
 #
 # Classifies an extracted token as a repo path (0) or prose (1).  A token
-# counts as a repo path only if it bears a known file extension OR resolves on
-# disk.  This demotes extension-less non-resolving tokens — HTTP routes like
-# `/api/register` and bare `/word` tokens like `/login` — to prose, so they
-# neither raise a false "unresolved path" error nor satisfy the ≥1-path
-# requirement.  Extension-less real references (e.g. a `.claude/scripts/`
-# directory) still count via the "resolves on disk" branch.
+# counts as a repo path only if it contains a directory separator AND (bears
+# a known file extension OR resolves on disk).  This demotes two token
+# classes to prose:
+#   - extension-less non-resolving tokens — HTTP routes like `/api/register`
+#     and bare `/word` tokens like `/login`
+#   - separator-less filenames — a bare `model-config.sh` mentioned by name
+#     in prose (e.g. "do NOT re-source `model-config.sh`") can never resolve
+#     (`_issue_body_path_resolves` only walks ancestors when the token
+#     contains a `/`), so classifying it as a repo path always false-rejects
+#     the description that mentions it (#679, #678)
+# Demoting them means they neither raise a false "unresolved path" error nor
+# satisfy the ≥1-path requirement.  Extension-less real references (e.g. a
+# `.claude/scripts/` directory) still count via the "resolves on disk"
+# branch, since a directory reference worth checking is slash-bearing.
 #
 # Arguments:
 #   $1 - extracted path token
@@ -334,6 +342,9 @@ _issue_body_path_resolves() {
 #
 _issue_body_is_repo_path() {
 	local token="$1" repo_root="$2"
+	# No directory separator → a name mention, not a navigation target.
+	# Resolution can never succeed for it, so it is never resolution-checked.
+	[[ "$token" == */* ]] || return 1
 	[[ "$token" =~ \.(${ISSUE_BODY_KNOWN_EXTS})$ ]] && return 0
 	_issue_body_path_resolves "$token" "$repo_root"
 }
@@ -768,6 +779,14 @@ assert_issue_valid() {
 		# codebase blind — the #1 token sink the explore skill warns about.
 		# The parser already skips checked [x] tasks, so only OPEN tasks are
 		# gated here; the diagnostic names the offending task.
+		#
+		# Strictness (#689): a separator-less filename (e.g. a bare
+		# `config.yaml` mentioned in prose) is demoted to prose by
+		# _issue_body_is_repo_path and so cannot be the task's sole path
+		# token here either — mirroring the pre-existing bare `/word` rule
+		# that already kept an extension-less non-resolving token from
+		# satisfying this same criterion.  A task must still name at least
+		# one real, slash-bearing path.
 		#
 		# Exemption (issue #634): a task that declares a NON-COMMIT
 		# deliverable — `deliverable:comment:<marker>` — has no file to name;

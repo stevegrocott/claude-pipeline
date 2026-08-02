@@ -138,6 +138,8 @@ MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_E2E_FIX_ITERATIONS="${MAX_E2E_FIX_ITERATIONS:-2}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-10800}" # seconds (default 3 hours — long-running issues with many tasks or slow test suites can easily exceed 1 hour)
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"       # seconds per parallel task (default 30 min —
-                                                                   # matches the serial implement-one-task stage
-                                                                   # timeout so parallel tasks aren't cut off
-                                                                   # sooner than the same task would run serially)
+                                                                   # a floor beneath the complexity-derived ceiling:
+                                                                   # get_stage_timeout() grants up to 3600s per
+                                                                   # attempt for L-complexity tasks, and a task can
+                                                                   # retry across several review attempts, so raise
+                                                                   # this via env var for large/complex batches)

@@ -296,6 +296,28 @@ get_stage_timeout() {
     esac
 }
 
+# get_task_wall_time - per-task watchdog wall-clock budget
+#
+# The parallel-batch watchdog previously killed every task at the flat
+# MAX_TASK_WALL_TIME_SECS, even large/complex tasks whose own stage
+# timeout (from get_stage_timeout) is longer. Take whichever is larger
+# so the watchdog never fires before the stage's own timeout would.
+get_task_wall_time() {
+    local complexity="${1:-}"
+    local stage_timeout
+    # "implement-task" is not a real stage name — it's a synthetic name
+    # chosen only to hit the `implement*|fix*` prefix case in
+    # get_stage_timeout, since task execution is implement-shaped
+    # regardless of which concrete stage (implement/fix) runs it.
+    stage_timeout=$(get_stage_timeout "implement-task" "$complexity")
+
+    if (( stage_timeout > MAX_TASK_WALL_TIME_SECS )); then
+        printf '%s' "$stage_timeout"
+    else
+        printf '%s' "$MAX_TASK_WALL_TIME_SECS"
+    fi
+}
+
 # =============================================================================
 # GLOBAL WALL-CLOCK TIMEOUT
 # =============================================================================
@@ -2797,12 +2819,12 @@ run_stage() {
     # immediately before calling run_stage.  Consumed and cleared here so a
     # stale value can never raise the budget of an unrelated later stage.
     local _stage_desc_len="${_RUN_STAGE_DESC_LEN:-0}"
-    # Promotion threshold (issue #619, retuned by #637).  This MUST sit below
-    # the explore skill's "task descriptions must stay under ~200 characters"
-    # rule: at 200 the two used the same number in opposite directions, so a
-    # correctly-authored task could never be promoted and the branch was dead
-    # code.  Measured bails clustered at 152–190 chars; 120 covers that band.
-    # The raised budget is a ceiling, not a target — unused turns cost nothing.
+    # Promotion threshold (issue #619, retuned by #637, reconciled with the
+    # explore/enrich-issue skills' stated "~120 characters" limit in #746).
+    # A task that stays within the skill's stated limit never trips this
+    # promotion; one that exceeds it — an authoring guideline violation — is
+    # exactly what should get the larger turn budget. The raised budget is a
+    # ceiling, not a target — unused turns cost nothing.
     # Pinned against the skill by test-stage-runner.bats.
     local _promote_chars="${TASK_DESC_PROMOTE_CHARS:-120}"
     unset _RUN_STAGE_DESC_LEN
@@ -6676,6 +6698,7 @@ execute_batch_parallel() {
 	local -a wt_paths=()
 	local -a wt_branches=()
 	local -a result_files=()
+	local -a task_walltimes=()
 
 	local i
 	for ((i = 0; i < batch_count; i++)); do
@@ -6687,6 +6710,8 @@ execute_batch_parallel() {
 		tdesc=$(printf '%s' "$task" | jq -r '.description')
 		tagent=$(printf '%s' "$task" | jq -r '.agent')
 		tsize=$(extract_task_size "$tdesc")
+		local twall
+		twall=$(get_task_wall_time "$tsize")
 
 		local wt_branch="wt-i${ISSUE_NUMBER}-t${tid}"
 		local result_file
@@ -6709,6 +6734,7 @@ execute_batch_parallel() {
 			wt_paths+=("")
 			wt_branches+=("$wt_branch")
 			result_files+=("$result_file")
+			task_walltimes+=("$twall")
 			continue
 		fi
 
@@ -6716,6 +6742,7 @@ execute_batch_parallel() {
 		wt_paths+=("$wt_path")
 		wt_branches+=("$wt_branch")
 		result_files+=("$result_file")
+		task_walltimes+=("$twall")
 
 		# Launch in background subshell with wall-time guard
 		(
@@ -6730,7 +6757,7 @@ execute_batch_parallel() {
 			_task_pid=$!
 			set +m
 			set -m
-			( sleep "${MAX_TASK_WALL_TIME_SECS}" && \
+			( sleep "${twall}" && \
 				kill -- -"$_task_pid" 2>/dev/null ) > /dev/null 2>&1 &
 			_watchdog_pid=$!
 			set +m
@@ -6744,7 +6771,7 @@ execute_batch_parallel() {
 			if [[ $_task_exit -eq 143 && \
 				! -f "$result_file" ]]; then
 				log_error "Task $tid TIMED OUT" \
-					"after ${MAX_TASK_WALL_TIME_SECS}s"
+					"after ${twall}s"
 				printf '%s' \
 					'{"status":"timeout","review_attempts":0}' \
 					> "$result_file"
@@ -6754,7 +6781,7 @@ execute_batch_parallel() {
 		pids+=("$last_pid")
 		_bg_pids+=("$last_pid")
 		log "Task $tid launched (PID $last_pid," \
-			"wall-time limit ${MAX_TASK_WALL_TIME_SECS}s)" \
+			"wall-time limit ${twall}s)" \
 			"in $wt_path"
 	done
 
@@ -6780,6 +6807,7 @@ execute_batch_parallel() {
 		local rf="${result_files[$i]}"
 		local wb="${wt_branches[$i]}"
 		local wp="${wt_paths[$i]}"
+		local twall="${task_walltimes[$i]}"
 
 		if [[ ! -f "$rf" ]]; then
 			log_error "No result file for task $tid"
@@ -6794,7 +6822,7 @@ execute_batch_parallel() {
 
 		if [[ "$rstatus" == "timeout" ]]; then
 			log_error "Task $tid TIMED OUT" \
-				"(exceeded ${MAX_TASK_WALL_TIME_SECS}s wall time)"
+				"(exceeded ${twall}s wall time)"
 			failed+=("$tid")
 			cleanup_worktree "$wp" "$wb" \
 				"$ISSUE_NUMBER" "$tid" "$feature_branch"
@@ -8592,9 +8620,17 @@ run_parallel_post_task_stages() {
 	local e2e_start=0 acceptance_start=0
 	# Temp files carry failure summaries out of subshells for sequential
 	# fix dispatch; avoids two fix agents committing to $branch concurrently.
-	local e2e_fail_file acceptance_fail_file
+	local e2e_fail_file acceptance_fail_file e2e_unmeasured_file
 	e2e_fail_file=$(mktemp)
 	acceptance_fail_file=$(mktemp)
+	# Issue #745: a separate signal from e2e_fail_file. The initial
+	# e2e-verify call's own tests_run/tests_passed/tests_failed counts
+	# may not support its self-reported verdict (zero tests run, or a
+	# passed+failed total short of tests_run) — that is an unfinished
+	# run, not a measurement. Routing it here instead of e2e_fail_file
+	# keeps it out of the fix-dispatch gate entirely, so no fix
+	# iteration is spent chasing a verdict nothing measured.
+	e2e_unmeasured_file=$(mktemp)
 
 	if $run_e2e; then
 		e2e_start=$(date +%s)
@@ -8663,16 +8699,54 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			e2e_verify_summary=$(printf '%s' "$e2e_verify_result" \
 				| jq -r '.output.summary // "E2E verification completed"')
 
+			# Issue #745: a verdict is only as good as the counts
+			# behind it. A 'failed' verdict with tests_failed == 0
+			# claims a failure the counts never recorded (issue-5536:
+			# failed, 0/0/0 — the run never finished). A passed+failed
+			# total short of tests_run means some targeted specs never
+			# executed, whether the self-reported verdict was 'passed'
+			# or 'failed' (issue-5531: passed, 6+0 of 12 — half the
+			# suite was skipped for missing browsers). Either case is
+			# unsupported, not a measurement — override to 'unmeasured'
+			# rather than trust the self-report, and route it to
+			# e2e_unmeasured_file instead of e2e_fail_file so it never
+			# enters the fix loop.
+			#
+			# A genuine zero-spec run (0 run, 0 passed, 0 failed) is
+			# neither: nothing failed, and passed+failed (0) is not
+			# short of tests_run (0). Keying the check on the counts'
+			# own consistency, rather than a bare `tests_run == 0`,
+			# lets that legitimate pass stand (AC4).
+			local e2e_tests_run e2e_tests_passed e2e_tests_failed
+			e2e_tests_run=$(printf '%s' "$e2e_verify_result" \
+				| jq -r '.output.tests_run // 0')
+			e2e_tests_passed=$(printf '%s' "$e2e_verify_result" \
+				| jq -r '.output.tests_passed // 0')
+			e2e_tests_failed=$(printf '%s' "$e2e_verify_result" \
+				| jq -r '.output.tests_failed // 0')
+			if [[ "$e2e_verify_status" == "failed" \
+				&& "$e2e_tests_failed" -eq 0 ]] \
+				|| ((e2e_tests_passed + e2e_tests_failed \
+					< e2e_tests_run)); then
+				e2e_verify_status="unmeasured"
+			fi
+
 			local e2e_icon="✅"
 			[[ "$e2e_verify_status" == "failed" ]] \
 				&& e2e_icon="❌"
+			[[ "$e2e_verify_status" == "unmeasured" ]] \
+				&& e2e_icon="⚠️"
 			comment_issue "E2E Verification" \
 				"$e2e_icon **Result:** $e2e_verify_status
 Container rebuild: $rebuild_status | Health: $health_status
 
 $e2e_verify_summary" "playwright-test-developer"
 
-			if [[ "$e2e_verify_status" == "failed" ]]; then
+			if [[ "$e2e_verify_status" == "unmeasured" ]]; then
+				printf '%s' "$e2e_verify_summary" \
+					> "$e2e_unmeasured_file"
+				exit 1
+			elif [[ "$e2e_verify_status" == "failed" ]]; then
 				# Write summary for sequential fix dispatch after wait.
 				# Fixes must not run concurrently with acceptance fixes
 				# to prevent two agents committing to $branch at once.
@@ -8810,6 +8884,24 @@ $acceptance_summary" "default"
 	# dispatching any sequential fix stage, so no fix CLI call runs post-breach.
 	_halt_if_budget_exceeded
 
+	# Issue #745: the initial e2e-verify call reported a verdict its own
+	# counts don't support (zero tests run, or passed+failed short of
+	# tests_run). Record it as degraded — visible to the merge gate,
+	# same as the BATS incomplete path — and do NOT enter the fix-dispatch
+	# gate below: e2e_fail_file was never written for this case, so the
+	# fix budget and container rebuilds are not spent chasing a verdict
+	# nothing measured.
+	if [[ -s "$e2e_unmeasured_file" ]]; then
+		DEGRADED_STAGES+=("e2e_verify:unmeasured")
+		log_warn "E2E verification unmeasured" \
+			"(counts do not support the reported verdict)" \
+			"— skipping E2E fix loop"
+		comment_issue "E2E Verification: Unmeasured" \
+			"⚠️ E2E verdict was not supported by its own test counts \
+(run did not finish). Not entering the fix loop — this needs manual \
+review before merge." "playwright-test-developer"
+	fi
+
 	# ------------------------------------------------------------------
 	# Sequential fix dispatch: if a stage failed, dispatch fix agents
 	# one at a time to avoid concurrent commits to $branch.
@@ -8820,6 +8912,7 @@ $acceptance_summary" "default"
 		local max_e2e_fixes="${MAX_E2E_FIX_ITERATIONS:-2}"
 		local e2e_fix_iter=0
 		local e2e_fixed=false
+		local e2e_rerun_unmeasured=false
 
 		while ((e2e_fix_iter < max_e2e_fixes)); do
 			e2e_fix_iter=$((e2e_fix_iter + 1))
@@ -8902,8 +8995,28 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			rerun_summary=$(printf '%s' "$rerun_result" \
 				| jq -r '.output.summary // "E2E rerun completed"')
 
+			# Issue #745: a verdict is only as good as the counts
+			# behind it. Zero tests run, or a passed+failed total
+			# short of tests_run, means the run did not finish —
+			# a self-reported 'passed' or 'failed' in that state is
+			# unsupported, not a measurement. Override to
+			# 'unmeasured' rather than trust the self-report.
+			local rerun_tests_run rerun_tests_passed rerun_tests_failed
+			rerun_tests_run=$(printf '%s' "$rerun_result" \
+				| jq -r '.output.tests_run // 0')
+			rerun_tests_passed=$(printf '%s' "$rerun_result" \
+				| jq -r '.output.tests_passed // 0')
+			rerun_tests_failed=$(printf '%s' "$rerun_result" \
+				| jq -r '.output.tests_failed // 0')
+			if ((rerun_tests_run == 0)) \
+				|| ((rerun_tests_passed + rerun_tests_failed \
+					< rerun_tests_run)); then
+				rerun_status="unmeasured"
+			fi
+
 			local rerun_icon="✅"
 			[[ "$rerun_status" == "failed" ]] && rerun_icon="❌"
+			[[ "$rerun_status" == "unmeasured" ]] && rerun_icon="⚠️"
 			comment_issue \
 				"E2E Verification (rerun $e2e_fix_iter)" \
 				"$rerun_icon **Result:** $rerun_status
@@ -8915,11 +9028,33 @@ $rerun_summary" "playwright-test-developer"
 				break
 			fi
 
+			if [[ "$rerun_status" == "unmeasured" ]]; then
+				# Issue #745: an unmeasured rerun is not a
+				# fresh measured failure to keep fixing
+				# against — stop here instead of looping,
+				# so no further fix iteration or container
+				# rebuild is spent chasing a run that never
+				# finished.
+				e2e_rerun_unmeasured=true
+				break
+			fi
+
 			# Update failure summary for next iteration
 			e2e_fail_summary="$rerun_summary"
 		done
 
-		if ! $e2e_fixed; then
+		if $e2e_rerun_unmeasured; then
+			DEGRADED_STAGES+=("e2e_verify:unmeasured")
+			log_warn "E2E rerun verdict unmeasured" \
+				"(counts do not support the reported verdict)" \
+				"— stopping the fix loop at iteration" \
+				"$e2e_fix_iter/$max_e2e_fixes"
+			comment_issue "E2E Verification: Unmeasured" \
+				"⚠️ The E2E rerun verdict was not supported by \
+its own test counts (run did not finish). Stopping the fix loop here \
+instead of spending further budget on it — this needs manual review \
+before merge." "playwright-test-developer"
+		elif ! $e2e_fixed; then
 			log_warn "E2E failed after $max_e2e_fixes fix attempts" \
 				"— proceeding with soft failure"
 			comment_issue "E2E Verification: Soft Failure" \
@@ -8973,7 +9108,7 @@ Investigate the root cause and fix the issue. Commit your changes."
 	fi
 
 	# Clean up temp files
-	rm -f "$e2e_fail_file" "$acceptance_fail_file"
+	rm -f "$e2e_fail_file" "$acceptance_fail_file" "$e2e_unmeasured_file"
 
 	# Mark completed AFTER parallelism (sequential writes, no race)
 	$run_e2e && set_stage_completed "e2e_verify"
@@ -9252,6 +9387,29 @@ leaving changes in the working tree. The reported fixes have NOT landed on
 regenerate_bundle_if_needed() {
 	local work_dir="$1" base_branch="$2"
 	local repo_root changed dirty
+	# Parity-check scratch state (kept local — this function is sourced and
+	# run standalone by tests/sync-bundle.bats, so it cannot reach a helper
+	# defined elsewhere in the file).
+	local _canonical_dir _bundle_scripts_dir _parity_in_sync
+	# Populated below from sync.sh's own BUNDLE_SCRIPT_SUBDIRS *and* from the
+	# subdirectories that actually exist under .claude/scripts/ (issue #693):
+	# a hardcoded second copy here would silently miss a subdir added to
+	# .claude/scripts/ and to sync.sh's list but forgotten in this file, and
+	# reading sync.sh alone would still miss one added to .claude/scripts/
+	# and forgotten in sync.sh — exactly the drift this check exists to catch.
+	local -a _parity_subdirs=()
+	# Space-delimited mirror of _parity_subdirs used for membership tests:
+	# bash 3.2 under `set -u` errors on "${empty_array[@]}", and the array is
+	# legitimately empty until the parse below succeeds.
+	local _parity_seen=" "
+	local _parity_script _parity_rel _parity_counterpart _parity_sub
+	local _parity_dir _parity_bats _parity_bundle_script
+	# Set when the awk parse below finds no BUNDLE_SCRIPT_SUBDIRS=( ... )
+	# declaration at all, as distinct from a declaration that parses fine but
+	# omits a real subdirectory. Conflating the two used to make a total
+	# parse failure masquerade as "sync.sh forgot every single subdirectory"
+	# — see the union loop below.
+	local _parity_parse_failed=0
 
 	# Resolve the root once, then run every git call against it: the pathspecs
 	# below are repo-relative, so they must not depend on where the
@@ -9275,6 +9433,191 @@ regenerate_bundle_if_needed() {
 	if ! bash "$repo_root/sync.sh" bundle >/dev/null 2>&1; then
 		log_error "sync.sh bundle failed — bundle parity will be red on the PR"
 		return 0
+	fi
+
+	# The generator exited 0, but that alone doesn't prove the trees agree —
+	# a generator that silently skips a file (a subdir added to
+	# .claude/scripts/ but not yet to sync.sh's BUNDLE_SCRIPT_SUBDIRS, say)
+	# exits 0 and leaves `git status` clean for the path it never touched.
+	# Assert real parity explicitly, over the same top-level-*.sh-plus-subdirs
+	# scope sync.sh's BUNDLE_SCRIPT_SUBDIRS and test-bundle-parity.bats'
+	# PARITY_SUBDIRS already enforce, so a regeneration that silently fails to
+	# converge is loud here rather than discovered as a red Bundle Parity &
+	# Syntax check on the PR (issue #675 AC5).
+	_canonical_dir="$repo_root/.claude/scripts"
+	_bundle_scripts_dir="$repo_root/plugins/pipeline-core/scripts"
+
+	# Read BUNDLE_SCRIPT_SUBDIRS out of sync.sh itself rather than
+	# hardcoding a copy of it here. Handles both the single-line and
+	# one-entry-per-line array forms and strips trailing comments — the
+	# same parse test-bundle-parity.bats' _sync_array() uses to read
+	# sync.sh's hook allowlists, so one proven technique covers both.
+	#
+	# The trigger match tolerates indentation (a tab-indented declaration
+	# inside a function, say) and a `declare -a ` prefix — it only requires
+	# "BUNDLE_SCRIPT_SUBDIRS=(" to appear somewhere on the line, not at
+	# column 1, and strips everything up to and including that substring
+	# rather than up to the first "(" (which a leading "declare -a" would
+	# otherwise satisfy prematurely). A commented-out declaration is
+	# ignored so it can't be picked up as real.
+	while IFS= read -r _parity_sub; do
+		[[ -n "$_parity_sub" ]] || continue
+		_parity_subdirs+=("$_parity_sub")
+		_parity_seen+="$_parity_sub "
+	done < <(awk '
+		!inside && /^[ \t]*#/ { next }
+		!inside && index($0, "BUNDLE_SCRIPT_SUBDIRS=(") > 0 {
+			inside = 1
+			sub(/^.*BUNDLE_SCRIPT_SUBDIRS=\(/, "")
+		}
+		inside {
+			line = $0
+			sub(/#.*/, "", line)
+			closing = (index(line, ")") > 0)
+			sub(/\).*/, "", line)
+			n = split(line, parts, /[ \t]+/)
+			for (i = 1; i <= n; i++) {
+				if (parts[i] != "") print parts[i]
+			}
+			if (closing) exit
+		}
+	' "$repo_root/sync.sh")
+
+	# A total parse failure (no BUNDLE_SCRIPT_SUBDIRS=( ... ) declaration
+	# found anywhere in sync.sh) is a different failure mode than the
+	# per-subdirectory "sync.sh forgot to list this one" check below, and
+	# must be reported as such rather than conflated with it: if this branch
+	# fires, the union loop right after it cannot tell "sync.sh forgot this
+	# subdir" from "sync.sh's list was never read", so it is skipped there
+	# and every real subdirectory is added to the fallback list in silence,
+	# with a single loud error here instead of one false "does not list it"
+	# error per subdirectory.
+	if ((${#_parity_subdirs[@]} == 0)); then
+		_parity_parse_failed=1
+		log_error "PARSE FAILURE: no BUNDLE_SCRIPT_SUBDIRS=( ... )" \
+			"declaration found in $repo_root/sync.sh — falling back to" \
+			"whatever subdirectories exist under .claude/scripts/ for" \
+			"the parity check, without claiming sync.sh omits any of them"
+	fi
+
+	# sync.sh's list answers "what does the generator bundle?", never "what
+	# exists?". A subdir added under .claude/scripts/ but forgotten in
+	# BUNDLE_SCRIPT_SUBDIRS is absent from BOTH lists, so reading sync.sh
+	# alone reproduces the very blind spot this guard is meant to close
+	# (issue #693). Union in every real subdirectory too, so a forgotten one
+	# is named here instead of quietly never shipping to consumers.
+	#
+	# Test trees are the one deliberate exception: *-test/ directories, and
+	# any directory holding .bats files, are never bundled by design
+	# (.claude/scripts/implement-issue-test/, platform-test/), so reporting
+	# them would be noise on every run rather than a signal.
+	for _parity_dir in "$_canonical_dir"/*/; do
+		[[ -d "$_parity_dir" ]] || continue
+		_parity_sub="${_parity_dir%/}"
+		_parity_sub="${_parity_sub##*/}"
+
+		[[ "$_parity_seen" == *" $_parity_sub "* ]] && continue
+		[[ "$_parity_sub" == *-test ]] && continue
+		# Bounded to two levels (the subdir itself, plus one level of
+		# nested helper/fixture dirs like implement-issue-test/helpers/)
+		# rather than an unbounded recursive walk: every *.bats file in
+		# this tree today lives at one of those two levels, and without
+		# -maxdepth this find re-walks every file under subdirs like
+		# platform/ and schemas/ on every bundle regen even though they
+		# hold no .bats files at all.
+		_parity_bats=$(find "$_parity_dir" -maxdepth 2 -name '*.bats' \
+			2>/dev/null | head -n 1)
+		[[ -n "$_parity_bats" ]] && continue
+
+		# Only claim sync.sh forgot this specific subdirectory when its
+		# list was actually readable — when the parse totally failed above,
+		# EVERY real subdirectory lands here, and reporting each one
+		# individually would misrepresent a parse failure as sync.sh having
+		# omitted every subdirectory it bundles.
+		if ((! _parity_parse_failed)); then
+			log_error "subdirectory '$_parity_sub' exists under" \
+				".claude/scripts/ but sync.sh's BUNDLE_SCRIPT_SUBDIRS does" \
+				"not list it, so the generator never bundles it — add it" \
+				"there if it should ship to consumers"
+		fi
+		_parity_subdirs+=("$_parity_sub")
+		_parity_seen+="$_parity_sub "
+	done
+
+	_parity_in_sync=1
+	for _parity_script in "$_canonical_dir"/*.sh; do
+		[[ -f "$_parity_script" ]] || continue
+		_parity_rel="${_parity_script#"$_canonical_dir"/}"
+		_parity_counterpart="$_bundle_scripts_dir/$_parity_rel"
+		if [[ ! -f "$_parity_counterpart" ]] || \
+			! diff -q "$_parity_script" "$_parity_counterpart" >/dev/null 2>&1
+		then
+			_parity_in_sync=0
+			break
+		fi
+	done
+	if ((_parity_in_sync)) && ((${#_parity_subdirs[@]} > 0)); then
+		for _parity_sub in "${_parity_subdirs[@]}"; do
+			[[ -d "$_canonical_dir/$_parity_sub" ]] || continue
+			while IFS= read -r _parity_script; do
+				_parity_rel="${_parity_script#"$_canonical_dir"/}"
+				_parity_counterpart="$_bundle_scripts_dir/$_parity_rel"
+				if [[ ! -f "$_parity_counterpart" ]] || \
+					! diff -q "$_parity_script" "$_parity_counterpart" \
+						>/dev/null 2>&1
+				then
+					_parity_in_sync=0
+					break
+				fi
+			done < <(find "$_canonical_dir/$_parity_sub" -type f)
+			((_parity_in_sync)) || break
+		done
+	fi
+
+	# Reverse sweep (issue #694): the loops above only ever walk
+	# .claude/scripts/**, so a canonical file that was DELETED never gets
+	# visited — its leftover bundle copy would pass the checks above in
+	# silence. sync.sh's own removal step normally cleans this up, but this
+	# guard exists precisely because a generator that exits 0 is not proof
+	# of parity (same rationale as the forward check above), so it must
+	# verify the reverse direction itself rather than trust the generator
+	# removed everything it should have. Mirrors test-bundle-parity.bats'
+	# "every bundled script has a canonical counterpart" — the same failure
+	# the Bundle Parity & Syntax CI check flags.
+	for _parity_bundle_script in "$_bundle_scripts_dir"/*.sh; do
+		[[ -f "$_parity_bundle_script" ]] || continue
+		_parity_rel="${_parity_bundle_script#"$_bundle_scripts_dir"/}"
+		[[ -f "$_canonical_dir/$_parity_rel" ]] && continue
+		_parity_in_sync=0
+		log_error "bundled file '$_parity_rel' has no canonical" \
+			"counterpart in .claude/scripts/ — remove it from" \
+			"plugins/pipeline-core/scripts/ or restore the canonical source"
+	done
+	# Guarded on length for the same reason the forward subdir loop is: this
+	# file runs under `set -u`, and bash 3.2 (the macOS system bash) treats
+	# "${empty_array[@]}" as an unbound variable, which would abort the run
+	# one stage before the PR — the opposite of this function's "always
+	# return 0" contract.
+	if ((${#_parity_subdirs[@]} > 0)); then
+		for _parity_sub in "${_parity_subdirs[@]}"; do
+			[[ -d "$_bundle_scripts_dir/$_parity_sub" ]] || continue
+			while IFS= read -r _parity_bundle_script; do
+				_parity_rel="${_parity_bundle_script#"$_bundle_scripts_dir"/}"
+				[[ -f "$_canonical_dir/$_parity_rel" ]] && continue
+				_parity_in_sync=0
+				log_error "bundled file '$_parity_rel' has no canonical" \
+					"counterpart in .claude/scripts/ — remove it from" \
+					"plugins/pipeline-core/scripts/ or restore the" \
+					"canonical source"
+			done < <(find "$_bundle_scripts_dir/$_parity_sub" -type f)
+		done
+	fi
+
+	if ((! _parity_in_sync)); then
+		log_error "sync.sh bundle exited 0 but plugins/pipeline-core/scripts/" \
+			"still does not match .claude/scripts/ — bundle parity will be" \
+			"red on the PR; run ./sync.sh bundle by hand and inspect the" \
+			"generator"
 	fi
 
 	dirty=$(git -C "$repo_root" status --porcelain \
@@ -9674,12 +10017,13 @@ $excerpt
             fi
         done
 
-        # (b) Warn about large task descriptions (>200 chars)
+        # (b) Warn about large task descriptions — matches the explore/enrich-issue
+        # skills' stated ~120-char limit (TASK_DESC_PROMOTE_CHARS, issue #746).
         for ((i=0; i<task_count; i++)); do
             local check_desc
             check_desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
             local desc_len=${#check_desc}
-            if (( desc_len > 200 )); then
+            if (( desc_len > ${TASK_DESC_PROMOTE_CHARS:-120} )); then
                 log "WARNING: Task $((i+1)) description is $desc_len chars — consider splitting into smaller tasks"
             fi
         done
@@ -10973,6 +11317,15 @@ Fix the issues and commit. Output a summary of fixes applied."
             # its work uncommitted.
             if _handle_fix_stage_result "$pr_number" "$pr_iteration" \
                 "$branch" "$fix_head_before" "$fix_result"; then
+                # A review fix can edit a canonical .claude/scripts/ file just
+                # as easily as the initial implementation can — the pre-PR
+                # call above only covers commits that existed before the PR
+                # was opened. Regenerate here too, immediately before the
+                # push, so this post-PR commit cannot leave the bundle stale
+                # (issue #632 second-order case: the AC7 hook ran once, then
+                # a review-fix commit re-diverged the bundle).
+                regenerate_bundle_if_needed "." "$BASE_BRANCH"
+
                 # Push updates (quality loop skipped — re-review will catch remaining issues)
                 log "Pushing updates to PR..."
                 git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"

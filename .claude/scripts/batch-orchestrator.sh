@@ -108,11 +108,27 @@ ACTIVE_ORCH_PGID=""
 # to log and record why an issue was skipped in status.json.
 _SKIP_REASON=""
 
+# Out-of-band preflight-skip signal set by process_issue() when
+# validate_issue_for_processing() rejects an issue. process_issue() still
+# returns 0 for a preflight skip (so consecutive_failures / the circuit
+# breaker are unaffected — see issue #690), but callers need a way to tell
+# a genuine "processed successfully" 0 apart from a "skipped without ever
+# running" 0. Reset to false at the top of every process_issue() call; read
+# by the caller immediately after process_issue() returns.
+_PREFLIGHT_SKIPPED=false
+
 # Epic-scope signal set by validate_issue_for_processing() when an issue is
 # flagged as epic-scope (see EPIC_SCOPE_MAX_TASKS). Epic issues concentrate
 # spend, so they are routed to split-first (skipped from a wholesale run)
 # rather than implemented in a single expensive pass. Empty when not epic.
 _EPIC_SCOPE=""
+
+# Skip reason + merged-PR number set by check_issue_resolved_upstream();
+# read by the batch loop immediately after the call. Kept separate from
+# _SKIP_REASON (owned by validate_issue_for_processing()) so the two
+# unrelated preflight gates never stomp on the same global.
+_UPFRONT_SKIP_REASON=""
+_UPFRONT_SKIP_PR=""
 
 # Epic-scope task-count threshold: an issue whose body carries more than this
 # many task/AC checkboxes is treated as epic-scope regardless of labels. Set
@@ -955,6 +971,53 @@ revalidate_issue_after_enrich() {
 	assert_issue_valid "$body" 2>/dev/null
 }
 
+# check_issue_resolved_upstream <issue_num>
+#
+# Up-front skip gate: has this issue already been resolved on GitHub —
+# either the issue itself is closed, or a PR for "feature/issue-<num>" has
+# already been merged? Complements the status.json idempotency check in
+# the batch loop by querying live platform state before spinning up the
+# orchestrator. Only active when GIT_HOST=github; any other host is
+# treated as "not resolved" (returns 1).
+#
+# A gh failure (network error, unauthenticated) is non-fatal: the empty
+# result falls through to "not resolved" so the orchestrator's own
+# already_implemented detection remains the safety net.
+#
+# Returns:
+#   0 — issue is already resolved; caller should skip processing. Sets
+#       _UPFRONT_SKIP_REASON (human-readable) and _UPFRONT_SKIP_PR (the
+#       merged PR number, empty if the issue was closed without one).
+#   1 — not resolved upstream; proceed with processing.
+check_issue_resolved_upstream() {
+	local issue_num="$1"
+	_UPFRONT_SKIP_REASON=""
+	_UPFRONT_SKIP_PR=""
+
+	[[ "${GIT_HOST:-github}" == "github" ]] || return 1
+
+	local issue_state=""
+	issue_state=$(gh issue view "$issue_num" --json state \
+		--jq '.state' 2>/dev/null) || true
+	if [[ "$issue_state" == "CLOSED" ]]; then
+		_UPFRONT_SKIP_REASON="already closed on GitHub"
+		return 0
+	fi
+
+	local merged_pr=""
+	merged_pr=$(gh pr list --state merged \
+		--head "feature/issue-$issue_num" \
+		--json number --jq '.[0].number // empty' \
+		2>/dev/null) || true
+	if [[ -n "$merged_pr" ]]; then
+		_UPFRONT_SKIP_REASON="PR #$merged_pr already merged"
+		_UPFRONT_SKIP_PR="$merged_pr"
+		return 0
+	fi
+
+	return 1
+}
+
 # validate_issue_for_processing <issue_num>
 #
 # Preflight check: verify the issue has a parseable "## Implementation Tasks"
@@ -1170,6 +1233,11 @@ process_issue() {
     local issue_num="$1"
     local issue_log="$LOG_BASE/issue-$issue_num.log"
 
+    # Reset the out-of-band preflight-skip signal for this call. Callers
+    # must read _PREFLIGHT_SKIPPED immediately after process_issue()
+    # returns, before any other process_issue() invocation overwrites it.
+    _PREFLIGHT_SKIPPED=false
+
     log "=========================================="
     log "Starting issue #$issue_num"
     log "=========================================="
@@ -1181,7 +1249,9 @@ process_issue() {
     # A validation failure is non-fatal (returns 0 to the caller) so
     # it does NOT increment consecutive_failures or trigger the
     # circuit breaker. When ENRICH_FOLLOWUPS=true the issue is
-    # enriched inline rather than skipped.
+    # enriched inline rather than skipped. _PREFLIGHT_SKIPPED is set
+    # out-of-band (issue #690) so the caller can distinguish this from
+    # a genuine success while the return code stays 0.
     # ---------------------------------------------------------------
     if ! validate_issue_for_processing "$issue_num"; then
         log_warn \
@@ -1192,6 +1262,7 @@ process_issue() {
             "$issue_num" "error" \
             "${_SKIP_REASON:-preflight validation failed}"
         update_progress
+        _PREFLIGHT_SKIPPED=true
         return 0
     fi
 
@@ -1482,6 +1553,17 @@ process_issue() {
 
     if [[ "$impl_status" != "success" ]]; then
         log_error "implement-issue failed for #$issue_num: ${impl_error:-unknown error}"
+        if check_issue_resolved_upstream "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+            update_issue_field "$issue_num" "status" "completed"
+            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            fi
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+        fi
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "${impl_error:-implement-issue failed with status: $impl_status}"
         update_progress
@@ -1491,6 +1573,17 @@ process_issue() {
 
     if [[ -z "$pr_number" ]]; then
         log_error "implement-issue succeeded but no PR number found for #$issue_num"
+        if check_issue_resolved_upstream "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+            update_issue_field "$issue_num" "status" "completed"
+            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            fi
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+        fi
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "No PR number in status file or output"
         update_progress
@@ -1558,6 +1651,17 @@ process_issue() {
     # Check for timeout
     if (( proc_exit == 124 )); then
         log_error "Issue #$issue_num timed out during process-pr (${ISSUE_TIMEOUT}s)"
+        if check_issue_resolved_upstream "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+            update_issue_field "$issue_num" "status" "completed"
+            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            fi
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+        fi
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "Timeout after ${ISSUE_TIMEOUT}s during process-pr"
         update_progress
@@ -1595,6 +1699,17 @@ process_issue() {
             ;;
         error|rate_limit|*)
             log_error "process-pr failed for #$issue_num: ${proc_error:-status was $proc_status}"
+            if check_issue_resolved_upstream "$issue_num"; then
+                log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+                update_issue_field "$issue_num" "status" "completed"
+                update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+                if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
+                    update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+                fi
+                update_progress
+                git checkout "$BRANCH" 2>/dev/null || true
+                return 0
+            fi
             update_issue_field "$issue_num" "status" "failed"
             update_issue_field "$issue_num" "error" "${proc_error:-process-pr failed with status: $proc_status}"
             update_progress
@@ -1818,7 +1933,12 @@ sweep_implement_followups() {
 
 		log "Sweep: implementing follow-up #$issue_num"
 		if process_issue "$issue_num"; then
-			log "Sweep: follow-up #$issue_num processed successfully"
+			if [[ "$_PREFLIGHT_SKIPPED" == true ]]; then
+				log "Sweep: follow-up #$issue_num skipped" \
+					"(preflight): ${_SKIP_REASON:-unknown reason}"
+			else
+				log "Sweep: follow-up #$issue_num processed successfully"
+			fi
 		else
 			log_warn \
 				"Sweep: follow-up #$issue_num failed" \
@@ -1926,42 +2046,28 @@ for issue in "${ISSUE_ARRAY[@]}"; do
 
     # ---------------------------------------------------------------
     # Up-front skip gate: closed issue OR merged PR (via gh).
-    # Complements the status.json idempotency check above by querying
-    # live platform state before spinning up the orchestrator.
-    # Only active when GIT_HOST=github.  A gh failure (network error,
-    # unauthenticated) is non-fatal: the empty result falls through so
-    # the orchestrator's already_implemented detection remains the
-    # safety net.
+    # See check_issue_resolved_upstream() for the query details and the
+    # GIT_HOST / gh-failure fallback behavior.
     # ---------------------------------------------------------------
-    if [[ "${GIT_HOST:-github}" == "github" ]]; then
-        _upfront_issue_state=""
-        _upfront_issue_state=$(gh issue view "$issue" --json state \
-            --jq '.state' 2>/dev/null) || true
-        if [[ "$_upfront_issue_state" == "CLOSED" ]]; then
-            log "Skipping issue #$issue (already closed on GitHub)"
-            update_issue_field "$issue" "status" "completed"
-            update_progress
-            continue
+    if check_issue_resolved_upstream "$issue"; then
+        log "Skipping issue #$issue ($_UPFRONT_SKIP_REASON)"
+        update_issue_field "$issue" "status" "completed"
+        if [[ -n "$_UPFRONT_SKIP_PR" ]]; then
+            update_issue_field "$issue" "pr" "$_UPFRONT_SKIP_PR" "true"
         fi
-
-        _merged_pr=""
-        _merged_pr=$(gh pr list --state merged \
-            --head "feature/issue-$issue" \
-            --json number --jq '.[0].number // empty' \
-            2>/dev/null) || true
-        if [[ -n "$_merged_pr" ]]; then
-            log "Skipping issue #$issue (PR #$_merged_pr already merged)"
-            update_issue_field "$issue" "status" "completed"
-            update_issue_field "$issue" "pr" "$_merged_pr" "true"
-            update_progress
-            continue
-        fi
+        update_progress
+        continue
     fi
 
     if process_issue "$issue"; then
         consecutive_failures=0
-        log "Issue #$issue processed successfully"
-        emit_event "issue_end" "issue_num=$issue" "outcome=success"
+        if [[ "$_PREFLIGHT_SKIPPED" == true ]]; then
+            log "Issue #$issue skipped (preflight): ${_SKIP_REASON:-unknown reason}"
+            emit_event "issue_end" "issue_num=$issue" "outcome=skipped"
+        else
+            log "Issue #$issue processed successfully"
+            emit_event "issue_end" "issue_num=$issue" "outcome=success"
+        fi
     else
         consecutive_failures=$((consecutive_failures + 1))
         exit_code=1
@@ -2015,13 +2121,19 @@ if [[ "$IMPLEMENT_FOLLOWUPS" == true ]]; then
 	sweep_implement_followups
 fi
 
-# Final state
+# Final state (issue #690: a batch that skipped work is not fully clean,
+# even when nothing outright failed — progress.skipped must be consulted
+# here, not just progress.failed, so an all-skipped batch stops reporting
+# "completed").
 final_failed=$(jq '.progress.failed' "$STATUS_FILE")
+final_skipped=$(jq '.progress.skipped' "$STATUS_FILE")
 if (( exit_code == 2 )); then
     # Circuit breaker already set state
     :
 elif (( final_failed > 0 )); then
     set_state "completed_with_errors"
+elif (( final_skipped > 0 )); then
+    set_state "completed_with_skips"
 else
     set_state "completed"
 fi

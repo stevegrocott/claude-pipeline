@@ -598,12 +598,67 @@ teardown() {
 # discarded, and every task in it re-runs serially, paying for the work
 # twice.
 #
+# Environment-override sourcing path: BOTH copies of the fallback —
+# platform.sh:140 and implement-issue-orchestrator.sh:134 — use the exact
+# same `${MAX_TASK_WALL_TIME_SECS:-1800}` pattern, and production sources
+# platform.sh first (orchestrator.sh:70) before reaching its own line 134.
+# So an operator's env-var override has exactly one live entry point:
+# platform.sh's line resolves env-var-or-default, and by the time the
+# orchestrator reaches its own line the var is already set, making that
+# second fallback an inert no-op re-assignment there — PROVIDED platform.sh
+# is actually in the sourcing chain, which implement-issue-orchestrator.sh
+# itself always guarantees (it loud-aborts at line ~63 if platform.sh can't
+# be resolved). The orchestrator's own fallback only does real work when
+# something sources its functions WITHOUT going through that guard —
+# exactly what source_orchestrator_functions() below does: it awk-extracts
+# MAX_* declarations into orchestrator_functions.bash, and that extraction
+# drops the `source platform.sh` line along with it, which is why setup()
+# has to source the real platform.sh itself, in the right order, before
+# sourcing the extracted file. This mirrors the drift-prone gap #673 fell
+# into: platform.sh's override capped parallel tasks at 900s while the
+# orchestrator's own fallback (only reachable when platform.sh isn't in
+# the chain) had moved on to 1800s.
+#
 # setup()'s source_orchestrator_functions call sources the REAL
 # .claude/config/platform.sh (via the config/ -> .claude/config symlink
 # installed by setup_test_env) BEFORE the orchestrator's own fallback line,
 # the same order production sourcing uses — so MAX_TASK_WALL_TIME_SECS
 # below reflects whatever this repo's platform.sh actually resolves to, and
 # these tests fail the instant it drops below the serial timeout again.
+#
+# Why the control test below ("platform.sh's assignment actually drives
+# MAX_TASK_WALL_TIME_SECS") re-sources in an isolated `bash -c` subprocess
+# rather than reusing this shell: setup() already sourced platform.sh once
+# here, so MAX_TASK_WALL_TIME_SECS is already a set variable in this
+# process — re-running the fallback in-place wouldn't cleanly prove
+# anything flows through `${:-1800}` the way a fresh process sees it. A
+# genuinely fresh `bash -c` process reproduces exactly what a real
+# invocation resolves to. It also sidesteps the `readonly -a` array
+# redeclaration hazard documented on that test's own re-source call (see
+# MODEL_CONFIG_ARRAYS_FILE in helpers/test-helper.bash) by sourcing only
+# platform.sh and the extracted orchestrator functions there — never
+# model-config.sh a second time in a shell that already has it.
+#
+# An earlier version of this test set MAX_TASK_WALL_TIME_SECS=900 via
+# `env` and then asserted the resolved value was still 900 after sourcing
+# platform.sh. That was a false positive: the env var already equalled 900
+# before platform.sh's own `${MAX_TASK_WALL_TIME_SECS:-1800}` line ever
+# ran, so the fallback never fired — the assertion would hold identically
+# whether platform.sh was sourced or not, or even if its `source` line
+# were deleted outright. It proved the comparison logic worked, not that
+# platform.sh's place in the sourcing chain mattered.
+#
+# The test below fixes that: it overwrites the copied platform.sh fixture
+# with an UNCONDITIONAL assignment (no `${:-...}` guard, reproducing the
+# real #673 drift directly) and runs with the env var unset, so the
+# sentinel can only appear in the resolved value if platform.sh's line
+# actually executed and its assignment survived being sourced ahead of the
+# orchestrator's own fallback line. A second, contrasting subshell sources
+# the extracted orchestrator functions alone, without platform.sh, and
+# confirms that omitting it from the chain yields a DIFFERENT value (the
+# orchestrator's own hardcoded 1800 default) — proving the sentinel in the
+# first subshell is attributable to platform.sh's sourcing, not to
+# something the orchestrator functions would have produced unassisted.
 #
 # This file is one of the two curated bats paths in
 # .github/workflows/orchestrator-guards.yml's run step — that workflow is
@@ -622,30 +677,241 @@ teardown() {
         fail "Expected serial implement-task timeout=1800, got: $serial_timeout"
 }
 
-@test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout" {
-    source "$MODEL_CONFIG_ARRAYS_FILE"
-    local serial_timeout
-    serial_timeout=$(get_stage_timeout "implement-task-1" "")
+# assert_wall_time_covers_serial <resolved_wall> <serial_timeout> <label>
+#
+# Shared issue #673 invariant: the resolved parallel wall time must never
+# be tighter than the serial implement-task stage timeout it stands in
+# for — otherwise a task that would succeed serially gets killed in
+# parallel and the whole batch re-runs serially. Extracted so the guard
+# test below (proving today's real values satisfy it) and the control
+# test further down (proving the same comparison actually catches a
+# drifted value) run the exact same check rather than two copies that
+# could silently diverge.
+assert_wall_time_covers_serial() {
+    local resolved_wall="$1"
+    local serial_timeout="$2"
+    local label="$3"
 
-    (( MAX_TASK_WALL_TIME_SECS >= serial_timeout )) || \
-        fail "MAX_TASK_WALL_TIME_SECS=${MAX_TASK_WALL_TIME_SECS}s <" \
+    (( resolved_wall >= serial_timeout )) || \
+        fail "${label}: wall_time=${resolved_wall}s <" \
             "serial stage timeout=${serial_timeout}s — a task that would" \
             "succeed serially is killed in parallel and the whole batch" \
             "re-runs serially (issue #673)"
 }
 
-@test "a MAX_TASK_WALL_TIME_SECS below the serial timeout fails the invariant" {
-    # Proves the guard above actually discriminates rather than trivially
-    # passing: reproduce the pre-fix drift (platform.sh pinned at 900,
-    # serial timeout at 1800) and confirm the same comparison reports it.
+@test "MAX_TASK_WALL_TIME_SECS (parallel) is not tighter than the serial implement-task timeout, across all complexities" {
+    # Parametrised over the full complexity axis ("" S M L) rather than
+    # just the empty/default case: get_stage_timeout escalates the
+    # serial implement-task timeout to 3600s at complexity=L (see
+    # implement-issue-orchestrator.sh's get_stage_timeout). The flat
+    # MAX_TASK_WALL_TIME_SECS constant deliberately stays at 1800s (raising
+    # it would give small/medium tasks the same oversized watchdog as L
+    # tasks — see the wiring test below); per-task coverage comes from
+    # get_task_wall_time(), which takes max(MAX_TASK_WALL_TIME_SECS,
+    # get_stage_timeout("implement-task", cx)). Checking get_task_wall_time
+    # here (rather than the raw constant) still catches the #673 drift class
+    # for every complexity tier, without re-litigating what tests 37-40
+    # already prove about get_task_wall_time's own formula.
     source "$MODEL_CONFIG_ARRAYS_FILE"
-    local serial_timeout drifted_value
-    serial_timeout=$(get_stage_timeout "implement-task-1" "")
-    drifted_value=900
 
-    ! (( drifted_value >= serial_timeout )) || \
-        fail "Expected drifted MAX_TASK_WALL_TIME_SECS=$drifted_value to be" \
-            "caught as below serial_timeout=$serial_timeout"
+    local -a complexities=("" "S" "M" "L")
+    local cx serial_timeout resolved_wall
+    for cx in "${complexities[@]}"; do
+        serial_timeout=$(get_stage_timeout "implement-task-1" "$cx")
+
+        if [[ "$cx" == "L" ]]; then
+            [ "$serial_timeout" -eq 3600 ] || \
+                fail "Expected get_stage_timeout(implement-task-1, L)=3600," \
+                    "got: $serial_timeout"
+        fi
+
+        resolved_wall=$(get_task_wall_time "$cx")
+        assert_wall_time_covers_serial "$resolved_wall" "$serial_timeout" \
+            "complexity='${cx}'"
+    done
+}
+
+@test "parallel watchdog region resolves a per-task wall time for L, not the flat global (issue #673 wiring)" {
+    # A "fix" that just raises MAX_TASK_WALL_TIME_SECS to 3600s for every
+    # task would satisfy a flat-constant invariant while giving small
+    # (S/M) tasks the same oversized watchdog as L tasks — defeating the
+    # point of a wall-time guard. The real fix (issue #678) resolves a
+    # PER-TASK wall time via get_task_wall_time() (using the task's
+    # already-computed $tsize), which itself wraps get_stage_timeout and
+    # is proven correct by the get_task_wall_time unit tests below.
+    #
+    # issue #702: previously this searched -B 40 -A 20 around the "Launch
+    # in background subshell..." comment, which sits BETWEEN the twall
+    # assignment and the launch. Every line the loop grows in that gap
+    # (it already grew once — see the create_task_worktree failure
+    # branch below) eats into the -B budget, and once it silently
+    # exceeds 40 the region stops containing the twall assignment
+    # without any test failure pointing at why. Anchoring on the
+    # assignment itself and searching forward only means growth has to
+    # happen strictly AFTER the anchor to matter, and a generous -A
+    # margin covers that.
+    local watchdog_region
+    watchdog_region=$(grep -A 80 -F \
+        'twall=$(get_task_wall_time' \
+        "$ORCHESTRATOR_SCRIPT")
+
+    [[ -n "$watchdog_region" ]] || \
+        fail "Could not locate the per-task wall-time resolution" \
+            "(twall=\$(get_task_wall_time ...)) in $ORCHESTRATOR_SCRIPT"
+
+    printf '%s\n' "$watchdog_region" | grep -q 'get_task_wall_time' || \
+        fail "Expected the parallel watchdog region to resolve a" \
+            "per-task wall time via get_task_wall_time (using tsize)," \
+            "not rely solely on the flat MAX_TASK_WALL_TIME_SECS global." \
+            $'\nRegion:\n'"$watchdog_region"
+
+    # A regression that computes twall but leaves the watchdog's sleep
+    # reading the flat MAX_TASK_WALL_TIME_SECS global would still pass
+    # the get_task_wall_time check above, since that string appears
+    # regardless of whether its result is ever used. Assert the
+    # resolved value actually reaches the sleep call.
+    printf '%s\n' "$watchdog_region" | grep -qF 'sleep "${twall}"' || \
+        fail "Expected the watchdog's sleep to use the resolved" \
+            "per-task twall, not the flat MAX_TASK_WALL_TIME_SECS global." \
+            $'\nRegion:\n'"$watchdog_region"
+}
+
+@test "platform.sh's assignment actually drives MAX_TASK_WALL_TIME_SECS, not merely an injected env var" {
+    # Reproduce the pre-fix drift (platform.sh pinned at 900, serial
+    # timeout risen to 1800) for real, and prove it's platform.sh's own
+    # sourced line doing the work — not an env var that was already
+    # sitting at the target value before platform.sh ever ran.
+    #
+    # Overwrite the copied platform.sh fixture with an UNCONDITIONAL
+    # assignment (no `${VAR:-...}` guard): this is what a genuinely
+    # drifted platform.sh looks like, and it means 900 can only end up in
+    # the resolved value via platform.sh's line actually executing.
+    local sentinel=900
+    cat > "$TEST_TMP/config/platform.sh" <<EOF
+MAX_TASK_WALL_TIME_SECS=$sentinel
+EOF
+
+    # This must NOT re-source .claude/scripts/model-config.sh in this
+    # test's own shell: setup()'s source_orchestrator_functions already
+    # sourced it once here, and a second source in the same (unforked)
+    # process hits the `readonly -a` array redeclaration hazard documented
+    # on MODEL_CONFIG_ARRAYS_FILE in helpers/test-helper.bash.
+    # get_stage_timeout/get_task_wall_time never touch model-config.sh, so
+    # the subshell below sources only platform.sh (for the drifted
+    # constant) and the orchestrator functions file — nothing that trips
+    # the guard. MAX_TASK_WALL_TIME_SECS is explicitly unset first so
+    # nothing in the environment could supply the sentinel on its own.
+    run bash -c '
+        unset MAX_TASK_WALL_TIME_SECS
+        source "$TEST_TMP/config/platform.sh"
+        source "$TEST_TMP/orchestrator_functions.bash"
+        printf "%s %s\n" \
+            "$MAX_TASK_WALL_TIME_SECS" \
+            "$(get_stage_timeout "implement-task-1" "")"
+    '
+    [ "$status" -eq 0 ] || \
+        fail "Isolated config/orchestrator-functions subshell failed:" \
+            "$output"
+
+    local resolved_wall serial_timeout
+    read -r resolved_wall serial_timeout <<< "$output"
+
+    [ "$resolved_wall" = "$sentinel" ] || \
+        fail "Expected platform.sh's own assignment ($sentinel) to reach" \
+            "the resolved MAX_TASK_WALL_TIME_SECS, got: $resolved_wall"
+
+    # Control: source the SAME extracted orchestrator functions WITHOUT
+    # platform.sh in the chain at all. If platform.sh's sourcing were
+    # inert, this would also resolve to the sentinel; instead it must fall
+    # back to the orchestrator's own hardcoded 1800 default — a different
+    # value — proving the sentinel above came from platform.sh's line,
+    # not from the orchestrator functions alone.
+    run bash -c '
+        unset MAX_TASK_WALL_TIME_SECS
+        source "$TEST_TMP/orchestrator_functions.bash"
+        printf "%s\n" "$MAX_TASK_WALL_TIME_SECS"
+    '
+    [ "$status" -eq 0 ] || \
+        fail "Isolated orchestrator-functions-only subshell failed:" \
+            "$output"
+    [ "$output" != "$sentinel" ] || \
+        fail "Expected the orchestrator's own fallback (platform.sh NOT" \
+            "sourced) to differ from platform.sh's sentinel ($sentinel)." \
+            "Got the same value, so the sentinel can't be attributed to" \
+            "platform.sh's sourcing chain."
+
+    # Finally, confirm the shared invariant helper actually flags the
+    # drift reproduced above (900 < serial timeout).
+    ! assert_wall_time_covers_serial "$resolved_wall" "$serial_timeout" \
+        "drift repro" || \
+        fail "Expected the shared invariant helper to report a" \
+            "violation for a live wall_time=${resolved_wall}s against" \
+            "serial_timeout=${serial_timeout}s"
+}
+
+# =============================================================================
+# get_task_wall_time() — per-task watchdog budget (issue #678)
+#
+# The tests above only assert the flat MAX_TASK_WALL_TIME_SECS constant
+# happens to be >= the serial implement-task timeout today; nothing stops
+# them drifting apart again the way #673 did. get_task_wall_time() removes
+# the drift risk structurally: the parallel watchdog now always takes
+# max(MAX_TASK_WALL_TIME_SECS, get_stage_timeout("implement-task", size)),
+# so an "L" task's watchdog can never be tighter than its own stage timeout.
+# =============================================================================
+
+@test "get_task_wall_time is defined" {
+    [ "$(type -t get_task_wall_time)" = "function" ]
+}
+
+@test "get_task_wall_time matches MAX_TASK_WALL_TIME_SECS for default size" {
+    local result
+    result=$(get_task_wall_time "")
+    [ "$result" -eq "$MAX_TASK_WALL_TIME_SECS" ] || \
+        fail "Expected get_task_wall_time('')=$MAX_TASK_WALL_TIME_SECS," \
+            "got: $result"
+}
+
+@test "get_task_wall_time widens the watchdog for L-complexity tasks" {
+    local result stage_timeout
+    stage_timeout=$(get_stage_timeout "implement-task" "L")
+    result=$(get_task_wall_time "L")
+    [ "$result" -eq "$stage_timeout" ] || \
+        fail "Expected get_task_wall_time('L')=$stage_timeout," \
+            "got: $result"
+    (( result >= MAX_TASK_WALL_TIME_SECS )) || \
+        fail "get_task_wall_time('L')=$result must never be tighter than" \
+            "MAX_TASK_WALL_TIME_SECS=$MAX_TASK_WALL_TIME_SECS"
+}
+
+@test "get_task_wall_time never returns less than MAX_TASK_WALL_TIME_SECS" {
+    # Simulate the #673 drift (platform.sh pinned low) and confirm the
+    # per-task watchdog still can't fall below the flat floor.
+    local result
+    result=$(MAX_TASK_WALL_TIME_SECS=900 get_task_wall_time "")
+    (( result >= 900 )) || \
+        fail "get_task_wall_time must not return below" \
+            "MAX_TASK_WALL_TIME_SECS=900, got: $result"
+}
+
+@test "get_task_wall_time takes the flat floor even for L-complexity when it exceeds the stage timeout" {
+    # The "widens the watchdog for L-complexity tasks" test above only ever
+    # exercises the ceiling branch (stage_timeout=3600 > default
+    # MAX_TASK_WALL_TIME_SECS=1800), and the "never returns less than" test
+    # above only exercises the floor branch for the default ("") complexity,
+    # where get_stage_timeout("implement-task", "")=1800 happens to equal
+    # MAX_TASK_WALL_TIME_SECS. Neither proves the floor branch is reachable
+    # for an "L" task specifically. Pin MAX_TASK_WALL_TIME_SECS above the L
+    # stage timeout (3600) to force max() to pick the flat floor
+    # (5400) instead of the L stage timeout, actually exercising the
+    # floor-vs-ceiling `if (( stage_timeout > MAX_TASK_WALL_TIME_SECS ))`
+    # branch for a non-default complexity.
+    local result
+    result=$(MAX_TASK_WALL_TIME_SECS=5400 get_task_wall_time "L")
+    [ "$result" -eq 5400 ] || \
+        fail "Expected get_task_wall_time('L')=5400 when" \
+            "MAX_TASK_WALL_TIME_SECS=5400 exceeds the L stage timeout" \
+            "(3600), got: $result"
 }
 
 # =============================================================================

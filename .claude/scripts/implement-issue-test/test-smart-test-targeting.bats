@@ -459,9 +459,10 @@ teardown() {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-ts-testfiles
 
-    # Add an implementation file and a test file
+    # Add an implementation file and a test file that exercises it
     echo "export const add = (a, b) => a + b;" > math.ts
-    echo "test('adds', () => expect(1+1).toBe(2));" > math.test.ts
+    echo "import { add } from './math';
+test('adds', () => expect(add(2, 3)).toBe(5));" > math.test.ts
     git add math.ts math.test.ts
     git commit -q -m "add ts with test"
 
@@ -611,10 +612,13 @@ teardown() {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-mixed-testfiles
 
-    # Add TS test file and bash script
-    echo "test('adds', () => expect(1+1).toBe(2));" > math.test.ts
+    # Add a TS implementation file, a test file that exercises it, and a
+    # bash script
+    echo "export const add = (a, b) => a + b;" > math.ts
+    echo "import { add } from './math';
+test('adds', () => expect(add(2, 3)).toBe(5));" > math.test.ts
     echo "#!/bin/bash" > deploy.sh
-    git add math.test.ts deploy.sh
+    git add math.ts math.test.ts deploy.sh
     git commit -q -m "add mixed with test"
 
     local prompt_file="$TEST_TMP/mixed_prompt"
@@ -1103,6 +1107,637 @@ teardown() {
     scope=$(detect_change_scope "." "main")
     # mixed takes precedence (ts + bash = mixed regardless of frontend)
     [ "$scope" = "mixed" ]
+}
+
+# =============================================================================
+# ISSUE #659: detect_change_scope() + e2e_verify STAGE SELECTION INTEGRATION
+# (AC3/AC4 of issue #650's fix, PR #656)
+#
+# The _matches_frontend_pattern() glob-corruption bug (fixed in #656) let an
+# unquoted `for pattern in $FRONTEND_PATH_PATTERNS` expansion get
+# pathname-expanded against files that already existed on disk under the
+# pattern's own prefix, silently replacing the intended glob with literal
+# filenames before a nested path was ever compared. That misclassified a
+# nested frontend file as non-frontend, and because bash/.sh extensions are
+# checked independently of the frontend match, the file fell through to
+# scope=bash — which in turn made run_parallel_post_task_stages() SKIP
+# e2e_verify instead of running it.
+#
+# This test drives both detect_change_scope() and the real
+# run_parallel_post_task_stages() skip-condition logic end-to-end, using an
+# on-disk prefix (mirroring the #650 regression setup) so any regression to
+# unquoted glob expansion would be caught here too.
+# =============================================================================
+
+# Install spies around run_parallel_post_task_stages() so the stage-selection
+# decision is observable without running any real agent, container rebuild, or
+# issue comment. Every call is appended to $1 as a "kind:value" line so tests
+# can assert on ORDER, not just presence.
+#
+# Only the stage's collaborators are stubbed — the skip/run decision logic
+# under test is the real orchestrator code.
+_install_e2e_stage_spies() {
+    local calls_file="$1"
+    : > "$calls_file"
+    export E2E_SPY_CALLS="$calls_file"
+
+    is_stage_completed()   { return 1; }
+    set_stage_started()    { printf 'started:%s\n'   "$1" >> "$E2E_SPY_CALLS"; }
+    set_stage_completed()  { printf 'completed:%s\n' "$1" >> "$E2E_SPY_CALLS"; }
+    log()                  { printf 'log:%s\n' "$*"  >> "$E2E_SPY_CALLS"; }
+    log_warn()             { printf 'log:%s\n' "$*"  >> "$E2E_SPY_CALLS"; }
+    log_error()            { printf 'log:%s\n' "$*"  >> "$E2E_SPY_CALLS"; }
+    comment_issue()            { :; }
+    verify_on_feature_branch() { return 0; }
+    rebuild_and_health_check() {
+        printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+    }
+    _build_targeted_e2e_cmd()  { printf '%s' "$TEST_E2E_CMD"; }
+
+    # Shape must match what the orchestrator parses (.output.result /
+    # .output.summary); a flat object would read back as null and mask a
+    # regression in the result handling.
+    #
+    # $2/$3/$4 (prompt/schema/agent) are captured to sidecar files rather
+    # than appended to $E2E_SPY_CALLS: the prompt is multi-line, and folding
+    # it into the calls file would corrupt the "one call = one line"
+    # ordering assertions that key off run_stage:e2e-verify. Sidecar files
+    # keep those assertions intact while still letting callers verify the
+    # real args the orchestrator hands to run_stage for e2e_verify.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        printf '%s' "$2" > "$E2E_SPY_CALLS.prompt"
+        printf '%s' "$3" > "$E2E_SPY_CALLS.schema"
+        printf '%s' "$4" > "$E2E_SPY_CALLS.agent"
+        printf '{"output":{"result":"passed","summary":"e2e ok"}}'
+    }
+}
+
+# Read a prompt/schema/agent sidecar file written by the run_stage() spy
+# above. A missing sidecar means the spy's run_stage() was never invoked at
+# all (e2e_verify was skipped, or the orchestrator called run_stage with a
+# different stage first) -- reading it with plain `$(< file)` would instead
+# fail silently, returning an empty string that only surfaces later as a
+# confusing "got ''" mismatch against the expected value. Fail here with the
+# missing path and the reason, so the real cause is obvious immediately.
+_read_e2e_sidecar() {
+    local calls_file="$1"
+    local kind="$2"
+    local sidecar="$calls_file.$kind"
+    local msg
+
+    if [ ! -f "$sidecar" ]; then
+        msg="missing $kind sidecar file '$sidecar' -- run_stage() was"
+        msg+=" never invoked for e2e-verify (the stage likely didn't run)"
+        fail "$msg"
+        return 1
+    fi
+
+    cat "$sidecar"
+}
+
+# Shared assertion logic for the 'frontend' and 'ts-frontend' e2e_verify
+# skip-guard test cases below. The skip guard in
+# run_parallel_post_task_stages() checks
+# `branch_scope != "frontend" && branch_scope != "ts-frontend"`, so both
+# scopes must exercise the exact same run/ordering/schema/agent
+# assertions -- only the branch name, scope, and calls file differ per
+# test. Callers that need additional scope-specific assertions (e.g. the
+# 'frontend' test's prompt-content checks) can read $calls_file again
+# afterward via _read_e2e_sidecar().
+_assert_e2e_verify_runs_for_scope() {
+    local branch_name="$1"
+    local scope="$2"
+    local calls_file="$3"
+
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    _install_e2e_stage_spies "$calls_file"
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "$branch_name" "$scope" "minimal" "S" || exit_code=$?
+    [ "$exit_code" -eq 0 ] || {
+        fail "run_parallel_post_task_stages exited $exit_code, expected 0"
+        return 1
+    }
+
+    # ORDERING, not mere presence: the skip path also emits
+    # started:e2e_verify followed immediately by completed:e2e_verify, so
+    # grepping for those alone would pass even when the stage is skipped.
+    # Requiring run_stage:e2e-verify BETWEEN them is only satisfiable by
+    # the real run path.
+    local sequence expected run_msg
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    expected='*started:e2e_verify*run_stage:e2e-verify*completed:e2e_verify*'
+    run_msg="e2e_verify was skipped for scope '$scope', expected it to"
+    run_msg+=" run. Call sequence: $sequence"
+    # shellcheck disable=SC2254
+    [[ "$sequence" == $expected ]] || {
+        fail "$run_msg"
+        return 1
+    }
+
+    # The orchestrator must hand run_stage the real e2e-validate schema and
+    # the playwright-test-developer agent for this scope -- not just call
+    # it with any args. A regression that swapped in the wrong
+    # schema/agent (or lost them) would still satisfy the "run_stage was
+    # called" assertion above, so assert the actual $3/$4 values captured
+    # by the spy.
+    local captured_schema captured_agent
+    captured_schema=$(_read_e2e_sidecar "$calls_file" schema) || return 1
+    captured_agent=$(_read_e2e_sidecar "$calls_file" agent) || return 1
+
+    local schema_msg agent_msg
+    schema_msg="expected schema implement-issue-e2e-validate.json, got"
+    schema_msg+=" '$captured_schema'"
+    agent_msg="expected agent playwright-test-developer, got"
+    agent_msg+=" '$captured_agent'"
+
+    [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || {
+        fail "$schema_msg"
+        return 1
+    }
+    [ "$captured_agent" = "playwright-test-developer" ] || {
+        fail "$agent_msg"
+        return 1
+    }
+
+    # Structural skip marker: every skip branch records started:e2e_verify
+    # immediately followed by completed:e2e_verify with no run_stage call
+    # between them (see the skip-handling block in
+    # run_parallel_post_task_stages()). Assert that adjacent pair is
+    # absent instead of matching any particular log wording -- its
+    # presence would mean a skip branch fired even though the ordering
+    # check above passed.
+    local skip_msg
+    skip_msg="e2e_verify hit a skip branch for scope '$scope' (started"
+    skip_msg+=" immediately followed by completed, no run_stage in"
+    skip_msg+=" between): $sequence"
+    [[ "$sequence" != *'started:e2e_verify completed:e2e_verify'* ]] \
+        || fail "$skip_msg"
+}
+
+@test "detect_change_scope classifies a nested frontend file as frontend (not bash), and e2e_verify runs instead of being skipped" {
+    export FRONTEND_PATH_PATTERNS="web/e2e/*"
+
+    cd "$TEST_TMP/repo"
+
+    # Pre-populate sibling files under the pattern's own prefix on disk —
+    # reproduces the exact conditions of the #650 glob-corruption bug.
+    mkdir -p web/e2e/flows
+    touch web/e2e/existing-spec.js
+
+    git checkout -q -b feature-issue-659-e2e
+
+    # A nested frontend file with a .sh extension: if _matches_frontend_pattern
+    # regresses, this file's extension alone (*.sh) would classify it "bash"
+    # instead of "frontend".
+    printf '#!/usr/bin/env bash\nnpx playwright test login\n' \
+        > web/e2e/flows/login-flow.sh
+    git add web/e2e/flows/login-flow.sh
+    git commit -q -m "add nested e2e flow script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "frontend" ] || fail \
+        "expected nested frontend file to classify as 'frontend', got '$scope'"
+
+    # --- e2e_verify stage selection ------------------------------------
+    # Feed the real computed scope into run_parallel_post_task_stages() and
+    # assert the e2e-verify stage actually runs (calls run_stage) rather
+    # than being marked skipped. See _assert_e2e_verify_runs_for_scope()
+    # above for the shared run/ordering/schema/agent assertions -- also
+    # exercised by the ts-frontend companion test below.
+    local calls_file="$TEST_TMP/e2e-stage-calls.txt"
+    _assert_e2e_verify_runs_for_scope \
+        "feature-issue-659-e2e" "$scope" "$calls_file" || return 1
+
+    # Prompt must actually be built from this run's context (issue number
+    # and the targeted E2E command), not a stale/hardcoded string. This
+    # check is specific to the 'frontend' scope (driven by the real
+    # detect_change_scope output above), so it stays out of the shared
+    # helper.
+    local captured_prompt
+    captured_prompt=$(_read_e2e_sidecar "$calls_file" prompt) || return 1
+
+    [[ "$captured_prompt" == *"issue #$ISSUE_NUMBER"* ]] || fail \
+        "expected prompt to reference issue #$ISSUE_NUMBER: $captured_prompt"
+    [[ "$captured_prompt" == *"$TEST_E2E_CMD"* ]] || fail \
+        "expected prompt to include the targeted E2E command '$TEST_E2E_CMD': $captured_prompt"
+}
+
+# Negative control for the test above. Without this, an e2e_verify stage
+# that ran unconditionally (ignoring scope entirely) would still satisfy
+# the positive assertions. A non-frontend nested path must still skip.
+@test "detect_change_scope classifies a non-frontend nested file as bash, and e2e_verify is skipped" {
+    export FRONTEND_PATH_PATTERNS="web/e2e/*"
+
+    cd "$TEST_TMP/repo"
+    mkdir -p tools/deploy
+    git checkout -q -b feature-issue-659-nonfe
+
+    printf '#!/usr/bin/env bash\necho deploy\n' > tools/deploy/release.sh
+    git add tools/deploy/release.sh
+    git commit -q -m "add deploy script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "bash" ] || fail \
+        "expected non-frontend .sh file to classify as 'bash', got '$scope'"
+
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-stage-calls-skip.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-659-nonfe" "$scope" "minimal" "S" || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    if grep -q "^run_stage:e2e-verify$" "$calls_file"; then
+        fail "e2e_verify ran for non-frontend scope '$scope' — it must skip"
+    fi
+
+    # Structural skip marker: a skipped stage records started:e2e_verify
+    # immediately followed by completed:e2e_verify with no run_stage call
+    # between them (see the skip-handling block in
+    # run_parallel_post_task_stages()). Assert on that call-order marker
+    # instead of matching the log message's exact wording.
+    local sequence skip_msg
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    skip_msg="expected e2e_verify to be skipped (started immediately"
+    skip_msg+=" followed by completed, no run_stage call) for"
+    skip_msg+=" non-frontend scope, got: $sequence"
+    [[ "$sequence" == *'started:e2e_verify completed:e2e_verify'* ]] \
+        || fail "$skip_msg"
+}
+
+# Companion coverage for the 'frontend' branch tested above: the skip guard
+# in run_parallel_post_task_stages() checks
+# `branch_scope != "frontend" && branch_scope != "ts-frontend"`, so a
+# regression that dropped the "ts-frontend" arm would still pass every test
+# above (they only ever exercise "frontend" and "bash") while silently
+# skipping e2e_verify for TS+frontend projects. detect_change_scope's own
+# mapping to "ts-frontend" is already covered elsewhere (see the TSX test
+# above), so this test supplies the scope directly and asserts on the
+# skip-guard's behavior in isolation.
+@test "run_parallel_post_task_stages runs e2e_verify for ts-frontend scope (not just frontend)" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-712-ts-frontend
+
+    # See _assert_e2e_verify_runs_for_scope() above for the shared
+    # run/ordering/schema/agent assertions -- same as the 'frontend' test.
+    local calls_file="$TEST_TMP/e2e-stage-calls-ts-frontend.txt"
+    _assert_e2e_verify_runs_for_scope \
+        "feature-issue-712-ts-frontend" "ts-frontend" "$calls_file" \
+        || return 1
+}
+
+# =============================================================================
+# ISSUE #745: E2E VERDICT UNSUPPORTED BY ITS OWN COUNTS -> UNMEASURED
+#
+# A self-reported 'failed' with tests_run: 0 means the run never finished --
+# not that it observed a real failure. Trusting it verbatim burns fix
+# iterations and container rebuilds chasing a verdict nothing measured (the
+# issue-5536 evidence in #745: the same zero-count 'failed' payload was
+# repeated verbatim through a whole fix iteration before a real result ever
+# arrived). run_parallel_post_task_stages() must cross-check the initial
+# e2e-verify verdict against tests_run/tests_passed/tests_failed and, when
+# the counts don't support it, record a non-blocking `e2e_verify:unmeasured`
+# DEGRADED_STAGES marker -- the same pattern #666 established for
+# test:bats_incomplete -- instead of entering the fix-dispatch loop at all.
+# =============================================================================
+
+@test "run_parallel_post_task_stages records unmeasured and dispatches no fix for a failed verdict with zero tests run" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-unmeasured-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    # Replay the issue-5536 payload verbatim: result "failed" but
+    # tests_run/tests_passed/tests_failed are all 0 -- an unfinished run,
+    # not a measured failure. Any run_stage call beyond the initial
+    # e2e-verify (a fix or rerun stage) means the fix loop was entered,
+    # which is exactly what must NOT happen here.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"E2E test execution for issue #5536 is currently running in the background. A wakeup has been scheduled to check results upon completion.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- an unmeasured" \
+                    "verdict must dispatch no fix iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-unmeasured" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    # No fix iteration and no rerun dispatched -- only the single initial
+    # e2e-verify call should appear in the log.
+    local calls
+    calls=$(tr '\n' ' ' < "$calls_file")
+    if grep -q '^run_stage:fix-e2e-iter-1$' "$calls_file"; then
+        fail "an unmeasured verdict (tests_run: 0) must not dispatch a" \
+            "fix iteration; calls: $calls"
+    fi
+    if grep -q '^run_stage:e2e-verify-rerun-iter-1$' "$calls_file"; then
+        fail "an unmeasured verdict must not enter the rerun path" \
+            "either; calls: $calls"
+    fi
+    [[ "$calls" == *'run_stage:e2e-verify'* ]] || fail \
+        "expected the initial e2e-verify call to still run; calls: $calls"
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' || fail \
+        "Expected e2e_verify:unmeasured in DEGRADED_STAGES; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# Negative control: a genuinely measured failure (counts fully support the
+# verdict) must still enter the fix loop and dispatch a fix iteration -- the
+# unmeasured guard above must not swallow real failures too (AC6).
+@test "run_parallel_post_task_stages still dispatches a fix for a measured failed verdict" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    export MAX_E2E_FIX_ITERATIONS=1
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-measured-fail-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"3 specs failed on checkout","tests_run":12,"tests_passed":9,"tests_failed":3}}'
+                ;;
+            fix-e2e-iter-1)
+                printf '{"output":{"summary":"Fix applied"}}'
+                ;;
+            e2e-verify-rerun-iter-1)
+                printf '{"output":{"result":"passed","summary":"all green","tests_run":12,"tests_passed":12,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call: $1"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-measured-fail" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    grep -qx 'run_stage:fix-e2e-iter-1' "$calls_file" || fail \
+        "a measured failed verdict (12 run, 9 passed, 3 failed) must" \
+        "still dispatch a fix iteration; calls: $(tr '\n' ' ' < "$calls_file")"
+
+    local marker
+    marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -c '^e2e_verify:unmeasured$' || true)
+    [ "$marker" -eq 0 ] || fail \
+        "a measured failure must not be recorded as unmeasured; got:" \
+        "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# A self-reported 'passed' whose passed+failed total falls short of
+# tests_run means part of the suite never ran -- not that it observed a
+# clean pass. Trusting it verbatim closes the issue with its E2E
+# acceptance criteria unverified (the issue-5531 evidence in #745: 6 of
+# 12 specs ran, tests_failed: 0, browsers missing for the rest, verdict
+# still reported 'passed'). This must be swept up by the same
+# e2e_verify:unmeasured guard as the failed/zero-tests case above (AC2).
+@test "run_parallel_post_task_stages records unmeasured and dispatches no fix for a passed verdict with skipped specs" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-skipped-specs-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    # Replay the issue-5531 payload verbatim: result "passed" but only
+    # 6 of the 12 targeted specs ran (tests_passed + tests_failed = 6 <
+    # tests_run = 12) because the browser executables were missing. Any
+    # run_stage call beyond the initial e2e-verify (a fix or rerun
+    # stage) means the fix loop was entered, which must NOT happen for
+    # an unmeasured verdict.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"passed","summary":"Tests skipped: 6 (due to missing browser executables)","tests_run":12,"tests_passed":6,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- an unmeasured" \
+                    "verdict must dispatch no fix iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-skipped-specs" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    # No fix iteration and no rerun dispatched -- only the single initial
+    # e2e-verify call should appear in the log.
+    local calls
+    calls=$(tr '\n' ' ' < "$calls_file")
+    if grep -q '^run_stage:fix-e2e-iter-1$' "$calls_file"; then
+        fail "a passed verdict unsupported by its counts (6+0 of 12" \
+            "specs) must not dispatch a fix iteration; calls: $calls"
+    fi
+    if grep -q '^run_stage:e2e-verify-rerun-iter-1$' "$calls_file"; then
+        fail "an unmeasured verdict must not enter the rerun path" \
+            "either; calls: $calls"
+    fi
+    [[ "$calls" == *'run_stage:e2e-verify'* ]] || fail \
+        "expected the initial e2e-verify call to still run; calls: $calls"
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' || fail \
+        "Expected e2e_verify:unmeasured in DEGRADED_STAGES (a passed" \
+        "verdict with only 6+0 of 12 specs run must not record a" \
+        "pass); got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# Negative control for the test above (AC4): a run that legitimately
+# matched no specs at all (0 run, 0 passed, 0 failed) must still be
+# recorded as a pass, not swept up with the partly-skipped payload just
+# above. Nothing failed, and passed+failed (0) is not short of
+# tests_run (0) -- the unmeasured guard is keyed on that count
+# consistency, not on a bare `tests_run == 0`, so this legitimate pass
+# stands.
+@test "run_parallel_post_task_stages still records a pass for a genuine no-specs run" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-no-specs-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"passed","summary":"No E2E specs matched this change.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- a genuine" \
+                    "no-specs pass must not dispatch a fix iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-no-specs" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    local calls
+    calls=$(tr '\n' ' ' < "$calls_file")
+    if grep -q '^run_stage:fix-e2e-iter-1$' "$calls_file"; then
+        fail "a genuine no-specs pass must not dispatch a fix" \
+            "iteration; calls: $calls"
+    fi
+    if grep -q '^run_stage:e2e-verify-rerun-iter-1$' "$calls_file"; then
+        fail "a genuine no-specs pass must not enter the rerun path" \
+            "either; calls: $calls"
+    fi
+    [[ "$calls" == *'run_stage:e2e-verify'* ]] || fail \
+        "expected the initial e2e-verify call to still run; calls: $calls"
+
+    local marker
+    marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -c '^e2e_verify:unmeasured$' || true)
+    [ "$marker" -eq 0 ] || fail \
+        "a genuine zero-spec pass must not be recorded as unmeasured;" \
+        "got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# =============================================================================
+# ISSUE #745 TASK 4: AN UNMEASURED RERUN VERDICT MUST STOP THE FIX LOOP
+#
+# The rerun cross-check overrides rerun_status to "unmeasured" for display,
+# but on its own that only changes the icon/comment -- the while loop only
+# breaks on "passed". An unmeasured rerun fell through to the generic
+# not-yet-fixed branch: it overwrote e2e_fail_summary and looped again,
+# dispatching another fix-e2e iteration (and, if Docker files changed,
+# another container rebuild) chasing a verdict nothing measured -- the same
+# waste #745 documents for the initial verdict, just one iteration later.
+# run_parallel_post_task_stages() must stop spending the fix budget the
+# moment a rerun comes back unmeasured, record the same non-blocking
+# `e2e_verify:unmeasured` DEGRADED_STAGES marker the initial-verdict path
+# uses, and must not report it as a generic "Soft Failure".
+# =============================================================================
+
+@test "run_parallel_post_task_stages stops the fix loop and records unmeasured when a rerun verdict is unsupported by its counts" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    export MAX_E2E_FIX_ITERATIONS=2
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-unmeasured-rerun-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    local comments_file="$TEST_TMP/e2e-unmeasured-rerun-comments.txt"
+    : > "$comments_file"
+    comment_issue() { printf '%s\n' "$1" >> "$comments_file"; }
+
+    # Initial e2e-verify is a genuine measured failure (12 run, 9 passed,
+    # 3 failed) -- it must still enter the fix loop and dispatch a fix,
+    # exactly like the negative control above. The rerun then replays the
+    # issue-5536 payload verbatim: result "failed" but
+    # tests_run/tests_passed/tests_failed are all 0 -- an unfinished
+    # run, not a second measured failure. A second fix iteration
+    # (fix-e2e-iter-2 or e2e-verify-rerun-iter-2) would mean the fix
+    # budget kept being spent on a verdict nothing measured, which must
+    # NOT happen.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"3 specs failed on checkout","tests_run":12,"tests_passed":9,"tests_failed":3}}'
+                ;;
+            fix-e2e-iter-1)
+                printf '{"output":{"summary":"Fix applied"}}'
+                ;;
+            e2e-verify-rerun-iter-1)
+                printf '{"output":{"result":"failed","summary":"E2E test execution is currently running in the background. A wakeup has been scheduled to check results upon completion.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- an unmeasured" \
+                    "rerun verdict must not dispatch a second fix" \
+                    "iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-unmeasured-rerun" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    local calls
+    calls=$(tr '\n' ' ' < "$calls_file")
+    grep -qx 'run_stage:fix-e2e-iter-1' "$calls_file" || fail \
+        "expected the first fix iteration to run for a measured" \
+        "failure; calls: $calls"
+    grep -qx 'run_stage:e2e-verify-rerun-iter-1' "$calls_file" || fail \
+        "expected the first rerun to run; calls: $calls"
+
+    if grep -q '^run_stage:fix-e2e-iter-2$' "$calls_file"; then
+        fail "an unmeasured rerun verdict must not dispatch a second" \
+            "fix iteration; calls: $calls"
+    fi
+    if grep -q '^run_stage:e2e-verify-rerun-iter-2$' "$calls_file"; then
+        fail "an unmeasured rerun verdict must not dispatch a second" \
+            "rerun either; calls: $calls"
+    fi
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' || fail \
+        "Expected e2e_verify:unmeasured in DEGRADED_STAGES after an" \
+        "unmeasured rerun; got:" \
+        "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+
+    if grep -qx 'E2E Verification: Soft Failure' "$comments_file"; then
+        fail "an unmeasured rerun must not be reported as a generic" \
+            "Soft Failure; comments: $(tr '\n' '|' < "$comments_file")"
+    fi
 }
 
 # =============================================================================

@@ -654,3 +654,718 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# The AC7 hook only covers commits that exist before the PR is opened. A
+# PR-review fix stage commits AFTER that point and can touch a canonical
+# .claude/scripts/ file just as easily as the initial implementation — left
+# alone, that post-PR commit re-diverges the bundle and the push carries a
+# stale one. Assert a second call site exists, and that it sits immediately
+# before the fix-stage's push, not just somewhere in the file.
+@test "(#675) the regeneration hook also runs before the post-PR fix-stage push" {
+	local -a regen_lines
+	local push_line closest_regen line between
+
+	push_line=$(grep -n 'git push origin "\$branch"' "$ORCHESTRATOR" \
+		| head -1 | cut -d: -f1)
+	[[ -n "$push_line" ]] || {
+		printf 'FAIL: could not locate the fix-stage push in %s\n' \
+			"$ORCHESTRATOR" >&2
+		return 1
+	}
+
+	while IFS= read -r line; do
+		regen_lines+=("$line")
+	done < <(grep -n '^[[:space:]]*regenerate_bundle_if_needed "' \
+		"$ORCHESTRATOR" | cut -d: -f1)
+
+	(( ${#regen_lines[@]} >= 2 )) || {
+		printf 'FAIL: expected a pre-PR call and a fix-stage call, found %d\n' \
+			"${#regen_lines[@]}" >&2
+		return 1
+	}
+
+	# The regeneration call closest to (and before) the push is the one that
+	# must guard it.
+	closest_regen=0
+	for line in "${regen_lines[@]}"; do
+		(( line < push_line )) && closest_regen=$line
+	done
+	(( closest_regen > 0 )) || {
+		printf 'FAIL: no regenerate_bundle_if_needed call precedes the fix-stage push (line %s)\n' \
+			"$push_line" >&2
+		return 1
+	}
+
+	# No `git commit`/`git add` may sit between the guarding call and the
+	# push — that would slip a commit past the regeneration hook and
+	# re-diverge the bundle right before the push carries it. Other
+	# additions between the two calls (retry logic, status logging) are
+	# fine and must not fail this test, so assert on the specific hazard
+	# (a commit slipping past the guard) rather than on any code at all
+	# sitting between them.
+	between=$(sed -n "$((closest_regen + 1)),$((push_line - 1))p" \
+		"$ORCHESTRATOR" \
+		| grep -E '\bgit([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+(commit|add)\b' \
+		|| true)
+	[[ -z "$between" ]] || {
+		printf 'FAIL: git commit/add between regeneration and push:\n%s\n' \
+			"$between" >&2
+		return 1
+	}
+}
+
+# The structural test above only proves the fix-stage call site exists; it
+# says nothing about whether a regeneration run at THAT point in history
+# actually lands the trees in sync. This drives the extracted hook through
+# the full #666/#651 replay — an implementation commit, the pre-PR
+# regeneration, then a fix-pr-review commit touching the same canonical
+# script — and asserts the bundle matches at the moment a push would carry
+# it (AC1/AC2).
+@test "(#675) a fix-pr-review commit touching a canonical script leaves the bundle in sync at push time" {
+	_init_pipeline_git_repo
+
+	# Implementation commit, pre-PR (#666 / #651 replay).
+	git -C "$TEST_TMP" checkout -q -b wt/i675
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: implementation commit"
+
+	# The #632 pre-PR call site.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'pre-PR regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+	diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null || {
+		printf 'FAIL: fixture bundle not in sync after the pre-PR regeneration\n' >&2
+		return 1
+	}
+
+	# The PR is now open. A fix-pr-review-iterN commit lands afterwards and
+	# edits the same canonical script again — the entire #675 failure mode.
+	printf '#!/usr/bin/env bash\necho orchestrator v3 (fix-pr-review)\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix-pr-review-iter1: address review comment"
+
+	# Precondition: the fix commit re-diverged the bundle, i.e. the state
+	# that went red in #620 / #666 / #651 and needed a human to run
+	# sync.sh by hand.
+	! diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null 2>&1 || {
+		printf 'FAIL: fixture did not reproduce the post-PR re-divergence\n' >&2
+		return 1
+	}
+
+	# The fix-stage's guarding call, immediately before its push.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'fix-stage regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# AC1/AC2: at push time — right now, since a real push carries whatever
+	# HEAD holds — the bundle matches the canonical tree.
+	diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null || {
+		printf 'FAIL: bundle still stale at push time after the fix-stage commit\n' >&2
+		return 1
+	}
+
+	# The regenerated bundle must be committed — a push carries HEAD, not
+	# the working tree.
+	local dirty
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: regenerated bundle left uncommitted at push time:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+
+	# CI equivalence: Bundle Parity & Syntax would be green on the commit
+	# that gets pushed.
+	bash "$TEST_TMP/sync.sh" bundle > /dev/null
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: Bundle Parity & Syntax would still be red:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+}
+
+# AC3: the fix-stage call site reuses the same hook as the pre-PR call, but
+# that must not be assumed — assert directly that a fix-pr-review commit
+# touching no canonical script triggers neither a regeneration nor a commit
+# at the point the fix-stage push would carry it. Without this, a future
+# change that makes the fix-stage call unconditional (e.g. dropping the base
+# diff) would slip a spurious "chore(bundle)" commit into every review-fix
+# push, unnoticed.
+@test "(#675 AC3) the fix-stage regeneration is a no-op when the fix-pr-review commit changes no canonical script" {
+	_init_pipeline_git_repo
+
+	# Implementation commit, pre-PR (#666 / #651 replay) — same setup as the
+	# AC1/AC2 test above, so the bundle is already in sync before the
+	# fix-pr-review commit under test lands.
+	git -C "$TEST_TMP" checkout -q -b wt/i675-ac3
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: implementation commit"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'pre-PR regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# A fix-pr-review-iterN commit that touches only non-canonical content —
+	# the case where the fix-stage call must do nothing.
+	printf '# review note\n' > "$TEST_TMP/README.md"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix-pr-review-iter1: address review comment"
+
+	local head_before
+	head_before=$(git -C "$TEST_TMP" rev-parse HEAD)
+
+	# The fix-stage's guarding call, immediately before its push.
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'fix-stage regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# The hook diffs base_branch...HEAD (the whole PR so far), not just the
+	# latest commit, so it re-examines the earlier implementation commit here
+	# too — that is by design (#632) and cheap, per the #675 evaluation's own
+	# "negligible" framing. What AC3 actually forbids is an observable
+	# regeneration: a new commit, or the bundle tree changing underneath it.
+	[[ "$(git -C "$TEST_TMP" rev-parse HEAD)" == "$head_before" ]] || {
+		printf 'FAIL: fix-stage hook committed although no canonical script changed\n' >&2
+		return 1
+	}
+
+	local dirty
+	dirty=$(git -C "$TEST_TMP" status --porcelain)
+	[[ -z "$dirty" ]] || {
+		printf 'FAIL: fix-stage hook left the working tree dirty on a no-op run:\n%s\n' \
+			"$dirty" >&2
+		return 1
+	}
+}
+
+# AC4: consumers install the orchestrator from the plugin bundle and have
+# neither sync.sh nor plugins/pipeline-core/ (#632 AC8). The fix-stage call
+# site must stay inert there too, across the same pre-PR-then-fix-pr-review
+# replay used by the AC1/AC2 and AC3 tests above — not just on a single call,
+# as the pre-existing (#632) inert test already covers.
+@test "(#675 AC4) the fix-stage regeneration stays inert across a fix-pr-review commit in a repo with no bundle generator" {
+	mkdir -p "$TEST_TMP/consumer-repo/.claude/scripts"
+	git -C "$TEST_TMP/consumer-repo" init -q -b main
+	git -C "$TEST_TMP/consumer-repo" config user.email "test@example.com"
+	git -C "$TEST_TMP/consumer-repo" config user.name "Test"
+	printf '#!/usr/bin/env bash\necho x\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "base"
+
+	# Implementation commit, pre-PR call — mirrors the pipeline-repo replay,
+	# but against a consumer with no generator.
+	git -C "$TEST_TMP/consumer-repo" checkout -q -b wt/i675-ac4
+	printf '#!/usr/bin/env bash\necho y\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "feat: implementation commit"
+
+	_run_regen_hook "$TEST_TMP/consumer-repo" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: pre-PR hook failed in a consumer repo (exit %d):\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+
+	# fix-pr-review-iterN commit touching the canonical-shaped path again —
+	# still must not blow up or fabricate a bundle in a repo with no
+	# generator.
+	printf '#!/usr/bin/env bash\necho z\n' \
+		> "$TEST_TMP/consumer-repo/.claude/scripts/local.sh"
+	git -C "$TEST_TMP/consumer-repo" add -A
+	git -C "$TEST_TMP/consumer-repo" commit -qm "fix-pr-review-iter1: address review comment"
+
+	local head_before
+	head_before=$(git -C "$TEST_TMP/consumer-repo" rev-parse HEAD)
+
+	_run_regen_hook "$TEST_TMP/consumer-repo" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: fix-stage hook failed in a consumer repo (exit %d):\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$(git -C "$TEST_TMP/consumer-repo" rev-parse HEAD)" == "$head_before" ]] || {
+		printf 'FAIL: fix-stage hook committed in a repo with no bundle generator\n' >&2
+		return 1
+	}
+	[[ ! -e "$TEST_TMP/consumer-repo/plugins" ]] || {
+		printf 'FAIL: fix-stage hook fabricated a plugins/ tree in a consumer repo\n' >&2
+		return 1
+	}
+}
+
+# =============================================================================
+# AC5 parity guard test coverage (issue #696)
+#
+# regenerate_bundle_if_needed() (#675 AC5) diffs .claude/scripts/ against
+# plugins/pipeline-core/scripts/ itself after calling `sync.sh bundle`,
+# because the generator's own exit code lies when it silently skips a file
+# (e.g. a subdir added to .claude/scripts/ that BUNDLE_SCRIPT_SUBDIRS doesn't
+# know about yet): it exits 0 and `git status` on the untouched path stays
+# clean. Nothing exercised that branch, so the guard could regress to a
+# no-op — e.g. the `log_error` call deleted, or `_parity_in_sync` inverted —
+# and CI would only catch it as a red Bundle Parity & Syntax check on some
+# future PR, exactly the failure #675 exists to prevent.
+#
+# Stub sync.sh itself, rather than editing BUNDLE_SCRIPT_SUBDIRS, so this
+# test pins the guard at its actual defect site: a generator whose exit
+# status alone is not proof of parity.
+# =============================================================================
+
+@test "(#696 / #675 AC5) log_error parity guard fires when sync.sh bundle exits 0 without copying" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i696
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: edit canonical orchestrator"
+
+	# Replace the real generator with a stub that exits 0 but copies
+	# nothing — the exact failure mode AC5's guard exists to catch.
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	# Precondition: the stub really left the trees divergent, i.e. the state
+	# the guard exists to catch.
+	! diff -q "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh" \
+		> /dev/null 2>&1 || {
+		printf 'FAIL: fixture did not reproduce a stale bundle\n' >&2
+		return 1
+	}
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"ERROR: sync.sh bundle exited 0 but"* ]] || {
+		printf 'FAIL: parity guard did not fire:\n%s\n' "$output" >&2
+		return 1
+	}
+	[[ "$output" == *"still does not match .claude/scripts/"* ]] || {
+		printf 'FAIL: parity guard message missing expected detail:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# =============================================================================
+# Subdir list derived from sync.sh, not hardcoded (issue #693)
+#
+# regenerate_bundle_if_needed() used to check a literal
+# `_parity_subdirs=(platform prompts schemas)` — a THIRD hand-maintained copy
+# of the same list sync.sh's BUNDLE_SCRIPT_SUBDIRS and
+# test-bundle-parity.bats' PARITY_SUBDIRS already carry. A subdir added to
+# .claude/scripts/ and to sync.sh's allowlist, but forgotten in this literal,
+# would silently drop out of the orchestrator's own parity guard: drift under
+# that subdir would pass unnoticed here even though test-bundle-parity.bats
+# (a separate file, checked only in CI) would still catch it later.
+# =============================================================================
+
+@test "(#693) parity guard checks a subdir sync.sh's BUNDLE_SCRIPT_SUBDIRS names, not just platform/prompts/schemas" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i693
+
+	# A new bundled subdirectory, added under .claude/scripts/ and to
+	# sync.sh's own allowlist — nothing about it is hardcoded in the
+	# orchestrator, which is exactly the point being tested.
+	mkdir -p "$TEST_TMP/.claude/scripts/extras" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/extras"
+	printf '#!/usr/bin/env bash\necho canonical\n' \
+		> "$TEST_TMP/.claude/scripts/extras/tool.sh"
+	# The bundled counterpart drifts from canonical — the stub generator
+	# below never reconciles it, mirroring the AC5 fixture above.
+	printf '#!/usr/bin/env bash\necho stale\n' \
+		> "$TEST_TMP/plugins/pipeline-core/scripts/extras/tool.sh"
+
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: add extras/ under .claude/scripts/"
+
+	# Precondition: the two "extras" copies really differ.
+	! diff -q "$TEST_TMP/.claude/scripts/extras/tool.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/extras/tool.sh" \
+		> /dev/null 2>&1 || {
+		printf 'FAIL: fixture did not reproduce extras/ drift\n' >&2
+		return 1
+	}
+
+	# Stub the generator so it still TEXTUALLY declares
+	# BUNDLE_SCRIPT_SUBDIRS (including "extras") for the orchestrator's
+	# parser to read, but exits 0 without reconciling anything — the same
+	# "generator lies" shape as the AC5 test, extended to a subdir the
+	# orchestrator does not know about until it reads sync.sh.
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas extras)\n'
+		printf 'exit 0\n'
+	} > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"ERROR: sync.sh bundle exited 0 but"* ]] || {
+		printf 'FAIL: parity guard did not fire for extras/ drift:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# The failure mode #693 actually reports: a subdir added under
+# .claude/scripts/ and forgotten in sync.sh's BUNDLE_SCRIPT_SUBDIRS is
+# missing from BOTH lists, so deriving the guard's list from sync.sh alone
+# would stay just as silent as the old hardcoded literal. The generator never
+# copies such a subdir, so it ships to nobody — the guard has to enumerate
+# .claude/scripts/ as well and name it.
+@test "(#693) parity guard names a .claude/scripts subdir sync.sh's BUNDLE_SCRIPT_SUBDIRS forgot" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i693-unlisted
+
+	# A new subdir under the canonical tree only — no bundle counterpart,
+	# and deliberately absent from the generator's allowlist below.
+	mkdir -p "$TEST_TMP/.claude/scripts/extras"
+	printf '#!/usr/bin/env bash\necho canonical\n' \
+		> "$TEST_TMP/.claude/scripts/extras/tool.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: add unlisted extras/ subdir"
+
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)\n'
+		printf 'exit 0\n'
+	} > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"subdirectory 'extras' exists under"* ]] || {
+		printf 'FAIL: guard did not name the unlisted subdir:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	# And its contents are then diffed like any other bundled subdir, so
+	# the never-copied tool.sh surfaces as parity drift rather than as a
+	# silent omission.
+	[[ "$output" == *"ERROR: sync.sh bundle exited 0 but"* ]] || {
+		printf 'FAIL: unlisted subdir was named but not parity-checked:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# Enumerating .claude/scripts/*/ must not turn the repo's own test trees
+# (implement-issue-test/, platform-test/) into a false alarm on every single
+# run — they are unbundled by design, not forgotten.
+@test "(#693) parity guard stays quiet about unbundled test subdirs" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i693-tests
+
+	mkdir -p "$TEST_TMP/.claude/scripts/widget-test" \
+		"$TEST_TMP/.claude/scripts/fixtures"
+	printf '@test "x" { true; }\n' \
+		> "$TEST_TMP/.claude/scripts/widget-test/test-widget.bats"
+	# A test tree whose name does not follow the *-test convention is
+	# recognised by the .bats files it holds.
+	printf '@test "y" { true; }\n' \
+		> "$TEST_TMP/.claude/scripts/fixtures/test-fixture.bats"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "test: add unbundled test trees"
+
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)\n'
+		printf 'exit 0\n'
+	} > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" != *"subdirectory 'widget-test' exists under"* ]] || {
+		printf 'FAIL: guard flagged a *-test tree:\n%s\n' "$output" >&2
+		return 1
+	}
+	[[ "$output" != *"subdirectory 'fixtures' exists under"* ]] || {
+		printf 'FAIL: guard flagged a .bats-holding tree:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# The BUNDLE_SCRIPT_SUBDIRS awk parse used to require the declaration to
+# start at column 1 of its line, so a tab-indented `declare -a` inside a
+# function (e.g. sync.sh's bundle_scripts()) would parse as "nothing found"
+# rather than as the real list — silently degrading into the total-parse-
+# failure fallback on every run, long after the real declaration still
+# named every subdirectory correctly.
+@test "(#720) parity guard parses an indented declare -a BUNDLE_SCRIPT_SUBDIRS inside a function" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i720-indented
+
+	# A subdir absent from the (indented, declare -a, in-function) list
+	# below — present only so a successful parse has something to name as
+	# forgotten. If the parse instead silently failed and fell back to
+	# "whatever exists", this subdir would be added without complaint.
+	mkdir -p "$TEST_TMP/.claude/scripts/extras"
+	printf '#!/usr/bin/env bash\necho canonical\n' \
+		> "$TEST_TMP/.claude/scripts/extras/tool.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: add unlisted extras/ subdir"
+
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'bundle_scripts() {\n'
+		printf '\tdeclare -a BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)\n'
+		printf '}\n'
+		printf 'exit 0\n'
+	} > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" != *"PARSE FAILURE"* ]] || {
+		printf 'FAIL: indented declare -a form was treated as unparsable:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ "$output" == *"subdirectory 'extras' exists under"* ]] || {
+		printf 'FAIL: indented declare -a form was not parsed, so extras/' \
+			>&2
+		printf ' was not identified as forgotten:\n%s\n' "$output" >&2
+		return 1
+	}
+}
+
+# A total parse failure (no BUNDLE_SCRIPT_SUBDIRS=( ... ) anywhere in
+# sync.sh) is a different failure mode than "sync.sh's list parsed fine but
+# forgot this one subdirectory" — the two must not be conflated. Before this
+# fix, a total parse failure fell back to enumerating every real
+# subdirectory and reported each one individually as "sync.sh ... does not
+# list it", indistinguishable from N genuine per-subdir omissions.
+@test "(#720) total BUNDLE_SCRIPT_SUBDIRS parse failure reports one distinct error, not one per subdir" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i720-parse-failure
+
+	# A canonical edit so the hook's "did .claude/scripts change?" gate
+	# passes — parse behavior is what's under test, not that gate.
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: edit canonical orchestrator"
+
+	# No BUNDLE_SCRIPT_SUBDIRS declaration anywhere — the awk parse finds
+	# nothing at all, as distinct from finding a list that omits a subdir.
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"PARSE FAILURE"* ]] || {
+		printf 'FAIL: total parse failure did not report a distinct error:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ "$output" != *"does not list it"* ]] || {
+		printf 'FAIL: total parse failure was conflated with per-subdir' \
+			>&2
+		printf ' omissions (one "does not list it" per real subdir):\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# =============================================================================
+# Reverse sweep (issue #694) — a bundled file whose canonical source was
+# deleted must be caught, not just a canonical file whose bundle copy is
+# stale or missing. The forward loop above only ever walks
+# .claude/scripts/**, so it is structurally blind to a file that used to
+# exist there and no longer does: nothing in that loop ever visits the
+# leftover bundle copy. The real sync.sh's own removal step normally cleans
+# this up, but (as with AC5 above) this guard must not take the generator's
+# word for it — a generator that skips the removal (or is stubbed out, as
+# here) must be caught by this guard's own diff, exactly like
+# test-bundle-parity.bats' "every bundled script has a canonical
+# counterpart" catches it in CI.
+# =============================================================================
+
+@test "(#694) parity guard flags a bundled file whose canonical source was deleted" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i694
+
+	# Canonical source deleted; the bundle copy is left behind — the exact
+	# drift this reverse sweep exists to catch.
+	rm "$TEST_TMP/.claude/scripts/platform/create-issue.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix: remove obsolete canonical platform script"
+
+	# Stub sync.sh so the generator's own removal step never runs — this
+	# guard must not rely on the generator to have cleaned up (same
+	# rationale as the AC5 stub above: exit 0 alone proves nothing).
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	# Precondition: the orphan really exists, i.e. the state the guard
+	# exists to catch.
+	[[ ! -f "$TEST_TMP/.claude/scripts/platform/create-issue.sh" ]] || {
+		printf 'FAIL: fixture did not delete the canonical source\n' >&2
+		return 1
+	}
+	[[ -f "$TEST_TMP/plugins/pipeline-core/scripts/platform/create-issue.sh" ]] || {
+		printf 'FAIL: fixture did not leave an orphaned bundle copy\n' >&2
+		return 1
+	}
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"platform/create-issue.sh"*"no canonical counterpart"* ]] || {
+		printf 'FAIL: reverse sweep did not flag the orphaned bundle file:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(#694) parity guard flags a top-level bundled script whose canonical source was deleted" {
+	_init_pipeline_git_repo
+
+	# A second top-level script, in BOTH trees, committed on the BASE branch.
+	# It has to pre-date the branch: the hook gates on
+	# `git diff base...HEAD -- .claude/scripts`, so adding and deleting
+	# helper.sh on the same branch nets out to no canonical change at all and
+	# the hook returns before it ever reaches the parity sweep.
+	printf '#!/usr/bin/env bash\necho helper\n' \
+		> "$TEST_TMP/.claude/scripts/helper.sh"
+	cp "$TEST_TMP/.claude/scripts/helper.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/helper.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: add canonical helper.sh"
+
+	git -C "$TEST_TMP" checkout -q -b wt/i694-top-level
+
+	rm "$TEST_TMP/.claude/scripts/helper.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "fix: remove obsolete canonical helper.sh"
+
+	# Stub sync.sh so the generator's own removal step never runs (same
+	# rationale as the AC5 stub above).
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	[[ ! -f "$TEST_TMP/.claude/scripts/helper.sh" ]] || {
+		printf 'FAIL: fixture did not delete the canonical source\n' >&2
+		return 1
+	}
+	[[ -f "$TEST_TMP/plugins/pipeline-core/scripts/helper.sh" ]] || {
+		printf 'FAIL: fixture did not leave an orphaned bundle copy\n' >&2
+		return 1
+	}
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" == *"helper.sh"*"no canonical counterpart"* ]] || {
+		printf 'FAIL: reverse sweep did not flag the top-level orphan:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+# The orchestrator runs under `set -u`, and bash 3.2 (the macOS system bash)
+# treats "${empty_array[@]}" as an unbound variable rather than an empty
+# expansion. _parity_subdirs is legitimately empty whenever the
+# BUNDLE_SCRIPT_SUBDIRS parse finds nothing AND no bundleable subdirectory
+# exists, so an unguarded reverse-sweep loop over it kills the run one stage
+# before the PR — strictly worse than the stale bundle this whole function
+# exists to prevent, and the opposite of its "returns 0 always" contract.
+@test "(#694) reverse sweep survives an empty bundled-subdir list under set -u" {
+	_init_pipeline_git_repo
+
+	git -C "$TEST_TMP" checkout -q -b wt/i694-empty-subdirs
+
+	# Drop every subdirectory from BOTH trees so the union of "what sync.sh
+	# lists" and "what actually exists" is empty.
+	rm -rf "$TEST_TMP/.claude/scripts/platform" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/platform"
+
+	# A canonical edit, mirrored into the bundle, so the hook gets past its
+	# "did .claude/scripts change?" gate with the trees already in parity —
+	# an empty subdir list is then the only thing under test.
+	printf '#!/usr/bin/env bash\necho orchestrator v2\n' \
+		> "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh"
+	cp "$TEST_TMP/.claude/scripts/implement-issue-orchestrator.sh" \
+		"$TEST_TMP/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+	git -C "$TEST_TMP" add -A
+	git -C "$TEST_TMP" commit -qm "feat: edit canonical orchestrator"
+
+	# A generator with no BUNDLE_SCRIPT_SUBDIRS at all, so the awk parse
+	# yields nothing and the array stays empty.
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_TMP/sync.sh"
+	chmod +x "$TEST_TMP/sync.sh"
+
+	_run_regen_hook "$TEST_TMP" main || return 1
+	[ "$status" -eq 0 ] || {
+		printf 'regen hook exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	[[ "$output" != *"unbound variable"* ]] || {
+		printf 'FAIL: empty subdir array expanded under set -u:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}

@@ -131,6 +131,150 @@ EOF
 }
 
 # =============================================================================
+# ISSUE #690: preflight-skipped issues must not be logged/emitted as success
+# =============================================================================
+#
+# process_issue() returns 0 on a preflight skip (see the validate_issue_for_
+# processing tests below, ~line 1043) so a skip does not trip the consecutive-
+# failure circuit breaker. That same 0 was indistinguishable from a real
+# success to the caller loop's "if process_issue "$issue"; then" block
+# (originally ":1961-1964", now ~:1983-1991 after the fix), which used to
+# unconditionally log "processed successfully" and emit outcome=success.
+#
+# The call-site block lives in the top-level batch loop, not inside a
+# function, so it cannot be sourced directly. It is extracted by anchor and
+# exercised with mocked log/emit_event/process_issue, mirroring the
+# up-front-skip-gate extraction technique used elsewhere in this file.
+#
+# Signal contract: process_issue() sets the dedicated global
+# _PREFLIGHT_SKIPPED=true immediately before its preflight-skip `return 0`,
+# and resets it to false at the top of every call (see batch-orchestrator.sh
+# ~:108-118, :1183-1211). The caller reads _PREFLIGHT_SKIPPED right after
+# process_issue() returns to distinguish a genuine success from a skip that
+# also returned 0.
+#
+# MAINTENANCE NOTE: if the fix changes to a different signal (e.g. back to a
+# non-empty _SKIP_REASON) or different wording than "outcome=skipped", update
+# the mock setup / assertions below in lockstep — see the maintenance note
+# above the up-front skip gate tests for the established convention this
+# follows.
+
+# Extracts the "if process_issue "$issue"; then ... fi" call-site block from
+# the top-level batch loop. Returns 1 (without aborting) if the anchor is not
+# found so callers can skip rather than false-fail on an unrelated script
+# change.
+_extract_process_issue_call_site() {
+	local block_file="$TEST_TMP/process_issue_call_site.bash"
+	awk '/^    if process_issue /,/^    fi$/' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		> "$block_file"
+	grep -q 'process_issue' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources the extracted block inside a one-shot for-loop (so `break`, used by
+# the circuit-breaker arm, has a loop to break out of) with log/emit_event/
+# process_issue/set_state mocked to capture their arguments to files instead
+# of touching the real filesystem or git/gh.
+_run_process_issue_call_site() {
+	local block_file="$1"
+	local process_issue_rc="$2"
+	local preflight_skipped="${3:-false}"
+	local skip_reason="${4:-}"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_error() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	emit_event() { printf '%s\n' "$*" >> "$TEST_TMP/events.out"; }
+	set_state() { printf '%s\n' "$*" >> "$TEST_TMP/state.out"; }
+	# shellcheck disable=SC2317
+	process_issue() { return "$process_issue_rc"; }
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/events.out"
+	: > "$TEST_TMP/state.out"
+
+	# _PREFLIGHT_SKIPPED is the out-of-band signal process_issue() leaves
+	# behind (see the maintenance note above); _SKIP_REASON is only used
+	# for the human-readable skip reason in the log line.
+	_PREFLIGHT_SKIPPED="$preflight_skipped"
+	_SKIP_REASON="$skip_reason"
+	issue=690
+	consecutive_failures="${CF_IN:-0}"
+	exit_code=0
+	MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-5}"
+
+	for _once in 1; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+	done
+}
+
+@test "functional: process_issue call site does not log 'processed successfully' for a preflight skip" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site \
+		"$block_file" 0 true "body failed structural validation"
+
+	! grep -q 'processed successfully' "$TEST_TMP/log.out"
+}
+
+@test "functional: process_issue call site logs a distinct skip message for a preflight skip" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site \
+		"$block_file" 0 true "body failed structural validation"
+
+	grep -qi 'skip' "$TEST_TMP/log.out"
+}
+
+@test "functional: process_issue call site does not emit outcome=success for a preflight skip" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site \
+		"$block_file" 0 true "body failed structural validation"
+
+	! grep -q 'outcome=success' "$TEST_TMP/events.out"
+}
+
+@test "functional: process_issue call site emits a skipped outcome for a preflight skip" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site \
+		"$block_file" 0 true "body failed structural validation"
+
+	grep -q 'outcome=skipped' "$TEST_TMP/events.out"
+}
+
+@test "functional: process_issue call site still logs success for a real (non-skipped) success" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	_run_process_issue_call_site "$block_file" 0 false ""
+
+	grep -q 'processed successfully' "$TEST_TMP/log.out"
+	grep -q 'outcome=success' "$TEST_TMP/events.out"
+}
+
+@test "functional: process_issue call site still logs a failure and increments consecutive_failures" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	CF_IN=4 _run_process_issue_call_site "$block_file" 1 false ""
+
+	grep -q 'outcome=failed' "$TEST_TMP/events.out"
+	[[ "$consecutive_failures" -eq 5 ]]
+}
+
+# =============================================================================
 # STATIC ANALYSIS: merge_blocked case arm
 # =============================================================================
 
@@ -671,37 +815,44 @@ _simulate_cost_rollup() {
 	grep -q 'already merged' "$BATCH_ORCHESTRATOR_SCRIPT"
 }
 
-@test "up-front skip gate: closed issue sets status to completed" {
-	# Verify the closed-issue branch updates the issue to completed so
-	# update_progress counts it correctly (not as failed/skipped).
-	# Anchor on code structure (_upfront_issue_state == CLOSED condition)
-	# rather than log message wording.
+@test "up-front skip gate: gh-resolved issue sets status to completed" {
+	# ISSUE #740: the closed-issue and merged-PR detection was extracted
+	# into check_issue_resolved_upstream(); the call-site now shares a
+	# single if-block for both cases. Anchor on that call-site's code
+	# structure rather than log message wording.
 	local block
-	block=$(awk '/_upfront_issue_state.*==.*CLOSED/,/continue/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" | head -10)
-	[[ "$block" == *'update_issue_field'* ]]
-	[[ "$block" == *'"status"'* ]]
-	[[ "$block" == *'"completed"'* ]]
-}
-
-@test "up-front skip gate: merged PR sets status to completed" {
-	# Anchor on code structure (_merged_pr detection block) not log wording.
-	local block
-	block=$(awk '/\[\[ -n.*_merged_pr/,/continue/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" | head -10)
-	[[ "$block" == *'update_issue_field'* ]]
-	[[ "$block" == *'"status"'* ]]
-	[[ "$block" == *'"completed"'* ]]
-}
-
-@test "up-front skip gate: merged PR update also stores the PR number" {
-	# The PR field must be written so handle-issues progress table shows it.
-	# Anchor on code structure (_merged_pr detection block) not log wording.
-	local block
-	block=$(awk '/\[\[ -n.*_merged_pr/,/update_progress/' \
+	block=$(awk '/if check_issue_resolved_upstream /,/^    fi$/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
 	[[ "$block" == *'update_issue_field'* ]]
+	[[ "$block" == *'"status"'* ]]
+	[[ "$block" == *'"completed"'* ]]
+}
+
+@test "up-front skip gate: call-site stores the PR number when one is set" {
+	# The PR field must be written so handle-issues progress table shows it.
+	# Anchor on code structure (_UPFRONT_SKIP_PR) not log wording.
+	local block
+	block=$(awk '/if check_issue_resolved_upstream /,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
+	[[ "$block" == *'_UPFRONT_SKIP_PR'* ]]
+	[[ "$block" == *'update_issue_field'* ]]
 	[[ "$block" == *'"pr"'* ]]
+}
+
+@test "check_issue_resolved_upstream: detects a closed issue" {
+	local body
+	body=$(_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'CLOSED'* ]]
+	[[ "$body" == *'_UPFRONT_SKIP_REASON'* ]]
+}
+
+@test "check_issue_resolved_upstream: detects a merged PR and records its number" {
+	local body
+	body=$(_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'merged_pr'* ]]
+	[[ "$body" == *'_UPFRONT_SKIP_PR'* ]]
 }
 
 @test "up-front skip gate: gh failures are non-fatal (|| true pattern)" {
@@ -773,6 +924,606 @@ _make_gh_skip_status_json() {
 	result=$(_simulate_update_progress "$status_file")
 	count=$(printf '%s' "$result" | jq '.progress.failed')
 	[[ "$count" == "0" ]]
+}
+
+# =============================================================================
+# TASK 3 (i740): failure-site reconciliation — a stale `failed` verdict must
+# flip to `completed` when the issue's feature branch PR already merged
+# =============================================================================
+#
+# batch-orchestrator.sh records four failure sites unconditionally today:
+# implement-issue failure (~:1500), missing PR number (~:1509), process-pr
+# timeout (~:1576) and process-pr failure (~:1613, a case arm). None re-checks
+# whether the work actually landed before writing "failed" — see issue #740.
+# Tasks #1/#2 on this issue reuse the up-front skip gate's
+# `gh pr list --state merged --head "feature/issue-N"` check on these
+# failure paths: when it reports a merged PR, the site must record
+# `completed` with that PR number and return 0 (success) instead of 1, so the
+# call-site circuit breaker (see the "process_issue call site" tests above)
+# naturally leaves consecutive_failures untouched — it only increments on a
+# nonzero process_issue() return. A genuine failure (no merged PR) must still
+# record `failed` and return 1, unchanged.
+#
+# These functional tests extract each failure site by its stable if/case
+# guard — not by the (separately implemented) reconciliation call itself —
+# so they stay valid regardless of the helper's internal name, and `skip`
+# gracefully if a future refactor moves the guard. Until tasks #1/#2 land,
+# the "reconciled" assertions below fail RED (the sites unconditionally
+# record "failed" today); they turn GREEN once the failure sites call the
+# merged-PR check before finalizing a verdict.
+
+# Extracts the implement-issue failure site's "if [[ "$impl_status" !=
+# "success" ]]; then ... fi" block. Returns 1 (without aborting) if the
+# anchor is not found so callers skip rather than false-fail on an unrelated
+# script change.
+_extract_impl_failure_block() {
+	local block_file="$TEST_TMP/impl_failure_block.bash"
+	awk '/^    if \[\[ "\$impl_status" != "success" \]\]; then$/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Extracts the process-pr failure case arm ("error|rate_limit|*) ... ;;") and
+# wraps it in its own "case "$proc_status" in ... esac" so it is valid,
+# sourceable bash on its own (a bare case arm is not). The wildcard "*"
+# pattern in the arm still matches any $proc_status. Same not-found contract
+# as _extract_impl_failure_block.
+_extract_process_pr_failure_block() {
+	local block_file="$TEST_TMP/process_pr_failure_block.bash"
+	{
+		printf 'case "$proc_status" in\n'
+		awk '/error\|rate_limit\|\*\)/,/^[[:space:]]+;;/' \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		printf 'esac\n'
+	} > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Extracts the "no PR number found" failure site's "if [[ -z "$pr_number"
+# ]]; then ... fi" block. Same not-found contract as
+# _extract_impl_failure_block.
+_extract_no_pr_failure_block() {
+	local block_file="$TEST_TMP/no_pr_failure_block.bash"
+	awk '/^    if \[\[ -z "\$pr_number" \]\]; then$/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Extracts the process-pr timeout failure site's "if (( proc_exit == 124 ));
+# then ... fi" block. Same not-found contract as _extract_impl_failure_block.
+_extract_timeout_failure_block() {
+	local block_file="$TEST_TMP/timeout_failure_block.bash"
+	awk '/^    if \(\( proc_exit == 124 \)\); then$/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources an extracted failure-site block with gh mocked on PATH (caller sets
+# PATH before calling) and log/log_error/update_issue_field/update_progress/
+# git mocked to capture calls instead of touching the real filesystem or
+# git/gh. Leaves the block's return code in _failure_block_rc (0 or 1).
+# PROC_EXIT_IN (default 0) seeds $proc_exit, needed for the timeout site's
+# "(( proc_exit == 124 ))" guard.
+_run_failure_site_block() {
+	local block_file="$1"
+
+	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_error()          { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
+	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
+	# shellcheck disable=SC2317
+	git()                { printf '%s\n' "git $*" >> "$TEST_TMP/git.out"; return 0; }
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/update.out"
+	: > "$TEST_TMP/progress.out"
+	: > "$TEST_TMP/git.out"
+
+	# The failure sites call the real check_issue_resolved_upstream() to
+	# reconcile a reported failure against GitHub's actual state — source
+	# it so the block under test exercises production reconciliation logic
+	# (and the mocked `gh` on PATH) rather than skipping that call entirely.
+	source_check_issue_resolved_upstream \
+		|| { _failure_block_rc=1; return 1; }
+
+	issue_num=695
+	impl_status="error"
+	impl_error="pr stage aborted: already exists"
+	proc_status="error"
+	proc_error="status was error"
+	pr_number=""
+	BRANCH="main"
+	ISSUE_TIMEOUT=3600
+	proc_exit="${PROC_EXIT_IN:-0}"
+
+	_failure_block_rc=0
+	source "$block_file" || _failure_block_rc=$?
+}
+
+# Mocked gh reporting the feature branch's PR as merged (issue #695 / PR #735
+# from the issue's own evidence table).
+_stub_gh_pr_merged() {
+	local mock_bin="$TEST_TMP/mock-bin-merged-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	pr) printf '735\n' ;;
+	issue) printf 'OPEN\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+# Mocked gh reporting no merged PR and an open issue — a genuine failure.
+_stub_gh_pr_not_merged() {
+	local mock_bin="$TEST_TMP/mock-bin-open-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	pr) printf '' ;;
+	issue) printf 'OPEN\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "functional: implement-issue failure site records completed with the PR number when the PR already merged" {
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: implement-issue failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: implement-issue failure site logs the reconciliation explicitly" {
+	# AC4: a status flipping from failed to completed must be visible in the
+	# run log, not silent. Anchor on the merged PR number rather than exact
+	# wording so a future rewording of the log message doesn't false-fail.
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -q '735' "$TEST_TMP/log.out"
+}
+
+@test "functional: process-pr failure site records completed with the PR number when the PR already merged" {
+	# Mirrors issue #740's #5482 evidence: process-pr timed out/failed while
+	# the PR had already merged moments earlier.
+	local block_file
+	block_file=$(_extract_process_pr_failure_block) \
+		|| skip "process-pr failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: process-pr failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_process_pr_failure_block) \
+		|| skip "process-pr failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: no-PR-number failure site records completed with the PR number when the PR already merged" {
+	local block_file
+	block_file=$(_extract_no_pr_failure_block) \
+		|| skip "no-PR-number failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: no-PR-number failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_no_pr_failure_block) \
+		|| skip "no-PR-number failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: process-pr timeout failure site records completed with the PR number when the PR already merged" {
+	local block_file
+	block_file=$(_extract_timeout_failure_block) \
+		|| skip "process-pr timeout failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	PROC_EXIT_IN=124 _run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: process-pr timeout failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_timeout_failure_block) \
+		|| skip "process-pr timeout failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_EXIT_IN=124 _run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: a reconciled false failure (process_issue returns success) leaves consecutive_failures untouched" {
+	# AC3: a failure site that reconciles a stale "failed" verdict must
+	# return 0 like a genuine success (see the failure-site tests above), so
+	# the circuit breaker — which only increments consecutive_failures on a
+	# nonzero process_issue() return, per the "process_issue call site"
+	# tests earlier in this file — cannot be tripped by a false failure that
+	# already landed.
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	CF_IN=3 _run_process_issue_call_site "$block_file" 0 false ""
+
+	[[ "$consecutive_failures" -eq 0 ]]
+	! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+}
+
+@test "functional: a genuine failure (process_issue returns failure) still increments consecutive_failures" {
+	# Contrast case: establishes the circuit breaker still fires for a real
+	# failure, so the reconciled-false-failure test above isn't vacuous.
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	CF_IN=3 _run_process_issue_call_site "$block_file" 1 false ""
+
+	[[ "$consecutive_failures" -eq 4 ]]
+}
+
+# =============================================================================
+# ISSUE #690 (task 5): preflight skips must not affect the circuit breaker,
+# and the pre-existing up-front skip gate must be unaffected by the fix
+# =============================================================================
+#
+# AC4 (issue #690): "Skips still do not increment consecutive failures and
+# still do not trip the circuit breaker — asserted directly, not inferred."
+# The tests below reuse the real call-site block (via
+# _extract_process_issue_call_site / _run_process_issue_call_site, defined
+# above) so the circuit-breaker arithmetic and the `break` statement under
+# test are the actual production code, not a re-implementation of it.
+#
+# AC5: "The up-front gate for already-closed issues and already-merged PRs
+# still records completion and is unaffected." That gate (~:1958-1981) uses
+# `continue` to bypass process_issue entirely, so it never sees
+# _PREFLIGHT_SKIPPED — the tests below confirm that stays true.
+
+@test "functional: a preflight skip does not increment consecutive_failures" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	CF_IN=2 _run_process_issue_call_site \
+		"$block_file" 0 true "body failed structural validation"
+
+	[[ "$consecutive_failures" -eq 0 ]]
+}
+
+@test "functional: a preflight skip at the failure threshold does not trip the circuit breaker" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	# consecutive_failures is already one below MAX_CONSECUTIVE_FAILURES —
+	# the case most likely to falsely trip if a skip were ever miscounted
+	# as a failure.
+	MAX_CONSECUTIVE_FAILURES=3 CF_IN=2 _run_process_issue_call_site \
+		"$block_file" 0 true "body failed structural validation"
+
+	! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+	[[ ! -s "$TEST_TMP/state.out" ]]
+	! grep -q 'batch_paused' "$TEST_TMP/events.out"
+	[[ "$exit_code" -eq 0 ]]
+}
+
+@test "functional: repeated preflight skips beyond MAX_CONSECUTIVE_FAILURES never trip the circuit breaker" {
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	MAX_CONSECUTIVE_FAILURES=3
+	local cf=0
+	local i
+	for ((i = 0; i < 5; i++)); do
+		CF_IN="$cf" _run_process_issue_call_site \
+			"$block_file" 0 true "body failed structural validation"
+		cf="$consecutive_failures"
+		! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+		[[ "$exit_code" -eq 0 ]]
+	done
+
+	[[ "$cf" -eq 0 ]]
+}
+
+@test "functional: a real failure at the threshold still trips the circuit breaker (contrast case)" {
+	# Establishes that the harness/circuit-breaker arithmetic can still
+	# fire at all — otherwise the skip tests above would pass vacuously.
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	MAX_CONSECUTIVE_FAILURES=3 CF_IN=2 _run_process_issue_call_site \
+		"$block_file" 1 false ""
+
+	grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+	grep -q 'circuit_breaker' "$TEST_TMP/state.out"
+	[[ "$exit_code" -eq 2 ]]
+}
+
+# --- The pre-existing up-front skip gate must remain unaffected ---
+#
+# ISSUE #740: the closed-issue / merged-PR detection was extracted out of
+# the main loop into check_issue_resolved_upstream(). It's now a real,
+# independently-sourceable function, so it is unit tested directly (no
+# block-extraction hack needed). The trivial call-site wiring that remains
+# in the loop (update_issue_field / update_progress / continue) is still
+# covered via the block-extraction approach below, since it isn't a
+# standalone function.
+
+# Sources the real check_issue_resolved_upstream() function extracted from
+# batch-orchestrator.sh, so functional tests exercise the actual
+# implementation rather than a hand-copied block.
+source_check_issue_resolved_upstream() {
+	local func_file="$TEST_TMP/check_issue_resolved_upstream.bash"
+	_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	grep -q 'check_issue_resolved_upstream' "$func_file" 2>/dev/null \
+		|| return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+@test "functional: check_issue_resolved_upstream (closed issue) returns 0 with a reason and no PR" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-closed"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'CLOSED\n' ;;
+	pr) printf '' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'closed'* ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+}
+
+@test "functional: check_issue_resolved_upstream (merged PR) returns 0 and records the PR number" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-merged"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\n' ;;
+	pr) printf '123\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'123'* ]]
+	[[ "$_UPFRONT_SKIP_PR" == "123" ]]
+}
+
+@test "functional: check_issue_resolved_upstream returns 1 when issue is open and no PR is merged" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-open"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\n' ;;
+	pr) printf '' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+}
+
+@test "functional: check_issue_resolved_upstream is a no-op for a non-github GIT_HOST" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	# gh must not even be invoked for a non-github host — a mock that fails
+	# hard if called proves the short-circuit happens before any gh call.
+	local mock_bin="$TEST_TMP/mock-bin-upfront-nongithub"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+echo "gh should not be called for a non-github GIT_HOST" >&2
+exit 1
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=gitlab
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+}
+
+# Extracts the call-site "if check_issue_resolved_upstream "$issue"; then
+# ... fi" block from the main loop. Returns 1 (without aborting) if the
+# anchor is not found so callers skip rather than false-fail on an
+# unrelated script change.
+_extract_upfront_call_site_block() {
+	local block_file="$TEST_TMP/upfront_call_site.bash"
+	awk '/^    if check_issue_resolved_upstream /,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'check_issue_resolved_upstream' "$block_file" 2>/dev/null \
+		|| return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources the extracted call-site block inside a one-shot for-loop (so
+# `continue` has a loop to act on), with check_issue_resolved_upstream
+# stubbed via CIRU_RC/CIRU_REASON/CIRU_PR (so this test exercises only the
+# call-site wiring, not the gh queries — those are covered above) and
+# log/update_issue_field/update_progress mocked to capture calls instead of
+# touching the real filesystem. _process_issue_reached is set to true only
+# if the block falls through without hitting `continue` — mirroring how the
+# real loop would fall through to `if process_issue "$issue"; then`.
+_run_upfront_call_site() {
+	local block_file="$1"
+
+	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
+	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
+	check_issue_resolved_upstream() {
+		_UPFRONT_SKIP_REASON="${CIRU_REASON:-}"
+		_UPFRONT_SKIP_PR="${CIRU_PR:-}"
+		return "${CIRU_RC:-1}"
+	}
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/update.out"
+	: > "$TEST_TMP/progress.out"
+
+	issue=690
+	consecutive_failures="${CF_IN:-2}"
+	_PREFLIGHT_SKIPPED="${PREFLIGHT_IN:-false}"
+	_process_issue_reached=false
+
+	for _once in 1; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+		_process_issue_reached=true
+	done
+}
+
+@test "functional: call-site (resolved) does not set _PREFLIGHT_SKIPPED and leaves consecutive_failures untouched" {
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=0 CIRU_REASON="already closed on GitHub" CIRU_PR="" \
+		PREFLIGHT_IN=false CF_IN=2 _run_upfront_call_site "$block_file"
+
+	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+	[[ "$consecutive_failures" -eq 2 ]]
+}
+
+@test "functional: call-site (resolved) bypasses process_issue via continue and still records completed" {
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=0 CIRU_REASON="already closed on GitHub" CIRU_PR="" \
+		_run_upfront_call_site "$block_file"
+
+	[[ "$_process_issue_reached" == false ]]
+	grep -q 'status' "$TEST_TMP/update.out"
+	grep -q 'completed' "$TEST_TMP/update.out"
+	[[ -s "$TEST_TMP/progress.out" ]]
+}
+
+@test "functional: call-site (merged PR) also records the PR number" {
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=0 CIRU_REASON="PR #123 already merged" CIRU_PR="123" \
+		_run_upfront_call_site "$block_file"
+
+	[[ "$_process_issue_reached" == false ]]
+	grep -q 'pr' "$TEST_TMP/update.out"
+	grep -q '123' "$TEST_TMP/update.out"
+}
+
+@test "functional: call-site falls through to process_issue when not resolved" {
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=1 PREFLIGHT_IN=false CF_IN=1 _run_upfront_call_site "$block_file"
+
+	# No status write, and the block falls through to process_issue rather
+	# than skipping — leaving the preflight-skip signal to process_issue().
+	[[ "$_process_issue_reached" == true ]]
+	[[ ! -s "$TEST_TMP/update.out" ]]
+	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+	[[ "$consecutive_failures" -eq 1 ]]
 }
 
 # =============================================================================
@@ -2092,4 +2843,262 @@ _simulate_missing_status_file_error() {
 @test "batch-orchestrator.sh exec-failure diagnostic names the exit code" {
 	grep -Fq 'Orchestrator failed to execute (exit $impl_exit)' \
 		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+# =============================================================================
+# ISSUE #690: preflight skip out-of-band signal (_PREFLIGHT_SKIPPED)
+# =============================================================================
+#
+# process_issue() must keep returning 0 on a preflight skip (validate_issue_
+# for_processing failure) so consecutive_failures / the circuit breaker stay
+# unaffected. But a bare 0 does not let a caller tell "genuinely processed"
+# apart from "skipped without ever running" — the main batch loop and
+# sweep_implement_followups() were both logging/emitting a plain success for
+# skipped issues. _PREFLIGHT_SKIPPED is the out-of-band fix: reset to false
+# at the top of every process_issue() call, set true only in the preflight-
+# skip branch immediately before `return 0`, and read by callers right after
+# process_issue() returns.
+
+# --- Static analysis: declaration, reset, and set-before-return ordering ---
+
+@test "_PREFLIGHT_SKIPPED global is declared before process_issue" {
+	local decl_line process_line
+	decl_line=$(grep -n '^_PREFLIGHT_SKIPPED=' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	process_line=$(grep -n '^process_issue()' "$BATCH_ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	[[ -n "$decl_line" && -n "$process_line" ]]
+	(( decl_line < process_line ))
+}
+
+@test "process_issue resets _PREFLIGHT_SKIPPED to false at the top of the call" {
+	local body
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'_PREFLIGHT_SKIPPED=false'* ]]
+}
+
+@test "process_issue sets _PREFLIGHT_SKIPPED=true before returning 0 on preflight skip" {
+	local body skip_block set_line return_line
+	body=$(awk '/^process_issue\(\)/,/^\}$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	skip_block=$(printf '%s\n' "$body" \
+		| awk '/validate_issue_for_processing/,/return 0/' \
+		| head -15)
+	[[ "$skip_block" == *'_PREFLIGHT_SKIPPED=true'* ]]
+	set_line=$(printf '%s\n' "$skip_block" \
+		| grep -n '_PREFLIGHT_SKIPPED=true' | head -1 | cut -d: -f1)
+	return_line=$(printf '%s\n' "$skip_block" \
+		| grep -n 'return 0' | head -1 | cut -d: -f1)
+	[[ -n "$set_line" && -n "$return_line" ]]
+	(( set_line < return_line ))
+}
+
+# --- Static analysis: callers read the signal instead of trusting rc alone ---
+
+@test "main batch loop reads _PREFLIGHT_SKIPPED after calling process_issue" {
+	local loop_block
+	loop_block=$(awk '/^for issue in "\$\{ISSUE_ARRAY\[@\]\}"/,0' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -80)
+	[[ "$loop_block" == *'_PREFLIGHT_SKIPPED'* ]]
+}
+
+@test "main batch loop emits outcome=skipped for preflight-skipped issues" {
+	grep -Fq 'outcome=skipped' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "main batch loop still emits outcome=success for genuine successes" {
+	grep -Fq 'outcome=success' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "sweep_implement_followups reads _PREFLIGHT_SKIPPED after calling process_issue" {
+	local body
+	body=$(awk '/^sweep_implement_followups\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'_PREFLIGHT_SKIPPED'* ]]
+}
+
+# --- Functional: real validate_issue_for_processing + the real signal logic ---
+#
+# These replicate process_issue()'s preflight block verbatim (reset, call
+# the real sourced validate_issue_for_processing(), branch, set-then-return)
+# so the assertions exercise the actual validation function rather than a
+# hand-rolled stand-in.
+
+@test "functional: preflight skip sets _PREFLIGHT_SKIPPED=true while still returning 0" {
+	local mock_bin="$TEST_TMP/mock-bin-signal-skip"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"body":"No Implementation Tasks heading at all.","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	source_validate_issue_for_processing \
+		|| skip "validate_issue_for_processing() not yet present"
+
+	log()                { :; }
+	log_warn()           { :; }
+	update_issue_field() { :; }
+	update_progress()    { :; }
+	dispatch_composition() { return 1; }
+	export ENRICH_FOLLOWUPS=false
+	unset DEPLOY_VERIFY_CMD
+
+	# Replicate process_issue()'s preflight block.
+	_PREFLIGHT_SKIPPED=false
+	local rc=0
+	if ! validate_issue_for_processing 99; then
+		update_issue_field 99 "status" "skipped"
+		update_issue_field 99 "error" \
+			"${_SKIP_REASON:-preflight validation failed}"
+		update_progress
+		_PREFLIGHT_SKIPPED=true
+		rc=0
+	fi
+
+	[[ "$rc" -eq 0 ]]
+	[[ "$_PREFLIGHT_SKIPPED" == true ]]
+}
+
+@test "functional: a valid issue body leaves _PREFLIGHT_SKIPPED=false" {
+	local mock_bin="$TEST_TMP/mock-bin-signal-ok"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing — `.claude/scripts/x.sh`\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	source_validate_issue_for_processing \
+		|| skip "validate_issue_for_processing() not yet present"
+
+	log()                { :; }
+	log_warn()           { :; }
+	update_issue_field() { :; }
+	update_progress()    { :; }
+	dispatch_composition() { return 1; }
+	export ENRICH_FOLLOWUPS=false
+	unset DEPLOY_VERIFY_CMD
+	# This test only sources the extracted validate_issue_for_processing
+	# function body, not the whole script, so the top-level default
+	# (batch-orchestrator.sh:129: EPIC_SCOPE_MAX_TASKS="${EPIC_SCOPE_MAX_TASKS:-20}")
+	# never runs. Without it EPIC_SCOPE_MAX_TASKS is unset/0 and Check 1b
+	# treats this body's single task checkbox as oversized, misrouting it
+	# to the epic-scope skip path instead of exercising the valid-body case
+	# under test. Set the same default explicitly.
+	local EPIC_SCOPE_MAX_TASKS=20
+
+	# Replicate process_issue()'s preflight block.
+	_PREFLIGHT_SKIPPED=false
+	local rc=0
+	if ! validate_issue_for_processing 99; then
+		update_issue_field 99 "status" "skipped"
+		update_issue_field 99 "error" \
+			"${_SKIP_REASON:-preflight validation failed}"
+		update_progress
+		_PREFLIGHT_SKIPPED=true
+		rc=0
+	fi
+
+	[[ "$rc" -eq 0 ]]
+	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+}
+
+# =============================================================================
+# ISSUE #690 (AC3): terminal-state decision must consult progress.skipped
+# =============================================================================
+#
+# Prior to the fix, the "Final state" block at the bottom of the batch loop
+# only inspected progress.failed: zero failures always produced state
+# "completed", even when every issue in the batch had been preflight-skipped
+# and nothing was actually implemented. The fix reads progress.skipped too,
+# so a batch with skipped work — but no true failures — reports a distinct
+# "completed_with_skips" state instead of presenting as fully clean.
+#
+# The block lives at the top level of the script (not inside a function), so
+# it is extracted by anchor and sourced with set_state mocked to capture its
+# argument, mirroring the process_issue-call-site extraction technique used
+# above.
+
+# Extracts the "# Final state ... fi" block from the bottom of the batch
+# loop. Returns 1 (without aborting) if the anchor is not found so callers
+# can skip rather than false-fail on an unrelated script change.
+_extract_final_state_block() {
+	local block_file="$TEST_TMP/final_state_block.bash"
+	awk '/^# Final state/,/^fi$/' "$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'set_state' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources the extracted block with set_state mocked to capture its argument
+# to a file, and STATUS_FILE pointed at a fixture carrying the given
+# progress.failed / progress.skipped counts.
+_run_final_state_block() {
+	local block_file="$1"
+	local failed_count="$2"
+	local skipped_count="$3"
+	local exit_code_in="${4:-0}"
+
+	set_state() { printf '%s\n' "$*" >> "$TEST_TMP/final_state.out"; }
+	: > "$TEST_TMP/final_state.out"
+
+	jq -n --argjson failed "$failed_count" --argjson skipped "$skipped_count" \
+		'{progress: {failed: $failed, skipped: $skipped}}' \
+		> "$STATUS_FILE"
+
+	exit_code="$exit_code_in"
+
+	# shellcheck disable=SC1090
+	source "$block_file"
+}
+
+@test "final state: all-skipped batch does not set state to completed" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 0 2
+
+	! grep -qx 'completed' "$TEST_TMP/final_state.out"
+}
+
+@test "final state: all-skipped batch sets a distinct completed_with_skips state" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 0 2
+
+	grep -qx 'completed_with_skips' "$TEST_TMP/final_state.out"
+}
+
+@test "final state: failures still take priority over skips" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 1 2
+
+	grep -qx 'completed_with_errors' "$TEST_TMP/final_state.out"
+}
+
+@test "final state: no failures and no skips still reports completed" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 0 0
+
+	grep -qx 'completed' "$TEST_TMP/final_state.out"
+}
+
+@test "final state: circuit breaker exit code bypasses the skip/fail checks" {
+	local block_file
+	block_file=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+
+	_run_final_state_block "$block_file" 0 2 2
+
+	[[ ! -s "$TEST_TMP/final_state.out" ]]
 }
