@@ -1645,6 +1645,102 @@ _assert_e2e_verify_runs_for_scope() {
 }
 
 # =============================================================================
+# ISSUE #745 TASK 4: AN UNMEASURED RERUN VERDICT MUST STOP THE FIX LOOP
+#
+# The rerun cross-check overrides rerun_status to "unmeasured" for display,
+# but on its own that only changes the icon/comment -- the while loop only
+# breaks on "passed". An unmeasured rerun fell through to the generic
+# not-yet-fixed branch: it overwrote e2e_fail_summary and looped again,
+# dispatching another fix-e2e iteration (and, if Docker files changed,
+# another container rebuild) chasing a verdict nothing measured -- the same
+# waste #745 documents for the initial verdict, just one iteration later.
+# run_parallel_post_task_stages() must stop spending the fix budget the
+# moment a rerun comes back unmeasured, record the same non-blocking
+# `e2e_verify:unmeasured` DEGRADED_STAGES marker the initial-verdict path
+# uses, and must not report it as a generic "Soft Failure".
+# =============================================================================
+
+@test "run_parallel_post_task_stages stops the fix loop and records unmeasured when a rerun verdict is unsupported by its counts" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    export MAX_E2E_FIX_ITERATIONS=2
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-unmeasured-rerun-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    local comments_file="$TEST_TMP/e2e-unmeasured-rerun-comments.txt"
+    : > "$comments_file"
+    comment_issue() { printf '%s\n' "$1" >> "$comments_file"; }
+
+    # Initial e2e-verify is a genuine measured failure (12 run, 9 passed,
+    # 3 failed) -- it must still enter the fix loop and dispatch a fix,
+    # exactly like the negative control above. The rerun then replays the
+    # issue-5536 payload verbatim: result "failed" but
+    # tests_run/tests_passed/tests_failed are all 0 -- an unfinished
+    # run, not a second measured failure. A second fix iteration
+    # (fix-e2e-iter-2 or e2e-verify-rerun-iter-2) would mean the fix
+    # budget kept being spent on a verdict nothing measured, which must
+    # NOT happen.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"3 specs failed on checkout","tests_run":12,"tests_passed":9,"tests_failed":3}}'
+                ;;
+            fix-e2e-iter-1)
+                printf '{"output":{"summary":"Fix applied"}}'
+                ;;
+            e2e-verify-rerun-iter-1)
+                printf '{"output":{"result":"failed","summary":"E2E test execution is currently running in the background. A wakeup has been scheduled to check results upon completion.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- an unmeasured" \
+                    "rerun verdict must not dispatch a second fix" \
+                    "iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-unmeasured-rerun" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    local calls
+    calls=$(tr '\n' ' ' < "$calls_file")
+    grep -qx 'run_stage:fix-e2e-iter-1' "$calls_file" || fail \
+        "expected the first fix iteration to run for a measured" \
+        "failure; calls: $calls"
+    grep -qx 'run_stage:e2e-verify-rerun-iter-1' "$calls_file" || fail \
+        "expected the first rerun to run; calls: $calls"
+
+    if grep -q '^run_stage:fix-e2e-iter-2$' "$calls_file"; then
+        fail "an unmeasured rerun verdict must not dispatch a second" \
+            "fix iteration; calls: $calls"
+    fi
+    if grep -q '^run_stage:e2e-verify-rerun-iter-2$' "$calls_file"; then
+        fail "an unmeasured rerun verdict must not dispatch a second" \
+            "rerun either; calls: $calls"
+    fi
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' || fail \
+        "Expected e2e_verify:unmeasured in DEGRADED_STAGES after an" \
+        "unmeasured rerun; got:" \
+        "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+
+    if grep -qx 'E2E Verification: Soft Failure' "$comments_file"; then
+        fail "an unmeasured rerun must not be reported as a generic" \
+            "Soft Failure; comments: $(tr '\n' '|' < "$comments_file")"
+    fi
+}
+
+# =============================================================================
 # E2E PROMPT INJECTION TESTS
 # =============================================================================
 

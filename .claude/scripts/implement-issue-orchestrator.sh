@@ -8912,6 +8912,7 @@ review before merge." "playwright-test-developer"
 		local max_e2e_fixes="${MAX_E2E_FIX_ITERATIONS:-2}"
 		local e2e_fix_iter=0
 		local e2e_fixed=false
+		local e2e_rerun_unmeasured=false
 
 		while ((e2e_fix_iter < max_e2e_fixes)); do
 			e2e_fix_iter=$((e2e_fix_iter + 1))
@@ -9027,11 +9028,33 @@ $rerun_summary" "playwright-test-developer"
 				break
 			fi
 
+			if [[ "$rerun_status" == "unmeasured" ]]; then
+				# Issue #745: an unmeasured rerun is not a
+				# fresh measured failure to keep fixing
+				# against — stop here instead of looping,
+				# so no further fix iteration or container
+				# rebuild is spent chasing a run that never
+				# finished.
+				e2e_rerun_unmeasured=true
+				break
+			fi
+
 			# Update failure summary for next iteration
 			e2e_fail_summary="$rerun_summary"
 		done
 
-		if ! $e2e_fixed; then
+		if $e2e_rerun_unmeasured; then
+			DEGRADED_STAGES+=("e2e_verify:unmeasured")
+			log_warn "E2E rerun verdict unmeasured" \
+				"(counts do not support the reported verdict)" \
+				"— stopping the fix loop at iteration" \
+				"$e2e_fix_iter/$max_e2e_fixes"
+			comment_issue "E2E Verification: Unmeasured" \
+				"⚠️ The E2E rerun verdict was not supported by \
+its own test counts (run did not finish). Stopping the fix loop here \
+instead of spending further budget on it — this needs manual review \
+before merge." "playwright-test-developer"
+		elif ! $e2e_fixed; then
 			log_warn "E2E failed after $max_e2e_fixes fix attempts" \
 				"— proceeding with soft failure"
 			comment_issue "E2E Verification: Soft Failure" \
