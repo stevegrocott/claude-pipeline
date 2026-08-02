@@ -43,18 +43,54 @@ setup_test_env() {
         cp "$SCRIPT_DIR/model-config.sh" "$TEST_TMP/model-config.sh"
 
         # Extract the stage-tier arrays into a standalone file so @test
-        # bodies can repopulate them after the BATS setup→test fork (which
-        # drops bash arrays).  See MODEL_CONFIG_ARRAYS_FILE for the full
-        # rationale.  Only the `readonly -a ...=( ... )` blocks are pulled
-        # out — sourcing the whole config would trip the idempotent guard
-        # and the surviving readonly scalars.
+        # bodies can repopulate them regardless of whether
+        # source_orchestrator_functions()'s own model-config.sh source (run
+        # from setup()) left them declared — bash scopes a `readonly -a`
+        # declared inside a function differently across versions.  See
+        # MODEL_CONFIG_ARRAYS_FILE for the full rationale.  Only the
+        # `readonly -a ...=( ... )` blocks are pulled out — sourcing the
+        # whole config would trip the idempotent guard and the surviving
+        # readonly scalars.
+        #
+        # Each extracted block is wrapped in `declare -p <name> || { ... }`
+        # so the re-source is a no-op when the array is already global and
+        # readonly (Linux) and still populates it fresh when it is not
+        # (macOS) — instead of assuming the unset state that only holds on
+        # one platform. A trailing non-empty check turns a future
+        # regression (e.g. the awk extraction breaking silently) into a
+        # named diagnostic instead of downstream assertion noise.
         MODEL_CONFIG_ARRAYS_FILE="$TEST_TMP/model-config-arrays.sh"
         export MODEL_CONFIG_ARRAYS_FILE
-        awk '
-            /^readonly -a / { capture = 1 }
-            capture { print }
-            capture && /^\)/ { capture = 0 }
-        ' "$TEST_TMP/model-config.sh" > "$MODEL_CONFIG_ARRAYS_FILE"
+        {
+            awk '
+                /^readonly -a / {
+                    name = $3
+                    sub(/=.*/, "", name)
+                    print "declare -p " name " >/dev/null 2>&1 || {"
+                    capture = 1
+                }
+                capture { print }
+                capture && /^\)/ { print "}"; capture = 0 }
+            ' "$TEST_TMP/model-config.sh"
+
+            cat <<'ARRAYS_NONEMPTY_CHECK'
+if [[ ${#_LIGHT_STAGES[@]} -eq 0 ]]; then
+    echo "FATAL: _LIGHT_STAGES is empty after" \
+        "MODEL_CONFIG_ARRAYS_FILE re-source" >&2
+    return 1
+fi
+if [[ ${#_STANDARD_STAGES[@]} -eq 0 ]]; then
+    echo "FATAL: _STANDARD_STAGES is empty after" \
+        "MODEL_CONFIG_ARRAYS_FILE re-source" >&2
+    return 1
+fi
+if [[ ${#_STAGE_PREFIXES[@]} -eq 0 ]]; then
+    echo "FATAL: _STAGE_PREFIXES is empty after" \
+        "MODEL_CONFIG_ARRAYS_FILE re-source" >&2
+    return 1
+fi
+ARRAYS_NONEMPTY_CHECK
+        } > "$MODEL_CONFIG_ARRAYS_FILE"
     fi
 
     # Copy platform config (sourced by orchestrator functions)
@@ -239,24 +275,64 @@ install_decide_scripts() {
 # Why this exists, and why it must be a bare `source` at @test scope rather
 # than a helper function:
 #
-# BATS forks between setup() and each @test, and bash arrays do NOT survive
-# that fork (functions and readonly scalars do).  model-config.sh also carries
-# an idempotent source guard keyed on the readonly _MODEL_CONFIG_LOADED scalar
-# — which DOES survive — so a plain re-source of model-config.sh short-circuits
-# and leaves _STAGE_PREFIXES / _STANDARD_STAGES / _LIGHT_STAGES empty.  With the
-# prefix table empty, _match_stage_prefix matches nothing and resolve_model
-# collapses every stage to the advanced (opus) fallback tier, breaking model
-# and max-turns assertions.
+# CORRECTED (issue #743): there is no setup()->@test fork. bats-exec-test
+# (bats-core 1.13.0/1.14.0) runs `{ setup "$@"; "$@"; } >>"$BATS_OUT" 2>&1`
+# in bats_perform_test — a brace group, not a subshell — so setup() and the
+# @test body execute back to back in the very same bash process. What
+# differs cross-platform is not fork survival but whether bash treats a
+# `readonly -a` declared *inside a function* as global or function-local.
 #
-# Re-sourcing the whole file is not viable either: the readonly scalar
-# constants survived the fork, so their re-declaration aborts under BATS
-# errexit before the array blocks are reached.  So setup_test_env extracts
-# just the `readonly -a ...=( ... )` blocks into MODEL_CONFIG_ARRAYS_FILE; the
-# arrays are unset post-fork, so those declarations apply cleanly.
+# setup() calls source_orchestrator_functions(), which is a function that
+# itself `source`s model-config.sh (to pull in resolve_model()). That file
+# declares _STAGE_PREFIXES / _STANDARD_STAGES / _LIGHT_STAGES with
+# `readonly -a`, plus the scalar guard `readonly _MODEL_CONFIG_LOADED=1`.
+# Minimal repro of what happens to those declarations once the function
+# returns:
 #
-# The source MUST run at @test scope: `readonly -a` inside a function creates a
-# function-local array invisible to the caller, so wrapping it in a helper
-# would silently leave the global arrays empty.
+#     inner() { readonly _S=1; readonly -a _A=(x y z); }
+#     inner
+#     declare -p _S   # -> declare -r _S="1"           (bash 3.2 AND 5.x)
+#     declare -p _A   # bash 3.2.57 (macOS's frozen, pre-GPLv3 /bin/bash):
+#                     #   "declare: _A: not found" -- local to inner(), gone
+#                     # bash 5.3.x (Linux, and any non-Apple bash):
+#                     #   declare -ar _A=([0]="x" [1]="y" [2]="z") -- global
+#
+# The readonly *scalar* is global on both platforms; only the readonly
+# *array* is scoped to the function on bash 3.2 and escapes it on bash
+# 4.x+/5.x. Confirmed against the actual harness by probing state right
+# after setup() returns, before the @test body's re-source runs:
+#   macOS bash 3.2.57  -> _MODEL_CONFIG_LOADED declared, _LIGHT_STAGES unset
+#   Linux bash 5.3.9/15 -> both declared; _LIGHT_STAGES already readonly
+#
+# So on macOS, source_orchestrator_functions()'s own model-config.sh source
+# leaves the arrays unset once it returns (function-local, discarded), and
+# the @test body's `source "$MODEL_CONFIG_ARRAYS_FILE"` is the *first* time
+# they're declared — it succeeds. On Linux the same source call leaves them
+# already global and readonly, so the identical re-source hits
+# `readonly variable` and aborts under BATS's `set -eET`, leaving
+# _STAGE_PREFIXES / _STANDARD_STAGES / _LIGHT_STAGES empty for every
+# subsequent test in the run. With the prefix table empty,
+# _match_stage_prefix matches nothing and resolve_model collapses every
+# stage to the advanced (opus) fallback tier, breaking model and max-turns
+# assertions.
+#
+# model-config.sh's idempotent source guard (readonly _MODEL_CONFIG_LOADED,
+# which — per above — survives on both platforms) means re-sourcing the
+# whole file is not a fix either: on Linux the guard short-circuits and
+# never reaches the array blocks; on macOS the scalar's own re-declaration
+# would abort first. setup_test_env instead extracts just the
+# `readonly -a ...=( ... )` blocks into MODEL_CONFIG_ARRAYS_FILE, with each
+# block wrapped in `declare -p <name> >/dev/null 2>&1 || { ... }` so the
+# re-declaration is skipped when the array is already global (Linux) and
+# still runs when it is not (macOS) — instead of assuming either state.
+# A trailing check asserts all three arrays are non-empty once the file is
+# sourced, so a broken extraction fails with a named diagnostic instead of
+# empty-array symptoms downstream.
+#
+# The source MUST run at @test scope: `readonly -a` inside a function
+# creates a function-local array invisible to the caller (the same rule
+# documented above), so wrapping it in a helper would silently leave the
+# global arrays empty.
 MODEL_CONFIG_ARRAYS_FILE=""
 
 # =============================================================================
