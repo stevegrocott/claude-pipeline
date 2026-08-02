@@ -265,6 +265,8 @@ The `## Implementation Tasks` section must use this parseable convention (identi
 
 **Paths must be repo-relative from the repo root** — `` `.claude/scripts/model-config.sh` ``, not a bare basename like `` `model-config.sh` ``. `assert_issue_valid` treats every backtick-quoted token as a file path and rejects bare basenames as unresolved.
 
+**Task descriptions must stay under ~200 characters** — keep the description concise; put details in the Research Findings section of the issue body instead.
+
 **Agent values** — use agents defined in `.claude/agents/`:
 
 | Agent | Use for |
