@@ -183,7 +183,8 @@ PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/p
  - No NAS concern (CI, docs, unrelated scripts) → OMIT this section entirely]
 - **Target environment:** [staging|test|nas|production]
 - **Health endpoint:** [full URL to health check endpoint, e.g., https://test-beegeefarm.grocott.com.au/health]
-- **Verification command:** [bash scripts/deploy-nas-from-local.sh or bash scripts/deploy-nas-from-local.sh --health-only]
+
+**Verification command:** [bash scripts/deploy-nas-from-local.sh or bash scripts/deploy-nas-from-local.sh --health-only]
 
 ## Acceptance Criteria
 - [ ] AC1: [measurable criterion]
@@ -248,7 +249,7 @@ The `## Implementation Tasks` section must use this parseable convention:
 
 **Files suffix:** Append ` — \`path/to/file.ts:L10-40\`` (em dash, space, backtick-quoted path with optional line range) to every task description. Multiple files: ` — \`file1.ts:L5\`, \`file2.ts:L20-35\``. This tells subagents exactly where to look, eliminating broad codebase scans.
 - **Paths must be real repo paths, written repo-relative from the repo root** — verify each path exists in the repository before writing it. Never invent or guess file paths, and never write a bare basename like `` `model-config.sh` `` — use the full path (`` `.claude/scripts/model-config.sh` ``). `assert_issue_valid` treats every backtick-quoted token as a file path and rejects bare basenames as unresolved.
-- **Task descriptions must stay under ~200 characters** — keep the description concise; put details in the Research Findings section of the issue body instead.
+- **Task descriptions must stay under ~120 characters** — matches the orchestrator's `TASK_DESC_PROMOTE_CHARS` default (`.claude/scripts/implement-issue-orchestrator.sh`); keep the description concise and put details in the Research Findings section of the issue body instead.
 
 **Parser hardening (issue #584) — the section extractor is tolerant, the failure mode is loud:** the two mirrored parsers (`_parse_task_lines` in the orchestrator and `_issue_body_parse_tasks` in `issue-body-lib.sh`) stay behaviourally identical and both now:
 - **Match the heading case-insensitively** — `## Implementation Tasks`, `## implementation tasks`, `### IMPLEMENTATION TASKS`, etc. all resolve the same section.
@@ -318,7 +319,7 @@ Task sizing directly controls model cost via `model-config.sh`:
 | Task has no file paths | **Rejected by `assert_issue_valid`** — an OPEN task with zero file paths fails validation before the issue is created (subagents would otherwise read 13+ files to orient). Include at least 1 file path per task |
 | File path doesn't exist in repo | Subagent wastes a full search cycle; verify paths before writing them |
 | File path is a bare basename, not repo-relative | **Rejected by `assert_issue_valid`** as an unresolved path; write the full path from the repo root instead of just the filename |
-| Task description over ~200 chars | Truncated in UI and hard to scan; put details in the issue body instead |
+| Task description over ~120 chars | Orchestrator promotes it to the larger turn budget (`TASK_DESC_PROMOTE_CHARS`); put details in the issue body instead |
 | Writing `[test-engineer]` as agent | Legacy alias — write `[playwright-test-developer]` for E2E or `[default]` for general tests |
 | Missing square brackets: `` `agent-name` `` instead of `` `[agent-name]` `` | Parser accepts it, but explicit brackets make intent clear — always use brackets |
 | Writing `[fullstack-engineer]` as agent | Unknown agent — normalizer silently downgrades to `default`, losing backend and frontend specialization; split into `[fastify-backend-developer]` + `[react-frontend-developer]` instead |

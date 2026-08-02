@@ -633,6 +633,200 @@ MAP
 		|| { echo "CLAUDE_PLUGIN_ROOT used in a skill (use a pipeline-core-* bin instead):" >&2; echo "$output" >&2; return 1; }
 }
 
+@test "skills: every '## Deploy Verification' template satisfies the orchestrator's verification-command gate" {
+	local orch="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+	[ -f "$orch" ] || skip "bundle orchestrator not present"
+
+	local skills_dir="$REPO_ROOT/plugins/pipeline-core/skills"
+	[ -d "$skills_dir" ] || skip "bundle skills not present"
+
+	# Pull the anchored gate pattern straight out of should_run_deploy_verify()
+	# instead of restating it here, so a future edit to ver_cmd_pat is picked
+	# up by this test instead of silently diverging from it (issue #746).
+	local ver_cmd_pat
+	ver_cmd_pat=$(grep -oE "ver_cmd_pat='[^']*'" "$orch" | head -1)
+	ver_cmd_pat="${ver_cmd_pat#ver_cmd_pat=\'}"
+	ver_cmd_pat="${ver_cmd_pat%\'}"
+	[ -n "$ver_cmd_pat" ] \
+		|| { echo "could not extract ver_cmd_pat from $orch" >&2; return 1; }
+
+	# Extract every '## Deploy Verification' block from every skill file
+	# verbatim, one block per temp file, so the assertion runs against the
+	# skill's own words rather than a copy restated in the test — restating
+	# it here is exactly what let both templates drift apart (issue #746
+	# AC5).
+	local block_dir="$TEST_TMP/deploy-verify-blocks"
+	mkdir -p "$block_dir"
+	local skill
+	while IFS= read -r -d '' skill; do
+		awk -v outdir="$block_dir" -v src="$(basename "$(dirname "$skill")")" '
+			/^## Deploy Verification$/ {
+				if (in_section) close(outfile)
+				in_section = 1
+				n++
+				outfile = outdir "/" src "." n ".md"
+			}
+			in_section && /^## / && $0 !~ /^## Deploy Verification$/ {
+				in_section = 0
+				close(outfile)
+			}
+			in_section { print > outfile }
+		' "$skill"
+	done < <(find "$skills_dir" -name SKILL.md -print0)
+
+	local blocks=("$block_dir"/*.md)
+	[ -e "${blocks[0]}" ] \
+		|| { echo "no '## Deploy Verification' template found under $skills_dir" >&2
+			return 1; }
+
+	# Same awk gate should_run_deploy_verify() runs against a real issue
+	# body — a match here means the orchestrator would treat the section as
+	# satisfying the gate.
+	local block
+	for block in "${blocks[@]}"; do
+		if ! awk -v pat="$ver_cmd_pat" '
+			/^## Deploy Verification/ { in_section=1; next }
+			in_section && /^## /     { in_section=0 }
+			in_section && $0 ~ pat   { found=1; exit }
+			END                      { exit !found }
+		' "$block"
+		then
+			echo "template fails the orchestrator gate: $block" >&2
+			echo "--- content ---" >&2
+			cat "$block" >&2
+			return 1
+		fi
+	done
+}
+
+@test "skills: a task line built from the Task Format template passes assert_issue_valid" {
+	local lib="$REPO_ROOT/plugins/pipeline-core/scripts/issue-body-lib.sh"
+	[ -f "$lib" ] || skip "bundle issue-body-lib.sh not present"
+
+	local skills_dir="$REPO_ROOT/plugins/pipeline-core/skills"
+	[ -d "$skills_dir" ] || skip "bundle skills not present"
+
+	# Extract the fenced ```markdown block following a "## Task Format" (or
+	# "## Task Format Specification") heading from every skill file,
+	# verbatim, one block per temp file — restating the convention here
+	# instead of extracting it is exactly what let the explore/enrich-issue
+	# templates drift from the gate they document (issue #746 AC5).
+	local template_dir="$TEST_TMP/task-format-templates"
+	mkdir -p "$template_dir"
+	local skill
+	while IFS= read -r -d '' skill; do
+		awk -v outdir="$template_dir" -v src="$(basename "$(dirname "$skill")")" '
+			/^#+ Task Format/ { in_heading = 1; next }
+			in_heading && /^```markdown$/ {
+				in_fence = 1
+				n++
+				outfile = outdir "/" src "." n ".md"
+				next
+			}
+			in_fence && /^```$/ { in_fence = 0; in_heading = 0; close(outfile) }
+			in_fence { print > outfile }
+		' "$skill"
+	done < <(find "$skills_dir" -name SKILL.md -print0)
+
+	local templates=("$template_dir"/*.md)
+	[ -e "${templates[0]}" ] \
+		|| { echo "no '## Task Format' template found under $skills_dir" >&2
+			return 1; }
+
+	# A real, existing repo-relative path with a line-range suffix, to
+	# stand in for the template's own placeholder path (which is not a
+	# real file and would otherwise fail the gate for the wrong reason).
+	local real_path="tests/marketplace-smoke.bats:L1-10"
+
+	local template line task_line body
+	for template in "${templates[@]}"; do
+		line=$(grep -m1 '^- \[ \] `\[agent-name\]`' "$template") \
+			|| { echo "no canonical task line in template: $template" >&2
+				cat "$template" >&2
+				return 1; }
+
+		# Fill only the placeholders the template documents itself —
+		# the agent name and the example path — leaving every other
+		# character (backticks, em dash, bold marker) exactly as the
+		# skill wrote it, so the test binds to the skill's own words.
+		task_line="${line//agent-name/default}"
+		task_line="${task_line/src\/path\/file.ts:L10-40/$real_path}"
+
+		body=$(cat <<BODY
+## Implementation Tasks
+
+$task_line
+
+## Acceptance Criteria
+
+- [ ] AC1: it works
+BODY
+)
+
+		run env -u ISSUE_BODY_AGENTS_DIR -u PIPELINE_CONFIG_DIR \
+			-u CLAUDE_PLUGIN_ROOT -u DEPLOY_VERIFY_CMD \
+			bash -c '
+				cd "$1" || exit 1
+				source "$2"
+				assert_issue_valid "$3"
+			' _ "$REPO_ROOT" "$lib" "$body"
+
+		[ "$status" -eq 0 ] \
+			|| { echo "template task line failed assert_issue_valid: $template" >&2
+				echo "task line: $task_line" >&2
+				echo "$output" >&2
+				return 1; }
+	done
+}
+
+@test "skills: the stated task-description char limit in both skills equals TASK_DESC_PROMOTE_CHARS" {
+	local orch="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+	[ -f "$orch" ] || skip "bundle orchestrator not present"
+
+	local skills_dir="$REPO_ROOT/plugins/pipeline-core/skills"
+	[ -d "$skills_dir" ] || skip "bundle skills not present"
+
+	# Pull the orchestrator's default straight out of its ${VAR:-N}
+	# expansion instead of restating the number here, so a future change to
+	# the default is picked up by this test instead of silently diverging
+	# from it (issue #746 Drift 2).
+	local promote_default
+	promote_default=$(grep -oE 'TASK_DESC_PROMOTE_CHARS:-[0-9]+' "$orch" \
+		| head -1)
+	promote_default="${promote_default##*:-}"
+	[ -n "$promote_default" ] \
+		|| { echo "could not extract TASK_DESC_PROMOTE_CHARS default from $orch" >&2
+			return 1; }
+
+	# Every line in either skill that cites TASK_DESC_PROMOTE_CHARS must
+	# state the same number the orchestrator actually defaults to —
+	# extracted from the skill's own words, not restated here, so drift
+	# fails this test instead of going unnoticed (issue #746 AC3, AC4, AC5).
+	local skill stated_lines line stated
+	for skill in "$skills_dir/explore/SKILL.md" \
+		"$skills_dir/enrich-issue/SKILL.md"; do
+		[ -f "$skill" ] || { echo "missing skill file: $skill" >&2; return 1; }
+
+		stated_lines=$(grep -n 'TASK_DESC_PROMOTE_CHARS' "$skill") \
+			|| { echo "no TASK_DESC_PROMOTE_CHARS reference in $skill" >&2
+				return 1; }
+
+		while IFS= read -r line; do
+			if [[ "$line" =~ ~([0-9]+)[[:space:]]char ]]; then
+				stated="${BASH_REMATCH[1]}"
+			else
+				echo "no ~N char limit near TASK_DESC_PROMOTE_CHARS mention in $skill:" >&2
+				echo "$line" >&2
+				return 1
+			fi
+			[ "$stated" -eq "$promote_default" ] \
+				|| { echo "$skill states limit ~$stated but orchestrator default is $promote_default:" >&2
+					echo "$line" >&2
+					return 1; }
+		done <<< "$stated_lines"
+	done
+}
+
 @test "bundle: no bundled script hardcodes ../config/platform.sh" {
 	local scripts_dir="$REPO_ROOT/plugins/pipeline-core/scripts"
 	[ -d "$scripts_dir" ] || skip "bundle scripts not present"

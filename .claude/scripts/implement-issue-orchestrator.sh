@@ -2819,12 +2819,12 @@ run_stage() {
     # immediately before calling run_stage.  Consumed and cleared here so a
     # stale value can never raise the budget of an unrelated later stage.
     local _stage_desc_len="${_RUN_STAGE_DESC_LEN:-0}"
-    # Promotion threshold (issue #619, retuned by #637).  This MUST sit below
-    # the explore skill's "task descriptions must stay under ~200 characters"
-    # rule: at 200 the two used the same number in opposite directions, so a
-    # correctly-authored task could never be promoted and the branch was dead
-    # code.  Measured bails clustered at 152–190 chars; 120 covers that band.
-    # The raised budget is a ceiling, not a target — unused turns cost nothing.
+    # Promotion threshold (issue #619, retuned by #637, reconciled with the
+    # explore/enrich-issue skills' stated "~120 characters" limit in #746).
+    # A task that stays within the skill's stated limit never trips this
+    # promotion; one that exceeds it — an authoring guideline violation — is
+    # exactly what should get the larger turn budget. The raised budget is a
+    # ceiling, not a target — unused turns cost nothing.
     # Pinned against the skill by test-stage-runner.bats.
     local _promote_chars="${TASK_DESC_PROMOTE_CHARS:-120}"
     unset _RUN_STAGE_DESC_LEN
@@ -10017,12 +10017,13 @@ $excerpt
             fi
         done
 
-        # (b) Warn about large task descriptions (>200 chars)
+        # (b) Warn about large task descriptions — matches the explore/enrich-issue
+        # skills' stated ~120-char limit (TASK_DESC_PROMOTE_CHARS, issue #746).
         for ((i=0; i<task_count; i++)); do
             local check_desc
             check_desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
             local desc_len=${#check_desc}
-            if (( desc_len > 200 )); then
+            if (( desc_len > ${TASK_DESC_PROMOTE_CHARS:-120} )); then
                 log "WARNING: Task $((i+1)) description is $desc_len chars — consider splitting into smaller tasks"
             fi
         done
