@@ -779,6 +779,54 @@ BODY
 	done
 }
 
+@test "skills: the stated task-description char limit in both skills equals TASK_DESC_PROMOTE_CHARS" {
+	local orch="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+	[ -f "$orch" ] || skip "bundle orchestrator not present"
+
+	local skills_dir="$REPO_ROOT/plugins/pipeline-core/skills"
+	[ -d "$skills_dir" ] || skip "bundle skills not present"
+
+	# Pull the orchestrator's default straight out of its ${VAR:-N}
+	# expansion instead of restating the number here, so a future change to
+	# the default is picked up by this test instead of silently diverging
+	# from it (issue #746 Drift 2).
+	local promote_default
+	promote_default=$(grep -oE 'TASK_DESC_PROMOTE_CHARS:-[0-9]+' "$orch" \
+		| head -1)
+	promote_default="${promote_default##*:-}"
+	[ -n "$promote_default" ] \
+		|| { echo "could not extract TASK_DESC_PROMOTE_CHARS default from $orch" >&2
+			return 1; }
+
+	# Every line in either skill that cites TASK_DESC_PROMOTE_CHARS must
+	# state the same number the orchestrator actually defaults to —
+	# extracted from the skill's own words, not restated here, so drift
+	# fails this test instead of going unnoticed (issue #746 AC3, AC4, AC5).
+	local skill stated_lines line stated
+	for skill in "$skills_dir/explore/SKILL.md" \
+		"$skills_dir/enrich-issue/SKILL.md"; do
+		[ -f "$skill" ] || { echo "missing skill file: $skill" >&2; return 1; }
+
+		stated_lines=$(grep -n 'TASK_DESC_PROMOTE_CHARS' "$skill") \
+			|| { echo "no TASK_DESC_PROMOTE_CHARS reference in $skill" >&2
+				return 1; }
+
+		while IFS= read -r line; do
+			if [[ "$line" =~ ~([0-9]+)[[:space:]]char ]]; then
+				stated="${BASH_REMATCH[1]}"
+			else
+				echo "no ~N char limit near TASK_DESC_PROMOTE_CHARS mention in $skill:" >&2
+				echo "$line" >&2
+				return 1
+			fi
+			[ "$stated" -eq "$promote_default" ] \
+				|| { echo "$skill states limit ~$stated but orchestrator default is $promote_default:" >&2
+					echo "$line" >&2
+					return 1; }
+		done <<< "$stated_lines"
+	done
+}
+
 @test "bundle: no bundled script hardcodes ../config/platform.sh" {
 	local scripts_dir="$REPO_ROOT/plugins/pipeline-core/scripts"
 	[ -d "$scripts_dir" ] || skip "bundle scripts not present"
