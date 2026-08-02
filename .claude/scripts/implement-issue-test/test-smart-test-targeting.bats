@@ -1219,8 +1219,10 @@ _assert_e2e_verify_runs_for_scope() {
     local exit_code=0
     run_parallel_post_task_stages \
         "$branch_name" "$scope" "minimal" "S" || exit_code=$?
-    [ "$exit_code" -eq 0 ] || fail \
-        "run_parallel_post_task_stages exited $exit_code, expected 0"
+    [ "$exit_code" -eq 0 ] || {
+        fail "run_parallel_post_task_stages exited $exit_code, expected 0"
+        return 1
+    }
 
     # ORDERING, not mere presence: the skip path also emits
     # started:e2e_verify followed immediately by completed:e2e_verify, so
@@ -1233,7 +1235,10 @@ _assert_e2e_verify_runs_for_scope() {
     run_msg="e2e_verify was skipped for scope '$scope', expected it to"
     run_msg+=" run. Call sequence: $sequence"
     # shellcheck disable=SC2254
-    [[ "$sequence" == $expected ]] || fail "$run_msg"
+    [[ "$sequence" == $expected ]] || {
+        fail "$run_msg"
+        return 1
+    }
 
     # The orchestrator must hand run_stage the real e2e-validate schema and
     # the playwright-test-developer agent for this scope -- not just call
@@ -1245,10 +1250,20 @@ _assert_e2e_verify_runs_for_scope() {
     captured_schema=$(_read_e2e_sidecar "$calls_file" schema) || return 1
     captured_agent=$(_read_e2e_sidecar "$calls_file" agent) || return 1
 
-    [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || fail \
-        "expected schema implement-issue-e2e-validate.json, got '$captured_schema'"
-    [ "$captured_agent" = "playwright-test-developer" ] || fail \
-        "expected agent playwright-test-developer, got '$captured_agent'"
+    local schema_msg agent_msg
+    schema_msg="expected schema implement-issue-e2e-validate.json, got"
+    schema_msg+=" '$captured_schema'"
+    agent_msg="expected agent playwright-test-developer, got"
+    agent_msg+=" '$captured_agent'"
+
+    [ "$captured_schema" = "implement-issue-e2e-validate.json" ] || {
+        fail "$schema_msg"
+        return 1
+    }
+    [ "$captured_agent" = "playwright-test-developer" ] || {
+        fail "$agent_msg"
+        return 1
+    }
 
     # Structural skip marker: every skip branch records started:e2e_verify
     # immediately followed by completed:e2e_verify with no run_stage call
