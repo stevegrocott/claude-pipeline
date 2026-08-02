@@ -1091,7 +1091,7 @@ teardown() {
         fail "Expected max_turns error_kind, got: $err_kind ($sr)"
 }
 
-@test "TASK_DESC_PROMOTE_CHARS default sits below the explore skill's description limit" {
+@test "TASK_DESC_PROMOTE_CHARS default equals the explore skill's description limit" {
     local repo_root explore_skill orch
     repo_root=$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)
     orch="$repo_root/.claude/scripts/implement-issue-orchestrator.sh"
@@ -1113,8 +1113,8 @@ teardown() {
     [[ -n "$promote_default" ]] || \
         fail "Could not read the TASK_DESC_PROMOTE_CHARS default"
 
-    (( promote_default < skill_limit )) || \
-        fail "TASK_DESC_PROMOTE_CHARS default ($promote_default) must sit below the explore skill's ~${skill_limit}-char rule, or a correctly-authored task can never be promoted"
+    (( promote_default == skill_limit )) || \
+        fail "TASK_DESC_PROMOTE_CHARS default ($promote_default) must equal the explore skill's ~${skill_limit}-char rule, or the two drift apart again (issue #746)"
 }
 
 # =============================================================================
