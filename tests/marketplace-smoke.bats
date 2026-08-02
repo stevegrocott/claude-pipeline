@@ -633,6 +633,72 @@ MAP
 		|| { echo "CLAUDE_PLUGIN_ROOT used in a skill (use a pipeline-core-* bin instead):" >&2; echo "$output" >&2; return 1; }
 }
 
+@test "skills: every '## Deploy Verification' template satisfies the orchestrator's verification-command gate" {
+	local orch="$REPO_ROOT/plugins/pipeline-core/scripts/implement-issue-orchestrator.sh"
+	[ -f "$orch" ] || skip "bundle orchestrator not present"
+
+	local skills_dir="$REPO_ROOT/plugins/pipeline-core/skills"
+	[ -d "$skills_dir" ] || skip "bundle skills not present"
+
+	# Pull the anchored gate pattern straight out of should_run_deploy_verify()
+	# instead of restating it here, so a future edit to ver_cmd_pat is picked
+	# up by this test instead of silently diverging from it (issue #746).
+	local ver_cmd_pat
+	ver_cmd_pat=$(grep -oE "ver_cmd_pat='[^']*'" "$orch" | head -1)
+	ver_cmd_pat="${ver_cmd_pat#ver_cmd_pat=\'}"
+	ver_cmd_pat="${ver_cmd_pat%\'}"
+	[ -n "$ver_cmd_pat" ] \
+		|| { echo "could not extract ver_cmd_pat from $orch" >&2; return 1; }
+
+	# Extract every '## Deploy Verification' block from every skill file
+	# verbatim, one block per temp file, so the assertion runs against the
+	# skill's own words rather than a copy restated in the test — restating
+	# it here is exactly what let both templates drift apart (issue #746
+	# AC5).
+	local block_dir="$TEST_TMP/deploy-verify-blocks"
+	mkdir -p "$block_dir"
+	local skill
+	while IFS= read -r -d '' skill; do
+		awk -v outdir="$block_dir" -v src="$(basename "$(dirname "$skill")")" '
+			/^## Deploy Verification$/ {
+				if (in_section) close(outfile)
+				in_section = 1
+				n++
+				outfile = outdir "/" src "." n ".md"
+			}
+			in_section && /^## / && $0 !~ /^## Deploy Verification$/ {
+				in_section = 0
+				close(outfile)
+			}
+			in_section { print > outfile }
+		' "$skill"
+	done < <(find "$skills_dir" -name SKILL.md -print0)
+
+	local blocks=("$block_dir"/*.md)
+	[ -e "${blocks[0]}" ] \
+		|| { echo "no '## Deploy Verification' template found under $skills_dir" >&2
+			return 1; }
+
+	# Same awk gate should_run_deploy_verify() runs against a real issue
+	# body — a match here means the orchestrator would treat the section as
+	# satisfying the gate.
+	local block
+	for block in "${blocks[@]}"; do
+		if ! awk -v pat="$ver_cmd_pat" '
+			/^## Deploy Verification/ { in_section=1; next }
+			in_section && /^## /     { in_section=0 }
+			in_section && $0 ~ pat   { found=1; exit }
+			END                      { exit !found }
+		' "$block"
+		then
+			echo "template fails the orchestrator gate: $block" >&2
+			echo "--- content ---" >&2
+			cat "$block" >&2
+			return 1
+		fi
+	done
+}
+
 @test "bundle: no bundled script hardcodes ../config/platform.sh" {
 	local scripts_dir="$REPO_ROOT/plugins/pipeline-core/scripts"
 	[ -d "$scripts_dir" ] || skip "bundle scripts not present"
