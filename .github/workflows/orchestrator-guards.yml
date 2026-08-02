@@ -1,0 +1,57 @@
+name: Orchestrator Guards
+
+# Guards the orchestrator's timeout invariant from silently drifting (issue
+# #673): MAX_TASK_WALL_TIME_SECS (the parallel-task watchdog ceiling, set in
+# .claude/config/platform.sh) must never be tighter than the orchestrator's
+# serial implement-task-* stage timeout, or a task that would succeed
+# serially gets killed in parallel and the whole batch re-runs serially,
+# paying for the work twice.
+#
+# bundle-parity.yml deliberately excludes .claude/config/** from its trigger
+# set (its own header documents a scope contract around the two script
+# trees and sync.sh), so a platform.sh-only edit fires no workflow at all.
+# This workflow closes that gap without widening bundle-parity's scope.
+#
+# The bats file list below is curated, not globbed: .claude/scripts/
+# implement-issue-test/ holds 56 files, seven of which shell out to
+# gh/claude/curl and are unsuited to CI. Only the two files that guard the
+# timeout invariant run here — do not "helpfully" expand this to *.bats.
+#
+# (Paths are duplicated rather than shared via a YAML anchor — the Actions
+# workflow parser does not reliably support anchors/aliases, per
+# bundle-parity.yml:1-31.)
+on:
+  push:
+    paths:
+      - '.claude/config/**'
+      - '.claude/scripts/implement-issue-orchestrator.sh'
+      - '.claude/scripts/implement-issue-test/**'
+      - 'plugins/pipeline-core/scripts/implement-issue-orchestrator.sh'
+      - 'tests/timeout-budget.bats'
+      - '.github/workflows/orchestrator-guards.yml'
+  pull_request:
+    paths:
+      - '.claude/config/**'
+      - '.claude/scripts/implement-issue-orchestrator.sh'
+      - '.claude/scripts/implement-issue-test/**'
+      - 'plugins/pipeline-core/scripts/implement-issue-orchestrator.sh'
+      - 'tests/timeout-budget.bats'
+      - '.github/workflows/orchestrator-guards.yml'
+
+jobs:
+  orchestrator-guards:
+    name: Orchestrator Timeout Drift Guards
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats and jq
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bats jq
+
+      - name: Run orchestrator timeout drift guards
+        run: bats .claude/scripts/implement-issue-test/test-timeout-escalation.bats tests/timeout-budget.bats
