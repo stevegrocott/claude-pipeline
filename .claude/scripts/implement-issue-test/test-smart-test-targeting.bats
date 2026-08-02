@@ -1401,6 +1401,127 @@ _assert_e2e_verify_runs_for_scope() {
 }
 
 # =============================================================================
+# ISSUE #745: E2E VERDICT UNSUPPORTED BY ITS OWN COUNTS -> UNMEASURED
+#
+# A self-reported 'failed' with tests_run: 0 means the run never finished --
+# not that it observed a real failure. Trusting it verbatim burns fix
+# iterations and container rebuilds chasing a verdict nothing measured (the
+# issue-5536 evidence in #745: the same zero-count 'failed' payload was
+# repeated verbatim through a whole fix iteration before a real result ever
+# arrived). run_parallel_post_task_stages() must cross-check the initial
+# e2e-verify verdict against tests_run/tests_passed/tests_failed and, when
+# the counts don't support it, record a non-blocking `e2e_verify:unmeasured`
+# DEGRADED_STAGES marker -- the same pattern #666 established for
+# test:bats_incomplete -- instead of entering the fix-dispatch loop at all.
+# =============================================================================
+
+@test "run_parallel_post_task_stages records unmeasured and dispatches no fix for a failed verdict with zero tests run" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-unmeasured-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    # Replay the issue-5536 payload verbatim: result "failed" but
+    # tests_run/tests_passed/tests_failed are all 0 -- an unfinished run,
+    # not a measured failure. Any run_stage call beyond the initial
+    # e2e-verify (a fix or rerun stage) means the fix loop was entered,
+    # which is exactly what must NOT happen here.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"E2E test execution for issue #5536 is currently running in the background. A wakeup has been scheduled to check results upon completion.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- an unmeasured" \
+                    "verdict must dispatch no fix iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-unmeasured" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    # No fix iteration and no rerun dispatched -- only the single initial
+    # e2e-verify call should appear in the log.
+    local calls
+    calls=$(tr '\n' ' ' < "$calls_file")
+    if grep -q '^run_stage:fix-e2e-iter-1$' "$calls_file"; then
+        fail "an unmeasured verdict (tests_run: 0) must not dispatch a" \
+            "fix iteration; calls: $calls"
+    fi
+    if grep -q '^run_stage:e2e-verify-rerun-iter-1$' "$calls_file"; then
+        fail "an unmeasured verdict must not enter the rerun path" \
+            "either; calls: $calls"
+    fi
+    [[ "$calls" == *'run_stage:e2e-verify'* ]] || fail \
+        "expected the initial e2e-verify call to still run; calls: $calls"
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' || fail \
+        "Expected e2e_verify:unmeasured in DEGRADED_STAGES; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# Negative control: a genuinely measured failure (counts fully support the
+# verdict) must still enter the fix loop and dispatch a fix iteration -- the
+# unmeasured guard above must not swallow real failures too (AC6).
+@test "run_parallel_post_task_stages still dispatches a fix for a measured failed verdict" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    export MAX_E2E_FIX_ITERATIONS=1
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-measured-fail-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"3 specs failed on checkout","tests_run":12,"tests_passed":9,"tests_failed":3}}'
+                ;;
+            fix-e2e-iter-1)
+                printf '{"output":{"summary":"Fix applied"}}'
+                ;;
+            e2e-verify-rerun-iter-1)
+                printf '{"output":{"result":"passed","summary":"all green","tests_run":12,"tests_passed":12,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call: $1"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-745-measured-fail" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    grep -qx 'run_stage:fix-e2e-iter-1' "$calls_file" || fail \
+        "a measured failed verdict (12 run, 9 passed, 3 failed) must" \
+        "still dispatch a fix iteration; calls: $(tr '\n' ' ' < "$calls_file")"
+
+    local marker
+    marker=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -c '^e2e_verify:unmeasured$' || true)
+    [ "$marker" -eq 0 ] || fail \
+        "a measured failure must not be recorded as unmeasured; got:" \
+        "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# =============================================================================
 # E2E PROMPT INJECTION TESTS
 # =============================================================================
 

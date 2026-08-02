@@ -8620,9 +8620,17 @@ run_parallel_post_task_stages() {
 	local e2e_start=0 acceptance_start=0
 	# Temp files carry failure summaries out of subshells for sequential
 	# fix dispatch; avoids two fix agents committing to $branch concurrently.
-	local e2e_fail_file acceptance_fail_file
+	local e2e_fail_file acceptance_fail_file e2e_unmeasured_file
 	e2e_fail_file=$(mktemp)
 	acceptance_fail_file=$(mktemp)
+	# Issue #745: a separate signal from e2e_fail_file. The initial
+	# e2e-verify call's own tests_run/tests_passed/tests_failed counts
+	# may not support its self-reported verdict (zero tests run, or a
+	# passed+failed total short of tests_run) — that is an unfinished
+	# run, not a measurement. Routing it here instead of e2e_fail_file
+	# keeps it out of the fix-dispatch gate entirely, so no fix
+	# iteration is spent chasing a verdict nothing measured.
+	e2e_unmeasured_file=$(mktemp)
 
 	if $run_e2e; then
 		e2e_start=$(date +%s)
@@ -8691,16 +8699,43 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			e2e_verify_summary=$(printf '%s' "$e2e_verify_result" \
 				| jq -r '.output.summary // "E2E verification completed"')
 
+			# Issue #745: a verdict is only as good as the counts
+			# behind it. Zero tests run, or a passed+failed total
+			# short of tests_run, means the run did not finish — a
+			# self-reported 'passed' or 'failed' in that state is
+			# unsupported, not a measurement. Override to
+			# 'unmeasured' rather than trust the self-report, and
+			# route it to e2e_unmeasured_file instead of
+			# e2e_fail_file so it never enters the fix loop.
+			local e2e_tests_run e2e_tests_passed e2e_tests_failed
+			e2e_tests_run=$(printf '%s' "$e2e_verify_result" \
+				| jq -r '.output.tests_run // 0')
+			e2e_tests_passed=$(printf '%s' "$e2e_verify_result" \
+				| jq -r '.output.tests_passed // 0')
+			e2e_tests_failed=$(printf '%s' "$e2e_verify_result" \
+				| jq -r '.output.tests_failed // 0')
+			if ((e2e_tests_run == 0)) \
+				|| ((e2e_tests_passed + e2e_tests_failed \
+					< e2e_tests_run)); then
+				e2e_verify_status="unmeasured"
+			fi
+
 			local e2e_icon="✅"
 			[[ "$e2e_verify_status" == "failed" ]] \
 				&& e2e_icon="❌"
+			[[ "$e2e_verify_status" == "unmeasured" ]] \
+				&& e2e_icon="⚠️"
 			comment_issue "E2E Verification" \
 				"$e2e_icon **Result:** $e2e_verify_status
 Container rebuild: $rebuild_status | Health: $health_status
 
 $e2e_verify_summary" "playwright-test-developer"
 
-			if [[ "$e2e_verify_status" == "failed" ]]; then
+			if [[ "$e2e_verify_status" == "unmeasured" ]]; then
+				printf '%s' "$e2e_verify_summary" \
+					> "$e2e_unmeasured_file"
+				exit 1
+			elif [[ "$e2e_verify_status" == "failed" ]]; then
 				# Write summary for sequential fix dispatch after wait.
 				# Fixes must not run concurrently with acceptance fixes
 				# to prevent two agents committing to $branch at once.
@@ -8837,6 +8872,24 @@ $acceptance_summary" "default"
 	# budget inside its background subshell.  Halt in the PARENT shell BEFORE
 	# dispatching any sequential fix stage, so no fix CLI call runs post-breach.
 	_halt_if_budget_exceeded
+
+	# Issue #745: the initial e2e-verify call reported a verdict its own
+	# counts don't support (zero tests run, or passed+failed short of
+	# tests_run). Record it as degraded — visible to the merge gate,
+	# same as the BATS incomplete path — and do NOT enter the fix-dispatch
+	# gate below: e2e_fail_file was never written for this case, so the
+	# fix budget and container rebuilds are not spent chasing a verdict
+	# nothing measured.
+	if [[ -s "$e2e_unmeasured_file" ]]; then
+		DEGRADED_STAGES+=("e2e_verify:unmeasured")
+		log_warn "E2E verification unmeasured" \
+			"(counts do not support the reported verdict)" \
+			"— skipping E2E fix loop"
+		comment_issue "E2E Verification: Unmeasured" \
+			"⚠️ E2E verdict was not supported by its own test counts \
+(run did not finish). Not entering the fix loop — this needs manual \
+review before merge." "playwright-test-developer"
+	fi
 
 	# ------------------------------------------------------------------
 	# Sequential fix dispatch: if a stage failed, dispatch fix agents
@@ -9021,7 +9074,7 @@ Investigate the root cause and fix the issue. Commit your changes."
 	fi
 
 	# Clean up temp files
-	rm -f "$e2e_fail_file" "$acceptance_fail_file"
+	rm -f "$e2e_fail_file" "$acceptance_fail_file" "$e2e_unmeasured_file"
 
 	# Mark completed AFTER parallelism (sequential writes, no race)
 	$run_e2e && set_stage_completed "e2e_verify"
