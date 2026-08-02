@@ -8930,8 +8930,28 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			rerun_summary=$(printf '%s' "$rerun_result" \
 				| jq -r '.output.summary // "E2E rerun completed"')
 
+			# Issue #745: a verdict is only as good as the counts
+			# behind it. Zero tests run, or a passed+failed total
+			# short of tests_run, means the run did not finish —
+			# a self-reported 'passed' or 'failed' in that state is
+			# unsupported, not a measurement. Override to
+			# 'unmeasured' rather than trust the self-report.
+			local rerun_tests_run rerun_tests_passed rerun_tests_failed
+			rerun_tests_run=$(printf '%s' "$rerun_result" \
+				| jq -r '.output.tests_run // 0')
+			rerun_tests_passed=$(printf '%s' "$rerun_result" \
+				| jq -r '.output.tests_passed // 0')
+			rerun_tests_failed=$(printf '%s' "$rerun_result" \
+				| jq -r '.output.tests_failed // 0')
+			if ((rerun_tests_run == 0)) \
+				|| ((rerun_tests_passed + rerun_tests_failed \
+					< rerun_tests_run)); then
+				rerun_status="unmeasured"
+			fi
+
 			local rerun_icon="✅"
 			[[ "$rerun_status" == "failed" ]] && rerun_icon="❌"
+			[[ "$rerun_status" == "unmeasured" ]] && rerun_icon="⚠️"
 			comment_issue \
 				"E2E Verification (rerun $e2e_fix_iter)" \
 				"$rerun_icon **Result:** $rerun_status
