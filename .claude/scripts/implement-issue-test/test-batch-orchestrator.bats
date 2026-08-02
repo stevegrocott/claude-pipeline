@@ -815,37 +815,44 @@ _simulate_cost_rollup() {
 	grep -q 'already merged' "$BATCH_ORCHESTRATOR_SCRIPT"
 }
 
-@test "up-front skip gate: closed issue sets status to completed" {
-	# Verify the closed-issue branch updates the issue to completed so
-	# update_progress counts it correctly (not as failed/skipped).
-	# Anchor on code structure (_upfront_issue_state == CLOSED condition)
-	# rather than log message wording.
+@test "up-front skip gate: gh-resolved issue sets status to completed" {
+	# ISSUE #740: the closed-issue and merged-PR detection was extracted
+	# into check_issue_resolved_upstream(); the call-site now shares a
+	# single if-block for both cases. Anchor on that call-site's code
+	# structure rather than log message wording.
 	local block
-	block=$(awk '/_upfront_issue_state.*==.*CLOSED/,/continue/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" | head -10)
-	[[ "$block" == *'update_issue_field'* ]]
-	[[ "$block" == *'"status"'* ]]
-	[[ "$block" == *'"completed"'* ]]
-}
-
-@test "up-front skip gate: merged PR sets status to completed" {
-	# Anchor on code structure (_merged_pr detection block) not log wording.
-	local block
-	block=$(awk '/\[\[ -n.*_merged_pr/,/continue/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" | head -10)
-	[[ "$block" == *'update_issue_field'* ]]
-	[[ "$block" == *'"status"'* ]]
-	[[ "$block" == *'"completed"'* ]]
-}
-
-@test "up-front skip gate: merged PR update also stores the PR number" {
-	# The PR field must be written so handle-issues progress table shows it.
-	# Anchor on code structure (_merged_pr detection block) not log wording.
-	local block
-	block=$(awk '/\[\[ -n.*_merged_pr/,/update_progress/' \
+	block=$(awk '/if check_issue_resolved_upstream /,/^    fi$/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
 	[[ "$block" == *'update_issue_field'* ]]
+	[[ "$block" == *'"status"'* ]]
+	[[ "$block" == *'"completed"'* ]]
+}
+
+@test "up-front skip gate: call-site stores the PR number when one is set" {
+	# The PR field must be written so handle-issues progress table shows it.
+	# Anchor on code structure (_UPFRONT_SKIP_PR) not log wording.
+	local block
+	block=$(awk '/if check_issue_resolved_upstream /,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
+	[[ "$block" == *'_UPFRONT_SKIP_PR'* ]]
+	[[ "$block" == *'update_issue_field'* ]]
 	[[ "$block" == *'"pr"'* ]]
+}
+
+@test "check_issue_resolved_upstream: detects a closed issue" {
+	local body
+	body=$(_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'CLOSED'* ]]
+	[[ "$body" == *'_UPFRONT_SKIP_REASON'* ]]
+}
+
+@test "check_issue_resolved_upstream: detects a merged PR and records its number" {
+	local body
+	body=$(_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'merged_pr'* ]]
+	[[ "$body" == *'_UPFRONT_SKIP_PR'* ]]
 }
 
 @test "up-front skip gate: gh failures are non-fatal (|| true pattern)" {
@@ -917,6 +924,304 @@ _make_gh_skip_status_json() {
 	result=$(_simulate_update_progress "$status_file")
 	count=$(printf '%s' "$result" | jq '.progress.failed')
 	[[ "$count" == "0" ]]
+}
+
+# =============================================================================
+# TASK 3 (i740): failure-site reconciliation — a stale `failed` verdict must
+# flip to `completed` when the issue's feature branch PR already merged
+# =============================================================================
+#
+# batch-orchestrator.sh records four failure sites unconditionally today:
+# implement-issue failure (~:1500), missing PR number (~:1509), process-pr
+# timeout (~:1576) and process-pr failure (~:1613, a case arm). None re-checks
+# whether the work actually landed before writing "failed" — see issue #740.
+# Tasks #1/#2 on this issue reuse the up-front skip gate's
+# `gh pr list --state merged --head "feature/issue-N"` check on these
+# failure paths: when it reports a merged PR, the site must record
+# `completed` with that PR number and return 0 (success) instead of 1, so the
+# call-site circuit breaker (see the "process_issue call site" tests above)
+# naturally leaves consecutive_failures untouched — it only increments on a
+# nonzero process_issue() return. A genuine failure (no merged PR) must still
+# record `failed` and return 1, unchanged.
+#
+# These functional tests extract each failure site by its stable if/case
+# guard — not by the (separately implemented) reconciliation call itself —
+# so they stay valid regardless of the helper's internal name, and `skip`
+# gracefully if a future refactor moves the guard. Until tasks #1/#2 land,
+# the "reconciled" assertions below fail RED (the sites unconditionally
+# record "failed" today); they turn GREEN once the failure sites call the
+# merged-PR check before finalizing a verdict.
+
+# Extracts the implement-issue failure site's "if [[ "$impl_status" !=
+# "success" ]]; then ... fi" block. Returns 1 (without aborting) if the
+# anchor is not found so callers skip rather than false-fail on an unrelated
+# script change.
+_extract_impl_failure_block() {
+	local block_file="$TEST_TMP/impl_failure_block.bash"
+	awk '/^    if \[\[ "\$impl_status" != "success" \]\]; then$/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Extracts the process-pr failure case arm ("error|rate_limit|*) ... ;;") and
+# wraps it in its own "case "$proc_status" in ... esac" so it is valid,
+# sourceable bash on its own (a bare case arm is not). The wildcard "*"
+# pattern in the arm still matches any $proc_status. Same not-found contract
+# as _extract_impl_failure_block.
+_extract_process_pr_failure_block() {
+	local block_file="$TEST_TMP/process_pr_failure_block.bash"
+	{
+		printf 'case "$proc_status" in\n'
+		awk '/error\|rate_limit\|\*\)/,/^[[:space:]]+;;/' \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		printf 'esac\n'
+	} > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Extracts the "no PR number found" failure site's "if [[ -z "$pr_number"
+# ]]; then ... fi" block. Same not-found contract as
+# _extract_impl_failure_block.
+_extract_no_pr_failure_block() {
+	local block_file="$TEST_TMP/no_pr_failure_block.bash"
+	awk '/^    if \[\[ -z "\$pr_number" \]\]; then$/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Extracts the process-pr timeout failure site's "if (( proc_exit == 124 ));
+# then ... fi" block. Same not-found contract as _extract_impl_failure_block.
+_extract_timeout_failure_block() {
+	local block_file="$TEST_TMP/timeout_failure_block.bash"
+	awk '/^    if \(\( proc_exit == 124 \)\); then$/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources an extracted failure-site block with gh mocked on PATH (caller sets
+# PATH before calling) and log/log_error/update_issue_field/update_progress/
+# git mocked to capture calls instead of touching the real filesystem or
+# git/gh. Leaves the block's return code in _failure_block_rc (0 or 1).
+# PROC_EXIT_IN (default 0) seeds $proc_exit, needed for the timeout site's
+# "(( proc_exit == 124 ))" guard.
+_run_failure_site_block() {
+	local block_file="$1"
+
+	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_error()          { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
+	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
+	# shellcheck disable=SC2317
+	git()                { printf '%s\n' "git $*" >> "$TEST_TMP/git.out"; return 0; }
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/update.out"
+	: > "$TEST_TMP/progress.out"
+	: > "$TEST_TMP/git.out"
+
+	# The failure sites call the real check_issue_resolved_upstream() to
+	# reconcile a reported failure against GitHub's actual state — source
+	# it so the block under test exercises production reconciliation logic
+	# (and the mocked `gh` on PATH) rather than skipping that call entirely.
+	source_check_issue_resolved_upstream \
+		|| { _failure_block_rc=1; return 1; }
+
+	issue_num=695
+	impl_status="error"
+	impl_error="pr stage aborted: already exists"
+	proc_status="error"
+	proc_error="status was error"
+	pr_number=""
+	BRANCH="main"
+	ISSUE_TIMEOUT=3600
+	proc_exit="${PROC_EXIT_IN:-0}"
+
+	_failure_block_rc=0
+	source "$block_file" || _failure_block_rc=$?
+}
+
+# Mocked gh reporting the feature branch's PR as merged (issue #695 / PR #735
+# from the issue's own evidence table).
+_stub_gh_pr_merged() {
+	local mock_bin="$TEST_TMP/mock-bin-merged-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	pr) printf '735\n' ;;
+	issue) printf 'OPEN\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+# Mocked gh reporting no merged PR and an open issue — a genuine failure.
+_stub_gh_pr_not_merged() {
+	local mock_bin="$TEST_TMP/mock-bin-open-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	pr) printf '' ;;
+	issue) printf 'OPEN\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "functional: implement-issue failure site records completed with the PR number when the PR already merged" {
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: implement-issue failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: implement-issue failure site logs the reconciliation explicitly" {
+	# AC4: a status flipping from failed to completed must be visible in the
+	# run log, not silent. Anchor on the merged PR number rather than exact
+	# wording so a future rewording of the log message doesn't false-fail.
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -q '735' "$TEST_TMP/log.out"
+}
+
+@test "functional: process-pr failure site records completed with the PR number when the PR already merged" {
+	# Mirrors issue #740's #5482 evidence: process-pr timed out/failed while
+	# the PR had already merged moments earlier.
+	local block_file
+	block_file=$(_extract_process_pr_failure_block) \
+		|| skip "process-pr failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: process-pr failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_process_pr_failure_block) \
+		|| skip "process-pr failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: no-PR-number failure site records completed with the PR number when the PR already merged" {
+	local block_file
+	block_file=$(_extract_no_pr_failure_block) \
+		|| skip "no-PR-number failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: no-PR-number failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_no_pr_failure_block) \
+		|| skip "no-PR-number failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: process-pr timeout failure site records completed with the PR number when the PR already merged" {
+	local block_file
+	block_file=$(_extract_timeout_failure_block) \
+		|| skip "process-pr timeout failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	PROC_EXIT_IN=124 _run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: process-pr timeout failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_timeout_failure_block) \
+		|| skip "process-pr timeout failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_EXIT_IN=124 _run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: a reconciled false failure (process_issue returns success) leaves consecutive_failures untouched" {
+	# AC3: a failure site that reconciles a stale "failed" verdict must
+	# return 0 like a genuine success (see the failure-site tests above), so
+	# the circuit breaker — which only increments consecutive_failures on a
+	# nonzero process_issue() return, per the "process_issue call site"
+	# tests earlier in this file — cannot be tripped by a false failure that
+	# already landed.
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	CF_IN=3 _run_process_issue_call_site "$block_file" 0 false ""
+
+	[[ "$consecutive_failures" -eq 0 ]]
+	! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+}
+
+@test "functional: a genuine failure (process_issue returns failure) still increments consecutive_failures" {
+	# Contrast case: establishes the circuit breaker still fires for a real
+	# failure, so the reconciled-false-failure test above isn't vacuous.
+	local block_file
+	block_file=$(_extract_process_issue_call_site) \
+		|| skip "process_issue call-site block not found (script changed)"
+
+	CF_IN=3 _run_process_issue_call_site "$block_file" 1 false ""
+
+	[[ "$consecutive_failures" -eq 4 ]]
 }
 
 # =============================================================================
@@ -999,53 +1304,31 @@ _make_gh_skip_status_json() {
 }
 
 # --- The pre-existing up-front skip gate must remain unaffected ---
+#
+# ISSUE #740: the closed-issue / merged-PR detection was extracted out of
+# the main loop into check_issue_resolved_upstream(). It's now a real,
+# independently-sourceable function, so it is unit tested directly (no
+# block-extraction hack needed). The trivial call-site wiring that remains
+# in the loop (update_issue_field / update_progress / continue) is still
+# covered via the block-extraction approach below, since it isn't a
+# standalone function.
 
-# Extracts the up-front skip gate's "if [[ "${GIT_HOST:-github}" ...
-# ... fi" block from the main loop. Returns 1 (without aborting) if the
-# anchor is not found so callers skip rather than false-fail on an
-# unrelated script change.
-_extract_upfront_skip_gate_block() {
-	local block_file="$TEST_TMP/upfront_skip_gate.bash"
-	awk '/^    if \[\[ "\$\{GIT_HOST:-github\}"/,/^    fi$/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
-	grep -q 'gh issue view' "$block_file" 2>/dev/null || return 1
-	printf '%s\n' "$block_file"
+# Sources the real check_issue_resolved_upstream() function extracted from
+# batch-orchestrator.sh, so functional tests exercise the actual
+# implementation rather than a hand-copied block.
+source_check_issue_resolved_upstream() {
+	local func_file="$TEST_TMP/check_issue_resolved_upstream.bash"
+	_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	grep -q 'check_issue_resolved_upstream' "$func_file" 2>/dev/null \
+		|| return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
 }
 
-# Sources the extracted up-front gate block inside a one-shot for-loop (so
-# `continue` has a loop to act on) with gh on PATH mocked by the caller, and
-# log/update_issue_field/update_progress mocked to capture calls instead of
-# touching the real filesystem. _process_issue_reached is set to true only
-# if the block falls through without hitting `continue` — mirroring how the
-# real loop would fall through to `if process_issue "$issue"; then`.
-_run_upfront_skip_gate() {
-	local block_file="$1"
-
-	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
-	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
-	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
-
-	: > "$TEST_TMP/log.out"
-	: > "$TEST_TMP/update.out"
-	: > "$TEST_TMP/progress.out"
-
-	issue=690
-	consecutive_failures="${CF_IN:-2}"
-	_PREFLIGHT_SKIPPED="${PREFLIGHT_IN:-false}"
-	GIT_HOST=github
-	_process_issue_reached=false
-
-	for _once in 1; do
-		# shellcheck disable=SC1090
-		source "$block_file"
-		_process_issue_reached=true
-	done
-}
-
-@test "functional: up-front gate (closed issue) does not set _PREFLIGHT_SKIPPED" {
-	local block_file
-	block_file=$(_extract_upfront_skip_gate_block) \
-		|| skip "up-front skip gate block not found (script changed)"
+@test "functional: check_issue_resolved_upstream (closed issue) returns 0 with a reason and no PR" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
 
 	local mock_bin="$TEST_TMP/mock-bin-upfront-closed"
 	mkdir -p "$mock_bin"
@@ -1058,66 +1341,19 @@ esac
 GHEOF
 	chmod +x "$mock_bin/gh"
 	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
 
-	PREFLIGHT_IN=false CF_IN=2 _run_upfront_skip_gate "$block_file"
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
 
-	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+	[[ "$rc" -eq 0 ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'closed'* ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
 }
 
-@test "functional: up-front gate (closed issue) leaves consecutive_failures untouched" {
-	local block_file
-	block_file=$(_extract_upfront_skip_gate_block) \
-		|| skip "up-front skip gate block not found (script changed)"
-
-	local mock_bin="$TEST_TMP/mock-bin-upfront-closed-cf"
-	mkdir -p "$mock_bin"
-	cat > "$mock_bin/gh" << 'GHEOF'
-#!/usr/bin/env bash
-case "$1" in
-	issue) printf 'CLOSED\n' ;;
-	pr) printf '' ;;
-esac
-GHEOF
-	chmod +x "$mock_bin/gh"
-	export PATH="$mock_bin:$PATH"
-
-	# Unlike a process_issue() success/skip (which resets to 0), the
-	# up-front gate must leave consecutive_failures exactly as it found it
-	# — it never calls process_issue at all.
-	PREFLIGHT_IN=false CF_IN=2 _run_upfront_skip_gate "$block_file"
-
-	[[ "$consecutive_failures" -eq 2 ]]
-}
-
-@test "functional: up-front gate (closed issue) bypasses process_issue via continue and still records completed" {
-	local block_file
-	block_file=$(_extract_upfront_skip_gate_block) \
-		|| skip "up-front skip gate block not found (script changed)"
-
-	local mock_bin="$TEST_TMP/mock-bin-upfront-closed-continue"
-	mkdir -p "$mock_bin"
-	cat > "$mock_bin/gh" << 'GHEOF'
-#!/usr/bin/env bash
-case "$1" in
-	issue) printf 'CLOSED\n' ;;
-	pr) printf '' ;;
-esac
-GHEOF
-	chmod +x "$mock_bin/gh"
-	export PATH="$mock_bin:$PATH"
-
-	_run_upfront_skip_gate "$block_file"
-
-	[[ "$_process_issue_reached" == false ]]
-	grep -q 'status' "$TEST_TMP/update.out"
-	grep -q 'completed' "$TEST_TMP/update.out"
-	[[ -s "$TEST_TMP/progress.out" ]]
-}
-
-@test "functional: up-front gate (merged PR) does not set _PREFLIGHT_SKIPPED and leaves consecutive_failures untouched" {
-	local block_file
-	block_file=$(_extract_upfront_skip_gate_block) \
-		|| skip "up-front skip gate block not found (script changed)"
+@test "functional: check_issue_resolved_upstream (merged PR) returns 0 and records the PR number" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
 
 	local mock_bin="$TEST_TMP/mock-bin-upfront-merged"
 	mkdir -p "$mock_bin"
@@ -1130,19 +1366,19 @@ esac
 GHEOF
 	chmod +x "$mock_bin/gh"
 	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
 
-	PREFLIGHT_IN=false CF_IN=1 _run_upfront_skip_gate "$block_file"
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
 
-	[[ "$_PREFLIGHT_SKIPPED" == false ]]
-	[[ "$consecutive_failures" -eq 1 ]]
-	[[ "$_process_issue_reached" == false ]]
-	grep -q 'completed' "$TEST_TMP/update.out"
+	[[ "$rc" -eq 0 ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'123'* ]]
+	[[ "$_UPFRONT_SKIP_PR" == "123" ]]
 }
 
-@test "functional: up-front gate falls through to process_issue when issue is open and no PR is merged" {
-	local block_file
-	block_file=$(_extract_upfront_skip_gate_block) \
-		|| skip "up-front skip gate block not found (script changed)"
+@test "functional: check_issue_resolved_upstream returns 1 when issue is open and no PR is merged" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
 
 	local mock_bin="$TEST_TMP/mock-bin-upfront-open"
 	mkdir -p "$mock_bin"
@@ -1155,8 +1391,132 @@ esac
 GHEOF
 	chmod +x "$mock_bin/gh"
 	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
 
-	PREFLIGHT_IN=false CF_IN=1 _run_upfront_skip_gate "$block_file"
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+}
+
+@test "functional: check_issue_resolved_upstream is a no-op for a non-github GIT_HOST" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	# gh must not even be invoked for a non-github host — a mock that fails
+	# hard if called proves the short-circuit happens before any gh call.
+	local mock_bin="$TEST_TMP/mock-bin-upfront-nongithub"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+echo "gh should not be called for a non-github GIT_HOST" >&2
+exit 1
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=gitlab
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+}
+
+# Extracts the call-site "if check_issue_resolved_upstream "$issue"; then
+# ... fi" block from the main loop. Returns 1 (without aborting) if the
+# anchor is not found so callers skip rather than false-fail on an
+# unrelated script change.
+_extract_upfront_call_site_block() {
+	local block_file="$TEST_TMP/upfront_call_site.bash"
+	awk '/^    if check_issue_resolved_upstream /,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'check_issue_resolved_upstream' "$block_file" 2>/dev/null \
+		|| return 1
+	printf '%s\n' "$block_file"
+}
+
+# Sources the extracted call-site block inside a one-shot for-loop (so
+# `continue` has a loop to act on), with check_issue_resolved_upstream
+# stubbed via CIRU_RC/CIRU_REASON/CIRU_PR (so this test exercises only the
+# call-site wiring, not the gh queries — those are covered above) and
+# log/update_issue_field/update_progress mocked to capture calls instead of
+# touching the real filesystem. _process_issue_reached is set to true only
+# if the block falls through without hitting `continue` — mirroring how the
+# real loop would fall through to `if process_issue "$issue"; then`.
+_run_upfront_call_site() {
+	local block_file="$1"
+
+	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
+	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
+	check_issue_resolved_upstream() {
+		_UPFRONT_SKIP_REASON="${CIRU_REASON:-}"
+		_UPFRONT_SKIP_PR="${CIRU_PR:-}"
+		return "${CIRU_RC:-1}"
+	}
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/update.out"
+	: > "$TEST_TMP/progress.out"
+
+	issue=690
+	consecutive_failures="${CF_IN:-2}"
+	_PREFLIGHT_SKIPPED="${PREFLIGHT_IN:-false}"
+	_process_issue_reached=false
+
+	for _once in 1; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+		_process_issue_reached=true
+	done
+}
+
+@test "functional: call-site (resolved) does not set _PREFLIGHT_SKIPPED and leaves consecutive_failures untouched" {
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=0 CIRU_REASON="already closed on GitHub" CIRU_PR="" \
+		PREFLIGHT_IN=false CF_IN=2 _run_upfront_call_site "$block_file"
+
+	[[ "$_PREFLIGHT_SKIPPED" == false ]]
+	[[ "$consecutive_failures" -eq 2 ]]
+}
+
+@test "functional: call-site (resolved) bypasses process_issue via continue and still records completed" {
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=0 CIRU_REASON="already closed on GitHub" CIRU_PR="" \
+		_run_upfront_call_site "$block_file"
+
+	[[ "$_process_issue_reached" == false ]]
+	grep -q 'status' "$TEST_TMP/update.out"
+	grep -q 'completed' "$TEST_TMP/update.out"
+	[[ -s "$TEST_TMP/progress.out" ]]
+}
+
+@test "functional: call-site (merged PR) also records the PR number" {
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=0 CIRU_REASON="PR #123 already merged" CIRU_PR="123" \
+		_run_upfront_call_site "$block_file"
+
+	[[ "$_process_issue_reached" == false ]]
+	grep -q 'pr' "$TEST_TMP/update.out"
+	grep -q '123' "$TEST_TMP/update.out"
+}
+
+@test "functional: call-site falls through to process_issue when not resolved" {
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=1 PREFLIGHT_IN=false CF_IN=1 _run_upfront_call_site "$block_file"
 
 	# No status write, and the block falls through to process_issue rather
 	# than skipping — leaving the preflight-skip signal to process_issue().
