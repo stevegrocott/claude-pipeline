@@ -981,10 +981,33 @@ _extract_process_pr_failure_block() {
 	printf '%s\n' "$block_file"
 }
 
+# Extracts the "no PR number found" failure site's "if [[ -z "$pr_number"
+# ]]; then ... fi" block. Same not-found contract as
+# _extract_impl_failure_block.
+_extract_no_pr_failure_block() {
+	local block_file="$TEST_TMP/no_pr_failure_block.bash"
+	awk '/^    if \[\[ -z "\$pr_number" \]\]; then$/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+# Extracts the process-pr timeout failure site's "if (( proc_exit == 124 ));
+# then ... fi" block. Same not-found contract as _extract_impl_failure_block.
+_extract_timeout_failure_block() {
+	local block_file="$TEST_TMP/timeout_failure_block.bash"
+	awk '/^    if \(\( proc_exit == 124 \)\); then$/,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
 # Sources an extracted failure-site block with gh mocked on PATH (caller sets
 # PATH before calling) and log/log_error/update_issue_field/update_progress/
 # git mocked to capture calls instead of touching the real filesystem or
 # git/gh. Leaves the block's return code in _failure_block_rc (0 or 1).
+# PROC_EXIT_IN (default 0) seeds $proc_exit, needed for the timeout site's
+# "(( proc_exit == 124 ))" guard.
 _run_failure_site_block() {
 	local block_file="$1"
 
@@ -1000,6 +1023,13 @@ _run_failure_site_block() {
 	: > "$TEST_TMP/progress.out"
 	: > "$TEST_TMP/git.out"
 
+	# The failure sites call the real check_issue_resolved_upstream() to
+	# reconcile a reported failure against GitHub's actual state — source
+	# it so the block under test exercises production reconciliation logic
+	# (and the mocked `gh` on PATH) rather than skipping that call entirely.
+	source_check_issue_resolved_upstream \
+		|| { _failure_block_rc=1; return 1; }
+
 	issue_num=695
 	impl_status="error"
 	impl_error="pr stage aborted: already exists"
@@ -1008,6 +1038,7 @@ _run_failure_site_block() {
 	pr_number=""
 	BRANCH="main"
 	ISSUE_TIMEOUT=3600
+	proc_exit="${PROC_EXIT_IN:-0}"
 
 	_failure_block_rc=0
 	source "$block_file" || _failure_block_rc=$?
@@ -1107,6 +1138,58 @@ GHEOF
 	_stub_gh_pr_not_merged
 
 	_run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: no-PR-number failure site records completed with the PR number when the PR already merged" {
+	local block_file
+	block_file=$(_extract_no_pr_failure_block) \
+		|| skip "no-PR-number failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: no-PR-number failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_no_pr_failure_block) \
+		|| skip "no-PR-number failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	_run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: process-pr timeout failure site records completed with the PR number when the PR already merged" {
+	local block_file
+	block_file=$(_extract_timeout_failure_block) \
+		|| skip "process-pr timeout failure block not found (script changed)"
+	_stub_gh_pr_merged
+
+	PROC_EXIT_IN=124 _run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	! grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: process-pr timeout failure site still records failed when no PR merged" {
+	local block_file
+	block_file=$(_extract_timeout_failure_block) \
+		|| skip "process-pr timeout failure block not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_EXIT_IN=124 _run_failure_site_block "$block_file"
 
 	grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 1 ]]

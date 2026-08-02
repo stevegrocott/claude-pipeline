@@ -1553,6 +1553,17 @@ process_issue() {
 
     if [[ "$impl_status" != "success" ]]; then
         log_error "implement-issue failed for #$issue_num: ${impl_error:-unknown error}"
+        if check_issue_resolved_upstream "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+            update_issue_field "$issue_num" "status" "completed"
+            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            fi
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+        fi
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "${impl_error:-implement-issue failed with status: $impl_status}"
         update_progress
@@ -1562,6 +1573,17 @@ process_issue() {
 
     if [[ -z "$pr_number" ]]; then
         log_error "implement-issue succeeded but no PR number found for #$issue_num"
+        if check_issue_resolved_upstream "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+            update_issue_field "$issue_num" "status" "completed"
+            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            fi
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+        fi
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "No PR number in status file or output"
         update_progress
@@ -1629,6 +1651,17 @@ process_issue() {
     # Check for timeout
     if (( proc_exit == 124 )); then
         log_error "Issue #$issue_num timed out during process-pr (${ISSUE_TIMEOUT}s)"
+        if check_issue_resolved_upstream "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+            update_issue_field "$issue_num" "status" "completed"
+            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            fi
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+        fi
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "Timeout after ${ISSUE_TIMEOUT}s during process-pr"
         update_progress
@@ -1666,6 +1699,17 @@ process_issue() {
             ;;
         error|rate_limit|*)
             log_error "process-pr failed for #$issue_num: ${proc_error:-status was $proc_status}"
+            if check_issue_resolved_upstream "$issue_num"; then
+                log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+                update_issue_field "$issue_num" "status" "completed"
+                update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+                if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
+                    update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+                fi
+                update_progress
+                git checkout "$BRANCH" 2>/dev/null || true
+                return 0
+            fi
             update_issue_field "$issue_num" "status" "failed"
             update_issue_field "$issue_num" "error" "${proc_error:-process-pr failed with status: $proc_status}"
             update_progress
