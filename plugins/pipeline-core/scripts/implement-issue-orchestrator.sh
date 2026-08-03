@@ -8092,7 +8092,12 @@ ${e2e_rebuild_note}Run the E2E test suite:
 $e2e_command
 
 Report pass/fail. E2E failures count as overall test failure (set result to 'failed').
-Include e2e_result ('passed', 'failed', or 'skipped') and e2e_summary in output.
+Include e2e_result ('passed', 'failed', 'skipped', or 'unmeasured') and e2e_summary in output.
+If the run did not produce a trustworthy pass/fail count for the targeted specs
+(it errored before finishing, the environment blocked some specs from running,
+or the reported counts do not cover every targeted spec), set e2e_result to
+'unmeasured' — do NOT report 'passed' or 'failed' for an inconclusive run.
+An unmeasured verdict does NOT count as an overall test failure.
 
 "
         fi
@@ -8186,7 +8191,9 @@ Output both test results and validation findings in one structured response.
 - validation_issues: array of issues found (if any)
 - pre_existing_issues: array of pre-existing quality issues (informational only)
 - validation_summary: summary of validation findings
-- e2e_result: 'passed', 'failed', or 'skipped' (from E2E execution, if applicable)
+- e2e_result: 'passed', 'failed', 'skipped', or 'unmeasured' (from E2E execution, if applicable).
+  Use 'unmeasured' when the run did not produce a trustworthy pass/fail count for the
+  targeted specs — never report 'passed' or 'failed' for an inconclusive run.
 - e2e_summary: summary of E2E test findings (if applicable)
 - bats_result: 'passed', 'failed', 'skipped', or 'incomplete' (from BATS pipeline tests, informational only).
   Use 'incomplete' when the suite did not reach an exit code — never report 'passed' or 'skipped' for a partial run.
@@ -8539,6 +8546,34 @@ rebuild_and_health_check() {
 	done
 }
 
+# finalize_e2e_verify_stage_status() — persist the e2e_verify stage verdict
+# (issue #763 AC5).
+#
+# Both the initial e2e-verify call and its rerun-after-fix loop can append an
+# "e2e_verify:unmeasured*" marker to DEGRADED_STAGES when the reported
+# verdict is not supported by its own counts (see the cross-checks above).
+# Unconditionally calling set_stage_completed afterward would still record
+# status.json as "completed" — indistinguishable, after a crash and resume,
+# from a genuinely measured pass. Mirrors finalize_test_loop_stage_status
+# (issue #666): mark completed first, then downgrade to "degraded" if this
+# run's DEGRADED_STAGES carries the unmeasured marker, so the in-memory
+# signal and the persisted status agree.
+# Globals:
+#   DEGRADED_STAGES - scanned for the e2e_verify:unmeasured marker
+#   STATUS_FILE     - stage status written here
+finalize_e2e_verify_stage_status() {
+	set_stage_completed "e2e_verify"
+
+	local _ds_e2e_final
+	for _ds_e2e_final in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		if [[ "$_ds_e2e_final" == e2e_verify:unmeasured* ]]; then
+			update_stage "e2e_verify" "degraded"
+			return 0
+		fi
+	done
+	return 0
+}
+
 # =============================================================================
 # PARALLEL POST-TASK STAGES
 #
@@ -8717,6 +8752,15 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			# short of tests_run (0). Keying the check on the counts'
 			# own consistency, rather than a bare `tests_run == 0`,
 			# lets that legitimate pass stand (AC4).
+			#
+			# Issue #763 AC1: a 'passed' verdict whose own counts
+			# show tests_failed > 0 (12 run / 9 passed / 3 failed,
+			# reported 'passed') is the same defect class as above
+			# but is not unsupported — the failures are real and
+			# counted, so the verdict is downgraded to 'failed'
+			# rather than 'unmeasured', and still routes to
+			# e2e_fail_file so it enters the fix loop like any other
+			# measured failure.
 			local e2e_tests_run e2e_tests_passed e2e_tests_failed
 			e2e_tests_run=$(printf '%s' "$e2e_verify_result" \
 				| jq -r '.output.tests_run // 0')
@@ -8724,11 +8768,38 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.tests_passed // 0')
 			e2e_tests_failed=$(printf '%s' "$e2e_verify_result" \
 				| jq -r '.output.tests_failed // 0')
-			if [[ "$e2e_verify_status" == "failed" \
+
+			# Issue #763 AC3: `// 0` only substitutes a missing or
+			# null field -- a malformed payload that reports a
+			# string (e.g. tests_run: "unknown") passes through
+			# jq -r verbatim. Fed into bash arithmetic, an
+			# unset-variable-shaped string like "unknown" silently
+			# evaluates to 0 ("0 + 0 < 0" is false) instead of
+			# raising an error, which would leave a bare 'passed'
+			# verdict standing on an unmeasured count. Guard each
+			# count against the integer pattern first and fail
+			# loudly into 'unmeasured' the moment any of them isn't
+			# a plain non-negative integer, before the arithmetic
+			# below ever runs.
+			local count_pattern='^[0-9]+$'
+			if [[ ! "$e2e_tests_run" =~ $count_pattern \
+				|| ! "$e2e_tests_passed" =~ $count_pattern \
+				|| ! "$e2e_tests_failed" =~ $count_pattern ]]
+			then
+				log_warn "E2E verify returned non-integer" \
+					"counts (run=$e2e_tests_run" \
+					"passed=$e2e_tests_passed" \
+					"failed=$e2e_tests_failed)" \
+					"— treating as unmeasured"
+				e2e_verify_status="unmeasured"
+			elif [[ "$e2e_verify_status" == "failed" \
 				&& "$e2e_tests_failed" -eq 0 ]] \
 				|| ((e2e_tests_passed + e2e_tests_failed \
 					< e2e_tests_run)); then
 				e2e_verify_status="unmeasured"
+			elif [[ "$e2e_verify_status" == "passed" \
+				&& "$e2e_tests_failed" -gt 0 ]]; then
+				e2e_verify_status="failed"
 			fi
 
 			local e2e_icon="✅"
@@ -8743,7 +8814,18 @@ Container rebuild: $rebuild_status | Health: $health_status
 $e2e_verify_summary" "playwright-test-developer"
 
 			if [[ "$e2e_verify_status" == "unmeasured" ]]; then
-				printf '%s' "$e2e_verify_summary" \
+				# Issue #763 AC2: the DEGRADED_STAGES marker below
+				# gates on `[[ -s "$e2e_unmeasured_file" ]]` (a
+				# non-empty check). jq's `// fallback` above only
+				# substitutes for a *missing* summary field, not
+				# an explicit `"summary": ""`, so a genuinely
+				# empty summary still reaches here verbatim and
+				# would write a 0-byte file -- silently dropping
+				# an already-correct 'unmeasured' classification.
+				# `:-` substitutes for empty as well as unset, so
+				# the file always gets non-empty content.
+				printf '%s' \
+					"${e2e_verify_summary:-No summary provided}" \
 					> "$e2e_unmeasured_file"
 				exit 1
 			elif [[ "$e2e_verify_status" == "failed" ]]; then
@@ -8892,7 +8974,14 @@ $acceptance_summary" "default"
 	# fix budget and container rebuilds are not spent chasing a verdict
 	# nothing measured.
 	if [[ -s "$e2e_unmeasured_file" ]]; then
-		DEGRADED_STAGES+=("e2e_verify:unmeasured")
+		# Issue #763 AC6: tag the marker with the path that produced
+		# it. Both this initial call and the rerun-after-fix loop
+		# below append an unmeasured marker on the identical prefix,
+		# so without a suffix the PR warning cannot tell a run that
+		# was never measured from one that failed measured and came
+		# back unmeasured on rerun (the BATS bats_incomplete markers
+		# carry an iteration suffix for the same reason).
+		DEGRADED_STAGES+=("e2e_verify:unmeasured:initial")
 		log_warn "E2E verification unmeasured" \
 			"(counts do not support the reported verdict)" \
 			"— skipping E2E fix loop"
@@ -8996,11 +9085,32 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.summary // "E2E rerun completed"')
 
 			# Issue #745: a verdict is only as good as the counts
-			# behind it. Zero tests run, or a passed+failed total
-			# short of tests_run, means the run did not finish —
-			# a self-reported 'passed' or 'failed' in that state is
-			# unsupported, not a measurement. Override to
-			# 'unmeasured' rather than trust the self-report.
+			# behind it. A passed+failed total short of tests_run
+			# means the run did not finish — a self-reported
+			# 'passed' or 'failed' in that state is unsupported,
+			# not a measurement. Override to 'unmeasured' rather
+			# than trust the self-report.
+			#
+			# Issue #763 AC4: a genuine zero-spec rerun (0 run, 0
+			# passed, 0 failed) is neither: nothing failed, and
+			# passed+failed (0) is not short of tests_run (0).
+			# The initial path already keys this exemption on the
+			# counts' own consistency rather than a bare
+			# `tests_run == 0` (see the e2e-verify cross-check
+			# above) — apply the identical rule here so the same
+			# payload classifies the same way on both paths.
+			#
+			# Issue #763 AC1/AC3 parity: the rerun cross-check had
+			# only received the AC4 zero-spec exemption, not the
+			# AC1 'passed with tests_failed > 0 -> failed' downgrade
+			# or the AC3 non-integer count guard added to the
+			# initial e2e-verify cross-check above. A rerun that
+			# self-reports 'passed' with real counted failures (or
+			# a malformed count coerced to 0 by bash arithmetic)
+			# would exit the fix loop believing the issue was
+			# fixed. Apply the identical guard and downgrade here
+			# so both call sites classify the same payload the
+			# same way.
 			local rerun_tests_run rerun_tests_passed rerun_tests_failed
 			rerun_tests_run=$(printf '%s' "$rerun_result" \
 				| jq -r '.output.tests_run // 0')
@@ -9008,10 +9118,25 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.tests_passed // 0')
 			rerun_tests_failed=$(printf '%s' "$rerun_result" \
 				| jq -r '.output.tests_failed // 0')
-			if ((rerun_tests_run == 0)) \
+			local rerun_count_pattern='^[0-9]+$'
+			if [[ ! "$rerun_tests_run" =~ $rerun_count_pattern \
+				|| ! "$rerun_tests_passed" =~ $rerun_count_pattern \
+				|| ! "$rerun_tests_failed" =~ $rerun_count_pattern ]]
+			then
+				log_warn "E2E rerun returned non-integer" \
+					"counts (run=$rerun_tests_run" \
+					"passed=$rerun_tests_passed" \
+					"failed=$rerun_tests_failed)" \
+					"— treating as unmeasured"
+				rerun_status="unmeasured"
+			elif [[ "$rerun_status" == "failed" \
+				&& "$rerun_tests_failed" -eq 0 ]] \
 				|| ((rerun_tests_passed + rerun_tests_failed \
 					< rerun_tests_run)); then
 				rerun_status="unmeasured"
+			elif [[ "$rerun_status" == "passed" \
+				&& "$rerun_tests_failed" -gt 0 ]]; then
+				rerun_status="failed"
 			fi
 
 			local rerun_icon="✅"
@@ -9044,7 +9169,15 @@ $rerun_summary" "playwright-test-developer"
 		done
 
 		if $e2e_rerun_unmeasured; then
-			DEGRADED_STAGES+=("e2e_verify:unmeasured")
+			# Issue #763 AC6: tag with "rerun" (plus the fix
+			# iteration it came back on) so this is distinguishable
+			# from the initial-call marker above — the initial path
+			# never measured anything, this one measured a real
+			# failure, fixed it, and then the rerun itself came back
+			# unsupported by its own counts.
+			DEGRADED_STAGES+=(
+				"e2e_verify:unmeasured:rerun:iter=$e2e_fix_iter"
+			)
 			log_warn "E2E rerun verdict unmeasured" \
 				"(counts do not support the reported verdict)" \
 				"— stopping the fix loop at iteration" \
@@ -9110,8 +9243,11 @@ Investigate the root cause and fix the issue. Commit your changes."
 	# Clean up temp files
 	rm -f "$e2e_fail_file" "$acceptance_fail_file" "$e2e_unmeasured_file"
 
-	# Mark completed AFTER parallelism (sequential writes, no race)
-	$run_e2e && set_stage_completed "e2e_verify"
+	# Mark completed AFTER parallelism (sequential writes, no race).
+	# e2e_verify routes through finalize_e2e_verify_stage_status so an
+	# unmeasured verdict downgrades the persisted status to "degraded"
+	# instead of reading "completed" after a crash and resume (#763 AC5).
+	$run_e2e && finalize_e2e_verify_stage_status
 	$run_acceptance && set_stage_completed "acceptance_test"
 
 	log "Parallel post-task stages complete:" \
