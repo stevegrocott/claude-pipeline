@@ -9099,6 +9099,18 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			# `tests_run == 0` (see the e2e-verify cross-check
 			# above) — apply the identical rule here so the same
 			# payload classifies the same way on both paths.
+			#
+			# Issue #763 AC1/AC3 parity: the rerun cross-check had
+			# only received the AC4 zero-spec exemption, not the
+			# AC1 'passed with tests_failed > 0 -> failed' downgrade
+			# or the AC3 non-integer count guard added to the
+			# initial e2e-verify cross-check above. A rerun that
+			# self-reports 'passed' with real counted failures (or
+			# a malformed count coerced to 0 by bash arithmetic)
+			# would exit the fix loop believing the issue was
+			# fixed. Apply the identical guard and downgrade here
+			# so both call sites classify the same payload the
+			# same way.
 			local rerun_tests_run rerun_tests_passed rerun_tests_failed
 			rerun_tests_run=$(printf '%s' "$rerun_result" \
 				| jq -r '.output.tests_run // 0')
@@ -9106,11 +9118,25 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.tests_passed // 0')
 			rerun_tests_failed=$(printf '%s' "$rerun_result" \
 				| jq -r '.output.tests_failed // 0')
-			if [[ "$rerun_status" == "failed" \
+			local rerun_count_pattern='^[0-9]+$'
+			if [[ ! "$rerun_tests_run" =~ $rerun_count_pattern \
+				|| ! "$rerun_tests_passed" =~ $rerun_count_pattern \
+				|| ! "$rerun_tests_failed" =~ $rerun_count_pattern ]]
+			then
+				log_warn "E2E rerun returned non-integer" \
+					"counts (run=$rerun_tests_run" \
+					"passed=$rerun_tests_passed" \
+					"failed=$rerun_tests_failed)" \
+					"— treating as unmeasured"
+				rerun_status="unmeasured"
+			elif [[ "$rerun_status" == "failed" \
 				&& "$rerun_tests_failed" -eq 0 ]] \
 				|| ((rerun_tests_passed + rerun_tests_failed \
 					< rerun_tests_run)); then
 				rerun_status="unmeasured"
+			elif [[ "$rerun_status" == "passed" \
+				&& "$rerun_tests_failed" -gt 0 ]]; then
+				rerun_status="failed"
 			fi
 
 			local rerun_icon="✅"

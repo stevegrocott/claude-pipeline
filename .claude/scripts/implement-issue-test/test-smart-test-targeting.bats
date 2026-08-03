@@ -1927,11 +1927,13 @@ _assert_e2e_verify_runs_for_scope() {
     [ "$exit_code" -eq 0 ] || fail \
         "run_parallel_post_task_stages exited $exit_code, expected 0"
 
-    # The verdict must not be accepted as an unconditional pass: either
-    # the real failure gets routed into the fix loop (like the measured
-    # 'failed' negative control above), or it gets flagged degraded like
-    # an unsupported verdict. Either is an acceptable fix; silently
-    # doing neither (today's behavior) is the bug.
+    # The verdict must not be accepted as an unconditional pass. The
+    # chosen behavior (both call sites, now that the rerun cross-check
+    # carries the same AC1 downgrade as the initial one) is: downgrade
+    # 'passed' to 'failed' and route into the fix loop -- not flag it
+    # 'unmeasured'. Pin that specific outcome instead of accepting
+    # either, so a regression that silently falls back to the
+    # 'unmeasured' branch (or drops the downgrade entirely) is caught.
     local dispatched_fix=false
     grep -qx 'run_stage:fix-e2e-iter-1' "$calls_file" && dispatched_fix=true
 
@@ -1939,13 +1941,22 @@ _assert_e2e_verify_runs_for_scope() {
     printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
         | grep -q '^e2e_verify:unmeasured' && recorded_unmeasured=true
 
-    if ! $dispatched_fix && ! $recorded_unmeasured; then
-        fail "a 'passed' verdict carrying 3 real failures (12 run, 9" \
-            "passed, 3 failed) must not be accepted verbatim -- expected" \
-            "either a fix iteration or an e2e_verify:unmeasured marker;" \
-            "calls: $(tr '\n' ' ' < "$calls_file"), DEGRADED_STAGES:" \
-            "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
-    fi
+    $dispatched_fix || fail \
+        "a 'passed' verdict carrying 3 real failures (12 run, 9 passed," \
+        "3 failed) must be downgraded to 'failed' and routed into the" \
+        "fix loop; calls: $(tr '\n' ' ' < "$calls_file")"
+
+    $recorded_unmeasured && fail \
+        "a 'passed' verdict carrying 3 real failures is a downgrade to" \
+        "'failed', not an unmeasured run -- it must not be recorded in" \
+        "DEGRADED_STAGES: ${DEGRADED_STAGES[*]}"
+
+    # The rerun stage (e2e-verify-rerun-iter-1) reports a genuine 12/12/0
+    # pass with no failures -- the fix loop must recognize it as fixed
+    # and stop, not loop again or misclassify it as unmeasured.
+    grep -qx 'run_stage:e2e-verify-rerun-iter-1' "$calls_file" || fail \
+        "expected the fix loop to dispatch a rerun after the fix" \
+        "iteration; calls: $(tr '\n' ' ' < "$calls_file")"
 }
 
 @test "run_parallel_post_task_stages still records the unmeasured marker for an empty verdict summary" {
