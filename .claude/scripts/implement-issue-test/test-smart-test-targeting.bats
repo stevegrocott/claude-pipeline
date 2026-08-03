@@ -1741,6 +1741,190 @@ _assert_e2e_verify_runs_for_scope() {
 }
 
 # =============================================================================
+# ISSUE #763: THREE PAYLOADS THAT STILL READ GREEN
+#
+# The #745 cross-check above closed two false verdicts, but its own review
+# (#763) found three more payload shapes that still slip past it and leave
+# the e2e_verify stage looking green:
+#
+#   AC1 - a 'passed' verdict whose own counts show real failures
+#         (tests_failed > 0) is accepted verbatim, because
+#         passed + failed == tests_run is internally consistent -- the
+#         short-of-tests_run branch above never fires, so a verdict that
+#         is flat-out wrong, not merely unsupported, sails through
+#         unchecked.
+#   AC2 - the DEGRADED_STAGES marker relies on
+#         `[[ -s "$e2e_unmeasured_file" ]]`. jq's `//` fallback only
+#         substitutes for a *missing* ".output.summary" field, not an
+#         empty-string one -- a payload with `"summary": ""` still gets
+#         classified 'unmeasured' internally (the subshell exits 1), but
+#         writes a 0-byte file, so the non-empty check drops the marker
+#         and the comment never posts.
+#   AC3 - a non-integer count feeds `-eq`/`((...))` directly, with no
+#         validation that it is actually a number first. A malformed
+#         count (a string instead of a number) is silently coerced by
+#         bash's untyped arithmetic instead of tripping the unmeasured
+#         guard -- the same class of false green as AC1/AC2, just
+#         triggered by a type error instead of a semantic one.
+# =============================================================================
+
+@test "run_parallel_post_task_stages does not accept a passed verdict whose own counts show real failures" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    export MAX_E2E_FIX_ITERATIONS=1
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-passed-with-failures-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    # Same counts as the measured-failure negative control above (12 run,
+    # 9 passed, 3 failed) -- but self-reported as "passed" instead of
+    # "failed". passed + failed (12) == tests_run (12), so the existing
+    # short-of-tests_run branch never fires and the false 'passed' label
+    # sails through unchecked (AC1). Stub both the fix and rerun stages
+    # in case the fix is routed through the existing fix-dispatch loop.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"passed","summary":"3 specs failed on checkout","tests_run":12,"tests_passed":9,"tests_failed":3}}'
+                ;;
+            fix-e2e-iter-1)
+                printf '{"output":{"summary":"Fix applied"}}'
+                ;;
+            e2e-verify-rerun-iter-1)
+                printf '{"output":{"result":"passed","summary":"all green","tests_run":12,"tests_passed":12,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call: $1"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-763-passed-with-failures" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    # The verdict must not be accepted as an unconditional pass: either
+    # the real failure gets routed into the fix loop (like the measured
+    # 'failed' negative control above), or it gets flagged degraded like
+    # an unsupported verdict. Either is an acceptable fix; silently
+    # doing neither (today's behavior) is the bug.
+    local dispatched_fix=false
+    grep -qx 'run_stage:fix-e2e-iter-1' "$calls_file" && dispatched_fix=true
+
+    local recorded_unmeasured=false
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' && recorded_unmeasured=true
+
+    if ! $dispatched_fix && ! $recorded_unmeasured; then
+        fail "a 'passed' verdict carrying 3 real failures (12 run, 9" \
+            "passed, 3 failed) must not be accepted verbatim -- expected" \
+            "either a fix iteration or an e2e_verify:unmeasured marker;" \
+            "calls: $(tr '\n' ' ' < "$calls_file"), DEGRADED_STAGES:" \
+            "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+    fi
+}
+
+@test "run_parallel_post_task_stages still records the unmeasured marker for an empty verdict summary" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-empty-summary-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    # Same zero-count "unfinished run" shape as the very first #745 test
+    # above, but with an empty ".output.summary" instead of a
+    # descriptive one. Classification already produces 'unmeasured' here
+    # (jq's // fallback only substitutes for a *missing* summary field,
+    # not an empty-string one) -- the bug is downstream: the summary is
+    # written verbatim to $e2e_unmeasured_file, and an empty file fails
+    # the `[[ -s ... ]]` non-empty check that gates the DEGRADED_STAGES
+    # marker (AC2).
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- an unmeasured" \
+                    "verdict must dispatch no fix iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-763-empty-summary" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    if grep -q '^run_stage:fix-e2e-iter-1$' "$calls_file"; then
+        fail "an unmeasured verdict with an empty summary must not" \
+            "dispatch a fix iteration; calls:" \
+            "$(tr '\n' ' ' < "$calls_file")"
+    fi
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' || fail \
+        "Expected e2e_verify:unmeasured in DEGRADED_STAGES even though" \
+        "the verdict summary was empty; got:" \
+        "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+@test "run_parallel_post_task_stages records unmeasured for a verdict with a non-integer count" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-nonint-count-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    # tests_run is a string instead of a number -- a malformed agent
+    # payload, not a legitimate zero-spec run. passed (0) + failed (0)
+    # compared against a non-numeric tests_run must not be silently
+    # coerced into "0 < 0" (false) and left standing as a bare 'passed'
+    # (AC3).
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"passed","summary":"E2E tests completed","tests_run":"unknown","tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' -- a malformed" \
+                    "count must not dispatch a fix iteration"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-763-nonint-count" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' || fail \
+        "Expected e2e_verify:unmeasured in DEGRADED_STAGES for a" \
+        "non-integer tests_run count ('unknown'); got:" \
+        "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# =============================================================================
 # E2E PROMPT INJECTION TESTS
 # =============================================================================
 
