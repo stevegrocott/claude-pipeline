@@ -8967,7 +8967,14 @@ $acceptance_summary" "default"
 	# fix budget and container rebuilds are not spent chasing a verdict
 	# nothing measured.
 	if [[ -s "$e2e_unmeasured_file" ]]; then
-		DEGRADED_STAGES+=("e2e_verify:unmeasured")
+		# Issue #763 AC6: tag the marker with the path that produced
+		# it. Both this initial call and the rerun-after-fix loop
+		# below append an unmeasured marker on the identical prefix,
+		# so without a suffix the PR warning cannot tell a run that
+		# was never measured from one that failed measured and came
+		# back unmeasured on rerun (the BATS bats_incomplete markers
+		# carry an iteration suffix for the same reason).
+		DEGRADED_STAGES+=("e2e_verify:unmeasured:initial")
 		log_warn "E2E verification unmeasured" \
 			"(counts do not support the reported verdict)" \
 			"— skipping E2E fix loop"
@@ -9129,7 +9136,15 @@ $rerun_summary" "playwright-test-developer"
 		done
 
 		if $e2e_rerun_unmeasured; then
-			DEGRADED_STAGES+=("e2e_verify:unmeasured")
+			# Issue #763 AC6: tag with "rerun" (plus the fix
+			# iteration it came back on) so this is distinguishable
+			# from the initial-call marker above — the initial path
+			# never measured anything, this one measured a real
+			# failure, fixed it, and then the rerun itself came back
+			# unsupported by its own counts.
+			DEGRADED_STAGES+=(
+				"e2e_verify:unmeasured:rerun:iter=$e2e_fix_iter"
+			)
 			log_warn "E2E rerun verdict unmeasured" \
 				"(counts do not support the reported verdict)" \
 				"— stopping the fix loop at iteration" \

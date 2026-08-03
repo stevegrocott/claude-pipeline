@@ -1466,8 +1466,9 @@ _assert_e2e_verify_runs_for_scope() {
         "expected the initial e2e-verify call to still run; calls: $calls"
 
     printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-        | grep -qx 'e2e_verify:unmeasured' || fail \
-        "Expected e2e_verify:unmeasured in DEGRADED_STAGES; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+        | grep -qx 'e2e_verify:unmeasured:initial' || fail \
+        "Expected e2e_verify:unmeasured:initial in DEGRADED_STAGES;" \
+        "got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
 # Negative control: a genuinely measured failure (counts fully support the
@@ -1580,10 +1581,10 @@ _assert_e2e_verify_runs_for_scope() {
         "expected the initial e2e-verify call to still run; calls: $calls"
 
     printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-        | grep -qx 'e2e_verify:unmeasured' || fail \
-        "Expected e2e_verify:unmeasured in DEGRADED_STAGES (a passed" \
-        "verdict with only 6+0 of 12 specs run must not record a" \
-        "pass); got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+        | grep -qx 'e2e_verify:unmeasured:initial' || fail \
+        "Expected e2e_verify:unmeasured:initial in DEGRADED_STAGES (a" \
+        "passed verdict with only 6+0 of 12 specs run must not record" \
+        "a pass); got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
 # Negative control for the test above (AC4): a run that legitimately
@@ -1729,9 +1730,10 @@ _assert_e2e_verify_runs_for_scope() {
     fi
 
     printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-        | grep -qx 'e2e_verify:unmeasured' || fail \
-        "Expected e2e_verify:unmeasured in DEGRADED_STAGES after an" \
-        "unmeasured rerun; got:" \
+        | grep -qx 'e2e_verify:unmeasured:rerun:iter=1' || fail \
+        "Expected e2e_verify:unmeasured:rerun:iter=1 in DEGRADED_STAGES" \
+        "after an unmeasured rerun (tagged 'rerun', not 'initial' --" \
+        "AC6); got:" \
         "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 
     if grep -qx 'E2E Verification: Soft Failure' "$comments_file"; then
@@ -1935,7 +1937,7 @@ _assert_e2e_verify_runs_for_scope() {
 
     local recorded_unmeasured=false
     printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-        | grep -qx 'e2e_verify:unmeasured' && recorded_unmeasured=true
+        | grep -q '^e2e_verify:unmeasured' && recorded_unmeasured=true
 
     if ! $dispatched_fix && ! $recorded_unmeasured; then
         fail "a 'passed' verdict carrying 3 real failures (12 run, 9" \
@@ -1991,9 +1993,9 @@ _assert_e2e_verify_runs_for_scope() {
     fi
 
     printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-        | grep -qx 'e2e_verify:unmeasured' || fail \
-        "Expected e2e_verify:unmeasured in DEGRADED_STAGES even though" \
-        "the verdict summary was empty; got:" \
+        | grep -qx 'e2e_verify:unmeasured:initial' || fail \
+        "Expected e2e_verify:unmeasured:initial in DEGRADED_STAGES" \
+        "even though the verdict summary was empty; got:" \
         "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
@@ -2033,9 +2035,9 @@ _assert_e2e_verify_runs_for_scope() {
         "run_parallel_post_task_stages exited $exit_code, expected 0"
 
     printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-        | grep -qx 'e2e_verify:unmeasured' || fail \
-        "Expected e2e_verify:unmeasured in DEGRADED_STAGES for a" \
-        "non-integer tests_run count ('unknown'); got:" \
+        | grep -qx 'e2e_verify:unmeasured:initial' || fail \
+        "Expected e2e_verify:unmeasured:initial in DEGRADED_STAGES for" \
+        "a non-integer tests_run count ('unknown'); got:" \
         "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
