@@ -1741,6 +1741,121 @@ _assert_e2e_verify_runs_for_scope() {
 }
 
 # =============================================================================
+# ISSUE #763 AC5: PERSISTED e2e_verify STATUS MUST SURVIVE RESUME AS DEGRADED
+#
+# Both unmeasured paths above append `e2e_verify:unmeasured` to
+# DEGRADED_STAGES, but run_parallel_post_task_stages used to call the bare
+# set_stage_completed("e2e_verify") unconditionally afterward -- so
+# status.json read "completed" for a run whose own verdict was never
+# measured, exactly the gap #666 already closed for test_loop /
+# bats_incomplete. finalize_e2e_verify_stage_status() (the shipped
+# orchestrator function run_parallel_post_task_stages now calls, not a
+# test-local mirror) must downgrade the persisted status to "degraded"
+# whenever this run's DEGRADED_STAGES carries the marker, and must still
+# record "completed" for a run that never earned the downgrade.
+# =============================================================================
+
+@test "finalize_e2e_verify_stage_status records e2e_verify as degraded when an unmeasured marker is present" {
+    printf '{"stages":{}}\n' > "$STATUS_FILE"
+    local -a DEGRADED_STAGES=("e2e_verify:unmeasured")
+
+    finalize_e2e_verify_stage_status
+
+    local stage_status
+    stage_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    [ "$stage_status" = "degraded" ] || \
+        fail "Expected e2e_verify status 'degraded' with an unmeasured" \
+            "verdict; got: $stage_status"
+}
+
+@test "finalize_e2e_verify_stage_status records e2e_verify as completed with no unmeasured marker" {
+    printf '{"stages":{}}\n' > "$STATUS_FILE"
+    local -a DEGRADED_STAGES=()
+
+    finalize_e2e_verify_stage_status
+
+    local stage_status
+    stage_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    [ "$stage_status" = "completed" ] || \
+        fail "Expected e2e_verify status 'completed' for a measured run;" \
+            "got: $stage_status"
+}
+
+@test "finalize_e2e_verify_stage_status ignores unrelated DEGRADED_STAGES markers and still records completed" {
+    printf '{"stages":{}}\n' > "$STATUS_FILE"
+    local -a DEGRADED_STAGES=(
+        "test:bats_incomplete:iter=1" "acceptance_test:unmeasured"
+    )
+
+    finalize_e2e_verify_stage_status
+
+    local stage_status
+    stage_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    [ "$stage_status" = "completed" ] || \
+        fail "Expected e2e_verify status 'completed' when only unrelated" \
+            "markers are present; got: $stage_status"
+}
+
+# End-to-end: drive the real run_parallel_post_task_stages() (not
+# finalize_e2e_verify_stage_status in isolation) with an unmeasured verdict,
+# leaving set_stage_completed/update_stage as the real orchestrator
+# functions, and assert the persisted status.json reflects "degraded" --
+# confirming finalize_e2e_verify_stage_status is actually wired into the
+# completion call and not just correct on its own.
+@test "run_parallel_post_task_stages persists e2e_verify as degraded in status.json for an unmeasured verdict" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-status-persist-calls.txt"
+    : > "$calls_file"
+
+    # Deliberately does NOT reuse _install_e2e_stage_spies: that helper
+    # stubs out set_stage_completed, which would hide the exact wiring
+    # this test exists to check. Only the side-effecting/non-essential
+    # collaborators are stubbed here.
+    is_stage_completed()       { return 1; }
+    log()                      { :; }
+    log_warn()                 { :; }
+    log_error()                { :; }
+    comment_issue()            { :; }
+    verify_on_feature_branch() { return 0; }
+    rebuild_and_health_check() {
+        printf '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+    }
+    _build_targeted_e2e_cmd()  { printf '%s' "$TEST_E2E_CMD"; }
+
+    # Replay the issue-5536 zero-count payload verbatim: an unfinished
+    # run, not a measurement.
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$calls_file"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"still running","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1'"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-763-status-persist" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    local stage_status
+    stage_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    [ "$stage_status" = "degraded" ] || fail \
+        "Expected status.json .stages.e2e_verify.status = 'degraded'" \
+        "after an unmeasured verdict; got: $stage_status"
+}
+
+# =============================================================================
 # ISSUE #763: THREE PAYLOADS THAT STILL READ GREEN
 #
 # The #745 cross-check above closed two false verdicts, but its own review

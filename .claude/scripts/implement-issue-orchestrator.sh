@@ -8539,6 +8539,34 @@ rebuild_and_health_check() {
 	done
 }
 
+# finalize_e2e_verify_stage_status() — persist the e2e_verify stage verdict
+# (issue #763 AC5).
+#
+# Both the initial e2e-verify call and its rerun-after-fix loop can append an
+# "e2e_verify:unmeasured*" marker to DEGRADED_STAGES when the reported
+# verdict is not supported by its own counts (see the cross-checks above).
+# Unconditionally calling set_stage_completed afterward would still record
+# status.json as "completed" — indistinguishable, after a crash and resume,
+# from a genuinely measured pass. Mirrors finalize_test_loop_stage_status
+# (issue #666): mark completed first, then downgrade to "degraded" if this
+# run's DEGRADED_STAGES carries the unmeasured marker, so the in-memory
+# signal and the persisted status agree.
+# Globals:
+#   DEGRADED_STAGES - scanned for the e2e_verify:unmeasured marker
+#   STATUS_FILE     - stage status written here
+finalize_e2e_verify_stage_status() {
+	set_stage_completed "e2e_verify"
+
+	local _ds_e2e_final
+	for _ds_e2e_final in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		if [[ "$_ds_e2e_final" == e2e_verify:unmeasured* ]]; then
+			update_stage "e2e_verify" "degraded"
+			return 0
+		fi
+	done
+	return 0
+}
+
 # =============================================================================
 # PARALLEL POST-TASK STAGES
 #
@@ -9167,8 +9195,11 @@ Investigate the root cause and fix the issue. Commit your changes."
 	# Clean up temp files
 	rm -f "$e2e_fail_file" "$acceptance_fail_file" "$e2e_unmeasured_file"
 
-	# Mark completed AFTER parallelism (sequential writes, no race)
-	$run_e2e && set_stage_completed "e2e_verify"
+	# Mark completed AFTER parallelism (sequential writes, no race).
+	# e2e_verify routes through finalize_e2e_verify_stage_status so an
+	# unmeasured verdict downgrades the persisted status to "degraded"
+	# instead of reading "completed" after a crash and resume (#763 AC5).
+	$run_e2e && finalize_e2e_verify_stage_status
 	$run_acceptance && set_stage_completed "acceptance_test"
 
 	log "Parallel post-task stages complete:" \
