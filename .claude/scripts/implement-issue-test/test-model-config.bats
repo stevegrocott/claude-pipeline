@@ -1236,3 +1236,110 @@ JSON
 	[ "$status" -eq 0 ]
 	[ "${#lines[@]}" -eq 1 ]
 }
+
+# =============================================================================
+# _extract_readonly_array_guards() — setup_test_env's awk extraction
+#
+# setup_test_env (helpers/test-helper.bash) pulls `readonly -a NAME=(...)`
+# blocks out of model-config.sh and wraps each in a
+# `declare -p NAME >/dev/null 2>&1 || { ... }` guard so @test bodies can
+# re-source the array regardless of whether it is already global and
+# readonly (see MODEL_CONFIG_ARRAYS_FILE's docs in test-helper.bash).
+# These tests exercise the extraction directly against synthetic input so
+# a regression to a broken guard (unbalanced braces) is caught as a
+# `bash -n` syntax failure rather than a silent empty-array symptom.
+# =============================================================================
+
+@test "_extract_readonly_array_guards closes the guard for a multi-line declaration" {
+	local input="$TEST_TMP/multi-line-config.sh"
+	cat > "$input" << 'EOF'
+readonly -a _MULTI=(
+	a b c
+)
+EOF
+
+	local out="$TEST_TMP/multi-line-arrays.sh"
+	_extract_readonly_array_guards "$input" > "$out"
+
+	run bash -n "$out"
+	[ "$status" -eq 0 ] || fail "Unbalanced braces in extraction output: $output"
+
+	unset _MULTI
+	source "$out"
+	[ "${#_MULTI[@]}" -eq 3 ]
+}
+
+@test "_extract_readonly_array_guards closes the guard for a single-line declaration" {
+	local input="$TEST_TMP/single-line-config.sh"
+	cat > "$input" << 'EOF'
+readonly -a _SINGLE=(x y z)
+EOF
+
+	local out="$TEST_TMP/single-line-arrays.sh"
+	_extract_readonly_array_guards "$input" > "$out"
+
+	run bash -n "$out"
+	[ "$status" -eq 0 ] || fail "Unbalanced braces in extraction output: $output"
+
+	unset _SINGLE
+	source "$out"
+	[ "${#_SINGLE[@]}" -eq 3 ]
+}
+
+@test "_extract_readonly_array_guards single-line output pairs each opening guard brace with a closing one" {
+	local input="$TEST_TMP/single-line-config.sh"
+	cat > "$input" << 'EOF'
+readonly -a _SINGLE=(x y z)
+EOF
+
+	local output
+	output=$(_extract_readonly_array_guards "$input")
+
+	local open_braces close_braces
+	open_braces=$(grep -c '|| {$' <<< "$output")
+	close_braces=$(grep -c '^}$' <<< "$output")
+	[ "$open_braces" -eq 1 ]
+	[ "$close_braces" -eq 1 ]
+}
+
+@test "_extract_readonly_array_guards handles a mix of single-line and multi-line declarations" {
+	local input="$TEST_TMP/mixed-config.sh"
+	cat > "$input" << 'EOF'
+readonly -a _FIRST_SINGLE=(a b)
+readonly -a _MULTI=(
+	c d e
+)
+readonly -a _SECOND_SINGLE=(f)
+EOF
+
+	local out="$TEST_TMP/mixed-arrays.sh"
+	_extract_readonly_array_guards "$input" > "$out"
+
+	run bash -n "$out"
+	[ "$status" -eq 0 ] || fail "Unbalanced braces in extraction output: $output"
+
+	unset _FIRST_SINGLE _MULTI _SECOND_SINGLE
+	source "$out"
+	[ "${#_FIRST_SINGLE[@]}" -eq 2 ]
+	[ "${#_MULTI[@]}" -eq 3 ]
+	[ "${#_SECOND_SINGLE[@]}" -eq 1 ]
+}
+
+@test "_extract_readonly_array_guards single-line guard is a no-op when the array is already global and readonly" {
+	local input="$TEST_TMP/single-line-config.sh"
+	cat > "$input" << 'EOF'
+readonly -a _ALREADY_SET=(orig)
+EOF
+
+	local out="$TEST_TMP/single-line-arrays.sh"
+	_extract_readonly_array_guards "$input" > "$out"
+
+	readonly -a _ALREADY_SET=(orig)
+
+	# Re-sourcing must not error even though _ALREADY_SET is already
+	# readonly in this same shell — the declare -p guard should skip
+	# re-declaring it rather than tripping bash's "readonly variable"
+	# error.
+	run source "$out"
+	[ "$status" -eq 0 ] || fail "Guard re-declared an existing readonly array: $output"
+}

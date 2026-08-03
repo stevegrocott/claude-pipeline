@@ -24,6 +24,44 @@ BATCH_ORCHESTRATOR_SCRIPT_PATH="$SCRIPT_DIR/batch-orchestrator.sh"
 # Temp directory for test artifacts
 TEST_TMP=""
 
+# Extract `readonly -a NAME=(...)` array declarations out of a script file
+# and wrap each one in a `declare -p NAME >/dev/null 2>&1 || { ... }` guard,
+# so re-sourcing the result is a no-op when NAME is already global and
+# readonly, and still populates it when it is not (see MODEL_CONFIG_ARRAYS_FILE
+# below for the full cross-platform rationale).
+#
+# Handles both declaration styles found in model-config.sh:
+#
+#     readonly -a _FOO=(
+#         a b c
+#     )
+#     readonly -a _BAR=(a b c)
+#
+# The guard's closing brace is emitted the moment a captured line ends in
+# a closing paren, rather than requiring the closing paren to be alone on
+# its own line at column 0. A single-line declaration's opening line IS
+# its closing line — matching only `/^\)/` (line starts with `)`) never
+# fires for it, so the guard's `{` is opened but never closed and the
+# generated file has unbalanced braces. Matching `/\)[[:space:]]*$/`
+# (line ends with `)`) instead catches both the single-line case (closes
+# on the same line it opens) and the multi-line case (closes on the
+# dedicated `)` line), since that line also ends in `)`.
+# Usage: _extract_readonly_array_guards <script_file>
+_extract_readonly_array_guards() {
+    local script_file="$1"
+
+    awk '
+        /^readonly -a / {
+            name = $3
+            sub(/=.*/, "", name)
+            print "declare -p " name " >/dev/null 2>&1 || {"
+            capture = 1
+        }
+        capture { print }
+        capture && /\)[[:space:]]*$/ { print "}"; capture = 0 }
+    ' "$script_file"
+}
+
 # Create isolated test environment
 setup_test_env() {
     TEST_TMP=$(mktemp -d)
@@ -62,16 +100,7 @@ setup_test_env() {
         MODEL_CONFIG_ARRAYS_FILE="$TEST_TMP/model-config-arrays.sh"
         export MODEL_CONFIG_ARRAYS_FILE
         {
-            awk '
-                /^readonly -a / {
-                    name = $3
-                    sub(/=.*/, "", name)
-                    print "declare -p " name " >/dev/null 2>&1 || {"
-                    capture = 1
-                }
-                capture { print }
-                capture && /^\)/ { print "}"; capture = 0 }
-            ' "$TEST_TMP/model-config.sh"
+            _extract_readonly_array_guards "$TEST_TMP/model-config.sh"
 
             cat <<'ARRAYS_NONEMPTY_CHECK'
 if [[ ${#_LIGHT_STAGES[@]} -eq 0 ]]; then
