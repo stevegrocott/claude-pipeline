@@ -158,6 +158,12 @@ parse_review_status() {
             status="APPROVED"
         elif echo "$comment" | grep -q 'Status: CHANGES_REQUESTED'; then
             status="CHANGES_REQUESTED"
+        # Fallback to the orchestrator's comment_pr Result format
+        # (icon + "**Result:** approved|changes_requested", implement-issue-orchestrator.sh)
+        elif echo "$comment" | grep -qi '\*\*Result:\*\* *approved'; then
+            status="APPROVED"
+        elif echo "$comment" | grep -qi '\*\*Result:\*\* *changes_requested'; then
+            status="CHANGES_REQUESTED"
         fi
     done <<< "$comments"
 
@@ -172,7 +178,7 @@ REVIEW_STATUS=$(parse_review_status "$COMMENTS")
 ```bash
 if [ -z "$REVIEW_STATUS" ]; then
     echo "ERROR: No review status found in PR/MR #$PR_NUMBER comments"
-    echo "Expected: Comment containing '**Status: APPROVED**' or '**Status: CHANGES_REQUESTED**'"
+    echo "Expected: Comment containing '**Status: APPROVED**', '**Status: CHANGES_REQUESTED**', or the orchestrator's '**Result:** approved'/'**Result:** changes_requested' format"
     exit 1
 fi
 
@@ -184,6 +190,8 @@ echo "Review status: $REVIEW_STATUS"
 2. `**Status: CHANGES_REQUESTED**` (markdown bold - preferred)
 3. `Status: APPROVED` (plain text - fallback)
 4. `Status: CHANGES_REQUESTED` (plain text - fallback)
+5. `**Result:** approved` (orchestrator's `comment_pr` PR-review format - fallback)
+6. `**Result:** changes_requested` (orchestrator's `comment_pr` PR-review format - fallback)
 
 **Multiple reviews:** The algorithm processes comments in chronological order. The LAST status found wins, representing the most recent review.
 
@@ -496,7 +504,7 @@ Re-running /implement-issue $ISSUE_NUMBER $BASE_BRANCH to address requested chan
 
 **Requires:**
 - Platform CLI authenticated (gh, glab, or acli — configured in .claude/config/platform.sh)
-- PR/MR must exist with a code review comment containing `**Status: APPROVED**` or `**Status: CHANGES_REQUESTED**`
+- PR/MR must exist with a code review comment containing `**Status: APPROVED**`/`**Status: CHANGES_REQUESTED**` or the orchestrator's `**Result:** approved`/`**Result:** changes_requested` format
 - Issue must exist and be open
 
 ## Example Sessions
