@@ -8779,7 +8779,18 @@ Container rebuild: $rebuild_status | Health: $health_status
 $e2e_verify_summary" "playwright-test-developer"
 
 			if [[ "$e2e_verify_status" == "unmeasured" ]]; then
-				printf '%s' "$e2e_verify_summary" \
+				# Issue #763 AC2: the DEGRADED_STAGES marker below
+				# gates on `[[ -s "$e2e_unmeasured_file" ]]` (a
+				# non-empty check). jq's `// fallback` above only
+				# substitutes for a *missing* summary field, not
+				# an explicit `"summary": ""`, so a genuinely
+				# empty summary still reaches here verbatim and
+				# would write a 0-byte file -- silently dropping
+				# an already-correct 'unmeasured' classification.
+				# `:-` substitutes for empty as well as unset, so
+				# the file always gets non-empty content.
+				printf '%s' \
+					"${e2e_verify_summary:-No summary provided}" \
 					> "$e2e_unmeasured_file"
 				exit 1
 			elif [[ "$e2e_verify_status" == "failed" ]]; then
