@@ -8733,7 +8733,31 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.tests_passed // 0')
 			e2e_tests_failed=$(printf '%s' "$e2e_verify_result" \
 				| jq -r '.output.tests_failed // 0')
-			if [[ "$e2e_verify_status" == "failed" \
+
+			# Issue #763 AC3: `// 0` only substitutes a missing or
+			# null field -- a malformed payload that reports a
+			# string (e.g. tests_run: "unknown") passes through
+			# jq -r verbatim. Fed into bash arithmetic, an
+			# unset-variable-shaped string like "unknown" silently
+			# evaluates to 0 ("0 + 0 < 0" is false) instead of
+			# raising an error, which would leave a bare 'passed'
+			# verdict standing on an unmeasured count. Guard each
+			# count against the integer pattern first and fail
+			# loudly into 'unmeasured' the moment any of them isn't
+			# a plain non-negative integer, before the arithmetic
+			# below ever runs.
+			local count_pattern='^[0-9]+$'
+			if [[ ! "$e2e_tests_run" =~ $count_pattern \
+				|| ! "$e2e_tests_passed" =~ $count_pattern \
+				|| ! "$e2e_tests_failed" =~ $count_pattern ]]
+			then
+				log_warn "E2E verify returned non-integer" \
+					"counts (run=$e2e_tests_run" \
+					"passed=$e2e_tests_passed" \
+					"failed=$e2e_tests_failed)" \
+					"— treating as unmeasured"
+				e2e_verify_status="unmeasured"
+			elif [[ "$e2e_verify_status" == "failed" \
 				&& "$e2e_tests_failed" -eq 0 ]] \
 				|| ((e2e_tests_passed + e2e_tests_failed \
 					< e2e_tests_run)); then
