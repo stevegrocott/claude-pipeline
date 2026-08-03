@@ -8717,6 +8717,15 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			# short of tests_run (0). Keying the check on the counts'
 			# own consistency, rather than a bare `tests_run == 0`,
 			# lets that legitimate pass stand (AC4).
+			#
+			# Issue #763 AC1: a 'passed' verdict whose own counts
+			# show tests_failed > 0 (12 run / 9 passed / 3 failed,
+			# reported 'passed') is the same defect class as above
+			# but is not unsupported — the failures are real and
+			# counted, so the verdict is downgraded to 'failed'
+			# rather than 'unmeasured', and still routes to
+			# e2e_fail_file so it enters the fix loop like any other
+			# measured failure.
 			local e2e_tests_run e2e_tests_passed e2e_tests_failed
 			e2e_tests_run=$(printf '%s' "$e2e_verify_result" \
 				| jq -r '.output.tests_run // 0')
@@ -8729,6 +8738,9 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				|| ((e2e_tests_passed + e2e_tests_failed \
 					< e2e_tests_run)); then
 				e2e_verify_status="unmeasured"
+			elif [[ "$e2e_verify_status" == "passed" \
+				&& "$e2e_tests_failed" -gt 0 ]]; then
+				e2e_verify_status="failed"
 			fi
 
 			local e2e_icon="✅"
