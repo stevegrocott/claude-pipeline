@@ -1925,6 +1925,122 @@ _assert_e2e_verify_runs_for_scope() {
 }
 
 # =============================================================================
+# ISSUE #763 AC4: INITIAL AND RERUN PATHS MUST CLASSIFY ONE PAYLOAD IDENTICALLY
+#
+# The initial e2e-verify cross-check exempts a genuine zero-spec pass (0
+# run, 0 passed, 0 failed, status "passed") from the unmeasured guard --
+# nothing failed, and passed+failed (0) is not short of tests_run (0); see
+# "still records a pass for a genuine no-specs run" above. The rerun
+# cross-check is a second, independently written copy of that same rule,
+# keyed on a bare `rerun_tests_run == 0` with no counts-consistency check --
+# so the identical 0/0/0 "passed" payload that is exempted on the initial
+# path is swept into `e2e_verify:unmeasured` when it shows up as the rerun
+# verdict instead. Both call sites read the same three counts off the same
+# verdict shape; AC4 requires them to reach the same classification
+# "exactly as on the initial path".
+# =============================================================================
+
+@test "run_parallel_post_task_stages classifies a genuine zero-spec pass identically whether it arrives as the initial or the rerun verdict" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    export MAX_E2E_FIX_ITERATIONS=2
+    unset RESUME_MODE
+
+    # --- Scenario 1: the payload IS the initial verdict. This is the
+    # comparison baseline -- the initial path is already known to exempt
+    # it (see the negative control above); re-asserted here so the two
+    # scenarios are measured against each other, not against a hardcoded
+    # assumption. ---
+    local calls_initial="$TEST_TMP/e2e-identical-initial-calls.txt"
+    _install_e2e_stage_spies "$calls_initial"
+
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"passed","summary":"No E2E specs matched this change.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' on the initial-path" \
+                    "scenario"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-763-identical-initial" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0" \
+        "(initial-path scenario)"
+
+    local initial_unmeasured=false
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' && initial_unmeasured=true
+
+    # --- Scenario 2: the SAME 0/0/0 "passed" payload arrives as the rerun
+    # verdict instead, after a genuine measured initial failure dispatches
+    # one fix iteration. ---
+    local calls_rerun="$TEST_TMP/e2e-identical-rerun-calls.txt"
+    _install_e2e_stage_spies "$calls_rerun"
+
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        case "$1" in
+            e2e-verify)
+                printf '{"output":{"result":"failed","summary":"3 specs failed on checkout","tests_run":12,"tests_passed":9,"tests_failed":3}}'
+                ;;
+            fix-e2e-iter-1)
+                printf '{"output":{"summary":"Fix applied -- removed the failing spec from scope"}}'
+                ;;
+            e2e-verify-rerun-iter-1)
+                # Identical 0/0/0 "passed" payload as scenario 1, just
+                # arriving through the rerun call site instead of the
+                # initial one.
+                printf '{"output":{"result":"passed","summary":"No E2E specs matched this change.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *)
+                fail "unexpected run_stage call '$1' on the rerun-path" \
+                    "scenario"
+                ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+    exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-763-identical-rerun" "frontend" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0" \
+        "(rerun-path scenario)"
+
+    local rerun_unmeasured=false
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -qx 'e2e_verify:unmeasured' && rerun_unmeasured=true
+
+    if grep -q '^run_stage:fix-e2e-iter-2$' "$calls_rerun"; then
+        fail "a genuine zero-spec pass on the rerun path must stop the" \
+            "fix loop, not dispatch a second fix iteration; calls:" \
+            "$(tr '\n' ' ' < "$calls_rerun")"
+    fi
+
+    [ "$initial_unmeasured" = "$rerun_unmeasured" ] || fail \
+        "initial and rerun paths classified the identical 0/0/0" \
+        "'passed' payload differently: initial" \
+        "unmeasured=$initial_unmeasured, rerun" \
+        "unmeasured=$rerun_unmeasured -- AC4 requires the same" \
+        "exemption rule on both paths"
+
+    [ "$rerun_unmeasured" = "false" ] || fail \
+        "a genuine zero-spec pass must not be recorded as unmeasured" \
+        "on the rerun path (AC4), matching the initial path's" \
+        "exemption"
+}
+
+# =============================================================================
 # E2E PROMPT INJECTION TESTS
 # =============================================================================
 
