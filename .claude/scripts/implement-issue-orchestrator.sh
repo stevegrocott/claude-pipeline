@@ -8092,7 +8092,12 @@ ${e2e_rebuild_note}Run the E2E test suite:
 $e2e_command
 
 Report pass/fail. E2E failures count as overall test failure (set result to 'failed').
-Include e2e_result ('passed', 'failed', or 'skipped') and e2e_summary in output.
+Include e2e_result ('passed', 'failed', 'skipped', or 'unmeasured') and e2e_summary in output.
+If the run did not produce a trustworthy pass/fail count for the targeted specs
+(it errored before finishing, the environment blocked some specs from running,
+or the reported counts do not cover every targeted spec), set e2e_result to
+'unmeasured' — do NOT report 'passed' or 'failed' for an inconclusive run.
+An unmeasured verdict does NOT count as an overall test failure.
 
 "
         fi
@@ -8186,7 +8191,9 @@ Output both test results and validation findings in one structured response.
 - validation_issues: array of issues found (if any)
 - pre_existing_issues: array of pre-existing quality issues (informational only)
 - validation_summary: summary of validation findings
-- e2e_result: 'passed', 'failed', or 'skipped' (from E2E execution, if applicable)
+- e2e_result: 'passed', 'failed', 'skipped', or 'unmeasured' (from E2E execution, if applicable).
+  Use 'unmeasured' when the run did not produce a trustworthy pass/fail count for the
+  targeted specs — never report 'passed' or 'failed' for an inconclusive run.
 - e2e_summary: summary of E2E test findings (if applicable)
 - bats_result: 'passed', 'failed', 'skipped', or 'incomplete' (from BATS pipeline tests, informational only).
   Use 'incomplete' when the suite did not reach an exit code — never report 'passed' or 'skipped' for a partial run.

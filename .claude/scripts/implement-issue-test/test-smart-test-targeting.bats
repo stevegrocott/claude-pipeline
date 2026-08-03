@@ -2203,6 +2203,65 @@ _assert_e2e_verify_runs_for_scope() {
     [[ "$captured" == *"playwright test"* ]]
 }
 
+# Issue #763 AC7: the schema has accepted e2e_result: 'unmeasured' since
+# #745, but the prompt itself never told the agent the value existed or
+# when to use it — the value was only ever synthesised by the
+# orchestrator's own post-hoc counts cross-check, never emitted directly
+# by the agent. The prompt must both list 'unmeasured' among the valid
+# e2e_result values and explain when an inconclusive run warrants it,
+# so the agent can report it directly instead of a misleading
+# 'passed'/'failed' guess.
+@test "run_test_loop tells the agent when to report e2e_result unmeasured" {
+    export TEST_E2E_CMD="cd web && npx playwright test"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-e2e-unmeasured-prompt
+    mkdir -p web/src/components
+    echo "export default () => <div/>;" > web/src/components/Button.tsx
+    git add web/src/components/Button.tsx
+    git commit -q -m "add component"
+
+    local prompt_file="$TEST_TMP/e2e_unmeasured_prompt"
+    export prompt_file
+
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"status":"success","output":{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated","e2e_result":"passed","e2e_summary":"E2E passed"}}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    # E2E injection gates on a successful container rebuild — stub it.
+    rebuild_and_health_check() {
+        echo '{"rebuild":"success","health":"healthy","elapsed_secs":1}'
+    }
+    export -f rebuild_and_health_check
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-e2e-unmeasured-prompt" "" \
+        "ts-frontend"
+
+    local captured
+    captured=$(< "$prompt_file")
+
+    [[ "$captured" == *"e2e_result ('passed', 'failed', 'skipped', or 'unmeasured')"* ]] \
+        || fail "E2E section must list 'unmeasured' as a valid e2e_result" \
+            "value; got: $captured"
+    [[ "$captured" == *"'unmeasured'"*"do NOT report 'passed' or 'failed'"* ]] \
+        || fail "E2E section must tell the agent to report 'unmeasured'" \
+            "instead of guessing 'passed'/'failed' for an inconclusive run"
+    [[ "$captured" == *"e2e_result: 'passed', 'failed', 'skipped', or 'unmeasured'"* ]] \
+        || fail "Output field list must document 'unmeasured' for" \
+            "e2e_result alongside the other values"
+}
+
 @test "run_test_loop omits E2E section for typescript scope" {
     export TEST_E2E_CMD="cd web && npx playwright test"
 
