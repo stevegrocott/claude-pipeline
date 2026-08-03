@@ -1343,3 +1343,56 @@ EOF
 	run source "$out"
 	[ "$status" -eq 0 ] || fail "Guard re-declared an existing readonly array: $output"
 }
+
+# =============================================================================
+# setup_test_env() — MODEL_CONFIG_ARRAYS_FILE non-empty check (issue #749)
+#
+# setup_test_env (helpers/test-helper.bash) appends an ARRAYS_NONEMPTY_CHECK
+# block after the extracted array guards: once MODEL_CONFIG_ARRAYS_FILE is
+# sourced, it asserts _LIGHT_STAGES, _STANDARD_STAGES, and _STAGE_PREFIXES
+# are all non-empty, printing a named "FATAL: <name> is empty after
+# MODEL_CONFIG_ARRAYS_FILE re-source" diagnostic and returning 1 if any of
+# them are not. Nothing exercised that failure path — a silently broken
+# extraction would otherwise surface only as unrelated downstream assertion
+# noise (see PR #747 / issue #743's review).
+#
+# This test points SCRIPT_DIR at a corrupted model-config.sh (one array
+# declared empty) and runs the real setup_test_env() against it, so the
+# guard that fires is the actual generated code, not a hand-written
+# reimplementation of it. setup_test_env reassigns the global
+# TEST_TMP/SCRIPT_DIR, so it runs inside an isolated wrapper script (its own
+# bash process) rather than this test's own shell — otherwise it would
+# clobber the $TEST_TMP this test's own setup()/teardown() rely on.
+# =============================================================================
+
+@test "setup_test_env's MODEL_CONFIG_ARRAYS_FILE guard prints FATAL and returns non-zero for an empty array" {
+	local fake_script_dir="$TEST_TMP/fake-script-dir"
+	mkdir -p "$fake_script_dir"
+	cat > "$fake_script_dir/model-config.sh" << 'EOF'
+readonly -a _LIGHT_STAGES=(a b)
+readonly -a _STANDARD_STAGES=(c d)
+readonly -a _STAGE_PREFIXES=()
+EOF
+
+	# $TEST_DIR and $fake_script_dir are known now and expand into the
+	# wrapper at generation time; $MODEL_CONFIG_ARRAYS_FILE and $? are
+	# escaped so they resolve inside the wrapper's own process, only after
+	# setup_test_env has run there.
+	local wrapper="$TEST_TMP/setup_test_env_wrapper.sh"
+	cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+source "$TEST_DIR/helpers/test-helper.bash"
+SCRIPT_DIR="$fake_script_dir"
+setup_test_env || exit 1
+source "\$MODEL_CONFIG_ARRAYS_FILE"
+status=\$?
+rm -rf "\$TEST_TMP"
+exit "\$status"
+WRAPPER
+	chmod +x "$wrapper"
+
+	run "$wrapper"
+	[ "$status" -ne 0 ] || fail "Expected non-zero return, got 0"
+	[[ "$output" == *"FATAL: _STAGE_PREFIXES is empty after"*"MODEL_CONFIG_ARRAYS_FILE re-source"* ]] || \
+		fail "Expected FATAL diagnostic for _STAGE_PREFIXES on stderr. Got: $output"
+}
