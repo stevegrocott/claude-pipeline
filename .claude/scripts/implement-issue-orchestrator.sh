@@ -9043,11 +9043,20 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.summary // "E2E rerun completed"')
 
 			# Issue #745: a verdict is only as good as the counts
-			# behind it. Zero tests run, or a passed+failed total
-			# short of tests_run, means the run did not finish —
-			# a self-reported 'passed' or 'failed' in that state is
-			# unsupported, not a measurement. Override to
-			# 'unmeasured' rather than trust the self-report.
+			# behind it. A passed+failed total short of tests_run
+			# means the run did not finish — a self-reported
+			# 'passed' or 'failed' in that state is unsupported,
+			# not a measurement. Override to 'unmeasured' rather
+			# than trust the self-report.
+			#
+			# Issue #763 AC4: a genuine zero-spec rerun (0 run, 0
+			# passed, 0 failed) is neither: nothing failed, and
+			# passed+failed (0) is not short of tests_run (0).
+			# The initial path already keys this exemption on the
+			# counts' own consistency rather than a bare
+			# `tests_run == 0` (see the e2e-verify cross-check
+			# above) — apply the identical rule here so the same
+			# payload classifies the same way on both paths.
 			local rerun_tests_run rerun_tests_passed rerun_tests_failed
 			rerun_tests_run=$(printf '%s' "$rerun_result" \
 				| jq -r '.output.tests_run // 0')
@@ -9055,7 +9064,8 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				| jq -r '.output.tests_passed // 0')
 			rerun_tests_failed=$(printf '%s' "$rerun_result" \
 				| jq -r '.output.tests_failed // 0')
-			if ((rerun_tests_run == 0)) \
+			if [[ "$rerun_status" == "failed" \
+				&& "$rerun_tests_failed" -eq 0 ]] \
 				|| ((rerun_tests_passed + rerun_tests_failed \
 					< rerun_tests_run)); then
 				rerun_status="unmeasured"
