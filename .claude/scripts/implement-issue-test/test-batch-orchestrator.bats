@@ -819,10 +819,12 @@ _simulate_cost_rollup() {
 	# ISSUE #771: a skip recorded by this gate must report as "skipped",
 	# not "completed" — resolving upstream (a closed issue, or the
 	# opt-in merged-PR override) is not proof the work is done, and must
-	# not count toward progress.completed. Anchor on the call-site's
-	# code structure rather than log message wording.
+	# not count toward progress.completed. Anchor on the up-front
+	# call-site's code structure (the call passes "$issue", distinct
+	# from the "$issue_num" reconciliation call-sites inside
+	# process_issue) rather than log message wording.
 	local block
-	block=$(awk '/if check_issue_resolved_upstream /,/^    fi$/' \
+	block=$(awk '/if check_issue_resolved_upstream "\$issue"; then/,/^    fi$/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
 	[[ "$block" == *'update_issue_field'* ]]
 	[[ "$block" == *'"status"'* ]]
@@ -1524,7 +1526,7 @@ _run_upfront_call_site() {
 	[[ "$consecutive_failures" -eq 2 ]]
 }
 
-@test "functional: call-site (resolved) bypasses process_issue via continue and still records completed" {
+@test "functional: call-site (resolved) bypasses process_issue via continue and records skipped" {
 	local block_file
 	block_file=$(_extract_upfront_call_site_block) \
 		|| skip "up-front call-site block not found (script changed)"
@@ -1534,7 +1536,7 @@ _run_upfront_call_site() {
 
 	[[ "$_process_issue_reached" == false ]]
 	grep -q 'status' "$TEST_TMP/update.out"
-	grep -q 'completed' "$TEST_TMP/update.out"
+	grep -q 'skipped' "$TEST_TMP/update.out"
 	[[ -s "$TEST_TMP/progress.out" ]]
 }
 

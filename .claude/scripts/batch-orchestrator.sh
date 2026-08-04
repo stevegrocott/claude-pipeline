@@ -2071,7 +2071,7 @@ for issue in "${ISSUE_ARRAY[@]}"; do
     # ---------------------------------------------------------------
     if check_issue_resolved_upstream "$issue"; then
         log "Skipping issue #$issue ($_UPFRONT_SKIP_REASON)"
-        update_issue_field "$issue" "status" "completed"
+        update_issue_field "$issue" "status" "skipped"
         if [[ -n "$_UPFRONT_SKIP_PR" ]]; then
             update_issue_field "$issue" "pr" "$_UPFRONT_SKIP_PR" "true"
         fi
