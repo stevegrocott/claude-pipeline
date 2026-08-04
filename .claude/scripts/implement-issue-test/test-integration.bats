@@ -1223,11 +1223,20 @@ BATCH_ORCHESTRATOR="${SCRIPT_DIR}/batch-orchestrator.sh"
 }
 
 @test "batch-orchestrator up-front check handles CLOSED issue state" {
-    # The gh check must handle the CLOSED state returned by gh issue view.
+    # The up-front gate must handle the CLOSED state returned by gh issue view.
+    # Asserted through the call rather than by text position: the check lives in
+    # check_issue_resolved_upstream() and the loop invokes it, so grepping the
+    # loop body for a literal CLOSED fails on a correct extract-to-function
+    # refactor while the behaviour is intact.
     local loop_body
     loop_body=$(awk '/^for issue in.*ISSUE_ARRAY/,/^done$/' "$BATCH_ORCHESTRATOR" 2>/dev/null)
-    [[ "$loop_body" == *'CLOSED'* ]] || \
-        fail "Main issue loop must check for CLOSED issue state from gh"
+    [[ "$loop_body" == *'check_issue_resolved_upstream "$issue"'* ]] || \
+        fail "Main issue loop must call the up-front resolved-upstream guard"
+
+    local guard_body
+    guard_body=$(awk '/^check_issue_resolved_upstream\(\)/,/^}$/' "$BATCH_ORCHESTRATOR" 2>/dev/null)
+    [[ "$guard_body" == *'CLOSED'* ]] || \
+        fail "check_issue_resolved_upstream must check for CLOSED issue state from gh"
 }
 
 # --- Functional simulation tests ---
