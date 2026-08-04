@@ -1534,6 +1534,57 @@ _run_upfront_call_site() {
 	[[ "$consecutive_failures" -eq 1 ]]
 }
 
+@test "functional: open issue with merged PR is processed, not skipped, end to end (#771)" {
+	# ISSUE #771: the two tests above each exercise one half of the gate —
+	# check_issue_resolved_upstream() in isolation (mocked gh, real
+	# function) and the call-site wiring in isolation (stubbed
+	# check_issue_resolved_upstream). Neither proves the two halves work
+	# together for the reported scenario. This test wires the REAL
+	# check_issue_resolved_upstream() (sourced from the script, driven by
+	# a mocked gh reporting an OPEN issue with a merged PR on its branch)
+	# straight into the REAL call-site block, so it stands in for the
+	# reported case: an open issue whose branch PR merged must be
+	# processed, not silently recorded as resolved.
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	_stub_gh_pr_merged
+	GIT_HOST=github
+
+	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
+	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/update.out"
+	: > "$TEST_TMP/progress.out"
+
+	issue=690
+	consecutive_failures=0
+	_PREFLIGHT_SKIPPED=false
+	_process_issue_reached=false
+
+	for _once in 1; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+		_process_issue_reached=true
+	done
+
+	# The real gate must fall through to process_issue rather than
+	# recording a skip: no status/pr write, no progress update, and the
+	# circuit-breaker counter left untouched.
+	[[ "$_process_issue_reached" == true ]]
+	[[ ! -s "$TEST_TMP/update.out" ]]
+	[[ ! -s "$TEST_TMP/progress.out" ]]
+	[[ "$consecutive_failures" -eq 0 ]]
+	# The merged-PR evidence is still surfaced, just not acted on as a skip.
+	grep -q '735' "$TEST_TMP/log.out"
+}
+
 # =============================================================================
 # ISSUE #397: surface deploy-verify failures in batch post-run summary
 # =============================================================================
