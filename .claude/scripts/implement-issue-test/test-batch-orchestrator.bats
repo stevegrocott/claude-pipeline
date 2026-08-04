@@ -1418,6 +1418,41 @@ GHEOF
 	grep -q 'SKIP_ON_MERGED_PR' "$TEST_TMP/log.out"
 }
 
+@test "functional: check_issue_resolved_upstream (closed issue) still skips when SKIP_ON_MERGED_PR is set" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	# The CLOSED check runs first and returns before the merged-PR /
+	# override check is ever reached, so SKIP_ON_MERGED_PR must have no
+	# bearing on a closed issue — it already skips on its own (#771). A
+	# mock that fails hard on "gh pr" proves the short-circuit: if the
+	# override path were consulted, this test would fail instead of
+	# passing vacuously.
+	local mock_bin="$TEST_TMP/mock-bin-upfront-closed-override"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'CLOSED\n' ;;
+	pr)
+		echo "gh pr list should not run once the issue is closed" >&2
+		exit 1
+		;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+	SKIP_ON_MERGED_PR=1
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'closed'* ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+}
+
 @test "functional: check_issue_resolved_upstream returns 1 when issue is open and no PR is merged" {
 	source_check_issue_resolved_upstream \
 		|| skip "check_issue_resolved_upstream() not yet present"
