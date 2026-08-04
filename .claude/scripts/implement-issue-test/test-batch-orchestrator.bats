@@ -928,29 +928,34 @@ _make_gh_skip_status_json() {
 
 # =============================================================================
 # TASK 3 (i740): failure-site reconciliation — a stale `failed` verdict must
-# flip to `completed` when the issue's feature branch PR already merged
+# flip to `completed` when the issue is actually already resolved on GitHub
 # =============================================================================
 #
 # batch-orchestrator.sh records four failure sites unconditionally today:
 # implement-issue failure (~:1500), missing PR number (~:1509), process-pr
 # timeout (~:1576) and process-pr failure (~:1613, a case arm). None re-checks
 # whether the work actually landed before writing "failed" — see issue #740.
-# Tasks #1/#2 on this issue reuse the up-front skip gate's
-# `gh pr list --state merged --head "feature/issue-N"` check on these
-# failure paths: when it reports a merged PR, the site must record
-# `completed` with that PR number and return 0 (success) instead of 1, so the
-# call-site circuit breaker (see the "process_issue call site" tests above)
-# naturally leaves consecutive_failures untouched — it only increments on a
-# nonzero process_issue() return. A genuine failure (no merged PR) must still
-# record `failed` and return 1, unchanged.
+# These sites call the shared check_issue_resolved_upstream() (also used by
+# the up-front skip gate) before finalizing a verdict: when it reports the
+# issue resolved, the site records `completed` with the PR number (if any)
+# and returns 0 (success) instead of 1, so the call-site circuit breaker
+# (see the "process_issue call site" tests above) naturally leaves
+# consecutive_failures untouched — it only increments on a nonzero
+# process_issue() return. A genuine failure must still record `failed` and
+# return 1, unchanged.
+#
+# ISSUE #771: check_issue_resolved_upstream() no longer treats a merged PR
+# on an open issue as resolution (an open issue with a merged branch PR is
+# evidence the merge did *not* resolve it, not proof that it did — see that
+# function's docstring). So a merged-but-not-yet-closed PR no longer
+# reconciles a reported failure here either; the site still correctly
+# records `failed` in that case, same as when no PR merged at all. Only an
+# issue that is actually CLOSED on GitHub reconciles a reported failure now.
 #
 # These functional tests extract each failure site by its stable if/case
 # guard — not by the (separately implemented) reconciliation call itself —
 # so they stay valid regardless of the helper's internal name, and `skip`
-# gracefully if a future refactor moves the guard. Until tasks #1/#2 land,
-# the "reconciled" assertions below fail RED (the sites unconditionally
-# record "failed" today); they turn GREEN once the failure sites call the
-# merged-PR check before finalizing a verdict.
+# gracefully if a future refactor moves the guard.
 
 # Extracts the implement-issue failure site's "if [[ "$impl_status" !=
 # "success" ]]; then ... fi" block. Returns 1 (without aborting) if the
@@ -1075,7 +1080,7 @@ GHEOF
 	export PATH="$mock_bin:$PATH"
 }
 
-@test "functional: implement-issue failure site records completed with the PR number when the PR already merged" {
+@test "functional: implement-issue failure site still records failed when PR merged but issue still open (#771)" {
 	local block_file
 	block_file=$(_extract_impl_failure_block) \
 		|| skip "implement-issue failure block not found (script changed)"
@@ -1083,10 +1088,8 @@ GHEOF
 
 	_run_failure_site_block "$block_file"
 
-	grep -qw 'completed' "$TEST_TMP/update.out"
-	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
-	[[ "$_failure_block_rc" -eq 0 ]]
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
 }
 
 @test "functional: implement-issue failure site still records failed when no PR merged" {
@@ -1101,10 +1104,11 @@ GHEOF
 	[[ "$_failure_block_rc" -eq 1 ]]
 }
 
-@test "functional: implement-issue failure site logs the reconciliation explicitly" {
-	# AC4: a status flipping from failed to completed must be visible in the
-	# run log, not silent. Anchor on the merged PR number rather than exact
-	# wording so a future rewording of the log message doesn't false-fail.
+@test "functional: implement-issue failure site logs the merged-PR-but-open evidence explicitly" {
+	# #771: even though the PR merged, the issue is still open, so the site
+	# does not reconcile — but check_issue_resolved_upstream() still logs the
+	# evidence so it isn't silently dropped. Anchor on the merged PR number
+	# rather than exact wording so a future rewording doesn't false-fail.
 	local block_file
 	block_file=$(_extract_impl_failure_block) \
 		|| skip "implement-issue failure block not found (script changed)"
@@ -1113,11 +1117,13 @@ GHEOF
 	_run_failure_site_block "$block_file"
 
 	grep -q '735' "$TEST_TMP/log.out"
+	grep -qw 'failed' "$TEST_TMP/update.out"
 }
 
-@test "functional: process-pr failure site records completed with the PR number when the PR already merged" {
+@test "functional: process-pr failure site still records failed when PR merged but issue still open (#771)" {
 	# Mirrors issue #740's #5482 evidence: process-pr timed out/failed while
-	# the PR had already merged moments earlier.
+	# the PR had already merged moments earlier. Per #771, a merged PR alone
+	# on a still-open issue is not resolution, so this must still fail.
 	local block_file
 	block_file=$(_extract_process_pr_failure_block) \
 		|| skip "process-pr failure block not found (script changed)"
@@ -1125,10 +1131,8 @@ GHEOF
 
 	_run_failure_site_block "$block_file"
 
-	grep -qw 'completed' "$TEST_TMP/update.out"
-	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
-	[[ "$_failure_block_rc" -eq 0 ]]
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
 }
 
 @test "functional: process-pr failure site still records failed when no PR merged" {
@@ -1143,7 +1147,7 @@ GHEOF
 	[[ "$_failure_block_rc" -eq 1 ]]
 }
 
-@test "functional: no-PR-number failure site records completed with the PR number when the PR already merged" {
+@test "functional: no-PR-number failure site still records failed when PR merged but issue still open (#771)" {
 	local block_file
 	block_file=$(_extract_no_pr_failure_block) \
 		|| skip "no-PR-number failure block not found (script changed)"
@@ -1151,10 +1155,8 @@ GHEOF
 
 	_run_failure_site_block "$block_file"
 
-	grep -qw 'completed' "$TEST_TMP/update.out"
-	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
-	[[ "$_failure_block_rc" -eq 0 ]]
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
 }
 
 @test "functional: no-PR-number failure site still records failed when no PR merged" {
@@ -1169,7 +1171,7 @@ GHEOF
 	[[ "$_failure_block_rc" -eq 1 ]]
 }
 
-@test "functional: process-pr timeout failure site records completed with the PR number when the PR already merged" {
+@test "functional: process-pr timeout failure site still records failed when PR merged but issue still open (#771)" {
 	local block_file
 	block_file=$(_extract_timeout_failure_block) \
 		|| skip "process-pr timeout failure block not found (script changed)"
@@ -1177,10 +1179,8 @@ GHEOF
 
 	PROC_EXIT_IN=124 _run_failure_site_block "$block_file"
 
-	grep -qw 'completed' "$TEST_TMP/update.out"
-	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
-	[[ "$_failure_block_rc" -eq 0 ]]
+	grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
 }
 
 @test "functional: process-pr timeout failure site still records failed when no PR merged" {
@@ -1351,7 +1351,7 @@ GHEOF
 	[[ -z "$_UPFRONT_SKIP_PR" ]]
 }
 
-@test "functional: check_issue_resolved_upstream (merged PR) returns 0 and records the PR number" {
+@test "functional: check_issue_resolved_upstream (merged PR, issue still open) returns 1 and logs a warning (#771)" {
 	source_check_issue_resolved_upstream \
 		|| skip "check_issue_resolved_upstream() not yet present"
 
@@ -1368,12 +1368,19 @@ GHEOF
 	export PATH="$mock_bin:$PATH"
 	GIT_HOST=github
 
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
 	local rc=0
 	check_issue_resolved_upstream 690 || rc=$?
 
-	[[ "$rc" -eq 0 ]]
-	[[ "$_UPFRONT_SKIP_REASON" == *'123'* ]]
-	[[ "$_UPFRONT_SKIP_PR" == "123" ]]
+	# #771: a merged PR on a branch does not, by itself, resolve an issue
+	# that is still open on GitHub — proceed with processing instead of
+	# skipping, but still surface the evidence via a log warning.
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q '123' "$TEST_TMP/log.out"
 }
 
 @test "functional: check_issue_resolved_upstream returns 1 when issue is open and no PR is merged" {

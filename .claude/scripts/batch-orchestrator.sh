@@ -974,20 +974,29 @@ revalidate_issue_after_enrich() {
 # check_issue_resolved_upstream <issue_num>
 #
 # Up-front skip gate: has this issue already been resolved on GitHub —
-# either the issue itself is closed, or a PR for "feature/issue-<num>" has
-# already been merged? Complements the status.json idempotency check in
-# the batch loop by querying live platform state before spinning up the
-# orchestrator. Only active when GIT_HOST=github; any other host is
-# treated as "not resolved" (returns 1).
+# specifically, is the issue itself closed? Complements the status.json
+# idempotency check in the batch loop by querying live platform state
+# before spinning up the orchestrator. Only active when GIT_HOST=github;
+# any other host is treated as "not resolved" (returns 1).
+#
+# A merged PR on "feature/issue-<num>" is NOT, by itself, treated as
+# resolution while the issue is still open. The pipeline closes an issue
+# when its PR merges, so an open issue with a merged PR on its branch is
+# evidence the merge did *not* resolve it — reopened, partially
+# implemented, reverted, or the branch name reused. Skipping on that
+# evidence silently drops open work with no supported way to re-run it
+# (see #771). Instead, a warning is logged and the issue proceeds to
+# normal processing, where the orchestrator's own checks act as the
+# safety net.
 #
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the orchestrator's own
 # already_implemented detection remains the safety net.
 #
 # Returns:
-#   0 — issue is already resolved; caller should skip processing. Sets
-#       _UPFRONT_SKIP_REASON (human-readable) and _UPFRONT_SKIP_PR (the
-#       merged PR number, empty if the issue was closed without one).
+#   0 — issue is already resolved (closed on GitHub); caller should skip
+#       processing. Sets _UPFRONT_SKIP_REASON (human-readable);
+#       _UPFRONT_SKIP_PR is always empty on this path.
 #   1 — not resolved upstream; proceed with processing.
 check_issue_resolved_upstream() {
 	local issue_num="$1"
@@ -1010,9 +1019,9 @@ check_issue_resolved_upstream() {
 		--json number --jq '.[0].number // empty' \
 		2>/dev/null) || true
 	if [[ -n "$merged_pr" ]]; then
-		_UPFRONT_SKIP_REASON="PR #$merged_pr already merged"
-		_UPFRONT_SKIP_PR="$merged_pr"
-		return 0
+		log "Issue #$issue_num is open but PR #$merged_pr" \
+			"already merged on feature/issue-$issue_num" \
+			"— processing anyway instead of skipping (#771)"
 	fi
 
 	return 1
@@ -2045,9 +2054,9 @@ for issue in "${ISSUE_ARRAY[@]}"; do
     fi
 
     # ---------------------------------------------------------------
-    # Up-front skip gate: closed issue OR merged PR (via gh).
-    # See check_issue_resolved_upstream() for the query details and the
-    # GIT_HOST / gh-failure fallback behavior.
+    # Up-front skip gate: issue closed on GitHub (via gh). A merged PR
+    # on its branch is not treated as resolution while the issue is
+    # still open — see check_issue_resolved_upstream() for why (#771).
     # ---------------------------------------------------------------
     if check_issue_resolved_upstream "$issue"; then
         log "Skipping issue #$issue ($_UPFRONT_SKIP_REASON)"
