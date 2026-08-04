@@ -815,17 +815,18 @@ _simulate_cost_rollup() {
 	grep -q 'already merged' "$BATCH_ORCHESTRATOR_SCRIPT"
 }
 
-@test "up-front skip gate: gh-resolved issue sets status to completed" {
-	# ISSUE #740: the closed-issue and merged-PR detection was extracted
-	# into check_issue_resolved_upstream(); the call-site now shares a
-	# single if-block for both cases. Anchor on that call-site's code
-	# structure rather than log message wording.
+@test "up-front skip gate: gh-resolved issue sets status to skipped" {
+	# ISSUE #771: a skip recorded by this gate must report as "skipped",
+	# not "completed" — resolving upstream (a closed issue, or the
+	# opt-in merged-PR override) is not proof the work is done, and must
+	# not count toward progress.completed. Anchor on the call-site's
+	# code structure rather than log message wording.
 	local block
 	block=$(awk '/if check_issue_resolved_upstream /,/^    fi$/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
 	[[ "$block" == *'update_issue_field'* ]]
 	[[ "$block" == *'"status"'* ]]
-	[[ "$block" == *'"completed"'* ]]
+	[[ "$block" == *'"skipped"'* ]]
 }
 
 @test "up-front skip gate: call-site stores the PR number when one is set" {
