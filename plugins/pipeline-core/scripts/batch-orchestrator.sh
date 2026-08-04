@@ -974,11 +974,23 @@ revalidate_issue_after_enrich() {
 # check_issue_resolved_upstream <issue_num>
 #
 # Up-front skip gate: has this issue already been resolved on GitHub —
-# either the issue itself is closed, or a PR for "feature/issue-<num>" has
-# already been merged? Complements the status.json idempotency check in
-# the batch loop by querying live platform state before spinning up the
-# orchestrator. Only active when GIT_HOST=github; any other host is
-# treated as "not resolved" (returns 1).
+# specifically, is the issue itself closed? Complements the status.json
+# idempotency check in the batch loop by querying live platform state
+# before spinning up the orchestrator. Only active when GIT_HOST=github;
+# any other host is treated as "not resolved" (returns 1).
+#
+# A merged PR on "feature/issue-<num>" is NOT, by itself, treated as
+# resolution while the issue is still open. The pipeline closes an issue
+# when its PR merges, so an open issue with a merged PR on its branch is
+# evidence the merge did *not* resolve it — reopened, partially
+# implemented, reverted, or the branch name reused. Skipping on that
+# evidence silently drops open work with no supported way to re-run it
+# (see #771). Instead, a warning is logged and the issue proceeds to
+# normal processing, where the orchestrator's own checks act as the
+# safety net.
+#
+# Opt-in override: SKIP_ON_MERGED_PR=1 (any non-empty value) restores the
+# pre-#771 skip-on-merged-PR-alone behavior, for operators who rely on it.
 #
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the orchestrator's own
@@ -986,8 +998,8 @@ revalidate_issue_after_enrich() {
 #
 # Returns:
 #   0 — issue is already resolved; caller should skip processing. Sets
-#       _UPFRONT_SKIP_REASON (human-readable) and _UPFRONT_SKIP_PR (the
-#       merged PR number, empty if the issue was closed without one).
+#       _UPFRONT_SKIP_REASON. _UPFRONT_SKIP_PR is set to the merged PR
+#       number under SKIP_ON_MERGED_PR, otherwise empty.
 #   1 — not resolved upstream; proceed with processing.
 check_issue_resolved_upstream() {
 	local issue_num="$1"
@@ -1010,8 +1022,68 @@ check_issue_resolved_upstream() {
 		--json number --jq '.[0].number // empty' \
 		2>/dev/null) || true
 	if [[ -n "$merged_pr" ]]; then
-		_UPFRONT_SKIP_REASON="PR #$merged_pr already merged"
-		_UPFRONT_SKIP_PR="$merged_pr"
+		if [[ -n "${SKIP_ON_MERGED_PR:-}" ]]; then
+			log "Issue #$issue_num: SKIP_ON_MERGED_PR is set" \
+				"— treating merged PR #$merged_pr on" \
+				"feature/issue-$issue_num as resolution"
+			_UPFRONT_SKIP_REASON="PR #$merged_pr already merged"
+			_UPFRONT_SKIP_PR="$merged_pr"
+			return 0
+		fi
+		log "Issue #$issue_num is open but PR #$merged_pr" \
+			"already merged on feature/issue-$issue_num" \
+			"— processing anyway instead of skipping (#771)"
+	fi
+
+	return 1
+}
+
+# check_issue_pr_merged <issue_num>
+#
+# Post-hoc failure-site reconciliation (#740): a stage reported a failure —
+# did the work in fact land anyway? Unlike the up-front gate above, a
+# merged PR on "feature/issue-<num>" IS treated as resolution here, and
+# without any opt-in override.
+#
+# The two gates differ because the evidence means different things at each
+# site. Up front, a merged branch PR is stale evidence about *prior* work
+# on a still-open issue (see check_issue_resolved_upstream). At a failure
+# site it is evidence about the run that just executed: #740 exists
+# precisely because process-pr merged a PR and then timed out before the
+# issue-close propagated, leaving an OPEN issue with a merged branch PR.
+# Requiring a CLOSED issue here would record `failed`, increment
+# consecutive_failures and re-arm the circuit breaker #740 fixed.
+#
+# A gh failure (network error, unauthenticated) is non-fatal: the empty
+# result falls through to "not resolved" so the reported failure stands.
+#
+# Returns:
+#   0 — the work landed; caller should record `completed`. Sets
+#       _RECONCILE_REASON, and _RECONCILE_PR when a merged PR was found.
+#   1 — not resolved; caller should record the failure as reported.
+check_issue_pr_merged() {
+	local issue_num="$1"
+	_RECONCILE_REASON=""
+	_RECONCILE_PR=""
+
+	[[ "${GIT_HOST:-github}" == "github" ]] || return 1
+
+	local issue_state=""
+	issue_state=$(gh issue view "$issue_num" --json state \
+		--jq '.state' 2>/dev/null) || true
+	if [[ "$issue_state" == "CLOSED" ]]; then
+		_RECONCILE_REASON="issue already closed on GitHub"
+		return 0
+	fi
+
+	local merged_pr=""
+	merged_pr=$(gh pr list --state merged \
+		--head "feature/issue-$issue_num" \
+		--json number --jq '.[0].number // empty' \
+		2>/dev/null) || true
+	if [[ -n "$merged_pr" ]]; then
+		_RECONCILE_REASON="PR #$merged_pr already merged"
+		_RECONCILE_PR="$merged_pr"
 		return 0
 	fi
 
@@ -1553,12 +1625,12 @@ process_issue() {
 
     if [[ "$impl_status" != "success" ]]; then
         log_error "implement-issue failed for #$issue_num: ${impl_error:-unknown error}"
-        if check_issue_resolved_upstream "$issue_num"; then
-            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+        if check_issue_pr_merged "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_RECONCILE_REASON"
             update_issue_field "$issue_num" "status" "completed"
             update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
-            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
-                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
             fi
             update_progress
             git checkout "$BRANCH" 2>/dev/null || true
@@ -1573,12 +1645,12 @@ process_issue() {
 
     if [[ -z "$pr_number" ]]; then
         log_error "implement-issue succeeded but no PR number found for #$issue_num"
-        if check_issue_resolved_upstream "$issue_num"; then
-            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+        if check_issue_pr_merged "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_RECONCILE_REASON"
             update_issue_field "$issue_num" "status" "completed"
             update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
-            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
-                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
             fi
             update_progress
             git checkout "$BRANCH" 2>/dev/null || true
@@ -1651,12 +1723,12 @@ process_issue() {
     # Check for timeout
     if (( proc_exit == 124 )); then
         log_error "Issue #$issue_num timed out during process-pr (${ISSUE_TIMEOUT}s)"
-        if check_issue_resolved_upstream "$issue_num"; then
-            log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+        if check_issue_pr_merged "$issue_num"; then
+            log "Issue #$issue_num: reported failure reconciled — $_RECONCILE_REASON"
             update_issue_field "$issue_num" "status" "completed"
             update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
-            if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
-                update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+            if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
+                update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
             fi
             update_progress
             git checkout "$BRANCH" 2>/dev/null || true
@@ -1699,12 +1771,12 @@ process_issue() {
             ;;
         error|rate_limit|*)
             log_error "process-pr failed for #$issue_num: ${proc_error:-status was $proc_status}"
-            if check_issue_resolved_upstream "$issue_num"; then
-                log "Issue #$issue_num: reported failure reconciled — $_UPFRONT_SKIP_REASON"
+            if check_issue_pr_merged "$issue_num"; then
+                log "Issue #$issue_num: reported failure reconciled — $_RECONCILE_REASON"
                 update_issue_field "$issue_num" "status" "completed"
                 update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
-                if [[ -n "${_UPFRONT_SKIP_PR:-$pr_number}" ]]; then
-                    update_issue_field "$issue_num" "pr" "${_UPFRONT_SKIP_PR:-$pr_number}" "true"
+                if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
+                    update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
                 fi
                 update_progress
                 git checkout "$BRANCH" 2>/dev/null || true
@@ -2045,17 +2117,24 @@ for issue in "${ISSUE_ARRAY[@]}"; do
     fi
 
     # ---------------------------------------------------------------
-    # Up-front skip gate: closed issue OR merged PR (via gh).
-    # See check_issue_resolved_upstream() for the query details and the
-    # GIT_HOST / gh-failure fallback behavior.
+    # Up-front skip gate: issue closed on GitHub (via gh). A merged PR
+    # on its branch is not treated as resolution while the issue is
+    # still open — see check_issue_resolved_upstream() for why (#771).
     # ---------------------------------------------------------------
     if check_issue_resolved_upstream "$issue"; then
         log "Skipping issue #$issue ($_UPFRONT_SKIP_REASON)"
-        update_issue_field "$issue" "status" "completed"
+        update_issue_field "$issue" "status" "skipped"
+        # Record the reason so the post-run skip summary attributes this
+        # to the up-front gate rather than printing "unknown reason"
+        # under the preflight-validation heading.
+        update_issue_field "$issue" "error" "$_UPFRONT_SKIP_REASON"
         if [[ -n "$_UPFRONT_SKIP_PR" ]]; then
             update_issue_field "$issue" "pr" "$_UPFRONT_SKIP_PR" "true"
         fi
         update_progress
+        # `continue` bypasses the terminal emit below, so emit here — every
+        # issue must produce exactly one issue_end event for telemetry.
+        emit_event "issue_end" "issue_num=$issue" "outcome=skipped"
         continue
     fi
 
@@ -2174,8 +2253,8 @@ _skipped_count=$(jq \
     "$STATUS_FILE" 2>/dev/null) || _skipped_count=0
 if ((_skipped_count > 0)); then
     log_warn "=========================================="
-    log_warn "PREFLIGHT SKIPPED: $_skipped_count issue(s)"
-    log_warn "(missing ## Implementation Tasks or needs-explore label)"
+    log_warn "SKIPPED: $_skipped_count issue(s)"
+    log_warn "(preflight validation, or already resolved upstream)"
     log_warn "=========================================="
     while IFS= read -r _skip_entry; do
         log_warn "  $_skip_entry"

@@ -167,6 +167,21 @@ prompt.
 | `DISABLE_SURGICAL_FAST_PATH` | `0` | `1` forces every issue to the full pipeline regardless of classifier output. Use during incidents. |
 | `TRIAGE_MODEL` | `haiku` (tier) | Override the model. Pass a tier name (`haiku`/`sonnet`/`opus`), not a pinned model ID — the tier-to-model mapping lives in `.claude/scripts/model-config.sh`. |
 | `FAST_PATH_IMPLEMENT_MODEL` | `sonnet` | Model used by the fast-path implement step. |
+| `SKIP_ON_MERGED_PR` | unset | Any non-empty value restores the pre-#771 up-front skip gate: an **open** issue whose `feature/issue-N` branch already has a merged PR is skipped instead of processed. Off by default because an open issue with a merged branch PR usually means the merge did *not* resolve it (reopened, partial, reverted, or branch name reused), and skipping silently drops the work. Does not affect failure-site reconciliation (`check_issue_pr_merged`), which always treats a merged branch PR as resolution. |
+
+### Behaviour change (#771): already-closed issues report as skipped
+
+An issue that is already **closed** on GitHub when the batch reaches it is
+now recorded as `skipped` (previously `completed`). Because the final batch
+state consults `progress.skipped`, a batch that merely encountered an
+already-closed issue now finishes as **`completed_with_skips`** rather than
+`completed`.
+
+This is intentional — resolving upstream is not proof this run did the work,
+so it must not inflate `progress.completed`. Operators and any CI/alerting
+that treats a non-`completed` final state as a problem should widen that
+check to accept `completed_with_skips`. The skip reason is written to the
+issue's `error` field and printed in the post-run skip summary.
 
 ### Pre-commit hook failure on fast-path
 

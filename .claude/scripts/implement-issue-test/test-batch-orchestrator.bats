@@ -815,17 +815,20 @@ _simulate_cost_rollup() {
 	grep -q 'already merged' "$BATCH_ORCHESTRATOR_SCRIPT"
 }
 
-@test "up-front skip gate: gh-resolved issue sets status to completed" {
-	# ISSUE #740: the closed-issue and merged-PR detection was extracted
-	# into check_issue_resolved_upstream(); the call-site now shares a
-	# single if-block for both cases. Anchor on that call-site's code
-	# structure rather than log message wording.
+@test "up-front skip gate: gh-resolved issue sets status to skipped" {
+	# ISSUE #771: a skip recorded by this gate must report as "skipped",
+	# not "completed" — resolving upstream (a closed issue, or the
+	# opt-in merged-PR override) is not proof the work is done, and must
+	# not count toward progress.completed. Anchor on the up-front
+	# call-site's code structure (the call passes "$issue", distinct
+	# from the "$issue_num" reconciliation call-sites inside
+	# process_issue) rather than log message wording.
 	local block
-	block=$(awk '/if check_issue_resolved_upstream /,/^    fi$/' \
+	block=$(awk '/if check_issue_resolved_upstream "\$issue"; then/,/^    fi$/' \
 		"$BATCH_ORCHESTRATOR_SCRIPT" | head -15)
 	[[ "$block" == *'update_issue_field'* ]]
 	[[ "$block" == *'"status"'* ]]
-	[[ "$block" == *'"completed"'* ]]
+	[[ "$block" == *'"skipped"'* ]]
 }
 
 @test "up-front skip gate: call-site stores the PR number when one is set" {
@@ -935,22 +938,27 @@ _make_gh_skip_status_json() {
 # implement-issue failure (~:1500), missing PR number (~:1509), process-pr
 # timeout (~:1576) and process-pr failure (~:1613, a case arm). None re-checks
 # whether the work actually landed before writing "failed" — see issue #740.
-# Tasks #1/#2 on this issue reuse the up-front skip gate's
-# `gh pr list --state merged --head "feature/issue-N"` check on these
-# failure paths: when it reports a merged PR, the site must record
-# `completed` with that PR number and return 0 (success) instead of 1, so the
-# call-site circuit breaker (see the "process_issue call site" tests above)
-# naturally leaves consecutive_failures untouched — it only increments on a
-# nonzero process_issue() return. A genuine failure (no merged PR) must still
-# record `failed` and return 1, unchanged.
+# These sites call check_issue_pr_merged() before finalizing a verdict:
+# when it reports the work landed, the site records `completed` with the
+# PR number (if any) and returns 0 (success) instead of 1, so the
+# call-site circuit breaker (see the "process_issue call site" tests
+# above) naturally leaves consecutive_failures untouched — it only
+# increments on a nonzero process_issue() return. A genuine failure (no
+# merged PR, issue still open) must still record `failed` and return 1.
+#
+# ISSUE #771 split this gate from the up-front skip gate
+# (check_issue_resolved_upstream). The up-front gate no longer treats a
+# merged branch PR as resolution for a still-open issue, because there it
+# is stale evidence about *prior* work. At these failure sites the same
+# evidence is about the run that just executed — #740's canonical case is
+# process-pr merging a PR then timing out before the issue-close
+# propagated — so check_issue_pr_merged() still reconciles on a merged PR
+# alone, with no opt-in required.
 #
 # These functional tests extract each failure site by its stable if/case
 # guard — not by the (separately implemented) reconciliation call itself —
 # so they stay valid regardless of the helper's internal name, and `skip`
-# gracefully if a future refactor moves the guard. Until tasks #1/#2 land,
-# the "reconciled" assertions below fail RED (the sites unconditionally
-# record "failed" today); they turn GREEN once the failure sites call the
-# merged-PR check before finalizing a verdict.
+# gracefully if a future refactor moves the guard.
 
 # Extracts the implement-issue failure site's "if [[ "$impl_status" !=
 # "success" ]]; then ... fi" block. Returns 1 (without aborting) if the
@@ -1023,11 +1031,11 @@ _run_failure_site_block() {
 	: > "$TEST_TMP/progress.out"
 	: > "$TEST_TMP/git.out"
 
-	# The failure sites call the real check_issue_resolved_upstream() to
-	# reconcile a reported failure against GitHub's actual state — source
-	# it so the block under test exercises production reconciliation logic
-	# (and the mocked `gh` on PATH) rather than skipping that call entirely.
-	source_check_issue_resolved_upstream \
+	# The failure sites call the real check_issue_pr_merged() to reconcile
+	# a reported failure against GitHub's actual state — source it so the
+	# block under test exercises production reconciliation logic (and the
+	# mocked `gh` on PATH) rather than skipping that call entirely.
+	source_check_issue_pr_merged \
 		|| { _failure_block_rc=1; return 1; }
 
 	issue_num=695
@@ -1113,6 +1121,7 @@ GHEOF
 	_run_failure_site_block "$block_file"
 
 	grep -q '735' "$TEST_TMP/log.out"
+	grep -qw 'completed' "$TEST_TMP/update.out"
 }
 
 @test "functional: process-pr failure site records completed with the PR number when the PR already merged" {
@@ -1326,6 +1335,20 @@ source_check_issue_resolved_upstream() {
 	source "$func_file"
 }
 
+# Same contract for check_issue_pr_merged() — the failure-site
+# reconciliation gate (#740), split from the up-front gate by #771 so a
+# merged branch PR keeps reconciling a reported failure without also
+# skipping still-open issues up front.
+source_check_issue_pr_merged() {
+	local func_file="$TEST_TMP/check_issue_pr_merged.bash"
+	_extract_function_body check_issue_pr_merged \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	grep -q 'check_issue_pr_merged' "$func_file" 2>/dev/null \
+		|| return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
 @test "functional: check_issue_resolved_upstream (closed issue) returns 0 with a reason and no PR" {
 	source_check_issue_resolved_upstream \
 		|| skip "check_issue_resolved_upstream() not yet present"
@@ -1351,7 +1374,7 @@ GHEOF
 	[[ -z "$_UPFRONT_SKIP_PR" ]]
 }
 
-@test "functional: check_issue_resolved_upstream (merged PR) returns 0 and records the PR number" {
+@test "functional: check_issue_resolved_upstream (merged PR, issue still open) returns 1 and logs a warning (#771)" {
 	source_check_issue_resolved_upstream \
 		|| skip "check_issue_resolved_upstream() not yet present"
 
@@ -1368,12 +1391,86 @@ GHEOF
 	export PATH="$mock_bin:$PATH"
 	GIT_HOST=github
 
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# #771: a merged PR on a branch does not, by itself, resolve an issue
+	# that is still open on GitHub — proceed with processing instead of
+	# skipping, but still surface the evidence via a log warning.
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q '123' "$TEST_TMP/log.out"
+}
+
+@test "functional: check_issue_resolved_upstream (SKIP_ON_MERGED_PR set) skips on a merged PR" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-override"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\n' ;;
+	pr) printf '123\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+	SKIP_ON_MERGED_PR=1
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# Opt-in override: restores the pre-#771 behavior of treating a
+	# merged PR on the issue's branch as resolution.
+	[[ "$rc" -eq 0 ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'123'* ]]
+	[[ "$_UPFRONT_SKIP_PR" == "123" ]]
+	grep -q 'SKIP_ON_MERGED_PR' "$TEST_TMP/log.out"
+}
+
+@test "functional: check_issue_resolved_upstream (closed issue) still skips when SKIP_ON_MERGED_PR is set" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	# The CLOSED check runs first and returns before the merged-PR /
+	# override check is ever reached, so SKIP_ON_MERGED_PR must have no
+	# bearing on a closed issue — it already skips on its own (#771). A
+	# mock that fails hard on "gh pr" proves the short-circuit: if the
+	# override path were consulted, this test would fail instead of
+	# passing vacuously.
+	local mock_bin="$TEST_TMP/mock-bin-upfront-closed-override"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'CLOSED\n' ;;
+	pr)
+		echo "gh pr list should not run once the issue is closed" >&2
+		exit 1
+		;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+	SKIP_ON_MERGED_PR=1
+
 	local rc=0
 	check_issue_resolved_upstream 690 || rc=$?
 
 	[[ "$rc" -eq 0 ]]
-	[[ "$_UPFRONT_SKIP_REASON" == *'123'* ]]
-	[[ "$_UPFRONT_SKIP_PR" == "123" ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'closed'* ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
 }
 
 @test "functional: check_issue_resolved_upstream returns 1 when issue is open and no PR is merged" {
@@ -1398,6 +1495,98 @@ GHEOF
 
 	[[ "$rc" -eq 1 ]]
 	[[ -z "$_UPFRONT_SKIP_PR" ]]
+}
+
+@test "functional: check_issue_pr_merged reconciles a merged PR on a still-open issue (#740)" {
+	# The two gates diverge here and that divergence is the point of the
+	# #771 split: the SAME gh state (issue OPEN, branch PR merged) makes
+	# check_issue_resolved_upstream return 1 (proceed) up front, but makes
+	# check_issue_pr_merged return 0 (reconcile) at a failure site — where
+	# it is evidence about the run that just executed. #740's canonical
+	# case is process-pr merging a PR then timing out before the
+	# issue-close propagated.
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	_stub_gh_pr_merged
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local reconcile_rc=0
+	check_issue_pr_merged 695 || reconcile_rc=$?
+	[[ "$reconcile_rc" -eq 0 ]]
+	[[ "$_RECONCILE_PR" == "735" ]]
+	[[ "$_RECONCILE_REASON" == *'735'* ]]
+
+	local upfront_rc=0
+	check_issue_resolved_upstream 695 || upfront_rc=$?
+	[[ "$upfront_rc" -eq 1 ]]
+}
+
+@test "functional: check_issue_pr_merged returns 1 when no PR merged and issue open" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	_stub_gh_pr_not_merged
+	GIT_HOST=github
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_RECONCILE_REASON" ]]
+	[[ -z "$_RECONCILE_PR" ]]
+}
+
+@test "functional: check_issue_pr_merged reconciles a closed issue with no merged PR" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-reconcile-closed"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'CLOSED\n' ;;
+	pr) printf '' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ "$_RECONCILE_REASON" == *'closed'* ]]
+	[[ -z "$_RECONCILE_PR" ]]
+}
+
+@test "functional: check_issue_pr_merged is a no-op for a non-github GIT_HOST" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-reconcile-nongithub"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+echo "gh should not be called for a non-github GIT_HOST" >&2
+exit 1
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=gitlab
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
 }
 
 @test "functional: check_issue_resolved_upstream is a no-op for a non-github GIT_HOST" {
@@ -1450,6 +1639,7 @@ _run_upfront_call_site() {
 	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
 	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
 	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
+	emit_event()         { printf '%s\n' "$*" >> "$TEST_TMP/events.out"; }
 	check_issue_resolved_upstream() {
 		_UPFRONT_SKIP_REASON="${CIRU_REASON:-}"
 		_UPFRONT_SKIP_PR="${CIRU_PR:-}"
@@ -1459,6 +1649,7 @@ _run_upfront_call_site() {
 	: > "$TEST_TMP/log.out"
 	: > "$TEST_TMP/update.out"
 	: > "$TEST_TMP/progress.out"
+	: > "$TEST_TMP/events.out"
 
 	issue=690
 	consecutive_failures="${CF_IN:-2}"
@@ -1484,7 +1675,7 @@ _run_upfront_call_site() {
 	[[ "$consecutive_failures" -eq 2 ]]
 }
 
-@test "functional: call-site (resolved) bypasses process_issue via continue and still records completed" {
+@test "functional: call-site (resolved) bypasses process_issue via continue and records skipped" {
 	local block_file
 	block_file=$(_extract_upfront_call_site_block) \
 		|| skip "up-front call-site block not found (script changed)"
@@ -1494,8 +1685,39 @@ _run_upfront_call_site() {
 
 	[[ "$_process_issue_reached" == false ]]
 	grep -q 'status' "$TEST_TMP/update.out"
-	grep -q 'completed' "$TEST_TMP/update.out"
+	grep -q 'skipped' "$TEST_TMP/update.out"
 	[[ -s "$TEST_TMP/progress.out" ]]
+}
+
+@test "functional: call-site (resolved) records the skip reason in the error field" {
+	# The post-run skip summary prints "$.error // \"unknown reason\"" for
+	# every skipped issue. Without this write an up-front skip would be
+	# reported as "unknown reason" under the preflight-validation heading,
+	# misattributing a closed-issue skip to a malformed issue body.
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=0 CIRU_REASON="already closed on GitHub" CIRU_PR="" \
+		_run_upfront_call_site "$block_file"
+
+	grep -q 'error' "$TEST_TMP/update.out"
+	grep -q 'already closed on GitHub' "$TEST_TMP/update.out"
+}
+
+@test "functional: call-site (resolved) emits a terminal issue_end skipped event" {
+	# The `continue` on this path bypasses the loop's own issue_end emit,
+	# so the gate must emit its own — otherwise telemetry sees an issue
+	# that started and never terminated.
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	CIRU_RC=0 CIRU_REASON="already closed on GitHub" CIRU_PR="" \
+		_run_upfront_call_site "$block_file"
+
+	grep -q 'issue_end' "$TEST_TMP/events.out"
+	grep -q 'outcome=skipped' "$TEST_TMP/events.out"
 }
 
 @test "functional: call-site (merged PR) also records the PR number" {
@@ -1524,6 +1746,59 @@ _run_upfront_call_site() {
 	[[ ! -s "$TEST_TMP/update.out" ]]
 	[[ "$_PREFLIGHT_SKIPPED" == false ]]
 	[[ "$consecutive_failures" -eq 1 ]]
+}
+
+@test "functional: open issue with merged PR is processed, not skipped, end to end (#771)" {
+	# ISSUE #771: the two tests above each exercise one half of the gate —
+	# check_issue_resolved_upstream() in isolation (mocked gh, real
+	# function) and the call-site wiring in isolation (stubbed
+	# check_issue_resolved_upstream). Neither proves the two halves work
+	# together for the reported scenario. This test wires the REAL
+	# check_issue_resolved_upstream() (sourced from the script, driven by
+	# a mocked gh reporting an OPEN issue with a merged PR on its branch)
+	# straight into the REAL call-site block, so it stands in for the
+	# reported case: an open issue whose branch PR merged must be
+	# processed, not silently recorded as resolved.
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local block_file
+	block_file=$(_extract_upfront_call_site_block) \
+		|| skip "up-front call-site block not found (script changed)"
+
+	_stub_gh_pr_merged
+	GIT_HOST=github
+
+	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
+	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
+	emit_event()         { printf '%s\n' "$*" >> "$TEST_TMP/events.out"; }
+
+	: > "$TEST_TMP/log.out"
+	: > "$TEST_TMP/update.out"
+	: > "$TEST_TMP/progress.out"
+	: > "$TEST_TMP/events.out"
+
+	issue=690
+	consecutive_failures=0
+	_PREFLIGHT_SKIPPED=false
+	_process_issue_reached=false
+
+	for _once in 1; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+		_process_issue_reached=true
+	done
+
+	# The real gate must fall through to process_issue rather than
+	# recording a skip: no status/pr write, no progress update, and the
+	# circuit-breaker counter left untouched.
+	[[ "$_process_issue_reached" == true ]]
+	[[ ! -s "$TEST_TMP/update.out" ]]
+	[[ ! -s "$TEST_TMP/progress.out" ]]
+	[[ "$consecutive_failures" -eq 0 ]]
+	# The merged-PR evidence is still surfaced, just not acted on as a skip.
+	grep -q '735' "$TEST_TMP/log.out"
 }
 
 # =============================================================================
@@ -1833,10 +2108,22 @@ _simulate_dv_failed_count() {
 	[[ "$body" == *'skipped'* ]]
 }
 
-@test "batch post-run section warns about preflight-skipped issues" {
+@test "batch post-run section warns about skipped issues" {
 	# The batch post-run log must surface skipped issues so operators can
 	# see at a glance that issues were skipped and why.
-	grep -qE 'PREFLIGHT SKIPPED|preflight.skipped' "$BATCH_ORCHESTRATOR_SCRIPT"
+	grep -qE 'SKIPPED: \$_skipped_count|preflight.skipped' \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "batch post-run skipped heading is not preflight-specific (#771)" {
+	# Issues are now also skipped by the up-front resolved-upstream gate,
+	# not just by preflight validation. A heading that names only
+	# preflight misattributes a closed-issue skip to a malformed body.
+	local heading
+	heading=$(grep -A1 'SKIPPED: \$_skipped_count' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$heading" != *'PREFLIGHT SKIPPED'* ]]
+	[[ "$heading" == *'resolved upstream'* ]]
 }
 
 @test "batch post-run skipped warning tracks count via _skipped_count" {
