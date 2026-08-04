@@ -989,14 +989,17 @@ revalidate_issue_after_enrich() {
 # normal processing, where the orchestrator's own checks act as the
 # safety net.
 #
+# Opt-in override: SKIP_ON_MERGED_PR=1 (any non-empty value) restores the
+# pre-#771 skip-on-merged-PR-alone behavior, for operators who rely on it.
+#
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the orchestrator's own
 # already_implemented detection remains the safety net.
 #
 # Returns:
-#   0 — issue is already resolved (closed on GitHub); caller should skip
-#       processing. Sets _UPFRONT_SKIP_REASON (human-readable);
-#       _UPFRONT_SKIP_PR is always empty on this path.
+#   0 — issue is already resolved; caller should skip processing. Sets
+#       _UPFRONT_SKIP_REASON. _UPFRONT_SKIP_PR is set to the merged PR
+#       number under SKIP_ON_MERGED_PR, otherwise empty.
 #   1 — not resolved upstream; proceed with processing.
 check_issue_resolved_upstream() {
 	local issue_num="$1"
@@ -1019,6 +1022,14 @@ check_issue_resolved_upstream() {
 		--json number --jq '.[0].number // empty' \
 		2>/dev/null) || true
 	if [[ -n "$merged_pr" ]]; then
+		if [[ -n "${SKIP_ON_MERGED_PR:-}" ]]; then
+			log "Issue #$issue_num: SKIP_ON_MERGED_PR is set" \
+				"— treating merged PR #$merged_pr on" \
+				"feature/issue-$issue_num as resolution"
+			_UPFRONT_SKIP_REASON="PR #$merged_pr already merged"
+			_UPFRONT_SKIP_PR="$merged_pr"
+			return 0
+		fi
 		log "Issue #$issue_num is open but PR #$merged_pr" \
 			"already merged on feature/issue-$issue_num" \
 			"— processing anyway instead of skipping (#771)"

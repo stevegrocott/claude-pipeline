@@ -1384,6 +1384,38 @@ GHEOF
 	grep -q '123' "$TEST_TMP/log.out"
 }
 
+@test "functional: check_issue_resolved_upstream (SKIP_ON_MERGED_PR set) skips on a merged PR" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-override"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\n' ;;
+	pr) printf '123\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+	SKIP_ON_MERGED_PR=1
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# Opt-in override: restores the pre-#771 behavior of treating a
+	# merged PR on the issue's branch as resolution.
+	[[ "$rc" -eq 0 ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'123'* ]]
+	[[ "$_UPFRONT_SKIP_PR" == "123" ]]
+	grep -q 'SKIP_ON_MERGED_PR' "$TEST_TMP/log.out"
+}
+
 @test "functional: check_issue_resolved_upstream returns 1 when issue is open and no PR is merged" {
 	source_check_issue_resolved_upstream \
 		|| skip "check_issue_resolved_upstream() not yet present"
