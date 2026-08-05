@@ -3582,3 +3582,54 @@ BROKEN
 		-name 'batch-orchestrator.*' -type f | wc -l)
 	[[ "$copy_count" -eq 1 ]]
 }
+
+# =============================================================================
+# ISSUE #775 TASK 3: the re-exec private copy is removed on exit (AC4)
+# =============================================================================
+#
+# Task 1 leaves the private snapshot in $TMPDIR forever -- nothing ever
+# removes it. Task 3 wires its cleanup into the same EXIT/TERM trap that
+# already releases the batch lock file, so every completed run (success,
+# skip, or failure) leaves $TMPDIR exactly as it found it.
+
+@test "real batch orchestrator: the re-exec private copy is removed once the run exits" {
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	# Non-blocking gh mock: resolve the single issue as already CLOSED so the
+	# up-front skip gate short-circuits it and the run reaches its terminal
+	# state (and the full EXIT trap) without doing any real work.
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'MOCKGH'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "issue view" ]]; then
+	echo "CLOSED"
+	exit 0
+fi
+echo ""
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	# Isolate TMPDIR so the private copy is the only batch-orchestrator.* file
+	# that can appear here -- a direct, unambiguous check for leftovers.
+	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
+	mkdir -p "$reexec_tmpdir"
+	export TMPDIR="$reexec_tmpdir"
+
+	(
+		cd "$TEST_TMP" || exit 1
+		"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
+	)
+
+	local copy_count
+	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
+		-name 'batch-orchestrator.*' -type f | wc -l)
+	[[ "$copy_count" -eq 0 ]]
+}
