@@ -3389,3 +3389,247 @@ _run_final_state_block() {
 
 	[[ ! -s "$TEST_TMP/final_state.out" ]]
 }
+
+# =============================================================================
+# ISSUE #775 TASK 4: rewriting the script mid-run does not disturb the run
+# =============================================================================
+#
+# batch-orchestrator.sh executes as top-level code, so bash historically read
+# it incrementally by byte offset as execution proceeded. When a batch merged
+# a change to the orchestrator itself, the rewrite landed underneath the
+# running process and bash resumed reading at a now-meaningless offset, dying
+# with a syntax error in the final summary block — after all the real work
+# had already completed (issue #771's reproduction).
+#
+# The fix (tasks 1-3) copies the script to a private temp file at startup and
+# re-execs from it, so the running process never reads the original file
+# path again. This test proves that end to end against the REAL script: it
+# starts a genuine batch-orchestrator.sh run, blocks it mid-run on the single
+# up-front `gh` call the up-front skip gate makes, overwrites the on-disk
+# script file with the exact broken snippet from the issue's crash log while
+# the process is blocked, then releases it and asserts the run completes
+# normally and writes its terminal state and summary (AC1, AC5) — never a
+# syntax error, never a crash.
+#
+# The run executes against an isolated COPY of scripts/ (never the real repo
+# file), so the corrupting overwrite below can never touch tracked source.
+
+@test "real batch orchestrator: rewriting the script on disk mid-run does not crash the run or lose its summary" {
+	# Isolated copy of the whole scripts/ tree: batch-orchestrator.sh plus
+	# every sibling it sources (resolve-pipeline-root.sh, issue-body-lib.sh,
+	# claude-usage.sh, schemas/, cost-trend-guard.sh, event-emit.sh, ...).
+	# Running the real script from here means the rewrite-mid-run below
+	# never touches the actual tracked file in the repo.
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	# Consumer config (platform.sh) lives outside the bundle, in the real
+	# repo's .claude/config/ — point resolve_consumer_file at it directly
+	# instead of also copying it (see resolve-pipeline-root.sh docstring).
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	# Mock gh: the up-front skip gate (check_issue_resolved_upstream) makes
+	# exactly one `gh issue view` call before the main loop reaches the
+	# vulnerable tail (the post-loop summary block where issue #775 actually
+	# crashed). Block there on a ready/release handshake so the test has a
+	# deterministic window to rewrite the script file while the real process
+	# is alive and mid-run, then resolve it CLOSED so the loop skips the
+	# fake issue and falls straight through to that tail.
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	local ready_file="$TEST_TMP/gh_ready"
+	local release_file="$TEST_TMP/gh_release"
+	cat > "$mock_bin/gh" << MOCKGH
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "issue view" ]]; then
+	touch "$ready_file"
+	while [[ ! -f "$release_file" ]]; do
+		sleep 0.1
+	done
+	echo "CLOSED"
+	exit 0
+fi
+echo ""
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	# Launch the real script from the isolated copy, in its own cwd so
+	# status.json / logs/ land under TEST_TMP instead of the real repo.
+	# `exec` inside the subshell means $pid below is the script's own pid.
+	(
+		cd "$TEST_TMP" || exit 1
+		exec "$scripts_copy/batch-orchestrator.sh" \
+			--issues 999999 --branch test
+	) > "$TEST_TMP/orch.out" 2>&1 &
+	local pid=$!
+
+	# Wait for the blocked gh call — confirms the run is genuinely mid-flight
+	# (past argument parsing, locking, and init_status) before we rewrite.
+	local i=0
+	while [[ ! -f "$ready_file" ]] && ((i++ < 100)); do
+		sleep 0.1
+	done
+	[[ -f "$ready_file" ]]
+
+	# Rewrite the running process's own script file on disk — the exact
+	# scenario from issue #775: a merge landing while the orchestrator is
+	# executing it. Reuses the actual crash snippet from the issue's log so
+	# a regression reproduces the original failure signature verbatim.
+	cat > "$scripts_copy/batch-orchestrator.sh" << 'BROKEN'
+#!/usr/bin/env bash
+echo "this file was rewritten out from under the running process"
+    '[.issues[] | select(.deploy_verify_failed == true)] | length' \
+BROKEN
+
+	# Release the blocked gh call so the run proceeds through the rest of
+	# top-level code — including the tail past where the rewrite landed.
+	touch "$release_file"
+
+	local exit_status=0
+	wait "$pid" || exit_status=$?
+
+	# The corruption landed for real (rules out a silent no-op overwrite).
+	grep -q "rewritten out from under" "$scripts_copy/batch-orchestrator.sh"
+
+	# AC1: no crash. A pre-fix process reading the rewritten file at its
+	# stale offset dies with "syntax error near unexpected token".
+	local output
+	output=$(cat "$TEST_TMP/orch.out")
+	[[ "$output" != *"syntax error"* ]]
+	[[ "$exit_status" -eq 0 ]]
+
+	# AC5: terminal state and summary are still written, not lost mid-crash.
+	local final_state
+	final_state=$(jq -r '.state' "$TEST_TMP/status.json")
+	[[ "$final_state" == "completed_with_skips" ]]
+
+	local summary_dir
+	summary_dir=$(find "$TEST_TMP/logs" -maxdepth 1 -name 'batch-*' \
+		-type d | head -1)
+	[[ -n "$summary_dir" ]]
+	local summary_file="$summary_dir/summary.json"
+	[[ -f "$summary_file" ]]
+	[[ "$(jq -r '.state' "$summary_file")" == "completed_with_skips" ]]
+}
+
+# =============================================================================
+# ISSUE #775 TASK 5: SCRIPT_DIR survives the re-exec; re-exec fires once
+# =============================================================================
+#
+# The re-exec (tasks 1-3) repoints BASH_SOURCE[0] at a private temp copy
+# before SCRIPT_DIR is derived from it. If the original directory is not
+# carried across explicitly, SCRIPT_DIR silently resolves to the bare
+# $TMPDIR the copy lives in instead of the real scripts/ directory — a
+# failure mode the issue calls out as more dangerous than the crash it
+# fixes, because it surfaces as unresolved schemas and sub-orchestrators
+# rather than an obvious error (AC2).
+#
+# Both tests below run the REAL script from an isolated copy of scripts/
+# (never the tracked repo file), exactly as the task 4 test does.
+
+@test "real batch orchestrator: SCRIPT_DIR resolves to the real script directory after re-exec" {
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	# No args: usage() is the first exit path that only runs after every
+	# SCRIPT_DIR-dependent sibling has already been sourced successfully
+	# (resolve-pipeline-root.sh, platform.sh, issue-body-lib.sh,
+	# claude-usage.sh — see batch-orchestrator.sh:118-131). Reaching it
+	# proves SCRIPT_DIR resolved to a directory that actually holds those
+	# siblings, not the bare $TMPDIR the private copy lives in.
+	run "$scripts_copy/batch-orchestrator.sh"
+
+	# If SCRIPT_DIR repoints at $TMPDIR, sourcing resolve-pipeline-root.sh
+	# fails with "No such file or directory", resolve_consumer_file is
+	# never defined, and the run dies early with a misleading "platform.sh
+	# not found" FATAL (exit 1) instead of reaching argument parsing.
+	[[ "$output" != *"No such file or directory"* ]]
+	[[ "$output" != *"platform.sh not found"* ]]
+	[[ "$output" == *"--manifest <path>"* ]]
+	[[ "$status" -eq 3 ]]
+}
+
+@test "real batch orchestrator: re-exec creates exactly one private copy per invocation" {
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	# Isolate TMPDIR so the private copy the re-exec creates is the only
+	# batch-orchestrator.* file that can appear here — a clean, direct
+	# count of how many times the re-exec fired (AC3). A failed recursion
+	# guard would keep re-execing (and thus keep re-copying) forever; a
+	# regressed guard could also skip the re-exec (zero copies), which
+	# would resurrect the original mid-run rewrite crash.
+	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
+	mkdir -p "$reexec_tmpdir"
+	export TMPDIR="$reexec_tmpdir"
+
+	run "$scripts_copy/batch-orchestrator.sh"
+
+	local copy_count
+	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
+		-name 'batch-orchestrator.*' -type f | wc -l)
+	[[ "$copy_count" -eq 1 ]]
+}
+
+# =============================================================================
+# ISSUE #775 TASK 3: the re-exec private copy is removed on exit (AC4)
+# =============================================================================
+#
+# Task 1 leaves the private snapshot in $TMPDIR forever -- nothing ever
+# removes it. Task 3 wires its cleanup into the same EXIT/TERM trap that
+# already releases the batch lock file, so every completed run (success,
+# skip, or failure) leaves $TMPDIR exactly as it found it.
+
+@test "real batch orchestrator: the re-exec private copy is removed once the run exits" {
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	# Non-blocking gh mock: resolve the single issue as already CLOSED so the
+	# up-front skip gate short-circuits it and the run reaches its terminal
+	# state (and the full EXIT trap) without doing any real work.
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'MOCKGH'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "issue view" ]]; then
+	echo "CLOSED"
+	exit 0
+fi
+echo ""
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	# Isolate TMPDIR so the private copy is the only batch-orchestrator.* file
+	# that can appear here -- a direct, unambiguous check for leftovers.
+	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
+	mkdir -p "$reexec_tmpdir"
+	export TMPDIR="$reexec_tmpdir"
+
+	(
+		cd "$TEST_TMP" || exit 1
+		"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
+	)
+
+	local copy_count
+	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
+		-name 'batch-orchestrator.*' -type f | wc -l)
+	[[ "$copy_count" -eq 0 ]]
+}
