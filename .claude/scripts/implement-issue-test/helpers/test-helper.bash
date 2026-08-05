@@ -613,7 +613,35 @@ HEADER
         /^source "\$SCRIPT_DIR\/\.\.\/config\/platform\.sh"/ { next }
 
         # Extract SCRIPT_DIR, SCHEMA_DIR, PLATFORM_DIR, and REPO
-        /^SCRIPT_DIR=/ { print; next }
+        #
+        # SCRIPT_DIR spans multiple lines since the re-exec-from-a-private-
+        # copy fix (issue #778): it prefers the directory carried across in
+        # _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR and only falls back to a
+        # `$(cd ... && pwd)` substitution, which does not fit in 80 columns
+        # on one line:
+        #
+        #     SCRIPT_DIR="${_IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR:-$(
+        #         cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+        #     )}"
+        #
+        # Printing only the first line would emit an unterminated assignment
+        # and every consumer of this extract would die with a syntax error
+        # near an unexpected open-paren token while sourcing it. So when the
+        # line ends with an unclosed command substitution, keep printing
+        # until it closes. Single-line forms are unaffected.
+        #
+        # NOTE: this awk program is inside a single-quoted shell string, so
+        # no comment here may contain an apostrophe.
+        /^SCRIPT_DIR=/ {
+            print
+            if ($0 ~ /\$\($/) {
+                while ((getline nextline) > 0) {
+                    print nextline
+                    if (nextline ~ /^\)/) break
+                }
+            }
+            next
+        }
         /^SCHEMA_DIR=/ { print; next }
         /^PLATFORM_DIR=/ { print; next }
         /^REPO=/ { print; next }

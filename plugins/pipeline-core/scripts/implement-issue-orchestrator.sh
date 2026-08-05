@@ -41,11 +41,79 @@
 set -uo pipefail  # Note: not -e, we handle errors explicitly
 
 # =============================================================================
+# RE-EXEC FROM A PRIVATE COPY (issue #778)
+# =============================================================================
+#
+# bash reads a top-level script incrementally by byte offset as execution
+# proceeds. This is a ~12k-line top-level script, and the pipeline routinely
+# runs it on issues that edit the orchestrator itself. When such a change
+# lands on disk mid-run, the rewrite arrives underneath the running process
+# -- bash then resumes at a now-meaningless offset, even though the file on
+# disk is not corrupt. Observed both ways: a hard parse error, and (verified
+# against the pre-fix script) a silent fall-off-the-end that exits 0 having
+# done nothing, losing the rest of the run without any error at all.
+# Re-exec from a private, stable copy at startup so this process reads from
+# a snapshot that a later rewrite of the real file cannot touch. Guarded so
+# the re-exec fires at most once per
+# invocation, whether the guard originates from this block or an ancestor
+# shell. The copy path is also carried in its own exported var (rather than
+# relied on via BASH_SOURCE[0] later) so the EXIT/TERM cleanup trap below can
+# remove it deterministically -- including on failure -- without ever being
+# able to target the real script file, even in the unlikely event `exec`
+# itself fails to replace the process. Mirrors the batch-orchestrator.sh fix
+# from issue #775.
+if [[ -z "${_IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED:-}" ]]; then
+    # The XXXXXX placeholder must be the template's trailing characters:
+    # BSD/macOS mktemp only substitutes a trailing run of Xs, so a suffix
+    # placed after it (e.g. ".sh") would never be randomized -- the first
+    # call would create a literal "...XXXXXX.sh" file and every later call
+    # would fail with "File exists". bash does not care about a script's
+    # extension, so the copy is left without one.
+    _REEXEC_COPY=$(mktemp \
+        "${TMPDIR:-/tmp}/implement-issue-orchestrator.XXXXXX") || {
+        echo "FATAL: mktemp failed; cannot re-exec from a private copy" >&2
+        exit 1
+    }
+    cp "${BASH_SOURCE[0]}" "$_REEXEC_COPY" || {
+        echo "FATAL: failed to copy ${BASH_SOURCE[0]}" \
+            "to $_REEXEC_COPY" >&2
+        rm -f "$_REEXEC_COPY"
+        exit 1
+    }
+    export _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED=1
+    export _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY="$_REEXEC_COPY"
+    # Capture the real script's directory before the re-exec repoints
+    # BASH_SOURCE at the private copy. SCRIPT_DIR (below) resolves schemas
+    # and sibling scripts, so it must stay anchored to this location, not
+    # wherever the temp snapshot happens to live.
+    _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR="$(
+        cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+    )"
+    export _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR
+    # Carry the invoked path across too. After the re-exec $0 is the temp
+    # snapshot, so usage() would otherwise print a "Usage:" line naming a
+    # $TMPDIR file that this run deletes on exit -- telling an operator to
+    # re-run a path that no longer exists. SCRIPT_PATH (below) restores the
+    # real, runnable path in that output.
+    export _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_PATH="${BASH_SOURCE[0]}"
+    exec bash "$_REEXEC_COPY" "$@"
+fi
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Prefer the directory captured before the re-exec above; BASH_SOURCE now
+# points at the private temp copy, so falling back to it here would silently
+# relocate schema/sibling-script resolution to $TMPDIR.
+SCRIPT_DIR="${_IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR:-$(
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+)}"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
+# The path to show operators in usage()/help text. Prefer the pre-re-exec
+# invocation path for the same reason SCRIPT_DIR does: $0 now names the
+# private temp copy, which is deleted when this run exits.
+SCRIPT_PATH="${_IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_PATH:-$0}"
 source "$SCRIPT_DIR/model-config.sh"
 # claude-usage.sh provides is_model_exhausted, used by effective_model in
 # model-config.sh. Sourcing is no-op when CLAUDE_USAGE_SESSION_KEY is unset
@@ -583,9 +651,9 @@ QUIET=false
 
 usage() {
     cat <<EOF
-Usage: $0 --issue <number> --branch <name> [options]
-       $0 --resume [--status-file <path>]
-       $0 --resume-from <log-dir>
+Usage: $SCRIPT_PATH --issue <number> --branch <name> [options]
+       $SCRIPT_PATH --resume [--status-file <path>]
+       $SCRIPT_PATH --resume-from <log-dir>
 
 Options:
   --issue <number>       Issue number or key (required for new runs)
@@ -1720,6 +1788,19 @@ _rewrite_running_to_interrupted() {
 	sync_status_to_log
 }
 
+# cleanup_reexec_copy() — remove the private re-exec snapshot created at
+# startup (issue #778, mirrored from batch-orchestrator.sh). Deletes the
+# path recorded in the exported _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY
+# var rather than BASH_SOURCE[0]: even if `exec` itself ever failed to
+# replace the process, that var still names only the private copy, never
+# the real tracked script, so this can never delete the file out from
+# under the run. Silently no-ops when unset (never re-exec'd) or already
+# removed. Called from both the EXIT and TERM traps below.
+cleanup_reexec_copy() {
+	[[ -n "${_IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY:-}" ]] || return 0
+	rm -f "$_IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY"
+}
+
 # _cleanup_status_lock_artifacts() — called from the EXIT trap to remove the
 # status-file lock artifacts (flock fd file, mkdir-lock directory, and its
 # break mutex) so worktree/temp runs don't leave them behind — .gitignore
@@ -2090,7 +2171,7 @@ _TIMED_OUT_STAGE_NAMES=""
 _bg_pids=()
 
 # Register EXIT trap so interrupted runs surface as a distinct state and
-# metrics are always exported.  All three helpers are forward-referenced —
+# metrics are always exported.  All helpers are forward-referenced —
 # bash traps evaluate at exit time, so the definitions need not precede this
 # line.  Call order:
 #   1. _rewrite_running_to_interrupted — rewrite state="running" to
@@ -2098,7 +2179,9 @@ _bg_pids=()
 #   2. write_task_summary_to_status   — persist task summary
 #   3. export_metrics                 — emit metrics.json
 #   4. _cleanup_status_lock_artifacts — remove lock file/dir left on disk
-trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics; _cleanup_status_lock_artifacts' EXIT
+#   5. cleanup_reexec_copy            — remove the private re-exec snapshot
+#      created at startup (issue #778), if any
+trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics; _cleanup_status_lock_artifacts; cleanup_reexec_copy' EXIT
 
 # Catch SIGTERM so the EXIT trap above fires properly.  Without this, bash may
 # not run the EXIT pseudo-signal handler when it is blocked waiting on a child
@@ -2106,8 +2189,11 @@ trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metr
 # encodes SIGTERM (128 + 15) per POSIX convention.
 # _propagate_sigterm is forward-referenced — defined near the other EXIT-trap
 # helpers — it sends SIGTERM to every registered background task PID/group so
-# that child subshells do not outlive the orchestrator.
-trap '_propagate_sigterm; exit 143' TERM
+# that child subshells do not outlive the orchestrator. cleanup_reexec_copy
+# is called explicitly here too (issue #778) — not just relied on via the
+# EXIT trap the `exit 143` below also triggers — so a single SIGTERM always
+# removes the private re-exec snapshot even if trap semantics ever change.
+trap '_propagate_sigterm; cleanup_reexec_copy; exit 143' TERM
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
@@ -2359,8 +2445,19 @@ load_skill() {
         #                                when its skills/ dir is also absent
         local _plugin_root="${CLAUDE_PLUGIN_ROOT:-}"
         if [[ -z "$_plugin_root" ]]; then
+            # Prefer the directory carried across the re-exec (issue #778).
+            # After the re-exec-from-a-private-copy fix, BASH_SOURCE[0] here
+            # names the temp snapshot in $TMPDIR, so self-locating from it
+            # would resolve _repo_root to "/" and silently fail to find any
+            # skill. The BASH_SOURCE fallback is retained (not replaced) on
+            # purpose: when this function is extracted and sourced on its
+            # own from a simulated <plugin>/<version>/scripts/ path, no
+            # re-exec has happened, and that self-location is exactly the
+            # installed-plugin-layout behaviour under test (#652).
             local _script_dir _repo_root
-            _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            _script_dir="${_IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR:-$(
+                cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+            )}"
             _repo_root="$(cd "$_script_dir/../.." && pwd)"
 
             local -a _candidates=(
