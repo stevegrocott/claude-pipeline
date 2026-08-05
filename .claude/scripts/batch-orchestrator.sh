@@ -74,6 +74,41 @@ if ! command -v setsid &>/dev/null; then
 fi
 
 # =============================================================================
+# RE-EXEC FROM A PRIVATE COPY (issue #775)
+# =============================================================================
+#
+# bash reads a top-level script incrementally by byte offset as execution
+# proceeds. If a batch processes an issue that modifies and merges a change
+# to this very file, the rewrite lands on disk underneath the running
+# process -- bash then resumes at a now-meaningless offset and dies with a
+# parse error, even though the file on disk is not corrupt (observed on
+# issue #771: the batch's work had already completed, but the crash lost the
+# terminal-state write and summary). Re-exec from a private, stable copy at
+# startup so this process reads from a snapshot that a later rewrite of the
+# real file cannot touch. Guarded so the re-exec fires at most once per
+# invocation, whether the guard originates from this block or an ancestor
+# shell.
+if [[ -z "${_BATCH_ORCHESTRATOR_REEXECED:-}" ]]; then
+    # The XXXXXX placeholder must be the template's trailing characters:
+    # BSD/macOS mktemp only substitutes a trailing run of Xs, so a suffix
+    # placed after it (e.g. ".sh") would never be randomized -- the first
+    # call would create a literal "...XXXXXX.sh" file and every later call
+    # would fail with "File exists". bash does not care about a script's
+    # extension, so the copy is left without one.
+    _REEXEC_COPY=$(mktemp "${TMPDIR:-/tmp}/batch-orchestrator.XXXXXX") || {
+        echo "FATAL: mktemp failed; cannot re-exec from a private copy" >&2
+        exit 1
+    }
+    cp "${BASH_SOURCE[0]}" "$_REEXEC_COPY" || {
+        echo "FATAL: failed to copy ${BASH_SOURCE[0]}" \
+            "to $_REEXEC_COPY" >&2
+        exit 1
+    }
+    export _BATCH_ORCHESTRATOR_REEXECED=1
+    exec bash "$_REEXEC_COPY" "$@"
+fi
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
