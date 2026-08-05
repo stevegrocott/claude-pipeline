@@ -105,6 +105,14 @@ if [[ -z "${_BATCH_ORCHESTRATOR_REEXECED:-}" ]]; then
         exit 1
     }
     export _BATCH_ORCHESTRATOR_REEXECED=1
+    # Capture the real script's directory before the re-exec repoints
+    # BASH_SOURCE at the private copy. SCRIPT_DIR (below) resolves schemas
+    # and sub-orchestrators, so it must stay anchored to this location, not
+    # wherever the temp snapshot happens to live.
+    _BATCH_ORCHESTRATOR_SCRIPT_DIR="$(
+        cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+    )"
+    export _BATCH_ORCHESTRATOR_SCRIPT_DIR
     exec bash "$_REEXEC_COPY" "$@"
 fi
 
@@ -112,7 +120,12 @@ fi
 # CONFIGURATION
 # =============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Prefer the directory captured before the re-exec above; BASH_SOURCE now
+# points at the private temp copy, so falling back to it here would silently
+# relocate schema/sub-orchestrator resolution to $TMPDIR.
+SCRIPT_DIR="${_BATCH_ORCHESTRATOR_SCRIPT_DIR:-$(
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+)}"
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 # shellcheck source=resolve-pipeline-root.sh
 source "$SCRIPT_DIR/resolve-pipeline-root.sh"
