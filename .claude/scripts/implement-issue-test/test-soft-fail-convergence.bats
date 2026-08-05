@@ -134,10 +134,14 @@ teardown() {
 	local now
 	now=$(date +%s)
 	# Set start to exactly MAX_ORCHESTRATOR_WALL_TIME ago
-	# The check is strictly greater-than, so equal should pass
+	# The check is strictly greater-than, so equal should pass.
+	# Pass "$now" as the injected current time so the function reuses
+	# this single clock read instead of calling `date +%s` again --
+	# a second real-clock read here could tick past the 3600s boundary
+	# between the two reads and make this test flaky.
 	ORCHESTRATOR_START_EPOCH=$(( now - 3600 ))
 	MAX_ORCHESTRATOR_WALL_TIME=3600
-	check_wall_timeout
+	check_wall_timeout "$now"
 }
 
 @test "check_wall_timeout returns 1 one second past boundary" {
@@ -147,6 +151,28 @@ teardown() {
 	MAX_ORCHESTRATOR_WALL_TIME=3600
 	run check_wall_timeout
 	[ "$status" -eq 1 ]
+}
+
+@test "check_wall_timeout accepts an injected current time instead of the clock" {
+	# No dependency on the real clock: start epoch and "now" are both
+	# fixed, arbitrary values far from the actual current time.
+	ORCHESTRATOR_START_EPOCH=1000000000
+	MAX_ORCHESTRATOR_WALL_TIME=3600
+
+	# Injected now is within budget (elapsed == 3600, boundary passes).
+	run check_wall_timeout 1000003600
+	[ "$status" -eq 0 ]
+
+	# Injected now is past budget (elapsed == 3601).
+	run check_wall_timeout 1000003601
+	[ "$status" -eq 1 ]
+}
+
+@test "check_wall_timeout falls back to the real clock when no time is injected" {
+	ORCHESTRATOR_START_EPOCH=$(date +%s)
+	MAX_ORCHESTRATOR_WALL_TIME=3600
+	run check_wall_timeout
+	[ "$status" -eq 0 ]
 }
 
 # =============================================================================

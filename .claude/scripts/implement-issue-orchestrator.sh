@@ -323,8 +323,9 @@ get_task_wall_time() {
 # =============================================================================
 
 check_wall_timeout() {
-    local now elapsed
-    now=$(date +%s)
+    local now="${1:-}"
+    local elapsed
+    now="${now:-$(date +%s)}"
     elapsed=$(( now - ORCHESTRATOR_START_EPOCH ))
     if (( elapsed > MAX_ORCHESTRATOR_WALL_TIME )); then
         log_warn "Global wall-clock timeout: ${elapsed}s elapsed (limit: ${MAX_ORCHESTRATOR_WALL_TIME}s). Soft-exiting current loop."
