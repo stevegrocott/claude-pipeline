@@ -3515,3 +3515,70 @@ BROKEN
 	[[ -f "$summary_file" ]]
 	[[ "$(jq -r '.state' "$summary_file")" == "completed_with_skips" ]]
 }
+
+# =============================================================================
+# ISSUE #775 TASK 5: SCRIPT_DIR survives the re-exec; re-exec fires once
+# =============================================================================
+#
+# The re-exec (tasks 1-3) repoints BASH_SOURCE[0] at a private temp copy
+# before SCRIPT_DIR is derived from it. If the original directory is not
+# carried across explicitly, SCRIPT_DIR silently resolves to the bare
+# $TMPDIR the copy lives in instead of the real scripts/ directory — a
+# failure mode the issue calls out as more dangerous than the crash it
+# fixes, because it surfaces as unresolved schemas and sub-orchestrators
+# rather than an obvious error (AC2).
+#
+# Both tests below run the REAL script from an isolated copy of scripts/
+# (never the tracked repo file), exactly as the task 4 test does.
+
+@test "real batch orchestrator: SCRIPT_DIR resolves to the real script directory after re-exec" {
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	# No args: usage() is the first exit path that only runs after every
+	# SCRIPT_DIR-dependent sibling has already been sourced successfully
+	# (resolve-pipeline-root.sh, platform.sh, issue-body-lib.sh,
+	# claude-usage.sh — see batch-orchestrator.sh:118-131). Reaching it
+	# proves SCRIPT_DIR resolved to a directory that actually holds those
+	# siblings, not the bare $TMPDIR the private copy lives in.
+	run "$scripts_copy/batch-orchestrator.sh"
+
+	# If SCRIPT_DIR repoints at $TMPDIR, sourcing resolve-pipeline-root.sh
+	# fails with "No such file or directory", resolve_consumer_file is
+	# never defined, and the run dies early with a misleading "platform.sh
+	# not found" FATAL (exit 1) instead of reaching argument parsing.
+	[[ "$output" != *"No such file or directory"* ]]
+	[[ "$output" != *"platform.sh not found"* ]]
+	[[ "$output" == *"--manifest <path>"* ]]
+	[[ "$status" -eq 3 ]]
+}
+
+@test "real batch orchestrator: re-exec creates exactly one private copy per invocation" {
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	# Isolate TMPDIR so the private copy the re-exec creates is the only
+	# batch-orchestrator.* file that can appear here — a clean, direct
+	# count of how many times the re-exec fired (AC3). A failed recursion
+	# guard would keep re-execing (and thus keep re-copying) forever; a
+	# regressed guard could also skip the re-exec (zero copies), which
+	# would resurrect the original mid-run rewrite crash.
+	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
+	mkdir -p "$reexec_tmpdir"
+	export TMPDIR="$reexec_tmpdir"
+
+	run "$scripts_copy/batch-orchestrator.sh"
+
+	local copy_count
+	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
+		-name 'batch-orchestrator.*' -type f | wc -l)
+	[[ "$copy_count" -eq 1 ]]
+}
