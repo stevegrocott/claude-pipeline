@@ -149,6 +149,28 @@ teardown() {
 	[ "$status" -eq 1 ]
 }
 
+@test "check_wall_timeout accepts an injected current time instead of the clock" {
+	# No dependency on the real clock: start epoch and "now" are both
+	# fixed, arbitrary values far from the actual current time.
+	ORCHESTRATOR_START_EPOCH=1000000000
+	MAX_ORCHESTRATOR_WALL_TIME=3600
+
+	# Injected now is within budget (elapsed == 3600, boundary passes).
+	run check_wall_timeout 1000003600
+	[ "$status" -eq 0 ]
+
+	# Injected now is past budget (elapsed == 3601).
+	run check_wall_timeout 1000003601
+	[ "$status" -eq 1 ]
+}
+
+@test "check_wall_timeout falls back to the real clock when no time is injected" {
+	ORCHESTRATOR_START_EPOCH=$(date +%s)
+	MAX_ORCHESTRATOR_WALL_TIME=3600
+	run check_wall_timeout
+	[ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # DEGRADED_STAGES TRACKING
 # =============================================================================
