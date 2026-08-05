@@ -134,10 +134,14 @@ teardown() {
 	local now
 	now=$(date +%s)
 	# Set start to exactly MAX_ORCHESTRATOR_WALL_TIME ago
-	# The check is strictly greater-than, so equal should pass
+	# The check is strictly greater-than, so equal should pass.
+	# Pass "$now" as the injected current time so the function reuses
+	# this single clock read instead of calling `date +%s` again --
+	# a second real-clock read here could tick past the 3600s boundary
+	# between the two reads and make this test flaky.
 	ORCHESTRATOR_START_EPOCH=$(( now - 3600 ))
 	MAX_ORCHESTRATOR_WALL_TIME=3600
-	check_wall_timeout
+	check_wall_timeout "$now"
 }
 
 @test "check_wall_timeout returns 1 one second past boundary" {
