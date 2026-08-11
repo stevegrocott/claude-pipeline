@@ -230,7 +230,7 @@ You are a [role] focused on [single capability].
 
 See these agents in `.claude/agents/` for production examples:
 
-- **code-simplifier.md** - Specialist with clear scope and anti-patterns
-- **laravel-backend-developer.md** - Comprehensive specialist with coordination protocols
+- **react-frontend-developer.md** - Specialist with clear scope and anti-patterns
+- **bash-script-craftsman.md** - Comprehensive specialist with coordination protocols
 - **spec-reviewer.md** - Reviewer with structured output format
-- **gitscrum-leader.md** - Orchestrator with delegation patterns
+- **cc-orchestration-writer.md** - Orchestrator with delegation patterns
