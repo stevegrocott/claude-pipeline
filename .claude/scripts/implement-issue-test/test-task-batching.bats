@@ -467,11 +467,17 @@ teardown() {
 
 	mkdir -p "$LOG_BASE/stages"
 
-	# Mock run_stage to return success
+	# Mock run_stage to return success and actually commit — the silent
+	# no-op guard (issue #790) treats an unmoved HEAD as a failed task, so
+	# a mock that only reports success without committing no longer
+	# represents a real successful task.
 	# run_stage nests structured fields under .output (only .status is lifted
 	# to the top level) — execute_batch_serial reads .output.status /
 	# .output.commit / .output.summary, so the mock must match that envelope.
 	run_stage() {
+		printf 'task 1 output\n' > task-1-out.txt
+		git add task-1-out.txt
+		git commit -q -m "task 1"
 		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
 	}
 	# Mock quality-related functions
@@ -817,10 +823,17 @@ _setup_parallel_stage_mocks() {
 
 	mkdir -p "$LOG_BASE/stages"
 
+	# run_stage mock actually commits — the silent no-op guard (issue #790)
+	# treats an unmoved HEAD as a failed task, so a mock that only reports
+	# success without committing no longer represents a real successful
+	# task.
 	# run_stage nests structured fields under .output (only .status is lifted
 	# to the top level) — execute_batch_serial reads .output.status /
 	# .output.commit / .output.summary, so the mock must match that envelope.
 	run_stage() {
+		printf 'task 3 output\n' > task-3-out.txt
+		git add task-3-out.txt
+		git commit -q -m "task 3"
 		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
 	}
 	should_run_quality_loop() { return 1; }
