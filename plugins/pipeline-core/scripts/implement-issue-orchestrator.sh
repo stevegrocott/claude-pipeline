@@ -5,7 +5,7 @@
 #
 # Usage:
 #   ./implement-issue-orchestrator.sh --issue 123 --branch test
-#   ./implement-issue-orchestrator.sh --issue 123 --branch test --agent precis-backend-developer
+#   ./implement-issue-orchestrator.sh --issue 123 --branch test --agent <your-agent-name>
 #
 # Outputs:
 #   - status.json: Real-time progress
