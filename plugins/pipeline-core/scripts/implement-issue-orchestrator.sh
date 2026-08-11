@@ -6611,12 +6611,22 @@ sanitize_worktree_commits() {
 # inside the allowed set:
 #
 #   - paths under tests/
+#   - root-level markdown docs (e.g. ./README.md, ./CLAUDE.md — no
+#     directory separator in the path; nested markdown is only admitted
+#     via the docs/**, .claude/skills/**, and
+#     plugins/pipeline-core/skills/** arms below)
 #   - recognised source-code extensions:
 #       .ts .tsx .js .jsx .mjs .cjs .sh .bats
 #       .py .go .rb .java .rs .c .cpp .h .hpp
 #
 # Any path outside the allowlist causes the function to return non-zero
 # and emit a clear error, which the caller must treat as a stage failure.
+#
+# Decision (issue #789 AC4): root-level CLAUDE.md is admitted, not
+# denylisted. Markdown cannot execute or alter runtime behaviour the way
+# .github/workflows/** can, and the commit is still reviewed on the PR
+# before merge. Revisit by adding an explicit CLAUDE.md hard-denylist arm
+# (alongside .github/workflows/**) if that trust assumption changes.
 #
 # Arguments:
 #   $1 - git directory (passed to git -C); defaults to "."
@@ -6652,6 +6662,14 @@ guard_commit_path_allowlist() {
 			.claude/agents/**) continue ;;
 			.claude/skills/**) continue ;;
 			plugins/pipeline-core/skills/**) continue ;;
+			*.md)
+				# Root-level docs only (no directory separator);
+				# nested markdown outside the arms above still
+				# falls through to the bad bucket.
+				case "$path" in
+					*/*) bad+=("$path") ;;
+					*) continue ;;
+				esac ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs)
 				continue ;;
 			*.sh | *.bats | *.py | *.go | *.rb | *.java | *.rs)
