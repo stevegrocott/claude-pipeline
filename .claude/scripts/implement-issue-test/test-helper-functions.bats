@@ -618,3 +618,108 @@ WRAPPER
     [ "$status" -eq 0 ]
 }
 
+# =============================================================================
+# guard_commit_path_allowlist() — root-level markdown docs (issue #789)
+# =============================================================================
+#
+# AC4 decision (issue #789): root-level CLAUDE.md is admitted, not
+# denylisted, on the same footing as README.md — markdown cannot execute
+# or alter runtime behaviour the way .github/workflows/** can, and the
+# commit is still reviewed on the PR before merge. Nested markdown outside
+# the existing docs/**, .claude/skills/**, and
+# plugins/pipeline-core/skills/** arms is still rejected, so the guard's
+# intent of blocking unreviewed code/config changes is preserved.
+
+@test "guard_commit_path_allowlist admits a commit touching only root-level README.md" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-readme
+    echo "corrected claim" > README.md
+    git add README.md
+    git commit -q -m "fix README claim"
+
+    local wrapper="$TEST_TMP/guard_readme_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+unset EXTRA_COMMIT_PATHS
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+
+    run "$wrapper"
+    [ "$status" -eq 0 ]
+}
+
+@test "guard_commit_path_allowlist admits a commit touching only root-level CLAUDE.md" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-claude-md
+    echo "updated instructions" > CLAUDE.md
+    git add CLAUDE.md
+    git commit -q -m "update CLAUDE.md"
+
+    local wrapper="$TEST_TMP/guard_claude_md_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+unset EXTRA_COMMIT_PATHS
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+
+    run "$wrapper"
+    [ "$status" -eq 0 ]
+}
+
+@test "guard_commit_path_allowlist still rejects a root-level non-doc file with EXTRA_COMMIT_PATHS unset" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-nondoc
+    echo "some,csv,data" > notes.csv
+    git add notes.csv
+    git commit -q -m "add notes.csv"
+
+    local wrapper="$TEST_TMP/guard_nondoc_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+unset EXTRA_COMMIT_PATHS
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+
+    run "$wrapper"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"notes.csv"* ]] || \
+        fail "Expected bad path 'notes.csv' flagged in output. Got: $output"
+}
+
+@test "guard_commit_path_allowlist still rejects nested markdown outside the docs/skills arms" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-nested-md
+    mkdir -p notes
+    echo "not under docs/ or .claude/skills/" > notes/plan.md
+    git add notes/plan.md
+    git commit -q -m "add nested markdown"
+
+    local wrapper="$TEST_TMP/guard_nested_md_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+unset EXTRA_COMMIT_PATHS
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+
+    run "$wrapper"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"notes/plan.md"* ]] || \
+        fail "Expected bad path 'notes/plan.md' flagged in output. Got: $output"
+}
+
