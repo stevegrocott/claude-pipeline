@@ -6652,6 +6652,16 @@ guard_commit_path_allowlist() {
 
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
+		# Root-level docs (no directory separator) are always admitted;
+		# nested markdown falls through to the default arm below, where
+		# EXTRA_COMMIT_PATHS can still override it.
+		case "$path" in
+			*.md)
+				case "$path" in
+					*/*) : ;;
+					*) continue ;;
+				esac ;;
+		esac
 		case "$path" in
 			# Hard denylist — not overridable by EXTRA_COMMIT_PATHS.
 			.github/workflows/**) bad+=("$path") ;;
@@ -6662,14 +6672,6 @@ guard_commit_path_allowlist() {
 			.claude/agents/**) continue ;;
 			.claude/skills/**) continue ;;
 			plugins/pipeline-core/skills/**) continue ;;
-			*.md)
-				# Root-level docs only (no directory separator);
-				# nested markdown outside the arms above still
-				# falls through to the bad bucket.
-				case "$path" in
-					*/*) bad+=("$path") ;;
-					*) continue ;;
-				esac ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs)
 				continue ;;
 			*.sh | *.bats | *.py | *.go | *.rb | *.java | *.rs)
