@@ -5826,6 +5826,54 @@ _fetch_issue_comment_bodies() {
 	esac
 }
 
+# Looks up a task's declared non-commit deliverable by task id.
+#
+# Re-derives the annotation from the task's own description via
+# _task_annotation — the same parse _parse_task_lines uses — rather than
+# trusting a pre-populated .deliverable field. A batch_tasks/serial_tasks
+# array that was assembled without going through _parse_task_lines (a
+# resumed batch, a hand-built task list) would otherwise carry no
+# .deliverable field even though the description still names one, letting
+# the no-op guard fall through to "no deliverable declared" and fail a task
+# that plainly declared one (issue #790). Falls back to a .deliverable
+# field for callers that populate it directly instead of via a
+# backtick-annotated description.
+#
+# Split out so both silent no-op guard sites (execute_batch_parallel and
+# execute_batch_serial) consult the same annotation the same way (issue
+# #790) instead of re-deriving it independently.
+#
+# Arguments:
+#   $1 - tasks_json (array of task objects, each carrying a .description
+#        and optionally a .deliverable field)
+#   $2 - task id
+# Outputs:
+#   The deliverable spec ("comment:<marker>" or "file:<path>") on stdout,
+#   or an empty string when the task declared none.
+_task_deliverable_by_id() {
+	local tasks_json="$1"
+	local task_id="$2"
+
+	local desc
+	desc=$(printf '%s' "$tasks_json" | jq -r --argjson id "$task_id" \
+		'(.[] | select(.id == $id) | .description) // ""' \
+		2>/dev/null)
+
+	local spec=""
+	if [[ -n "$desc" ]]; then
+		spec=$(_task_annotation "$desc" "deliverable" 2>/dev/null)
+	fi
+
+	if [[ -n "$spec" ]]; then
+		printf '%s' "$spec"
+		return 0
+	fi
+
+	printf '%s' "$tasks_json" | jq -r --argjson id "$task_id" \
+		'(.[] | select(.id == $id) | .deliverable) // ""' \
+		2>/dev/null
+}
+
 # Verifies that a task's declared non-commit artefact actually exists.
 #
 # Arguments:
@@ -6960,13 +7008,37 @@ execute_batch_parallel() {
 		# this check the task is counted "completed" and the issue sails to a
 		# false-green PR with the intended changes never landed. Treat an empty
 		# worktree branch as a failed task so it surfaces in the task summary.
+		#
+		# A task that declared a non-commit deliverable (issue #634) is
+		# exempt from the commit requirement — but only once its declared
+		# artefact actually verifies (issue #790). The annotation alone is
+		# never enough to dodge the guard.
 		if [[ -z "$(git rev-list "${feature_branch}..${wb}" 2>/dev/null)" ]]; then
-			log_error "Task $tid reported success but produced no commits" \
-				"— marking failed (silent no-op guard)"
-			failed+=("$tid")
-			cleanup_worktree "$wp" "$wb" \
-				"$ISSUE_NUMBER" "$tid" "$feature_branch"
-			continue
+			local tid_deliverable
+			tid_deliverable=$(_task_deliverable_by_id \
+				"$batch_tasks" "$tid")
+
+			if [[ -n "$tid_deliverable" ]] \
+				&& verify_task_deliverable "$tid_deliverable"; then
+				log "Task $tid produced no commits, but its declared" \
+					"deliverable ($tid_deliverable) verified" \
+					"— accepting as a non-commit deliverable"
+			else
+				if [[ -n "$tid_deliverable" ]]; then
+					log_error "Task $tid declared deliverable" \
+						"($tid_deliverable) but it could not be" \
+						"verified — marking failed" \
+						"(silent no-op guard)"
+				else
+					log_error "Task $tid reported success but" \
+						"produced no commits — marking failed" \
+						"(silent no-op guard)"
+				fi
+				failed+=("$tid")
+				cleanup_worktree "$wp" "$wb" \
+					"$ISSUE_NUMBER" "$tid" "$feature_branch"
+				continue
+			fi
 		fi
 
 		# Attempt merge
@@ -7314,6 +7386,12 @@ Commit your changes with a descriptive message."
 		local review_attempts=0
 		local task_succeeded=false
 
+		# Baseline for the silent no-op guard below (issue #790) — captured
+		# before any implementation attempt so a task that retries still
+		# compares against the branch state from before it started.
+		local task_head_before
+		task_head_before=$(git rev-parse HEAD 2>/dev/null)
+
 		local base_timeout
 		base_timeout=$(get_stage_timeout \
 			"implement-task-$tid" "$tsize")
@@ -7426,6 +7504,43 @@ Commit your changes with a descriptive message."
 					"$feature_branch" \
 					"task-$tid" "$tagent" \
 					"$quality_max" "$tsize"
+			fi
+
+			# Silent no-op guard (issue #790) — mirrors the worktree guard
+			# in execute_batch_parallel. A subagent can self-report
+			# {"status":"success"} yet commit nothing, and the serial path
+			# has no worktree merge to expose that silently. A task that
+			# declared a non-commit deliverable (issue #634) is exempt from
+			# the commit requirement, but only once its declared artefact
+			# actually verifies — the annotation alone is never enough to
+			# dodge the guard.
+			local task_head_after
+			task_head_after=$(git rev-parse HEAD 2>/dev/null)
+			if [[ "$task_head_after" == "$task_head_before" ]]; then
+				local tid_deliverable
+				tid_deliverable=$(_task_deliverable_by_id \
+					"$serial_tasks" "$tid")
+
+				if [[ -n "$tid_deliverable" ]] \
+					&& verify_task_deliverable "$tid_deliverable"; then
+					log "Task $tid produced no commits, but its" \
+						"declared deliverable ($tid_deliverable)" \
+						"verified — accepting as a non-commit" \
+						"deliverable"
+				else
+					if [[ -n "$tid_deliverable" ]]; then
+						log_error "Task $tid declared deliverable" \
+							"($tid_deliverable) but it could not" \
+							"be verified — marking failed" \
+							"(silent no-op guard)"
+					else
+						log_error "Task $tid reported success" \
+							"but produced no commits — marking" \
+							"failed (silent no-op guard)"
+					fi
+					failed+=("$tid")
+					continue
+				fi
 			fi
 
 			# Write result file for main loop

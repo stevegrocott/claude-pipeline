@@ -5826,16 +5826,26 @@ _fetch_issue_comment_bodies() {
 	esac
 }
 
-# Looks up the non-commit deliverable annotation already parsed onto a task
-# (see _parse_task_lines), by task id.
+# Looks up a task's declared non-commit deliverable by task id.
+#
+# Re-derives the annotation from the task's own description via
+# _task_annotation — the same parse _parse_task_lines uses — rather than
+# trusting a pre-populated .deliverable field. A batch_tasks/serial_tasks
+# array that was assembled without going through _parse_task_lines (a
+# resumed batch, a hand-built task list) would otherwise carry no
+# .deliverable field even though the description still names one, letting
+# the no-op guard fall through to "no deliverable declared" and fail a task
+# that plainly declared one (issue #790). Falls back to a .deliverable
+# field for callers that populate it directly instead of via a
+# backtick-annotated description.
 #
 # Split out so both silent no-op guard sites (execute_batch_parallel and
 # execute_batch_serial) consult the same annotation the same way (issue
 # #790) instead of re-deriving it independently.
 #
 # Arguments:
-#   $1 - tasks_json (array of task objects, each optionally carrying
-#        a .deliverable field)
+#   $1 - tasks_json (array of task objects, each carrying a .description
+#        and optionally a .deliverable field)
 #   $2 - task id
 # Outputs:
 #   The deliverable spec ("comment:<marker>" or "file:<path>") on stdout,
@@ -5843,6 +5853,21 @@ _fetch_issue_comment_bodies() {
 _task_deliverable_by_id() {
 	local tasks_json="$1"
 	local task_id="$2"
+
+	local desc
+	desc=$(printf '%s' "$tasks_json" | jq -r --argjson id "$task_id" \
+		'(.[] | select(.id == $id) | .description) // ""' \
+		2>/dev/null)
+
+	local spec=""
+	if [[ -n "$desc" ]]; then
+		spec=$(_task_annotation "$desc" "deliverable" 2>/dev/null)
+	fi
+
+	if [[ -n "$spec" ]]; then
+		printf '%s' "$spec"
+		return 0
+	fi
 
 	printf '%s' "$tasks_json" | jq -r --argjson id "$task_id" \
 		'(.[] | select(.id == $id) | .deliverable) // ""' \

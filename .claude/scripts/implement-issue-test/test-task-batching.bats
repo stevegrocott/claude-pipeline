@@ -2392,6 +2392,46 @@ _setup_parallel_stage_mocks() {
 }
 
 # -----------------------------------------------------------------------------
+# _task_deliverable_by_id — find the marker, don't just trust a field
+# (issue #790). batch_tasks/serial_tasks reaching the no-op guard may not
+# have gone through _parse_task_lines, so the lookup must re-derive the
+# annotation from the description rather than requiring a pre-populated
+# .deliverable field.
+# -----------------------------------------------------------------------------
+
+@test "_task_deliverable_by_id: derives the spec from the description when no .deliverable field is present" {
+	local tasks
+	tasks='[{"id":1,"description":"Audit the thing `deliverable:comment:task1-done`"}]'
+	local result
+	result=$(_task_deliverable_by_id "$tasks" 1)
+	[[ "$result" == "comment:task1-done" ]]
+}
+
+@test "_task_deliverable_by_id: falls back to a pre-populated .deliverable field" {
+	local tasks
+	tasks='[{"id":1,"description":"Audit the thing","deliverable":"comment:task1-done"}]'
+	local result
+	result=$(_task_deliverable_by_id "$tasks" 1)
+	[[ "$result" == "comment:task1-done" ]]
+}
+
+@test "_task_deliverable_by_id: description annotation wins over a stale .deliverable field" {
+	local tasks
+	tasks='[{"id":1,"description":"Audit `deliverable:comment:fresh-marker`","deliverable":"comment:stale-marker"}]'
+	local result
+	result=$(_task_deliverable_by_id "$tasks" 1)
+	[[ "$result" == "comment:fresh-marker" ]]
+}
+
+@test "_task_deliverable_by_id: returns empty when the task declared no deliverable" {
+	local tasks
+	tasks='[{"id":1,"description":"Just implement the thing"}]'
+	local result
+	result=$(_task_deliverable_by_id "$tasks" 1)
+	[[ -z "$result" ]]
+}
+
+# -----------------------------------------------------------------------------
 # AC1/AC2 — the partial-delivery count and the commits-ahead abort
 # -----------------------------------------------------------------------------
 
