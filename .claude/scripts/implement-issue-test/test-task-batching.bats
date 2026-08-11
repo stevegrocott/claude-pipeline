@@ -539,6 +539,96 @@ teardown() {
 }
 
 # =============================================================================
+# no-op guard vs. declared non-commit deliverables, serial path (issue #790)
+# Mirrors the execute_batch_parallel coverage above (lines 1311, 1376) so a
+# wiring bug specific to execute_batch_serial's task_head_before/after check
+# (wrong tasks_json variable, missing continue, stale HEAD capture) fails a
+# test instead of only being covered by the shared-helper unit tests.
+# =============================================================================
+
+@test "execute_batch_serial: comment-deliverable task with no commits and a matching comment is completed, not failed" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-deliverable-comment 2>/dev/null || true
+	git checkout -q -b feature/serial-deliverable-comment main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# Mock run_stage to report success without committing — the case
+	# assert_issue_valid's deliverable exemption exists for (issue #634).
+	run_stage() {
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"none","summary":"posted audit as comment"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "3"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+	# Stub the tracker boundary: the declared marker is present in a comment.
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "Audit complete. marker:task80-audit-done"
+	}
+
+	local tasks result comp_len fail_len
+	tasks='[
+		{"id":80,"description":"Audit the thing `deliverable:comment:task80-audit-done`","agent":"default"}
+	]'
+	result=$(execute_batch_serial "$tasks" \
+		"feature/serial-deliverable-comment" "main")
+	comp_len=$(printf '%s' "$result" | jq '.completed | length')
+	fail_len=$(printf '%s' "$result" | jq '.failed | length')
+
+	git checkout -q main
+	git branch -D feature/serial-deliverable-comment 2>/dev/null || true
+
+	# A verified comment deliverable must be recorded completed despite the
+	# unmoved HEAD — the guard consults the annotation instead of demanding
+	# commits (AC1).
+	[[ "$comp_len" -eq 1 ]]
+	[[ "$fail_len" -eq 0 ]]
+}
+
+@test "execute_batch_serial: comment-deliverable task whose marker appears in no comment still fails" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-deliverable-unmatched 2>/dev/null || true
+	git checkout -q -b feature/serial-deliverable-unmatched main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	run_stage() {
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"none","summary":"claimed a comment deliverable"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "3"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+	# No comment carries the declared marker — the annotation must not be
+	# enough on its own to bypass the guard (AC3).
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "An unrelated comment that never mentions the marker."
+	}
+
+	local tasks result comp_len fail_len
+	tasks='[
+		{"id":81,"description":"Audit the thing `deliverable:comment:task81-missing-marker`","agent":"default"}
+	]'
+	result=$(execute_batch_serial "$tasks" \
+		"feature/serial-deliverable-unmatched" "main")
+	comp_len=$(printf '%s' "$result" | jq '.completed | length')
+	fail_len=$(printf '%s' "$result" | jq '.failed | length')
+
+	git checkout -q main
+	git branch -D feature/serial-deliverable-unmatched 2>/dev/null || true
+
+	[[ "$fail_len" -eq 1 ]]
+	[[ "$comp_len" -eq 0 ]]
+}
+
+# =============================================================================
 # execute_batch_parallel (worktree integration)
 # =============================================================================
 
