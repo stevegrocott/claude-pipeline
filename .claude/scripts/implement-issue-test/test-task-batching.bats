@@ -44,6 +44,10 @@
 #   execute_batch_parallel:
 #     1. creates worktrees for each task in batch
 #     2. returns conflicted array on merge conflict
+#     3. comment-deliverable task with no commits + matching comment ->
+#        completed, not failed (issue #790, AC1)
+#     4. comment-deliverable task whose marker matches no comment -> still
+#        fails (issue #790, AC3)
 #
 #   run_parallel_post_task_stages:
 #     1. e2e-verify and acceptance-test launch as separate background processes
@@ -1290,6 +1294,140 @@ _setup_parallel_stage_mocks() {
 	git branch -D wt-task-20 2>/dev/null || true
 
 	# The no-op task must be classified failed, NOT completed.
+	[[ "$failed_count" -eq 1 ]]
+	[[ "$completed_count" -eq 0 ]]
+}
+
+# =============================================================================
+# no-op guard vs. declared non-commit deliverables (issue #790)
+# The guard above is correct for a task that was supposed to write code, but
+# wrong for one whose deliverable is a `deliverable:comment:<marker>`
+# annotation — assert_issue_valid already exempts such tasks from the
+# "must name a file path" rule (issue #634). These tests drive that
+# annotation through the runtime guard directly, which is the exact gap
+# issue #790 reports: the two halves disagree without either suite going red.
+# =============================================================================
+
+@test "execute_batch_parallel: comment-deliverable task with no commits and a matching comment is completed, not failed" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/deliverable-comment 2>/dev/null || true
+	git branch -D wt-task-70 2>/dev/null || true
+	git checkout -q -b feature/deliverable-comment main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'base\n' > base.ts
+	git add base.ts
+	git commit -q -m "add base"
+
+	# A research/audit task that posts its findings as an issue comment and
+	# commits nothing — the case assert_issue_valid's deliverable exemption
+	# exists for.
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf '{"status":"success","review_attempts":1,"commit":"none","summary":"posted audit as comment"}' \
+			> "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	# Stub the tracker boundary: the declared marker is present in a comment.
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "Audit complete. marker:task70-audit-done"
+	}
+	export -f run_task_in_worktree
+	export -f extract_task_size
+	export -f _fetch_issue_comment_bodies
+
+	local tasks
+	tasks='[
+		{"id":70,"description":"Audit the thing `deliverable:comment:task70-audit-done`","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/deliverable-comment" "main" \
+		2>/dev/null) || true
+
+	local completed_count failed_count
+	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+	failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+
+	# Clean up BEFORE asserting so the assertions are the test's last commands.
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/deliverable-comment 2>/dev/null || true
+	git branch -D wt-task-70 2>/dev/null || true
+
+	# A verified comment deliverable must be recorded completed despite the
+	# empty worktree branch — the guard consults the annotation instead of
+	# demanding commits (AC1).
+	[[ "$completed_count" -eq 1 ]]
+	[[ "$failed_count" -eq 0 ]]
+}
+
+@test "execute_batch_parallel: comment-deliverable task whose marker appears in no comment still fails" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/deliverable-unmatched 2>/dev/null || true
+	git branch -D wt-task-71 2>/dev/null || true
+	git checkout -q -b feature/deliverable-unmatched main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'base\n' > base.ts
+	git add base.ts
+	git commit -q -m "add base"
+
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf '{"status":"success","review_attempts":1,"commit":"none","summary":"claimed a comment deliverable"}' \
+			> "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	# No comment carries the declared marker — the annotation must not be
+	# enough on its own to bypass the guard (AC3).
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "An unrelated comment that never mentions the marker."
+	}
+	export -f run_task_in_worktree
+	export -f extract_task_size
+	export -f _fetch_issue_comment_bodies
+
+	local tasks
+	tasks='[
+		{"id":71,"description":"Audit the thing `deliverable:comment:task71-missing-marker`","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/deliverable-unmatched" "main" \
+		2>/dev/null) || true
+
+	local completed_count failed_count
+	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+	failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/deliverable-unmatched 2>/dev/null || true
+	git branch -D wt-task-71 2>/dev/null || true
+
 	[[ "$failed_count" -eq 1 ]]
 	[[ "$completed_count" -eq 0 ]]
 }
