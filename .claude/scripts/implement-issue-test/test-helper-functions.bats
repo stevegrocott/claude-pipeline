@@ -618,3 +618,111 @@ WRAPPER
     [ "$status" -eq 0 ]
 }
 
+# =============================================================================
+# guard_commit_path_allowlist() — root-level markdown docs (issue #789)
+# =============================================================================
+#
+# AC4 decision (issue #789): root-level CLAUDE.md is admitted, not
+# denylisted, on the same footing as README.md — markdown cannot execute
+# or alter runtime behaviour the way .github/workflows/** can, and the
+# commit is still reviewed on the PR before merge. Nested markdown outside
+# the existing docs/**, .claude/skills/**, and
+# plugins/pipeline-core/skills/** arms is still rejected by default (though
+# still overridable via EXTRA_COMMIT_PATHS, like any other non-denylisted
+# path), so the guard's intent of blocking unreviewed code/config changes
+# is preserved.
+#
+# The "still rejects" tests below (non-doc, nested-md) also pass against
+# main — they are regression guards for pre-existing behaviour, not RED
+# tests for this change. The EXTRA_COMMIT_PATHS override test is the RED
+# test for AC3: it failed before the fix in this PR.
+
+# Writes an executable wrapper that sources the orchestrator functions and
+# invokes guard_commit_path_allowlist against $TEST_TMP/repo at HEAD.
+# $1: path to write the wrapper to
+# $2: optional EXTRA_COMMIT_PATHS value (unset when omitted)
+make_guard_wrapper() {
+    local wrapper="$1"
+    local extra="${2:-}"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+$( [[ -n "$extra" ]] && echo "export EXTRA_COMMIT_PATHS=\"$extra\"" || echo "unset EXTRA_COMMIT_PATHS" )
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+}
+
+@test "guard_commit_path_allowlist admits a commit touching only root-level README.md" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-readme
+    echo "corrected claim" > README.md
+    git add README.md
+    git commit -q -m "fix README claim"
+
+    make_guard_wrapper "$TEST_TMP/guard_readme_wrapper.sh"
+
+    run "$TEST_TMP/guard_readme_wrapper.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "guard_commit_path_allowlist admits a commit touching only root-level CLAUDE.md" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-claude-md
+    echo "updated instructions" > CLAUDE.md
+    git add CLAUDE.md
+    git commit -q -m "update CLAUDE.md"
+
+    make_guard_wrapper "$TEST_TMP/guard_claude_md_wrapper.sh"
+
+    run "$TEST_TMP/guard_claude_md_wrapper.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "guard_commit_path_allowlist still rejects a root-level non-doc file with EXTRA_COMMIT_PATHS unset" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-nondoc
+    echo "some,csv,data" > notes.csv
+    git add notes.csv
+    git commit -q -m "add notes.csv"
+
+    make_guard_wrapper "$TEST_TMP/guard_nondoc_wrapper.sh"
+
+    run "$TEST_TMP/guard_nondoc_wrapper.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"notes.csv"* ]] || \
+        fail "Expected bad path 'notes.csv' flagged in output. Got: $output"
+}
+
+@test "guard_commit_path_allowlist still rejects nested markdown outside the docs/skills arms" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-nested-md
+    mkdir -p notes
+    echo "not under docs/ or .claude/skills/" > notes/plan.md
+    git add notes/plan.md
+    git commit -q -m "add nested markdown"
+
+    make_guard_wrapper "$TEST_TMP/guard_nested_md_wrapper.sh"
+
+    run "$TEST_TMP/guard_nested_md_wrapper.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"notes/plan.md"* ]] || \
+        fail "Expected bad path 'notes/plan.md' flagged in output. Got: $output"
+}
+
+@test "guard_commit_path_allowlist admits nested markdown when EXTRA_COMMIT_PATHS allows it" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-789-nested-md-override
+    mkdir -p notes
+    echo "not under docs/ or .claude/skills/" > notes/plan.md
+    git add notes/plan.md
+    git commit -q -m "add nested markdown"
+
+    make_guard_wrapper "$TEST_TMP/guard_nested_md_override_wrapper.sh" "notes/plan.md"
+
+    run "$TEST_TMP/guard_nested_md_override_wrapper.sh"
+    [ "$status" -eq 0 ]
+}
+
