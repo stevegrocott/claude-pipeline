@@ -523,7 +523,7 @@ A pre-commit hook (`skill-validate.sh`) validates every skill file against this 
 ## Hooks
 
 - **Session Start** (`hooks/session-start.sh`): Injects `using-skills` into every conversation
-- **Post-PR Simplify** (`hooks/post-pr-simplify.sh`): Runs code-simplifier after PR/MR creation (platform-agnostic)
+- **Post-PR Simplify** (`hooks/post-pr-simplify.sh`): After PR/MR creation, blocks the tool call and instructs Claude to run the `code-simplifier` agent for non-trivial PRs (≥100 lines added or ≥10 files changed); small PRs get a suggestion instead of a block, and it warns (without blocking) if no `code-simplifier` agent is defined in the repo (platform-agnostic)
 - **RTK Command Rewrite** (`hooks/rtk-rewrite.sh`): PreToolUse hook that rewrites verbose Bash commands through [RTK](https://rtk.sh) (Rust Token Killer) to reduce token consumption. Opt-in via `RTK_ENABLED=1`. Registered as a repo-local hook in `.claude/settings.local.json` (not synced).
 
 ### Which hooks ship in the plugin
@@ -537,7 +537,7 @@ Bundling is an explicit **allowlist**, not a directory mirror. Both the not-ship
 | `block-gh-issue-create.sh` | yes | Forces issue creation through `assert_issue_valid` — a core pipeline invariant |
 | `pipeline-status-inject.sh` | yes | `UserPromptSubmit`; reads the consumer's own `status.json` |
 | `pre-commit-skill-validate.sh` | yes | Validates SKILL.md frontmatter; resolves its validator from the plugin bundle |
-| `post-pr-simplify.sh` | yes | Runs code-simplifier after PR creation |
+| `post-pr-simplify.sh` | yes | Blocks and instructs Claude to run code-simplifier after PR creation (non-trivial PRs only) |
 | `scaffold-placeholder.sh` | yes | Plugin-only; no `.claude/hooks/` counterpart |
 | `block-destructive-db-commands.sh` | no | Project-local — DB safety; not every consumer has a database |
 | `rtk-rewrite.sh` | no | Project-local — routes commands through project-specific tooling |
