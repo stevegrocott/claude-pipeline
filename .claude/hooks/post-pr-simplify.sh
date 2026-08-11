@@ -72,6 +72,23 @@ fi
 
 printf 'lines_added=%s files_changed=%s\n' "$lines_added" "$files_changed" >> "$debug_log"
 
+# Resolve the code-simplifier agent before blocking on it. The plugin ships
+# no agents/ directory, so a consumer that never added its own
+# code-simplifier.md would be blocked on an instruction nobody can satisfy.
+# Check both the project-standard and locally-overridden agent locations.
+agent_name='code-simplifier'
+project_dir="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+agent_path="$project_dir/.claude/agents/${agent_name}.md"
+local_agent_path="$project_dir/.claude/local/agents/${agent_name}.md"
+
+agent_resolved=false
+if [[ -f "$agent_path" ]] || [[ -f "$local_agent_path" ]]; then
+    agent_resolved=true
+fi
+
+printf 'agent_resolved=%s (checked %s and %s)\n' \
+    "$agent_resolved" "$agent_path" "$local_agent_path" >> "$debug_log"
+
 # Build the reason message
 reason="PR/MR created successfully. Now run the code-simplifier agent to review and simplify the code in this PR/MR. Changed files: ${changed_files}. Use the Task tool with subagent_type='code-simplifier' to simplify the changed code. After simplification, commit any changes and push to update the PR/MR."
 
@@ -79,6 +96,12 @@ reason="PR/MR created successfully. Now run the code-simplifier agent to review 
 if [[ "$lines_added" -lt 100 ]] && [[ "$files_changed" -lt 10 ]]; then
     skip_reason="PR/MR created successfully. This is a small PR (${lines_added} lines added, ${files_changed} files changed) — code simplification skipped. Consider running the code-simplifier manually if needed. Changed files: ${changed_files}."
     printf '%s\n' "$skip_reason" | jq -Rs '{decision: "allow", reason: .}'
+elif [[ "$agent_resolved" == false ]]; then
+    # The agent this hook depends on isn't defined anywhere this repo would
+    # look for it — allow the PR through instead of hard-blocking on an
+    # instruction that can't be satisfied, but warn so the gap is visible.
+    warn_reason="PR/MR created successfully. Code simplification was skipped: the '${agent_name}' agent is not defined in this repo (checked .claude/agents/${agent_name}.md and .claude/local/agents/${agent_name}.md). To enable automatic simplification, add an agent definition at .claude/agents/${agent_name}.md. Changed files: ${changed_files}."
+    printf '%s\n' "$warn_reason" | jq -Rs '{decision: "allow", reason: .}'
 else
     # Output JSON to prompt Claude to run the simplifier
     printf '%s\n' "$reason" | jq -Rs '{decision: "block", reason: .}'
