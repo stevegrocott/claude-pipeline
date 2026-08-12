@@ -954,6 +954,56 @@ test('adds', () => expect(add(2, 3)).toBe(5));" > math.test.ts
 }
 
 # =============================================================================
+# warn_if_frontend_patterns_missing() TESTS
+# =============================================================================
+
+@test "warn_if_frontend_patterns_missing function is defined" {
+    [ "$(type -t warn_if_frontend_patterns_missing)" = "function" ]
+}
+
+@test "warn_if_frontend_patterns_missing warns when patterns are empty and TEST_E2E_CMD is set" {
+    export FRONTEND_PATH_PATTERNS=""
+    export TEST_E2E_CMD="npx playwright test"
+
+    run warn_if_frontend_patterns_missing
+    [[ "$output" == *"WARNING"* ]]
+    [[ "$output" == *"TEST_E2E_CMD"* ]]
+    [[ "$output" == *"FRONTEND_PATH_PATTERNS"* ]]
+}
+
+@test "warn_if_frontend_patterns_missing warns when patterns are unset and TEST_E2E_CMD is set" {
+    unset FRONTEND_PATH_PATTERNS
+    export TEST_E2E_CMD="npx playwright test"
+
+    run warn_if_frontend_patterns_missing
+    [[ "$output" == *"WARNING"* ]]
+}
+
+@test "warn_if_frontend_patterns_missing is silent when FRONTEND_PATH_PATTERNS is set" {
+    export FRONTEND_PATH_PATTERNS="web/src/components/*"
+    export TEST_E2E_CMD="npx playwright test"
+
+    run warn_if_frontend_patterns_missing
+    [ -z "$output" ]
+}
+
+@test "warn_if_frontend_patterns_missing is silent when TEST_E2E_CMD is unset" {
+    export FRONTEND_PATH_PATTERNS=""
+    unset TEST_E2E_CMD
+
+    run warn_if_frontend_patterns_missing
+    [ -z "$output" ]
+}
+
+@test "warn_if_frontend_patterns_missing is silent when both are unset" {
+    unset FRONTEND_PATH_PATTERNS
+    unset TEST_E2E_CMD
+
+    run warn_if_frontend_patterns_missing
+    [ -z "$output" ]
+}
+
+# =============================================================================
 # _matches_frontend_pattern() DISK-PREFIX REGRESSION TESTS (issue #650)
 #
 # The existing cases above all use a "web/..." prefix that never exists on
