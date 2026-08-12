@@ -8207,21 +8207,32 @@ run_test_loop() {
     local e2e_command=""
     local e2e_rebuild_note=""
     if [[ -n "${TEST_E2E_CMD:-}" ]] && { [[ "$change_scope" == "frontend" || "$change_scope" == "ts-frontend" ]] || [[ -n "$playwright_test_files" ]]; }; then
-        # Rebuild containers so E2E tests run against fresh code
-        log "Rebuilding containers before E2E tests in test loop..."
-        local rebuild_json=""
-        if rebuild_json=$(rebuild_and_health_check \
-            "${TEST_E2E_BASE_URL:-http://localhost:30004}" 120); then
+        if [[ "${E2E_CONTAINER_REBUILD:-true}" == "false" ]]; then
+            log "E2E_CONTAINER_REBUILD=false — skipping container rebuild" \
+                "in test loop"
             e2e_command="$TEST_E2E_CMD"
-            e2e_rebuild_note="Container rebuild: success. "
+            e2e_rebuild_note="Container rebuild: skipped"
+            e2e_rebuild_note+=" (E2E_CONTAINER_REBUILD=false). "
             log "E2E testing enabled for $change_scope scope: $e2e_command"
         else
-            local rb_health
-            rb_health=$(printf '%s' "$rebuild_json" \
-                | jq -r '.health // "unknown"')
-            log_warn "Container rebuild/health failed (health: $rb_health)" \
-                "— skipping E2E in test loop"
-            e2e_rebuild_note="Container rebuild failed (health: $rb_health). E2E skipped. "
+            # Rebuild containers so E2E tests run against fresh code
+            log "Rebuilding containers before E2E tests in test loop..."
+            local rebuild_json=""
+            if rebuild_json=$(rebuild_and_health_check \
+                "${TEST_E2E_BASE_URL:-http://localhost:30004}" 120); then
+                e2e_command="$TEST_E2E_CMD"
+                e2e_rebuild_note="Container rebuild: success. "
+                log "E2E testing enabled for $change_scope scope: $e2e_command"
+            else
+                local rb_health
+                rb_health=$(printf '%s' "$rebuild_json" \
+                    | jq -r '.health // "unknown"')
+                log_warn \
+                    "Container rebuild/health failed (health: $rb_health)" \
+                    "— skipping E2E in test loop"
+                e2e_rebuild_note="Container rebuild failed"
+                e2e_rebuild_note+=" (health: $rb_health). E2E skipped. "
+            fi
         fi
     elif [[ -n "$playwright_test_files" && -z "${TEST_E2E_CMD:-}" ]]; then
         log "WARNING: Playwright specs found but TEST_E2E_CMD not configured — Playwright specs will be skipped"
