@@ -7,6 +7,15 @@ name: Bundle Parity
 # made only to one side fails before it can be tagged (AC5), independent of
 # skill-golden.yml's decide-*/schemas/skills-scoped triggers.
 #
+# The hook trees (.claude/hooks/ and plugins/pipeline-core/hooks/scripts/) are
+# in the trigger set too (issue #788). test-bundle-parity.bats has asserted
+# hook parity since #640, but the triggers listed only the script trees, so a
+# hook-only change could not reach the guard: PR #785 shipped a drifted
+# post-pr-simplify.sh with `gh pr checks` reporting no checks at all, and the
+# break reached main and later blocked an unrelated PR from merging. Every
+# tree the guard compares must appear here — enforced by the "(#788) triggers
+# on every tree the parity guard checks" test in tests/sync-bundle.bats.
+#
 # sync.sh and tests/sync-bundle.bats are in the trigger set too: sync.sh is
 # the generator that produces the bundle, and its BUNDLE_SCRIPT_SUBDIRS list
 # must stay in lockstep with the guard's PARITY_SUBDIRS, so a change to
@@ -19,6 +28,8 @@ on:
     paths:
       - '.claude/scripts/**'
       - 'plugins/pipeline-core/scripts/**'
+      - '.claude/hooks/**'
+      - 'plugins/pipeline-core/hooks/scripts/**'
       - 'sync.sh'
       - 'tests/sync-bundle.bats'
       - '.github/workflows/bundle-parity.yml'
@@ -26,6 +37,8 @@ on:
     paths:
       - '.claude/scripts/**'
       - 'plugins/pipeline-core/scripts/**'
+      - '.claude/hooks/**'
+      - 'plugins/pipeline-core/hooks/scripts/**'
       - 'sync.sh'
       - 'tests/sync-bundle.bats'
       - '.github/workflows/bundle-parity.yml'

@@ -98,6 +98,74 @@ teardown() {
 	}
 }
 
+# A parity assertion whose tree cannot trigger the workflow is unreachable in
+# CI. PR #785 shipped a drifted plugins/pipeline-core/hooks/scripts/ because
+# .claude/hooks/ was guarded by test-bundle-parity.bats but absent from
+# bundle-parity.yml's trigger paths — `gh pr checks` reported no checks at all,
+# and the break reached main and later blocked an unrelated PR from merging.
+@test "(#788) bundle-parity workflow triggers on every tree the parity guard checks" {
+	local wf parity_bats
+	wf="$REPO_ROOT/.github/workflows/bundle-parity.yml"
+	parity_bats="$REPO_ROOT/.claude/scripts/implement-issue-test"
+	parity_bats+="/test-bundle-parity.bats"
+
+	[[ -f "$wf" ]] || {
+		printf 'FAIL: workflow not found: %s\n' "$wf" >&2
+		return 1
+	}
+	[[ -f "$parity_bats" ]] || {
+		printf 'FAIL: parity guard not found: %s\n' "$parity_bats" >&2
+		return 1
+	}
+
+	# Every repo tree the guard compares.
+	local -a guarded_trees=(
+		'.claude/scripts'
+		'plugins/pipeline-core/scripts'
+		'.claude/hooks'
+		'plugins/pipeline-core/hooks/scripts'
+	)
+
+	# Cross-check the hook trees against the guard's own directory variables,
+	# so this list cannot silently fall behind the guard it mirrors.
+	local d
+	for d in '.claude/hooks' 'plugins/pipeline-core/hooks/scripts'; do
+		grep -qF -- "REPO_ROOT/$d\"" "$parity_bats" || {
+			printf 'FAIL: guard no longer references %s — update guarded_trees\n' \
+				"$d" >&2
+			return 1
+		}
+	done
+
+	# The trigger lists are duplicated between push: and pull_request: (the
+	# workflow notes Actions does not reliably support YAML anchors), so both
+	# are checked — updating only one leaves half the triggers blind.
+	local section body tree
+	local -a missing=()
+	for section in push pull_request; do
+		body=$(awk -v s="  $section:" '
+			$0 == s { inside = 1; next }
+			inside && (/^  [a-z_]+:/ || /^[a-z_]+:/) { inside = 0 }
+			inside { print }
+		' "$wf")
+
+		[[ -n "$body" ]] || {
+			printf 'FAIL: no %s: trigger block in %s\n' "$section" "$wf" >&2
+			return 1
+		}
+
+		for tree in "${guarded_trees[@]}"; do
+			grep -qF -- "- '$tree/**'" <<<"$body" || missing+=("$section: $tree")
+		done
+	done
+
+	(( ${#missing[@]} == 0 )) || {
+		printf 'FAIL: the parity guard checks trees the workflow cannot be triggered by:\n' >&2
+		printf '  %s\n' "${missing[@]}" >&2
+		return 1
+	}
+}
+
 # =============================================================================
 # Integration — run `sync.sh bundle` against a fake repo.
 # =============================================================================
