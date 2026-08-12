@@ -8973,24 +8973,41 @@ run_parallel_post_task_stages() {
 		log "Running E2E verification for frontend changes (parallel)..."
 		(
 			# Step 1: Rebuild containers and wait for health
-			local rebuild_json rebuild_rc
-			rebuild_json=$(rebuild_and_health_check \
-				"${TEST_E2E_BASE_URL:-http://localhost:30004}" 120) \
-				|| true
-			rebuild_rc=$?
+			local rebuild_json="" rebuild_rc=0
 			local rebuild_status health_status
-			rebuild_status=$(printf '%s' "$rebuild_json" \
-				| jq -r '.rebuild // "skipped"')
-			health_status=$(printf '%s' "$rebuild_json" \
-				| jq -r '.health // "skipped"')
+			if [[ "${E2E_CONTAINER_REBUILD:-true}" == "false" ]]; then
+				log "E2E_CONTAINER_REBUILD=false — skipping" \
+					"container rebuild for e2e_verify"
+				rebuild_status="skipped"
+				health_status="skipped"
+			else
+				# `if cmd; then/else` (not `cmd || true`) captures
+				# rebuild_and_health_check's real exit status
+				# without tripping errexit on the failure branch —
+				# a bare `cmd || true` here always reports 0, which
+				# is why the guard below used to be unreachable
+				# (issue #801).
+				if rebuild_json=$(rebuild_and_health_check \
+					"${TEST_E2E_BASE_URL:-http://localhost:30004}" \
+					120); then
+					rebuild_rc=0
+				else
+					rebuild_rc=$?
+				fi
+				rebuild_status=$(printf '%s' "$rebuild_json" \
+					| jq -r '.rebuild // "skipped"')
+				health_status=$(printf '%s' "$rebuild_json" \
+					| jq -r '.health // "skipped"')
 
-			if ((rebuild_rc != 0)); then
-				log_error "Container rebuild/health failed — skipping E2E"
-				comment_issue "E2E Verification: Skipped" \
-					"⚠️ Container rebuild or health check failed. \
+				if ((rebuild_rc != 0)); then
+					log_error \
+						"Container rebuild/health failed — skipping E2E"
+					comment_issue "E2E Verification: Skipped" \
+						"⚠️ Container rebuild or health check failed. \
 Rebuild: $rebuild_status, Health: $health_status. \
 E2E tests skipped." "playwright-test-developer"
-				exit 1
+					exit 1
+				fi
 			fi
 
 			# Step 2: Build targeted test command
@@ -9239,8 +9256,11 @@ $acceptance_summary" "default"
 	local e2e_elapsed=0 acceptance_elapsed=0
 
 	if [[ -n "$e2e_pid" ]]; then
-		wait "$e2e_pid"
-		e2e_exit=$?
+		# `wait pid || e2e_exit=$?` (not a bare `wait pid`) so a
+		# non-zero e2e-verify subshell exit — the guard-fired path
+		# added by issue #801 — doesn't trip errexit in callers that
+		# run under `set -e` (e.g. BATS test bodies).
+		wait "$e2e_pid" || e2e_exit=$?
 		e2e_elapsed=$(( $(date +%s) - e2e_start ))
 		log "Stage timing: e2e-verify completed in ${e2e_elapsed}s" \
 			"(exit=$e2e_exit)"
@@ -9251,8 +9271,7 @@ $acceptance_summary" "default"
 	fi
 
 	if [[ -n "$acceptance_pid" ]]; then
-		wait "$acceptance_pid"
-		acceptance_exit=$?
+		wait "$acceptance_pid" || acceptance_exit=$?
 		acceptance_elapsed=$(( $(date +%s) - acceptance_start ))
 		log "Stage timing: acceptance-test completed in" \
 			"${acceptance_elapsed}s (exit=$acceptance_exit)"
