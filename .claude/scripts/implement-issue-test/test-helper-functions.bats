@@ -1029,3 +1029,87 @@ WRAPPER
         fail "Expected an 'E2E Verification: Skipped' comment. Got: $(cat "$comment_titles")"
 }
 
+# =============================================================================
+# warn_if_frontend_patterns_missing() — empty FRONTEND_PATH_PATTERNS advisory
+# =============================================================================
+#
+# Issue #802: an empty FRONTEND_PATH_PATTERNS makes _matches_frontend_pattern
+# return non-zero for every path, so detect_change_scope can never yield
+# "frontend"/"ts-frontend" and e2e_verify is silently unreachable. The fix is
+# a startup warning gated on TEST_E2E_CMD being set (only then is the empty
+# pattern list actually a misconfiguration rather than a legitimate
+# backend-only setup).
+
+@test "warn_if_frontend_patterns_missing warns when TEST_E2E_CMD is set and FRONTEND_PATH_PATTERNS is empty" {
+    export TEST_E2E_CMD="npx playwright test"
+    export FRONTEND_PATH_PATTERNS=""
+
+    warn_if_frontend_patterns_missing 2>/dev/null
+
+    grep -qi "FRONTEND_PATH_PATTERNS" "$LOG_FILE" || \
+        fail "Expected a FRONTEND_PATH_PATTERNS warning in the log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "warn_if_frontend_patterns_missing warning states the E2E and routing consequence" {
+    export TEST_E2E_CMD="npx playwright test"
+    export FRONTEND_PATH_PATTERNS=""
+
+    warn_if_frontend_patterns_missing 2>/dev/null
+
+    grep -qi "e2e" "$LOG_FILE" || \
+        fail "Expected the warning to mention E2E. Log: $(cat "$LOG_FILE")"
+    grep -qi "backend agent" "$LOG_FILE" || \
+        fail "Expected the warning to name the backend-agent routing consequence. Log: $(cat "$LOG_FILE")"
+}
+
+@test "warn_if_frontend_patterns_missing warning names the fix file and an example pattern" {
+    export TEST_E2E_CMD="npx playwright test"
+    export FRONTEND_PATH_PATTERNS=""
+
+    warn_if_frontend_patterns_missing 2>/dev/null
+
+    grep -qF ".claude/config/platform.sh" "$LOG_FILE" || \
+        fail "Expected the warning to name .claude/config/platform.sh. Log: $(cat "$LOG_FILE")"
+    grep -qE '[[:alnum:]_/]+\*' "$LOG_FILE" || \
+        fail "Expected the warning to include an example glob pattern. Log: $(cat "$LOG_FILE")"
+}
+
+@test "warn_if_frontend_patterns_missing is advisory only and does not abort the run" {
+    export TEST_E2E_CMD="npx playwright test"
+    export FRONTEND_PATH_PATTERNS=""
+
+    run warn_if_frontend_patterns_missing
+    [ "$status" -eq 0 ] || \
+        fail "Expected warn_if_frontend_patterns_missing to exit 0. Got status=$status"
+}
+
+@test "warn_if_frontend_patterns_missing stays quiet when FRONTEND_PATH_PATTERNS is set" {
+    export TEST_E2E_CMD="npx playwright test"
+    export FRONTEND_PATH_PATTERNS="src/components/*|src/pages/*"
+
+    warn_if_frontend_patterns_missing 2>/dev/null
+
+    ! grep -qi "FRONTEND_PATH_PATTERNS" "$LOG_FILE" || \
+        fail "Did not expect a warning when FRONTEND_PATH_PATTERNS is set. Log: $(cat "$LOG_FILE")"
+}
+
+@test "warn_if_frontend_patterns_missing stays quiet when TEST_E2E_CMD is empty" {
+    export TEST_E2E_CMD=""
+    export FRONTEND_PATH_PATTERNS=""
+
+    warn_if_frontend_patterns_missing 2>/dev/null
+
+    ! grep -qi "FRONTEND_PATH_PATTERNS" "$LOG_FILE" || \
+        fail "Did not expect a warning for a backend-only consumer (TEST_E2E_CMD empty). Log: $(cat "$LOG_FILE")"
+}
+
+@test "warn_if_frontend_patterns_missing stays quiet when TEST_E2E_CMD is unset" {
+    unset TEST_E2E_CMD
+    export FRONTEND_PATH_PATTERNS=""
+
+    warn_if_frontend_patterns_missing 2>/dev/null
+
+    ! grep -qi "FRONTEND_PATH_PATTERNS" "$LOG_FILE" || \
+        fail "Did not expect a warning when TEST_E2E_CMD is unset. Log: $(cat "$LOG_FILE")"
+}
+
