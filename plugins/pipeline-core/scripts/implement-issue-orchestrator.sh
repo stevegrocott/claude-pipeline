@@ -7736,6 +7736,31 @@ _matches_frontend_pattern() {
     return "$rc"
 }
 
+# Warn when TEST_E2E_CMD is configured but FRONTEND_PATH_PATTERNS is empty.
+#
+# detect_change_scope() can only classify a diff as "frontend"/"ts-frontend"
+# when FRONTEND_PATH_PATTERNS is set (see _matches_frontend_pattern() above).
+# Without it, the e2e trigger in the test loop stage — which gates on
+# change_scope == "frontend"/"ts-frontend" — never fires, so a configured
+# TEST_E2E_CMD only runs when Playwright spec files are directly present in
+# the diff. That silently degrades E2E coverage on every other frontend
+# change, so flag the gap once at startup instead of leaving it to be
+# discovered mid-run.
+# Outputs:
+#   A WARNING log line when the misconfiguration is detected; nothing
+#   otherwise.
+warn_if_frontend_patterns_missing() {
+    if [[ -z "${FRONTEND_PATH_PATTERNS:-}" && -n "${TEST_E2E_CMD:-}" ]]; then
+        log "WARNING: TEST_E2E_CMD is configured but" \
+            "FRONTEND_PATH_PATTERNS is empty — frontend change-scope" \
+            "detection cannot trigger, so E2E tests will only run when" \
+            "Playwright spec files are directly present in the diff, and" \
+            "frontend files get routed to the backend agent instead of a" \
+            "frontend specialist. Fix by setting FRONTEND_PATH_PATTERNS in" \
+            ".claude/config/platform.sh, e.g. FRONTEND_PATH_PATTERNS=\"src/frontend/*\""
+    fi
+}
+
 # Filter a newline-delimited file list to only implementation-relevant files.
 # Excludes .claude/ pipeline files, docs/, and non-code config files from the
 # list passed to the test validation prompt.
@@ -10124,6 +10149,10 @@ regenerate_bundle_if_needed() {
 main() {
     # Declare local variables used throughout main
     local branch tasks_json task_count completed_tasks max_task_size="" pipeline_profile=""
+
+    # Flag a config gap that would otherwise silently skip E2E coverage
+    # (see warn_if_frontend_patterns_missing() for the full rationale).
+    warn_if_frontend_patterns_missing
 
     # -------------------------------------------------------------------------
     # RESUME VS FRESH START INITIALIZATION
