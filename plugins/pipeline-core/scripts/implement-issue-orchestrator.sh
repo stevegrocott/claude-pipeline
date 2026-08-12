@@ -11011,6 +11011,15 @@ $full_scope_failures
             bats_full_output=$(bash "$bats_runner" 2>&1)
             bats_full_rc=$?
 
+            # Persist the complete output as a stage log — like every other
+            # stage — instead of discarding it. Written unconditionally (both
+            # red and green runs) so the full evidence is always recoverable
+            # without re-running the ~20-35 minute suite (#799).
+            local bats_full_log="$LOG_BASE/stages/$(next_stage_log "bats_full_suite")"
+            printf '%s\n' "$bats_full_output" >> "$bats_full_log"
+            printf '%s\n' "=== exit code: $bats_full_rc ===" >> "$bats_full_log"
+            log "  Log: $bats_full_log"
+
             if (( bats_full_rc != 0 )); then
                 local bats_full_failures
                 bats_full_failures=$(printf '%s' "$bats_full_output" | tail -40)
