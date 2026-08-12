@@ -7754,8 +7754,10 @@ warn_if_frontend_patterns_missing() {
         log "WARNING: TEST_E2E_CMD is configured but" \
             "FRONTEND_PATH_PATTERNS is empty — frontend change-scope" \
             "detection cannot trigger, so E2E tests will only run when" \
-            "Playwright spec files are directly present in the diff" \
-            "(see platform.sh)"
+            "Playwright spec files are directly present in the diff, and" \
+            "frontend files get routed to the backend agent instead of a" \
+            "frontend specialist. Fix by setting FRONTEND_PATH_PATTERNS in" \
+            ".claude/config/platform.sh, e.g. FRONTEND_PATH_PATTERNS=\"src/frontend/*\""
     fi
 }
 
