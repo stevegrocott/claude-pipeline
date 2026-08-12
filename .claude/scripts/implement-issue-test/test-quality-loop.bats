@@ -1966,3 +1966,208 @@ _install_fix_stage_stubs() {
     [ "$status" -eq 0 ]
 }
 
+# =============================================================================
+# FULL-SUITE BATS CHECK — LOG PERSISTENCE & FAILURE-NAME EXTRACTION (#799)
+#
+# On 2026-08-11, PR #785 shipped a bundle-parity drift. The full-suite BATS
+# check DID catch it (test-bundle-parity.bats failed) but the failure sat
+# above the `tail -40` cutoff, so the comment showed only an unrelated
+# pre-existing failure and the drift reached main. Recovering the true
+# failure set afterwards cost ~30 minutes of re-running the suite from
+# scratch, because nothing but the 40-line tail was ever persisted.
+#
+# Fix contract (issue #799):
+#   AC1: a red run persists its complete output to a stage log file
+#   AC2: the RED comment is built from extracted failing test names, not tail
+#   AC3: a failure far above any tail window still reaches the comment
+#   AC4: a large failure list is capped for display, but the true total is
+#        always stated — truncation is never silent
+#   AC5: a green run is unchanged — no comment, no degraded stage
+#
+# This code is inline in main() (not a callable function), so — mirroring
+# the pattern already established for this exact block in
+# test-stage-runner.bats (issue #686/#524) — coverage combines two kinds of
+# test:
+#   - static: binds directly to $ORCHESTRATOR_SCRIPT so a fix that never
+#     lands in the real source cannot pass
+#   - functional: a faithful reproduction of the required algorithm run
+#     against fabricated TAP-like output, so the extraction/cap/total logic
+#     itself is verified, not just its presence as a string
+# =============================================================================
+
+# Isolates the full-suite BATS check block from the real orchestrator source,
+# bounded by its two most stable landmarks: the bats_runner path declaration
+# and the following E2E-UNVALIDATED GUARD comment (both untouched by #799).
+_full_suite_bats_block() {
+    awk '
+        /local bats_runner=/ { capture=1 }
+        /E2E-UNVALIDATED GUARD/ { capture=0 }
+        capture { print }
+    ' "$ORCHESTRATOR_SCRIPT"
+}
+
+@test "full-suite BATS check block is still locatable in the orchestrator source" {
+    local block
+    block=$(_full_suite_bats_block)
+    [ -n "$block" ] || \
+        fail "Could not locate the full-suite BATS check block bounded by the bats_runner declaration and the E2E-UNVALIDATED GUARD comment"
+    [[ "$block" == *"run-tests.sh"* ]] || \
+        fail "Full-suite BATS check must still invoke run-tests.sh. Block:
+$block"
+}
+
+@test "full-suite BATS check persists full output to a stage log file (AC1)" {
+    local block
+    block=$(_full_suite_bats_block)
+    [[ "$block" == *'LOG_BASE/stages'* ]] || \
+        fail "Full-suite BATS check must write its complete output to a file under \$LOG_BASE/stages, like every other stage log (issue #799 AC1). Block:
+$block"
+}
+
+@test "full-suite BATS check builds the RED comment from extracted failing test names (AC2)" {
+    local block
+    block=$(_full_suite_bats_block)
+    [[ "$block" == *'not ok'* ]] || \
+        fail "Full-suite BATS check must extract '^not ok' lines to name failing tests, not rely solely on tail -40 (issue #799 AC2). Block:
+$block"
+    [[ "$block" == *'grep'* ]] || \
+        fail "Failing test names must be extracted with grep against the persisted output (issue #799 AC2). Block:
+$block"
+}
+
+@test "full-suite BATS check caps the shown failure list and states the true total (AC4)" {
+    local block
+    block=$(_full_suite_bats_block)
+    [[ "$block" =~ head[[:space:]]+-n?[[:space:]]*[0-9]+ ]] || \
+        fail "Full-suite BATS check must cap the displayed failing-test list (e.g. head -n 50) so a very large failure set stays readable (issue #799 AC4). Block:
+$block"
+    [[ "$block" == *'wc -l'* ]] || \
+        fail "Full-suite BATS check must count and state the true total number of failures, so capping the shown list is never silent truncation (issue #799 AC4). Block:
+$block"
+}
+
+@test "full-suite BATS check green path is unchanged — no comment call on success (AC5)" {
+    local block
+    block=$(_full_suite_bats_block)
+    local success_branch
+    success_branch=$(printf '%s' "$block" | awk '/else$/,/^ *fi$/')
+    [[ "$success_branch" != *'comment_issue'* ]] || \
+        fail "A green full-suite BATS run must not call comment_issue (issue #799 AC5). Success branch:
+$success_branch"
+    [[ "$success_branch" != *'DEGRADED_STAGES'* ]] || \
+        fail "A green full-suite BATS run must not record a degraded stage (issue #799 AC5). Success branch:
+$success_branch"
+}
+
+# Faithful reproduction of the algorithm issue #799 requires: persist the
+# complete output to a log file, extract '^not ok' lines to name failures,
+# cap what is shown, and always state the true total. Anchored to the real
+# source by the static tests above.
+_repro_full_suite_bats_persist_and_extract() {
+    local run_tests_cmd="$1"
+    local log_file="$2"
+    local cap="${3:-50}"
+
+    local rc=0
+    bash -c "$run_tests_cmd" > "$log_file" 2>&1 || rc=$?
+    FULL_SUITE_BATS_RC=$rc
+    FULL_SUITE_BATS_TOTAL=0
+    FULL_SUITE_BATS_SHOWN=""
+
+    if (( FULL_SUITE_BATS_RC != 0 )); then
+        local failures total
+        failures=$(grep '^not ok' "$log_file" || true)
+        total=$(printf '%s\n' "$failures" | grep -c '^not ok' || echo 0)
+        FULL_SUITE_BATS_TOTAL="$total"
+        FULL_SUITE_BATS_SHOWN=$(printf '%s\n' "$failures" | head -n "$cap")
+        DEGRADED_STAGES+=("test:bats_full_suite_red")
+    fi
+    return 0
+}
+
+@test "repro: a red full-suite BATS run persists complete output to disk (AC1)" {
+    local -a DEGRADED_STAGES=()
+    local suite="$TEST_TMP/fake-run-tests-persist.sh"
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'echo "not ok 4 test-bundle-parity.bats - bundle drift detected"'
+        echo 'echo "not ok 999 test-timeout-escalation.bats - pre-existing failure"'
+        echo 'exit 1'
+    } > "$suite"
+    chmod +x "$suite"
+    local log_file="$TEST_TMP/bats-full-persist.log"
+
+    _repro_full_suite_bats_persist_and_extract "bash '$suite'" "$log_file"
+
+    [ -f "$log_file" ] || \
+        fail "Expected the complete full-suite BATS output to be persisted to $log_file"
+    grep -q "test-bundle-parity.bats" "$log_file" || \
+        fail "Persisted log must contain the early failure"
+    grep -q "test-timeout-escalation.bats" "$log_file" || \
+        fail "Persisted log must contain the late failure"
+}
+
+@test "repro: an early failure far above any tail window still appears in the extracted list (AC3, #785 reproduction)" {
+    local -a DEGRADED_STAGES=()
+    local suite="$TEST_TMP/fake-run-tests-785.sh"
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'echo "not ok 4 test-bundle-parity.bats - bundle drift detected"'
+        for i in $(seq 1 100); do
+            echo "echo \"ok $((i + 4)) filler passing test $i\""
+        done
+        echo 'echo "not ok 105 test-timeout-escalation.bats - pre-existing failure"'
+        echo 'exit 1'
+    } > "$suite"
+    chmod +x "$suite"
+    local log_file="$TEST_TMP/bats-full-785.log"
+
+    _repro_full_suite_bats_persist_and_extract "bash '$suite'" "$log_file"
+
+    # The tail-40 window of this ~106-line run shows ONLY the late,
+    # pre-existing failure — the exact #785 scenario. The extracted list must
+    # surface the early bundle-parity failure regardless of tail position.
+    [[ "$FULL_SUITE_BATS_SHOWN" == *"test-bundle-parity.bats"* ]] || \
+        fail "Extracted failing-test list must include a failure that occurred above the tail-40 window (issue #785 reproduction). Shown: $FULL_SUITE_BATS_SHOWN"
+    [[ "$FULL_SUITE_BATS_SHOWN" == *"test-timeout-escalation.bats"* ]] || \
+        fail "Extracted failing-test list must also include the late failure. Shown: $FULL_SUITE_BATS_SHOWN"
+}
+
+@test "repro: a large failure set is capped in the shown list but the true total is preserved (AC4)" {
+    local -a DEGRADED_STAGES=()
+    local suite="$TEST_TMP/fake-run-tests-many.sh"
+    {
+        echo '#!/usr/bin/env bash'
+        for i in $(seq 1 75); do
+            echo "echo \"not ok $i failing test $i\""
+        done
+        echo 'exit 1'
+    } > "$suite"
+    chmod +x "$suite"
+    local log_file="$TEST_TMP/bats-full-many.log"
+
+    _repro_full_suite_bats_persist_and_extract "bash '$suite'" "$log_file" 50
+
+    [ "$FULL_SUITE_BATS_TOTAL" -eq 75 ] || \
+        fail "Expected the true total of 75 failures to be preserved even though the shown list is capped; got $FULL_SUITE_BATS_TOTAL"
+    local shown_count
+    shown_count=$(printf '%s\n' "$FULL_SUITE_BATS_SHOWN" | grep -c '^not ok')
+    [ "$shown_count" -le 50 ] || \
+        fail "Expected the shown failing-test list to be capped at 50; got $shown_count"
+}
+
+@test "repro: a green full-suite BATS run records no degraded stage (AC5)" {
+    local -a DEGRADED_STAGES=()
+    local suite="$TEST_TMP/fake-run-tests-green.sh"
+    printf '#!/usr/bin/env bash\necho "ok 1 everything passes"\nexit 0\n' > "$suite"
+    chmod +x "$suite"
+    local log_file="$TEST_TMP/bats-full-green.log"
+
+    _repro_full_suite_bats_persist_and_extract "bash '$suite'" "$log_file"
+
+    [ "$FULL_SUITE_BATS_RC" -eq 0 ] || \
+        fail "Expected rc=0 for a green full-suite BATS run"
+    [ "${#DEGRADED_STAGES[@]}" -eq 0 ] || \
+        fail "A green full-suite BATS run must not record a degraded stage (issue #799 AC5); got: ${DEGRADED_STAGES[*]}"
+}
+
