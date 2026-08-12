@@ -200,6 +200,15 @@ MAX_ESCALATIONS_PER_RUN="${MAX_ESCALATIONS_PER_RUN:-5}"
 # Override via MAX_ORCHESTRATOR_WALL_TIME env to set a different base.
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-14640}"
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
+# issue #800: reserve added on top of get_task_wall_time() by
+# get_task_wall_time_with_retry() so the parallel-batch watchdog has room
+# for run_stage's own same-model retry (the retry_same path, issue #637)
+# instead of only whatever remains of the first attempt's window. Empty
+# (default) means "use get_stage_timeout('implement-task', complexity)" —
+# the same per-attempt budget the retry's own `timeout` wrapper uses.
+# Override to a fixed number of seconds to tune independently of that
+# formula.
+TASK_WALL_TIME_RETRY_RESERVE_SECS="${TASK_WALL_TIME_RETRY_RESERVE_SECS:-}"
 # Slack added on top of the per-iteration timeout when computing the
 # PR-review loop wall-clock budget.  Override via env to tune.
 PR_REVIEW_WALL_TIME_SLACK="${PR_REVIEW_WALL_TIME_SLACK:-120}"
@@ -384,6 +393,42 @@ get_task_wall_time() {
     else
         printf '%s' "$MAX_TASK_WALL_TIME_SECS"
     fi
+}
+
+# get_task_wall_time_with_retry - per-task watchdog budget, with room
+# reserved for one same-model retry
+#
+# issue #800: run_stage grants at most one same-model retry after a
+# max_turns exhaustion (the retry_same path added by issue #637), and
+# that retry always launches with its own FRESH $stage_timeout — it is
+# not capped to whatever is left of the first attempt's window. But the
+# parallel-batch watchdog (get_task_wall_time above) only ever budgeted
+# for a single attempt, so in practice a retry inherited only the
+# remainder of the task's wall-clock window: a first attempt that burned
+# most of that window left the retry little room to finish before the
+# watchdog killed the whole task, even though the retry's own timeout
+# would have allowed it to run much longer. (#790 task-2: the task
+# started with a 30-minute window; the retry began with only ~19 of
+# those minutes left.)
+#
+# Add one more stage-timeout's worth of wall time on top of
+# get_task_wall_time() so a retry always has a full budget of its own.
+# This is deliberately a single, FIXED reserve — not unbounded — so the
+# task-level ceiling stays predictable: at most base + one retry, never
+# base + N retries. run_stage's retry_same path never loops more than
+# once per stage call, so one reserve is always enough.
+get_task_wall_time_with_retry() {
+    local complexity="${1:-}"
+    local base_wall retry_reserve
+    base_wall=$(get_task_wall_time "$complexity")
+
+    if [[ -n "$TASK_WALL_TIME_RETRY_RESERVE_SECS" ]]; then
+        retry_reserve="$TASK_WALL_TIME_RETRY_RESERVE_SECS"
+    else
+        retry_reserve=$(get_stage_timeout "implement-task" "$complexity")
+    fi
+
+    printf '%s' "$(( base_wall + retry_reserve ))"
 }
 
 # =============================================================================
@@ -6876,8 +6921,12 @@ execute_batch_parallel() {
 		tdesc=$(printf '%s' "$task" | jq -r '.description')
 		tagent=$(printf '%s' "$task" | jq -r '.agent')
 		tsize=$(extract_task_size "$tdesc")
+		# issue #800: use the retry-aware budget, not the bare
+		# get_task_wall_time(), so a run_stage retry_same recovery
+		# (max_turns exhaustion) gets its own wall-clock room instead
+		# of whatever remains of the first attempt's window.
 		local twall
-		twall=$(get_task_wall_time "$tsize")
+		twall=$(get_task_wall_time_with_retry "$tsize")
 
 		local wt_branch="wt-i${ISSUE_NUMBER}-t${tid}"
 		local result_file
