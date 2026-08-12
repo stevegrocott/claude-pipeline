@@ -11011,18 +11011,45 @@ $full_scope_failures
             bats_full_output=$(bash "$bats_runner" 2>&1)
             bats_full_rc=$?
 
+            # Persist the complete output as a stage log — like every other
+            # stage — instead of discarding it. Written unconditionally (both
+            # red and green runs) so the full evidence is always recoverable
+            # without re-running the ~20-35 minute suite (#799).
+            local bats_full_log="$LOG_BASE/stages/$(next_stage_log "bats_full_suite")"
+            printf '%s\n' "$bats_full_output" >> "$bats_full_log"
+            printf '%s\n' "=== exit code: $bats_full_rc ===" >> "$bats_full_log"
+            log "  Log: $bats_full_log"
+
             if (( bats_full_rc != 0 )); then
-                local bats_full_failures
-                bats_full_failures=$(printf '%s' "$bats_full_output" | tail -40)
+                # Build the comment from the extracted failing test names
+                # rather than an arbitrary tail. A tail only shows whatever
+                # happens to be last — on #785 the real (bundle-parity)
+                # failure sat above the tail-40 cutoff and was invisible in
+                # the comment while an unrelated late failure was assessed
+                # instead (#799 AC2/AC3). Cap the shown list but always state
+                # the true total so capping is never silent truncation (AC4).
+                local bats_full_failure_names bats_full_failure_total
+                local bats_full_failure_shown
+                bats_full_failure_names=$(printf '%s\n' "$bats_full_output" \
+                    | grep '^not ok' || true)
+                if [[ -n "$bats_full_failure_names" ]]; then
+                    bats_full_failure_total=$(printf '%s\n' \
+                        "$bats_full_failure_names" | wc -l)
+                    bats_full_failure_total="${bats_full_failure_total//[[:space:]]/}"
+                else
+                    bats_full_failure_total=0
+                fi
+                bats_full_failure_shown=$(printf '%s\n' \
+                    "$bats_full_failure_names" | head -n 50)
                 DEGRADED_STAGES+=("test:bats_full_suite_red")
                 comment_issue "Full-Suite BATS Check: pipeline tests are RED (non-blocking)" \
                     "⚠️ The full BATS suite (\`bash $bats_runner\`) failed on this branch. The smart-targeted test loop only runs BATS suites related to the changed files (scope: \`$branch_scope\`), so these failures were not caught there. They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
 
 <details>
-<summary>Failure details (last 40 lines)</summary>
+<summary>Failing tests ($bats_full_failure_total total, showing first 50) — full log: $bats_full_log</summary>
 
 \`\`\`
-$bats_full_failures
+$bats_full_failure_shown
 \`\`\`
 </details>" "default"
                 log "WARN: Full-suite BATS check found failures (non-blocking, recorded as degraded)"
