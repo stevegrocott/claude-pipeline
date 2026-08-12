@@ -2,7 +2,8 @@
 #
 # test-timeout-escalation.bats
 # Tests for timeout→model escalation, empty output recovery,
-# PR stage model tier, and selective git add enforcement.
+# PR stage model tier, selective git add enforcement, and the
+# parallel-task retry wall-clock budget.
 #
 
 load 'helpers/test-helper.bash'
@@ -912,6 +913,169 @@ EOF
         fail "Expected get_task_wall_time('L')=5400 when" \
             "MAX_TASK_WALL_TIME_SECS=5400 exceeds the L stage timeout" \
             "(3600), got: $result"
+}
+
+# =============================================================================
+# RETRY WALL-CLOCK BUDGET — execute_batch_parallel watchdog (issue #800)
+#
+# execute_batch_parallel launches each parallel task under a single
+# outer watchdog: `sleep "${twall}" && kill -- -"$_task_pid"`, where twall
+# comes from get_task_wall_time() and is resolved ONCE, before the task's
+# background subshell even starts. run_task_in_worktree then internally
+# retries the SAME task (its own review_attempts loop, escalating model
+# and per-attempt timeout on failure) — but every attempt, including
+# retries, runs inside that one outer watchdog. A retry therefore only
+# ever gets whatever time is left of the ORIGINAL twall, not a fresh
+# budget of its own.
+#
+# Observed on #790 task-2: the task started at 22:20 with a twall-derived
+# ~22:50 deadline, exhausted its turn cap partway through the first
+# attempt, and the retry — which began at 22:31 — had only ~19 of the
+# original 30 minutes left rather than a fresh window. It happened to
+# finish at 22:37, inside the remainder; a slightly slower retry would
+# have been SIGTERM'd by the watchdog mid-attempt and converted a
+# recoverable cap exhaustion into a hard task failure.
+#
+# The tests below reproduce that shape directly against
+# execute_batch_parallel + get_task_wall_time (both real; only
+# run_task_in_worktree is mocked, following the pattern established in
+# test-task-batching.bats's execute_batch_parallel tests) rather than
+# against a specific retry-budget helper, since the fix for this issue
+# lives in the orchestrator's wall-clock wiring and has not landed in
+# this branch yet — these tests are written to the current, observable
+# watchdog contract and are expected to fail (RED) until it does.
+# =============================================================================
+
+@test "execute_batch_parallel: a retry that needs more time than the original per-attempt wall budget still completes (issue #800 AC2/AC4 — #790 task-2 scenario)" {
+    local test_repo="$TEST_TMP/wall-budget-repo"
+    mkdir -p "$test_repo"
+    git -C "$test_repo" init -q -b main
+    git -C "$test_repo" config user.email "test@test.com"
+    git -C "$test_repo" config user.name "Test"
+    echo "readme" > "$test_repo/README.md"
+    git -C "$test_repo" add README.md
+    git -C "$test_repo" commit -q -m "init"
+    git -C "$test_repo" checkout -q -b feature/wall-budget main
+
+    cd "$test_repo" || fail "Could not cd to test repo"
+    mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+    # Force a tiny per-attempt wall budget so a task whose combined
+    # attempts run past it stays fast to test.
+    get_task_wall_time() { printf '2'; }
+    export -f get_task_wall_time
+
+    # Simulate a first attempt that burns almost the whole per-attempt
+    # budget (like #790 task-2 exhausting its cap 11 of 30 minutes in),
+    # followed by a retry that alone needs more wall time than the
+    # ORIGINAL budget had left. Combined (3s) exceeds the 2s per-attempt
+    # budget, but the retry must still be allowed to finish rather than
+    # being killed mid-attempt.
+    run_task_in_worktree() {
+        local task_id="$1"
+        local wt_path="$5"
+        local result_file="$8"
+        cd "$wt_path" || {
+            printf '%s' \
+                '{"status":"failed","review_attempts":0}' \
+                > "$result_file"
+            return 1
+        }
+        sleep 1.5   # first attempt — consumes most of the 2s budget
+        sleep 1.5   # retry — needs more than what the original budget left
+        printf 'task %s output\n' "$task_id" \
+            > "task-${task_id}-out.txt"
+        git add "task-${task_id}-out.txt"
+        git commit -q -m "task $task_id"
+        local sha
+        sha=$(git rev-parse --short HEAD)
+        printf '{"status":"success","review_attempts":2,"commit":"%s","summary":"done"}' \
+            "$sha" > "$result_file"
+        return 0
+    }
+    export -f run_task_in_worktree
+
+    local tasks result
+    tasks='[{"id":1,"description":"Modify wall-budget.ts","agent":"default","batch":1}]'
+
+    result=$(execute_batch_parallel 1 "$tasks" \
+        "feature/wall-budget" "main" \
+        2>/dev/null) || true
+
+    local comp_count
+    comp_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+    [[ "$comp_count" == "1" ]] || \
+        fail "Expected the retry to complete despite the combined" \
+            "attempts exceeding the original per-attempt wall budget" \
+            "(issue #800 AC2/AC4). Result: $result"
+
+    git worktree prune 2>/dev/null || true
+    git checkout -q main 2>/dev/null || true
+    git branch -D feature/wall-budget 2>/dev/null || true
+    git branch -D "wt-i${ISSUE_NUMBER}-t1" 2>/dev/null || true
+}
+
+@test "execute_batch_parallel: an overall wall ceiling still bounds a runaway retry (issue #800 AC3)" {
+    local test_repo="$TEST_TMP/wall-ceiling-repo"
+    mkdir -p "$test_repo"
+    git -C "$test_repo" init -q -b main
+    git -C "$test_repo" config user.email "test@test.com"
+    git -C "$test_repo" config user.name "Test"
+    echo "readme" > "$test_repo/README.md"
+    git -C "$test_repo" add README.md
+    git -C "$test_repo" commit -q -m "init"
+    git -C "$test_repo" checkout -q -b feature/wall-ceiling main
+
+    cd "$test_repo" || fail "Could not cd to test repo"
+    mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+    get_task_wall_time() { printf '1'; }
+    export -f get_task_wall_time
+
+    # A task whose retries never stop needing more time — far beyond any
+    # reasonable overall ceiling a retry-budget fix would grant. Giving
+    # retries their own budget (AC2) must not remove the bound entirely:
+    # the run must still be killed and marked failed rather than allowed
+    # to run indefinitely.
+    run_task_in_worktree() {
+        local task_id="$1"
+        local wt_path="$5"
+        local result_file="$8"
+        cd "$wt_path" || {
+            printf '%s' \
+                '{"status":"failed","review_attempts":0}' \
+                > "$result_file"
+            return 1
+        }
+        sleep 12
+        printf 'task %s output\n' "$task_id" \
+            > "task-${task_id}-out.txt"
+        git add "task-${task_id}-out.txt"
+        git commit -q -m "task $task_id"
+        printf '{"status":"success","review_attempts":1,"commit":"x","summary":"done"}' \
+            > "$result_file"
+        return 0
+    }
+    export -f run_task_in_worktree
+
+    local tasks result
+    tasks='[{"id":1,"description":"Modify wall-ceiling.ts","agent":"default","batch":1}]'
+
+    result=$(execute_batch_parallel 1 "$tasks" \
+        "feature/wall-ceiling" "main" \
+        2>/dev/null) || true
+
+    local failed_count
+    failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+    [[ "$failed_count" == "1" ]] || \
+        fail "Expected a task whose retries run far beyond any" \
+            "reasonable ceiling to still be bounded and marked failed" \
+            "(issue #800 AC3). Result: $result"
+
+    git worktree prune 2>/dev/null || true
+    git checkout -q main 2>/dev/null || true
+    git branch -D feature/wall-ceiling 2>/dev/null || true
+    git branch -D "wt-i${ISSUE_NUMBER}-t1" 2>/dev/null || true
 }
 
 # =============================================================================
