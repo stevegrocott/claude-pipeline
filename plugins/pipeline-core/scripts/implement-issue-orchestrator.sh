@@ -204,8 +204,9 @@ MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"
 # get_task_wall_time_with_retry() so the parallel-batch watchdog has room
 # for run_stage's own same-model retry (the retry_same path, issue #637)
 # instead of only whatever remains of the first attempt's window. Empty
-# (default) means "use get_stage_timeout('implement-task', complexity)" —
-# the same per-attempt budget the retry's own `timeout` wrapper uses.
+# (default) means "use get_task_wall_time(complexity) again" — the same
+# overall-bounded per-attempt budget the base watchdog window uses, so the
+# reserve stays subject to the same MAX_TASK_WALL_TIME_SECS ceiling.
 # Override to a fixed number of seconds to tune independently of that
 # formula.
 TASK_WALL_TIME_RETRY_RESERVE_SECS="${TASK_WALL_TIME_RETRY_RESERVE_SECS:-}"
@@ -417,6 +418,13 @@ get_task_wall_time() {
 # task-level ceiling stays predictable: at most base + one retry, never
 # base + N retries. run_stage's retry_same path never loops more than
 # once per stage call, so one reserve is always enough.
+#
+# The default reserve is computed via get_task_wall_time() itself (not a
+# raw get_stage_timeout() call) so it stays bound by the same overall
+# ceiling as the base budget — including the MAX_TASK_WALL_TIME_SECS
+# floor/override. Calling get_stage_timeout() directly here would let the
+# reserve silently ignore that ceiling, defeating the "still bounded"
+# guarantee an overall wall ceiling is meant to provide (issue #800 AC3).
 get_task_wall_time_with_retry() {
     local complexity="${1:-}"
     local base_wall retry_reserve
@@ -425,7 +433,7 @@ get_task_wall_time_with_retry() {
     if [[ -n "$TASK_WALL_TIME_RETRY_RESERVE_SECS" ]]; then
         retry_reserve="$TASK_WALL_TIME_RETRY_RESERVE_SECS"
     else
-        retry_reserve=$(get_stage_timeout "implement-task" "$complexity")
+        retry_reserve=$(get_task_wall_time "$complexity")
     fi
 
     printf '%s' "$(( base_wall + retry_reserve ))"
