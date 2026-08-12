@@ -8207,21 +8207,32 @@ run_test_loop() {
     local e2e_command=""
     local e2e_rebuild_note=""
     if [[ -n "${TEST_E2E_CMD:-}" ]] && { [[ "$change_scope" == "frontend" || "$change_scope" == "ts-frontend" ]] || [[ -n "$playwright_test_files" ]]; }; then
-        # Rebuild containers so E2E tests run against fresh code
-        log "Rebuilding containers before E2E tests in test loop..."
-        local rebuild_json=""
-        if rebuild_json=$(rebuild_and_health_check \
-            "${TEST_E2E_BASE_URL:-http://localhost:30004}" 120); then
+        if [[ "${E2E_CONTAINER_REBUILD:-true}" == "false" ]]; then
+            log "E2E_CONTAINER_REBUILD=false — skipping container rebuild" \
+                "in test loop"
             e2e_command="$TEST_E2E_CMD"
-            e2e_rebuild_note="Container rebuild: success. "
+            e2e_rebuild_note="Container rebuild: skipped"
+            e2e_rebuild_note+=" (E2E_CONTAINER_REBUILD=false). "
             log "E2E testing enabled for $change_scope scope: $e2e_command"
         else
-            local rb_health
-            rb_health=$(printf '%s' "$rebuild_json" \
-                | jq -r '.health // "unknown"')
-            log_warn "Container rebuild/health failed (health: $rb_health)" \
-                "— skipping E2E in test loop"
-            e2e_rebuild_note="Container rebuild failed (health: $rb_health). E2E skipped. "
+            # Rebuild containers so E2E tests run against fresh code
+            log "Rebuilding containers before E2E tests in test loop..."
+            local rebuild_json=""
+            if rebuild_json=$(rebuild_and_health_check \
+                "${TEST_E2E_BASE_URL:-http://localhost:30004}" 120); then
+                e2e_command="$TEST_E2E_CMD"
+                e2e_rebuild_note="Container rebuild: success. "
+                log "E2E testing enabled for $change_scope scope: $e2e_command"
+            else
+                local rb_health
+                rb_health=$(printf '%s' "$rebuild_json" \
+                    | jq -r '.health // "unknown"')
+                log_warn \
+                    "Container rebuild/health failed (health: $rb_health)" \
+                    "— skipping E2E in test loop"
+                e2e_rebuild_note="Container rebuild failed"
+                e2e_rebuild_note+=" (health: $rb_health). E2E skipped. "
+            fi
         fi
     elif [[ -n "$playwright_test_files" && -z "${TEST_E2E_CMD:-}" ]]; then
         log "WARNING: Playwright specs found but TEST_E2E_CMD not configured — Playwright specs will be skipped"
@@ -8962,24 +8973,41 @@ run_parallel_post_task_stages() {
 		log "Running E2E verification for frontend changes (parallel)..."
 		(
 			# Step 1: Rebuild containers and wait for health
-			local rebuild_json rebuild_rc
-			rebuild_json=$(rebuild_and_health_check \
-				"${TEST_E2E_BASE_URL:-http://localhost:30004}" 120) \
-				|| true
-			rebuild_rc=$?
+			local rebuild_json="" rebuild_rc=0
 			local rebuild_status health_status
-			rebuild_status=$(printf '%s' "$rebuild_json" \
-				| jq -r '.rebuild // "skipped"')
-			health_status=$(printf '%s' "$rebuild_json" \
-				| jq -r '.health // "skipped"')
+			if [[ "${E2E_CONTAINER_REBUILD:-true}" == "false" ]]; then
+				log "E2E_CONTAINER_REBUILD=false — skipping" \
+					"container rebuild for e2e_verify"
+				rebuild_status="skipped"
+				health_status="skipped"
+			else
+				# `if cmd; then/else` (not `cmd || true`) captures
+				# rebuild_and_health_check's real exit status
+				# without tripping errexit on the failure branch —
+				# a bare `cmd || true` here always reports 0, which
+				# is why the guard below used to be unreachable
+				# (issue #801).
+				if rebuild_json=$(rebuild_and_health_check \
+					"${TEST_E2E_BASE_URL:-http://localhost:30004}" \
+					120); then
+					rebuild_rc=0
+				else
+					rebuild_rc=$?
+				fi
+				rebuild_status=$(printf '%s' "$rebuild_json" \
+					| jq -r '.rebuild // "skipped"')
+				health_status=$(printf '%s' "$rebuild_json" \
+					| jq -r '.health // "skipped"')
 
-			if ((rebuild_rc != 0)); then
-				log_error "Container rebuild/health failed — skipping E2E"
-				comment_issue "E2E Verification: Skipped" \
-					"⚠️ Container rebuild or health check failed. \
+				if ((rebuild_rc != 0)); then
+					log_error \
+						"Container rebuild/health failed — skipping E2E"
+					comment_issue "E2E Verification: Skipped" \
+						"⚠️ Container rebuild or health check failed. \
 Rebuild: $rebuild_status, Health: $health_status. \
 E2E tests skipped." "playwright-test-developer"
-				exit 1
+					exit 1
+				fi
 			fi
 
 			# Step 2: Build targeted test command
@@ -9228,8 +9256,11 @@ $acceptance_summary" "default"
 	local e2e_elapsed=0 acceptance_elapsed=0
 
 	if [[ -n "$e2e_pid" ]]; then
-		wait "$e2e_pid"
-		e2e_exit=$?
+		# `wait pid || e2e_exit=$?` (not a bare `wait pid`) so a
+		# non-zero e2e-verify subshell exit — the guard-fired path
+		# added by issue #801 — doesn't trip errexit in callers that
+		# run under `set -e` (e.g. BATS test bodies).
+		wait "$e2e_pid" || e2e_exit=$?
 		e2e_elapsed=$(( $(date +%s) - e2e_start ))
 		log "Stage timing: e2e-verify completed in ${e2e_elapsed}s" \
 			"(exit=$e2e_exit)"
@@ -9240,8 +9271,7 @@ $acceptance_summary" "default"
 	fi
 
 	if [[ -n "$acceptance_pid" ]]; then
-		wait "$acceptance_pid"
-		acceptance_exit=$?
+		wait "$acceptance_pid" || acceptance_exit=$?
 		acceptance_elapsed=$(( $(date +%s) - acceptance_start ))
 		log "Stage timing: acceptance-test completed in" \
 			"${acceptance_elapsed}s (exit=$acceptance_exit)"

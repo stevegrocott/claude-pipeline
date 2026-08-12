@@ -726,3 +726,306 @@ WRAPPER
     [ "$status" -eq 0 ]
 }
 
+# =============================================================================
+# E2E_CONTAINER_REBUILD gating + the repaired e2e_verify skip guard (issue #801)
+# =============================================================================
+#
+# Two call sites rebuild containers before E2E: run_test_loop() (site 1) and
+# run_parallel_post_task_stages()'s e2e_verify subshell (site 2). Both must
+# honour E2E_CONTAINER_REBUILD=false as an opt-out (default unset == true,
+# identical to today's unconditional rebuild). Site 2 additionally has a
+# dead skip guard: `rebuild_json=$(rebuild_and_health_check ...) || true`
+# always sets `rebuild_rc=$?` to 0 (the exit status of `true`), so a failed
+# rebuild is never detected and E2E runs anyway against a broken
+# environment. The "guard fires" tests below are RED against an
+# unpatched orchestrator — they only pass once the gate and guard repair
+# land.
+
+# Site 1 — run_test_loop()'s pre-E2E container rebuild.
+
+@test "run_test_loop rebuilds containers by default (E2E_CONTAINER_REBUILD unset)" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-801-site1-default
+    echo "export const Widget = () => null;" > widget.tsx
+    git add widget.tsx
+    git commit -q -m "add frontend widget"
+
+    export TEST_E2E_CMD="echo run-e2e"
+    unset E2E_CONTAINER_REBUILD
+
+    local rebuild_calls="$TEST_TMP/site1_default_rebuild_calls"
+    echo 0 > "$rebuild_calls"
+    rebuild_and_health_check() {
+        echo "$(($(cat "$rebuild_calls") + 1))" > "$rebuild_calls"
+        printf '{"rebuild":"success","health":"healthy"}'
+    }
+    export -f rebuild_and_health_check
+
+    local prompt_file="$TEST_TMP/site1_default_prompt"
+    export prompt_file
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-801-site1-default" "" "frontend"
+
+    [ "$(cat "$rebuild_calls")" -eq 1 ]
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"Container rebuild: success."* ]] || \
+        fail "Expected success rebuild note in prompt. Got: $captured"
+    [[ "$captured" == *"STEP 1b"* ]] || \
+        fail "Expected E2E step to be included in prompt. Got: $captured"
+}
+
+@test "run_test_loop skips the container rebuild and still runs E2E when E2E_CONTAINER_REBUILD=false" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-801-site1-gated-off
+    echo "export const Widget = () => null;" > widget.tsx
+    git add widget.tsx
+    git commit -q -m "add frontend widget"
+
+    export TEST_E2E_CMD="echo run-e2e"
+    export E2E_CONTAINER_REBUILD=false
+
+    local rebuild_calls="$TEST_TMP/site1_gated_off_rebuild_calls"
+    echo 0 > "$rebuild_calls"
+    rebuild_and_health_check() {
+        echo "$(($(cat "$rebuild_calls") + 1))" > "$rebuild_calls"
+        printf '{"rebuild":"success","health":"healthy"}'
+    }
+    export -f rebuild_and_health_check
+
+    local prompt_file="$TEST_TMP/site1_gated_off_prompt"
+    export prompt_file
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-801-site1-gated-off" "" "frontend"
+
+    [ "$(cat "$rebuild_calls")" -eq 0 ] || \
+        fail "rebuild_and_health_check must not run when E2E_CONTAINER_REBUILD=false"
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"skipped"* && "$captured" == *"E2E_CONTAINER_REBUILD=false"* ]] || \
+        fail "Expected skip note referencing E2E_CONTAINER_REBUILD=false. Got: $captured"
+    [[ "$captured" == *"STEP 1b"* ]] || \
+        fail "Expected E2E to still run when rebuild is gated off. Got: $captured"
+}
+
+@test "run_test_loop skips E2E (not just the rebuild) when rebuild_and_health_check fails" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-801-site1-failure
+    echo "export const Widget = () => null;" > widget.tsx
+    git add widget.tsx
+    git commit -q -m "add frontend widget"
+
+    export TEST_E2E_CMD="echo run-e2e"
+    unset E2E_CONTAINER_REBUILD
+
+    local rebuild_calls="$TEST_TMP/site1_failure_rebuild_calls"
+    echo 0 > "$rebuild_calls"
+    rebuild_and_health_check() {
+        echo "$(($(cat "$rebuild_calls") + 1))" > "$rebuild_calls"
+        printf '{"rebuild":"failed","health":"unreachable"}'
+        return 1
+    }
+    export -f rebuild_and_health_check
+
+    local warn_file="$TEST_TMP/site1_failure_warnings"
+    : > "$warn_file"
+    log_warn() { printf '%s\n' "$*" >> "$warn_file"; }
+    export -f log_warn
+
+    local prompt_file="$TEST_TMP/site1_failure_prompt"
+    export prompt_file
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        case "$stage_name" in
+            test-iter-*)
+                printf '%s' "$prompt" > "$prompt_file"
+                echo '{"result":"passed","summary":"Tests passed","validation_result":"passed","validation_summary":"Validated"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-801-site1-failure" "" "frontend"
+
+    [ "$(cat "$rebuild_calls")" -eq 1 ]
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" != *"STEP 1b"* ]] || \
+        fail "E2E step must not run after a failed rebuild. Got: $captured"
+    grep -q "health: unreachable" "$warn_file" || \
+        fail "Expected rebuild failure warning with health status. Got: $(cat "$warn_file")"
+}
+
+# Site 2 — run_parallel_post_task_stages()'s e2e_verify subshell.
+#
+# Mirrors the mock set used for this function in test-task-batching.bats
+# (rebuild_and_health_check, run_stage, comment_issue, the log family,
+# verify_on_feature_branch, _build_targeted_e2e_cmd) so these gate/guard
+# tests exercise the real function rather than a stand-in.
+
+@test "run_parallel_post_task_stages rebuilds containers by default and reports success to e2e-verify" {
+    cd "$TEST_TMP/repo"
+    mkdir -p "$LOG_BASE/stages"
+
+    is_stage_completed()  { return 1; }
+    set_stage_started()   { true; }
+    set_stage_completed() { true; }
+    log()       { true; }
+    log_error() { true; }
+    log_warn()  { true; }
+    comment_issue() { true; }
+    verify_on_feature_branch() { return 0; }
+    _build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
+
+    export TEST_E2E_CMD="echo run-e2e"
+    export RESUME_MODE=""
+    unset E2E_CONTAINER_REBUILD
+
+    local rebuild_calls="$TEST_TMP/site2_default_rebuild_calls"
+    echo 0 > "$rebuild_calls"
+    rebuild_and_health_check() {
+        echo "$(($(cat "$rebuild_calls") + 1))" > "$rebuild_calls"
+        printf '{"rebuild":"success","health":"healthy"}'
+    }
+
+    local prompt_file="$TEST_TMP/site2_default_prompt"
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        [[ "$stage_name" == "e2e-verify" ]] && printf '%s' "$prompt" > "$prompt_file"
+        printf '%s' '{"status":"success","result":"passed","summary":"ok"}'
+    }
+
+    run_parallel_post_task_stages "feature/801-site2-default" "frontend" "standard" "M"
+
+    [ "$(cat "$rebuild_calls")" -eq 1 ]
+    [[ -f "$prompt_file" ]] || fail "e2e-verify stage was never invoked"
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"Rebuild: success | Health: healthy"* ]] || \
+        fail "Expected container status in e2e-verify prompt. Got: $captured"
+}
+
+@test "run_parallel_post_task_stages skips the rebuild but still runs e2e-verify when E2E_CONTAINER_REBUILD=false" {
+    cd "$TEST_TMP/repo"
+    mkdir -p "$LOG_BASE/stages"
+
+    is_stage_completed()  { return 1; }
+    set_stage_started()   { true; }
+    set_stage_completed() { true; }
+    log()       { true; }
+    log_error() { true; }
+    log_warn()  { true; }
+    comment_issue() { true; }
+    verify_on_feature_branch() { return 0; }
+    _build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
+
+    export TEST_E2E_CMD="echo run-e2e"
+    export RESUME_MODE=""
+    export E2E_CONTAINER_REBUILD=false
+
+    local rebuild_calls="$TEST_TMP/site2_gated_off_rebuild_calls"
+    echo 0 > "$rebuild_calls"
+    rebuild_and_health_check() {
+        echo "$(($(cat "$rebuild_calls") + 1))" > "$rebuild_calls"
+        printf '{"rebuild":"success","health":"healthy"}'
+    }
+
+    local prompt_file="$TEST_TMP/site2_gated_off_prompt"
+    run_stage() {
+        local stage_name="$1"
+        local prompt="$2"
+        [[ "$stage_name" == "e2e-verify" ]] && printf '%s' "$prompt" > "$prompt_file"
+        printf '%s' '{"status":"success","result":"passed","summary":"ok"}'
+    }
+
+    run_parallel_post_task_stages "feature/801-site2-gated-off" "frontend" "standard" "M"
+
+    [ "$(cat "$rebuild_calls")" -eq 0 ] || \
+        fail "rebuild_and_health_check must not run when E2E_CONTAINER_REBUILD=false"
+    [[ -f "$prompt_file" ]] || fail "e2e-verify stage must still run when rebuild is gated off"
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"Rebuild: skipped | Health: skipped"* ]] || \
+        fail "Expected skipped container status in e2e-verify prompt. Got: $captured"
+}
+
+@test "run_parallel_post_task_stages guard fires: a failed rebuild skips e2e-verify and posts a Skipped comment" {
+    cd "$TEST_TMP/repo"
+    mkdir -p "$LOG_BASE/stages"
+
+    is_stage_completed()  { return 1; }
+    set_stage_started()   { true; }
+    set_stage_completed() { true; }
+    log()       { true; }
+    log_error() { true; }
+    log_warn()  { true; }
+    verify_on_feature_branch() { return 0; }
+    _build_targeted_e2e_cmd() { printf '%s' "${TEST_E2E_CMD:-true}"; }
+
+    export TEST_E2E_CMD="echo run-e2e"
+    export RESUME_MODE=""
+    unset E2E_CONTAINER_REBUILD
+
+    rebuild_and_health_check() {
+        printf '{"rebuild":"failed","health":"unreachable"}'
+        return 1
+    }
+
+    local comment_titles="$TEST_TMP/site2_guard_comment_titles"
+    : > "$comment_titles"
+    comment_issue() { printf '%s\n' "$1" >> "$comment_titles"; }
+
+    local e2e_verify_calls="$TEST_TMP/site2_guard_e2e_verify_calls"
+    echo 0 > "$e2e_verify_calls"
+    run_stage() {
+        local stage_name="$1"
+        if [[ "$stage_name" == "e2e-verify" ]]; then
+            echo "$(($(cat "$e2e_verify_calls") + 1))" > "$e2e_verify_calls"
+        fi
+        printf '%s' '{"status":"success","result":"passed","summary":"ok"}'
+    }
+
+    run_parallel_post_task_stages "feature/801-site2-guard" "frontend" "standard" "M"
+
+    # The dead `|| true` guard bug (rebuild_rc always 0) meant e2e-verify ran
+    # anyway against a broken environment. The repaired guard must actually
+    # skip Step 2/3 once the rebuild has failed.
+    [ "$(cat "$e2e_verify_calls")" -eq 0 ] || \
+        fail "e2e-verify stage must not run after a failed rebuild — guard did not fire"
+    grep -qF "E2E Verification: Skipped" "$comment_titles" || \
+        fail "Expected an 'E2E Verification: Skipped' comment. Got: $(cat "$comment_titles")"
+}
+

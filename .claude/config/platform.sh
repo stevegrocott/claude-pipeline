@@ -25,6 +25,15 @@ AUTO_MERGE="${AUTO_MERGE:-0}"             # 0 = manual merge | 1 = auto-merge wh
 TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpunit", "pytest"
 TEST_E2E_CMD="${TEST_E2E_CMD:-}"          # e.g., "npx playwright test" — empty if no E2E
 TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
+# E2E_CONTAINER_REBUILD: gates the docker-compose rebuild/health-check that
+# rebuild_and_health_check() runs before E2E (test loop and e2e_verify stage).
+# Default true — every consumer keeps today's behavior unless it opts out.
+# Set to false for consumers whose test runner starts its own dev server
+# (Playwright webServer, Vite preview, `next dev`) and has no docker-compose
+# file — the rebuild is skipped, E2E still runs, and the skip is logged
+# (e2e_rebuild_note at the test loop; rebuild_status/health_status=skipped
+# at e2e_verify) instead of being inferred from silence.
+E2E_CONTAINER_REBUILD="${E2E_CONTAINER_REBUILD:-true}"
 # TDD reordering for E2E: default true when TEST_E2E_CMD is set; set false to keep smoke tests only without TDD reordering
 if [[ -z "${E2E_TDD_ENABLED:-}" ]]; then
   [[ -n "${TEST_E2E_CMD:-}" ]] && E2E_TDD_ENABLED=true || E2E_TDD_ENABLED=false
