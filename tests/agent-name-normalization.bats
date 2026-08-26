@@ -25,6 +25,26 @@
 # warn.  These stay RED until the corresponding source fix (a separate task
 # on this issue) lands in implement-issue-orchestrator.sh.
 #
+# Issue #818 found that the pipeline validates agent names by filename while
+# Claude Code registers agents by the `name:` frontmatter field — nothing
+# reconciles the two, so an agent whose `name:` diverges from its basename
+# passes preflight and then hard-bails at dispatch.  Tests (13) and (14)
+# below assert the fix: _normalize_agent_name must resolve a requested name
+# against agents' `name:` frontmatter field, not just their filenames, and
+# must still fall back to basename matching for agent files that declare no
+# `name:` field at all.  Test (13) stays RED until the corresponding source
+# fix (a separate task on this issue) adds frontmatter-based resolution to
+# _normalize_agent_name.
+#
+# Tests (15) and (16) pair _normalize_agent_name (this file's orchestrator)
+# against issue-body-lib.sh's valid_agents/_issue_body_agent_name for a
+# quoted `name: "foo"` field. A review pass on #818 found the two resolvers
+# had diverged: the orchestrator stripped surrounding quotes,
+# _issue_body_agent_name did not, so valid_agents() emitted a literal
+# `"backend-developer"` and rejected the correct unquoted `[backend-developer]`
+# task line while the orchestrator's own resolver accepted it. These tests
+# keep the two locked together.
+#
 
 bats_require_minimum_version 1.5.0
 
@@ -310,6 +330,150 @@ _agent_of_first_task() {
 	agent="$(printf '%s' "$output" | jq -r '.[0].agent')"
 	[ "$agent" = "default" ] || {
 		printf 'FAIL: expected default, got: %q\n' "$agent" >&2
+		return 1
+	}
+}
+
+# ===========================================================================
+# _normalize_agent_name() — name: frontmatter resolution (issue #818)
+# ===========================================================================
+
+@test "(13) _normalize_agent_name resolves an agent via its name: frontmatter field, not just its filename" {
+	# Fixture: a file whose basename differs from its declared `name:`
+	# field, mirroring .claude/agents/fastify-backend-developer.md, which
+	# declares `name: backend-developer`.  Resolving "custom-name" must
+	# succeed by reading the frontmatter even though no custom-name.md file
+	# exists on disk.
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/some-basename.md" <<-'EOF'
+	---
+	name: custom-name
+	description: fixture agent with a divergent name: field
+	---
+	Fixture body.
+	EOF
+	export SCRIPT_DIR="$TEST_TMP/scripts"
+	mkdir -p "$SCRIPT_DIR"
+
+	_source_orchestrator_functions
+
+	run --separate-stderr _normalize_agent_name "custom-name"
+	[ "$status" -eq 0 ]
+	[ "$output" = "custom-name" ] || {
+		printf 'FAIL: expected custom-name, got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+@test "(14) _normalize_agent_name falls back to basename matching when an agent file declares no name: field" {
+	# A consumer agent with no `name:` key must not break resolution — the
+	# evaluation notes for issue #818 call this out explicitly as a risk.
+	# Legacy agent files (and any future ones missing the field) keep
+	# resolving by basename exactly as before.
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/legacy-agent.md" <<-'EOF'
+	---
+	description: fixture agent with no name: field at all
+	---
+	Fixture body.
+	EOF
+	export SCRIPT_DIR="$TEST_TMP/scripts"
+	mkdir -p "$SCRIPT_DIR"
+
+	_source_orchestrator_functions
+
+	run --separate-stderr _normalize_agent_name "legacy-agent"
+	[ "$status" -eq 0 ]
+	[ "$output" = "legacy-agent" ] || {
+		printf 'FAIL: expected legacy-agent (basename fallback), got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+@test "(15) _normalize_agent_name strips surrounding quotes from a quoted name: field" {
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/quoted-agent.md" <<-'EOF'
+	---
+	name: "quoted-name"
+	description: fixture agent with a quoted name: field
+	---
+	Fixture body.
+	EOF
+	export SCRIPT_DIR="$TEST_TMP/scripts"
+	mkdir -p "$SCRIPT_DIR"
+
+	_source_orchestrator_functions
+
+	run --separate-stderr _normalize_agent_name "quoted-name"
+	[ "$status" -eq 0 ]
+	[ "$output" = "quoted-name" ] || {
+		printf 'FAIL: expected quoted-name, got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+@test "(16) issue-body-lib.sh's valid_agents strips surrounding quotes identically to _normalize_agent_name" {
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/quoted-agent.md" <<-'EOF'
+	---
+	name: "quoted-name"
+	description: fixture agent with a quoted name: field
+	---
+	Fixture body.
+	EOF
+
+	local lib="$CORE_DIR/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || fail "issue-body-lib.sh not present at $lib"
+
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents" run --separate-stderr valid_agents
+	[ "$status" -eq 0 ]
+	[[ "$output" == "quoted-name" ]] || {
+		printf 'FAIL: expected valid_agents to emit unquoted quoted-name, got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+# A CRLF-line-ending agent file leaves a trailing \r on the captured `name:`
+# value. The lib trimmed it via ${name%%trailing-space} while the orchestrator
+# used `read`, whose default IFS trims spaces and tabs but not \r — so the two
+# resolvers disagreed on the same file (#818 review). These two tests pin the
+# trim to identical behaviour.
+
+@test "(17) _normalize_agent_name trims a trailing CR from a CRLF agent file's name: field" {
+	mkdir -p "$TEST_TMP/agents"
+	printf -- '---\r\nname: crlf-name\r\ndescription: fixture with CRLF endings\r\n---\r\nFixture body.\r\n' \
+		> "$TEST_TMP/agents/crlf-agent.md"
+	export SCRIPT_DIR="$TEST_TMP/scripts"
+	mkdir -p "$SCRIPT_DIR"
+
+	_source_orchestrator_functions
+
+	run --separate-stderr _normalize_agent_name "crlf-name"
+	[ "$status" -eq 0 ]
+	[ "$output" = "crlf-name" ] || {
+		printf 'FAIL: expected crlf-name, got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+@test "(18) issue-body-lib.sh's valid_agents trims a trailing CR identically to _normalize_agent_name" {
+	mkdir -p "$TEST_TMP/agents"
+	printf -- '---\r\nname: crlf-name\r\ndescription: fixture with CRLF endings\r\n---\r\nFixture body.\r\n' \
+		> "$TEST_TMP/agents/crlf-agent.md"
+
+	local lib="$CORE_DIR/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || fail "issue-body-lib.sh not present at $lib"
+
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents" run --separate-stderr valid_agents
+	[ "$status" -eq 0 ]
+	[[ "$output" == "crlf-name" ]] || {
+		printf 'FAIL: expected valid_agents to emit CR-free crlf-name, got: %q\n' "$output" >&2
 		return 1
 	}
 }

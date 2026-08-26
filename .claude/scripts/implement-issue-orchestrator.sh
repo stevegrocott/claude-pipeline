@@ -4913,11 +4913,76 @@ _normalize_agent_name() {
 		test-engineer) name="playwright-test-developer" ;;
 	esac
 
-	# If the (possibly remapped) name has a local definition, accept it.
-	if [[ -f "${agents_dir}/${name}.md" ]]; then
-		printf '%s' "$name"
-		return
-	fi
+	# Resolve by the agent's `name:` front-matter field, falling back to the
+	# basename when the field is absent (issue #818). Claude Code registers
+	# agents by their `name:` field, not by filename — a shipped agent whose
+	# `name:` diverges from its basename (or a consumer copy renamed without
+	# updating `name:`) must still resolve here exactly as it does at
+	# dispatch time. Mirrors the resolution in issue-body-lib.sh's
+	# valid_agents().
+	#
+	# The scan is deliberately not memoized into a name→file map: agent
+	# definitions can be created mid-run (a task that adds an agent .md),
+	# and a process-lifetime cache would resolve those to "default" for the
+	# rest of the run. Re-reading ~9 small files per call is cheaper than
+	# that failure mode; revisit only if the agent set grows large.
+	local file file_base field_name in_frontmatter line
+	for file in "${agents_dir}"/*.md; do
+		[[ -f "$file" ]] || continue
+		file_base="${file##*/}"
+		file_base="${file_base%.md}"
+
+		# Extract the first `name:` key from the first YAML front-matter
+		# block only, so a stray "name:"-looking line in the agent's body
+		# text can never be mistaken for the declaration.
+		#
+		# Known constraint (mirrors issue-body-lib.sh's
+		# _issue_body_agent_name): `name : foo` and `name: foo  # comment`
+		# are not handled specially — the latter takes the trailing comment
+		# as part of the literal name. Follow-up if this bites.
+		field_name=""
+		in_frontmatter=false
+		while IFS= read -r line; do
+			# Tolerate CRLF agent files: without this the `---` compare
+			# below never matches, the frontmatter block is never entered
+			# and the agent silently resolves by basename instead of its
+			# declared name (issue #818).
+			line="${line%$'\r'}"
+			if [[ "$line" == "---" ]]; then
+				if [[ "$in_frontmatter" == "true" ]]; then
+					break
+				fi
+				in_frontmatter=true
+				continue
+			fi
+			if [[ "$in_frontmatter" == "true" \
+				&& "$line" =~ ^name:[[:space:]]*(.*)$ ]]; then
+				field_name="${BASH_REMATCH[1]}"
+				# Trim trailing whitespace/CR, then strip surrounding
+				# quotes. Uses the same expansion as
+				# _issue_body_agent_name() rather than `read`, whose
+				# default IFS trims spaces and tabs but leaves a CRLF
+				# file's trailing \r attached — which would make this
+				# resolver disagree with issue-body-lib.sh (issue #818).
+				field_name="${field_name%"${field_name##*[![:space:]]}"}"
+				field_name="${field_name#\"}"
+				field_name="${field_name%\"}"
+				field_name="${field_name#\'}"
+				field_name="${field_name%\'}"
+				break
+			fi
+		done < "$file"
+
+		if [[ -n "$field_name" ]]; then
+			if [[ "$field_name" == "$name" ]]; then
+				printf '%s' "$name"
+				return
+			fi
+		elif [[ "$file_base" == "$name" ]]; then
+			printf '%s' "$name"
+			return
+		fi
+	done
 
 	# Unknown name with no local definition — fall back to generic agent.
 	# Degrade to the literal "default" when _AGENT_SENTINEL_DEFAULT is not in

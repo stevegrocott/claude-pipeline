@@ -87,7 +87,11 @@ for f in .claude/local/agents/*.md; do
     grep -v '^<!-- STACK-SPECIFIC:' "$f" > "${f}.tmp" \
         && mv "${f}.tmp" "$f"
 done
+```
 
+**If you rename a copied agent file** (e.g. `fastify-backend-developer.md` → `backend-developer.md`), you must also update the `name:` field in that file's frontmatter to match. The Task tool resolves agents by the frontmatter `name:`, not the filename — a mismatch leaves the agent unreachable under its new filename.
+
+```bash
 # Copy config for customization
 cp .claude/config/platform.sh .claude/local/config/
 
