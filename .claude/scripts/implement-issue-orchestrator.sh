@@ -9769,11 +9769,11 @@ _prior_merged_prs_for_issue() {
 		pr_num=$(printf '%s' "$merged_prs" \
 			| jq -r ".[$i].pr // empty" 2>/dev/null)
 		if [[ -z "$pr_num" ]]; then
-			((i++))
+			i=$((i + 1))
 			continue
 		fi
 		if [[ -n "$exclude_pr" && "$pr_num" == "$exclude_pr" ]]; then
-			((i++))
+			i=$((i + 1))
 			continue
 		fi
 		pr_title=$(printf '%s' "$merged_prs" \
@@ -9792,7 +9792,7 @@ _prior_merged_prs_for_issue() {
 
 		printf '%s|%s|%s|%s\n' \
 			"$pr_num" "$pr_title" "$pr_merged" "$pr_files"
-		((i++)) || true
+		i=$((i + 1))
 	done
 	return 0
 }

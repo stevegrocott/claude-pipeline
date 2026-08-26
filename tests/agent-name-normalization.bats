@@ -545,9 +545,7 @@ _agent_of_first_task() {
 	body text
 	EOF
 
-	export ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents"
-	export FRONTEND_PATH_PATTERNS='app/*'
-	run _infer_agent_from_path "app/page.tsx"
+	ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents" FRONTEND_PATH_PATTERNS='app/*' run _infer_agent_from_path "app/page.tsx"
 	[ "$status" -eq 0 ]
 	[ "$output" == "frontend-developer" ]
 }
