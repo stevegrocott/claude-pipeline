@@ -65,7 +65,8 @@ fi
 @test "every .claude/agents/*.md name: field matches its basename" {
 	local file
 	local basename
-	local name_line
+	local line
+	local delim_count
 	local name_value
 	local -a failures=()
 
@@ -74,9 +75,25 @@ fi
 		basename="${file##*/}"
 		basename="${basename%.md}"
 
-		name_line=$(grep -m1 '^name:' "$file")
-		name_value="${name_line#name:}"
-		name_value="${name_value#"${name_value%%[![:space:]]*}"}"
+		# Scan only the first `---`-delimited frontmatter block, matching
+		# the production resolvers (_issue_body_agent_name,
+		# _normalize_agent_name) — a `name:`-looking line in the agent's
+		# prose body must not be mistaken for the declaration. Absence of a
+		# `name:` key (or of the file entirely) leaves name_value empty,
+		# which is reported as a violation rather than aborting the loop.
+		delim_count=0
+		name_value=""
+		while IFS= read -r line; do
+			if [[ "$line" == "---" ]]; then
+				((delim_count++))
+				((delim_count >= 2)) && break
+				continue
+			fi
+			if ((delim_count >= 1)) && [[ "$line" =~ ^name:[[:space:]]*(.*)$ ]]; then
+				name_value="${BASH_REMATCH[1]}"
+				break
+			fi
+		done < "$file"
 
 		if [[ "$name_value" != "$basename" ]]; then
 			failures+=(

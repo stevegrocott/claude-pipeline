@@ -4920,6 +4920,12 @@ _normalize_agent_name() {
 	# updating `name:`) must still resolve here exactly as it does at
 	# dispatch time. Mirrors the resolution in issue-body-lib.sh's
 	# valid_agents().
+	#
+	# The scan is deliberately not memoized into a name→file map: agent
+	# definitions can be created mid-run (a task that adds an agent .md),
+	# and a process-lifetime cache would resolve those to "default" for the
+	# rest of the run. Re-reading ~9 small files per call is cheaper than
+	# that failure mode; revisit only if the agent set grows large.
 	local file file_base field_name in_frontmatter line
 	for file in "${agents_dir}"/*.md; do
 		[[ -f "$file" ]] || continue
@@ -4929,9 +4935,19 @@ _normalize_agent_name() {
 		# Extract the first `name:` key from the first YAML front-matter
 		# block only, so a stray "name:"-looking line in the agent's body
 		# text can never be mistaken for the declaration.
+		#
+		# Known constraint (mirrors issue-body-lib.sh's
+		# _issue_body_agent_name): `name : foo` and `name: foo  # comment`
+		# are not handled specially — the latter takes the trailing comment
+		# as part of the literal name. Follow-up if this bites.
 		field_name=""
 		in_frontmatter=false
 		while IFS= read -r line; do
+			# Tolerate CRLF agent files: without this the `---` compare
+			# below never matches, the frontmatter block is never entered
+			# and the agent silently resolves by basename instead of its
+			# declared name (issue #818).
+			line="${line%$'\r'}"
 			if [[ "$line" == "---" ]]; then
 				if [[ "$in_frontmatter" == "true" ]]; then
 					break
@@ -4942,8 +4958,13 @@ _normalize_agent_name() {
 			if [[ "$in_frontmatter" == "true" \
 				&& "$line" =~ ^name:[[:space:]]*(.*)$ ]]; then
 				field_name="${BASH_REMATCH[1]}"
-				# Strip surrounding quotes and whitespace.
-				read -r field_name <<< "$field_name"
+				# Trim trailing whitespace/CR, then strip surrounding
+				# quotes. Uses the same expansion as
+				# _issue_body_agent_name() rather than `read`, whose
+				# default IFS trims spaces and tabs but leaves a CRLF
+				# file's trailing \r attached — which would make this
+				# resolver disagree with issue-body-lib.sh (issue #818).
+				field_name="${field_name%"${field_name##*[![:space:]]}"}"
 				field_name="${field_name#\"}"
 				field_name="${field_name%\"}"
 				field_name="${field_name#\'}"

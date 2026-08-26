@@ -139,6 +139,11 @@ issue_body_agents_dir_resolved() {
 # Only the first `---`-delimited frontmatter block is scanned; a `name:` key
 # outside it (e.g. in the agent's prose body) is ignored.
 #
+# Known constraint: `name:` must be the literal key with no space before the
+# colon, and the value runs to end-of-line — `name : foo` and
+# `name: foo  # comment` are not handled specially, so the latter takes the
+# trailing comment as part of the literal name. Follow-up if this bites.
+#
 # Arguments:
 #   $1 - path to an agent .md file
 # Outputs:
@@ -151,6 +156,11 @@ _issue_body_agent_name() {
 
 	local line delim_count=0 name=""
 	while IFS= read -r line; do
+		# Tolerate CRLF agent files: without this the `---` compare below
+		# never matches, the frontmatter block is never entered and the
+		# agent silently resolves by basename instead of its declared
+		# name (issue #818). Mirrors _normalize_agent_name().
+		line="${line%$'\r'}"
 		if [[ "$line" == "---" ]]; then
 			((delim_count++))
 			((delim_count >= 2)) && break
@@ -160,6 +170,13 @@ _issue_body_agent_name() {
 			name="${BASH_REMATCH[1]}"
 			# Trim trailing whitespace/CR left by the greedy capture.
 			name="${name%"${name##*[![:space:]]}"}"
+			# Strip surrounding quotes, mirroring _normalize_agent_name()
+			# in implement-issue-orchestrator.sh so `name: "foo"` resolves
+			# identically in both resolvers (issue #818).
+			name="${name#\"}"
+			name="${name%\"}"
+			name="${name#\'}"
+			name="${name%\'}"
 			break
 		fi
 	done < "$file"

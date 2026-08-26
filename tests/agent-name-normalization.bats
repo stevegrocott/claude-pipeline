@@ -36,6 +36,15 @@
 # fix (a separate task on this issue) adds frontmatter-based resolution to
 # _normalize_agent_name.
 #
+# Tests (15) and (16) pair _normalize_agent_name (this file's orchestrator)
+# against issue-body-lib.sh's valid_agents/_issue_body_agent_name for a
+# quoted `name: "foo"` field. A review pass on #818 found the two resolvers
+# had diverged: the orchestrator stripped surrounding quotes,
+# _issue_body_agent_name did not, so valid_agents() emitted a literal
+# `"backend-developer"` and rejected the correct unquoted `[backend-developer]`
+# task line while the orchestrator's own resolver accepted it. These tests
+# keep the two locked together.
+#
 
 bats_require_minimum_version 1.5.0
 
@@ -377,6 +386,94 @@ _agent_of_first_task() {
 	[ "$status" -eq 0 ]
 	[ "$output" = "legacy-agent" ] || {
 		printf 'FAIL: expected legacy-agent (basename fallback), got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+@test "(15) _normalize_agent_name strips surrounding quotes from a quoted name: field" {
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/quoted-agent.md" <<-'EOF'
+	---
+	name: "quoted-name"
+	description: fixture agent with a quoted name: field
+	---
+	Fixture body.
+	EOF
+	export SCRIPT_DIR="$TEST_TMP/scripts"
+	mkdir -p "$SCRIPT_DIR"
+
+	_source_orchestrator_functions
+
+	run --separate-stderr _normalize_agent_name "quoted-name"
+	[ "$status" -eq 0 ]
+	[ "$output" = "quoted-name" ] || {
+		printf 'FAIL: expected quoted-name, got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+@test "(16) issue-body-lib.sh's valid_agents strips surrounding quotes identically to _normalize_agent_name" {
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/quoted-agent.md" <<-'EOF'
+	---
+	name: "quoted-name"
+	description: fixture agent with a quoted name: field
+	---
+	Fixture body.
+	EOF
+
+	local lib="$CORE_DIR/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || fail "issue-body-lib.sh not present at $lib"
+
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents" run --separate-stderr valid_agents
+	[ "$status" -eq 0 ]
+	[[ "$output" == "quoted-name" ]] || {
+		printf 'FAIL: expected valid_agents to emit unquoted quoted-name, got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+# A CRLF-line-ending agent file leaves a trailing \r on the captured `name:`
+# value. The lib trimmed it via ${name%%trailing-space} while the orchestrator
+# used `read`, whose default IFS trims spaces and tabs but not \r — so the two
+# resolvers disagreed on the same file (#818 review). These two tests pin the
+# trim to identical behaviour.
+
+@test "(17) _normalize_agent_name trims a trailing CR from a CRLF agent file's name: field" {
+	mkdir -p "$TEST_TMP/agents"
+	printf -- '---\r\nname: crlf-name\r\ndescription: fixture with CRLF endings\r\n---\r\nFixture body.\r\n' \
+		> "$TEST_TMP/agents/crlf-agent.md"
+	export SCRIPT_DIR="$TEST_TMP/scripts"
+	mkdir -p "$SCRIPT_DIR"
+
+	_source_orchestrator_functions
+
+	run --separate-stderr _normalize_agent_name "crlf-name"
+	[ "$status" -eq 0 ]
+	[ "$output" = "crlf-name" ] || {
+		printf 'FAIL: expected crlf-name, got: %q\n' "$output" >&2
+		return 1
+	}
+}
+
+@test "(18) issue-body-lib.sh's valid_agents trims a trailing CR identically to _normalize_agent_name" {
+	mkdir -p "$TEST_TMP/agents"
+	printf -- '---\r\nname: crlf-name\r\ndescription: fixture with CRLF endings\r\n---\r\nFixture body.\r\n' \
+		> "$TEST_TMP/agents/crlf-agent.md"
+
+	local lib="$CORE_DIR/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || fail "issue-body-lib.sh not present at $lib"
+
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents" run --separate-stderr valid_agents
+	[ "$status" -eq 0 ]
+	[[ "$output" == "crlf-name" ]] || {
+		printf 'FAIL: expected valid_agents to emit CR-free crlf-name, got: %q\n' "$output" >&2
 		return 1
 	}
 }
