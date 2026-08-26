@@ -1,5 +1,5 @@
 ---
-name: frontend-developer
+name: react-frontend-developer
 model: sonnet
 description: Senior frontend developer agent template. Copy to .claude/local/agents/frontend-developer.md and customize for your project's frontend stack during /adapting-claude-pipeline.
 ---
