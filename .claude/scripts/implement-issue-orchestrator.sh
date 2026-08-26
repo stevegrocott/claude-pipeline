@@ -4506,7 +4506,7 @@ poll_health_url() {
 
     local attempt=0
     while ((attempt < max_retries)); do
-        ((attempt++))
+        attempt=$((attempt + 1))
         local http_code
         http_code=$(curl -s -o /dev/null -w '%{http_code}' \
             --max-time 10 \
@@ -6321,7 +6321,7 @@ compute_task_batches() {
 				fi
 				placed=1
 			else
-				((b++))
+				b=$((b + 1))
 			fi
 		done
 		# Safety fallback: loop ceiling hit without placement (defensive only;
