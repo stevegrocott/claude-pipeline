@@ -85,8 +85,15 @@ fi
 		name_value=""
 		while IFS= read -r line; do
 			if [[ "$line" == "---" ]]; then
-				((delim_count++))
-				((delim_count >= 2)) && break
+				# Use an assignment, not ((delim_count++)): the
+				# post-increment expression evaluates to the PRE
+				# value, so the first delimiter makes (( )) return
+				# exit status 1 and aborts the test under bats'
+				# errexit (green on macOS bash 3.2, red on CI bash 5).
+				delim_count=$((delim_count + 1))
+				if ((delim_count >= 2)); then
+					break
+				fi
 				continue
 			fi
 			if ((delim_count >= 1)) && [[ "$line" =~ ^name:[[:space:]]*(.*)$ ]]; then
