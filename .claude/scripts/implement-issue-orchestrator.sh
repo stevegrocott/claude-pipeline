@@ -4913,11 +4913,55 @@ _normalize_agent_name() {
 		test-engineer) name="playwright-test-developer" ;;
 	esac
 
-	# If the (possibly remapped) name has a local definition, accept it.
-	if [[ -f "${agents_dir}/${name}.md" ]]; then
-		printf '%s' "$name"
-		return
-	fi
+	# Resolve by the agent's `name:` front-matter field, falling back to the
+	# basename when the field is absent (issue #818). Claude Code registers
+	# agents by their `name:` field, not by filename — a shipped agent whose
+	# `name:` diverges from its basename (or a consumer copy renamed without
+	# updating `name:`) must still resolve here exactly as it does at
+	# dispatch time. Mirrors the resolution in issue-body-lib.sh's
+	# valid_agents().
+	local file file_base field_name in_frontmatter line
+	for file in "${agents_dir}"/*.md; do
+		[[ -f "$file" ]] || continue
+		file_base="${file##*/}"
+		file_base="${file_base%.md}"
+
+		# Extract the first `name:` key from the first YAML front-matter
+		# block only, so a stray "name:"-looking line in the agent's body
+		# text can never be mistaken for the declaration.
+		field_name=""
+		in_frontmatter=false
+		while IFS= read -r line; do
+			if [[ "$line" == "---" ]]; then
+				if [[ "$in_frontmatter" == "true" ]]; then
+					break
+				fi
+				in_frontmatter=true
+				continue
+			fi
+			if [[ "$in_frontmatter" == "true" \
+				&& "$line" =~ ^name:[[:space:]]*(.*)$ ]]; then
+				field_name="${BASH_REMATCH[1]}"
+				# Strip surrounding quotes and whitespace.
+				read -r field_name <<< "$field_name"
+				field_name="${field_name#\"}"
+				field_name="${field_name%\"}"
+				field_name="${field_name#\'}"
+				field_name="${field_name%\'}"
+				break
+			fi
+		done < "$file"
+
+		if [[ -n "$field_name" ]]; then
+			if [[ "$field_name" == "$name" ]]; then
+				printf '%s' "$name"
+				return
+			fi
+		elif [[ "$file_base" == "$name" ]]; then
+			printf '%s' "$name"
+			return
+		fi
+	done
 
 	# Unknown name with no local definition — fall back to generic agent.
 	# Degrade to the literal "default" when _AGENT_SENTINEL_DEFAULT is not in
