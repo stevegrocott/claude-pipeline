@@ -45,6 +45,15 @@
 # task line while the orchestrator's own resolver accepted it. These tests
 # keep the two locked together.
 #
+# Tests (19)-(22) are ported from
+# .claude/scripts/implement-issue-test/test-issue-body-lib.bats (issue #820).
+# They cover the same #818 fix from issue-body-lib.sh's side — valid_agents,
+# _infer_agent_from_path, and assert_issue_valid — but their original home is
+# a bats directory CI does not execute (orchestrator-guards.yml curates its
+# bats list rather than globbing it, since several sibling files shell out to
+# gh/claude/curl). Moving them here gets them onto every PR via the
+# already-gated Decision Script BATS Tests job.
+#
 
 bats_require_minimum_version 1.5.0
 
@@ -476,4 +485,104 @@ _agent_of_first_task() {
 		printf 'FAIL: expected valid_agents to emit CR-free crlf-name, got: %q\n' "$output" >&2
 		return 1
 	}
+}
+
+# ===========================================================================
+# issue-body-lib.sh — name: frontmatter resolution (ported from
+# .claude/scripts/implement-issue-test/test-issue-body-lib.bats, issue #820)
+# ===========================================================================
+
+@test "(19) valid_agents: resolves the name: frontmatter over a diverging basename" {
+	local lib="$CORE_DIR/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || fail "issue-body-lib.sh not present at $lib"
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	# Mirrors issue #818: fastify-backend-developer.md declares
+	# `name: backend-developer` — the Task tool dispatches by that
+	# frontmatter name, not the filename.
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/fastify-backend-developer.md" <<-'EOF'
+	---
+	name: backend-developer
+	description: test fixture
+	---
+	body text
+	EOF
+
+	ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents" run valid_agents
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"backend-developer"* ]]
+	[[ "$output" != *"fastify-backend-developer"* ]]
+}
+
+@test "(20) valid_agents: falls back to the basename when name: is absent" {
+	local lib="$CORE_DIR/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || fail "issue-body-lib.sh not present at $lib"
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	mkdir -p "$TEST_TMP/agents"
+	: > "$TEST_TMP/agents/no-frontmatter-agent.md"
+
+	ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents" run valid_agents
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"no-frontmatter-agent"* ]]
+}
+
+@test "(21) _infer_agent_from_path: resolves to the name: frontmatter, not the filename" {
+	local lib="$CORE_DIR/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || fail "issue-body-lib.sh not present at $lib"
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/react-frontend-developer.md" <<-'EOF'
+	---
+	name: frontend-developer
+	description: test fixture
+	---
+	body text
+	EOF
+
+	ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents" FRONTEND_PATH_PATTERNS='app/*' run _infer_agent_from_path "app/page.tsx"
+	[ "$status" -eq 0 ]
+	[ "$output" == "frontend-developer" ]
+}
+
+@test "(22) assert_issue_valid: rejects a task naming an agent by a basename that diverges from its name: field" {
+	local lib="$CORE_DIR/scripts/issue-body-lib.sh"
+	[[ -f "$lib" ]] || fail "issue-body-lib.sh not present at $lib"
+	# shellcheck disable=SC1090
+	source "$lib"
+
+	# A task line naming the OLD divergent basename must fail resolution
+	# now that valid_agents() lists the frontmatter name instead — AC4:
+	# it should be rejected as an unknown agent rather than silently
+	# passing and bailing at dispatch.
+	mkdir -p "$TEST_TMP/agents"
+	cat > "$TEST_TMP/agents/fastify-backend-developer.md" <<-'EOF'
+	---
+	name: backend-developer
+	description: test fixture
+	---
+	body text
+	EOF
+
+	mkdir -p "$TEST_TMP/repo/.claude/scripts"
+	export ISSUE_BODY_AGENTS_DIR="$TEST_TMP/agents"
+	export ISSUE_BODY_REPO_ROOT="$TEST_TMP/repo"
+	unset DEPLOY_VERIFY_CMD
+
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[fastify-backend-developer]\` **(S)** Fix it — \`.claude/scripts/a.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"unknown agent: fastify-backend-developer"* ]]
 }
