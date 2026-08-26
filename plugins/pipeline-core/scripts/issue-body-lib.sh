@@ -128,9 +128,51 @@ issue_body_agents_dir_resolved() {
 }
 
 #
+# Resolves an agent .md file's invokable name from its `name:` YAML
+# frontmatter, falling back to the filename stem when the field is absent
+# (issue #818).  Claude Code registers/dispatches agents by the frontmatter
+# `name:` field, NOT by filename — two shipped agents diverge from their
+# basename (e.g. fastify-backend-developer.md declares
+# `name: backend-developer`), so any caller resolving by basename alone
+# produces an agent tag the CLI cannot dispatch, bailing the run.
+#
+# Only the first `---`-delimited frontmatter block is scanned; a `name:` key
+# outside it (e.g. in the agent's prose body) is ignored.
+#
+# Arguments:
+#   $1 - path to an agent .md file
+# Outputs:
+#   The resolved agent name on stdout
+#
+_issue_body_agent_name() {
+	local file="$1"
+	local stem="${file##*/}"
+	stem="${stem%.md}"
+
+	local line delim_count=0 name=""
+	while IFS= read -r line; do
+		if [[ "$line" == "---" ]]; then
+			((delim_count++))
+			((delim_count >= 2)) && break
+			continue
+		fi
+		if ((delim_count >= 1)) && [[ "$line" =~ ^name:[[:space:]]*(.+)$ ]]; then
+			name="${BASH_REMATCH[1]}"
+			# Trim trailing whitespace/CR left by the greedy capture.
+			name="${name%"${name##*[![:space:]]}"}"
+			break
+		fi
+	done < "$file"
+
+	printf '%s' "${name:-$stem}"
+}
+
+#
 # Maps a file path to the specialist agent best suited for that file type.
 # Validates the candidate against ISSUE_BODY_AGENTS_DIR and degrades to
-# "default" when no .md definition exists.
+# "default" when no .md definition exists.  When a definition exists, the
+# agent's `name:` frontmatter (not its filename) is returned — see
+# _issue_body_agent_name.
 #
 # Arguments:
 #   $1 - file path (empty string → returns "default")
@@ -189,11 +231,16 @@ _infer_agent_from_path() {
 		return
 	fi
 
-	# Degrade to "default" when the inferred agent has no local .md definition.
-	local agents_dir
+	# Degrade to "default" when the inferred agent has no local .md definition;
+	# otherwise resolve to the file's declared `name:` (the actual invokable
+	# agent name, which may diverge from the filename stem — issue #818).
+	local agents_dir agent_file
 	agents_dir="$(_issue_body_agents_dir)"
-	if [[ ! -f "${agents_dir}/${candidate}.md" ]]; then
+	agent_file="${agents_dir}/${candidate}.md"
+	if [[ ! -f "$agent_file" ]]; then
 		candidate="default"
+	else
+		candidate="$(_issue_body_agent_name "$agent_file")"
 	fi
 
 	printf '%s' "$candidate"
@@ -201,18 +248,20 @@ _infer_agent_from_path() {
 
 #
 # Prints the known agent names — one per line, sorted-unique — derived from
-# the .claude/agents/*.md definitions.
+# the .claude/agents/*.md definitions. Each name is resolved from the file's
+# `name:` frontmatter (falling back to the filename stem when absent) via
+# _issue_body_agent_name, so a task line naming an agent by a filename that
+# diverges from its declared `name:` fails resolution here rather than
+# passing validation and bailing at dispatch (issue #818).
 #
 valid_agents() {
 	local agents_dir
 	agents_dir="$(_issue_body_agents_dir)"
-	local file name
+	local file
 
 	for file in "$agents_dir"/*.md; do
 		[[ -f "$file" ]] || continue
-		name="${file##*/}"
-		name="${name%.md}"
-		printf '%s\n' "$name"
+		printf '%s\n' "$(_issue_body_agent_name "$file")"
 	done | sort -u
 }
 
