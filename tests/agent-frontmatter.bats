@@ -54,6 +54,45 @@ fi
 }
 
 # =============================================================================
+# NAME FIELD MATCHES FILENAME
+# =============================================================================
+#
+# The orchestrator and issue-body-lib resolve agent identity from the file's
+# basename. If an agent's `name:` front-matter field diverges from its
+# basename (e.g. a template copied and renamed without updating `name:`),
+# name-based resolution silently picks the wrong agent (issue #818).
+
+@test "every .claude/agents/*.md name: field matches its basename" {
+	local file
+	local basename
+	local name_line
+	local name_value
+	local -a failures=()
+
+	for file in "$AGENTS_DIR"/*.md; do
+		[[ -f "$file" ]] || continue
+		basename="${file##*/}"
+		basename="${basename%.md}"
+
+		name_line=$(grep -m1 '^name:' "$file")
+		name_value="${name_line#name:}"
+		name_value="${name_value#"${name_value%%[![:space:]]*}"}"
+
+		if [[ "$name_value" != "$basename" ]]; then
+			failures+=(
+				"${file##*/}: name: '${name_value}' does not match basename '${basename}'"
+			)
+		fi
+	done
+
+	if ((${#failures[@]} > 0)); then
+		echo "Agent .md files with name: mismatched to filename:"
+		printf '  %s\n' "${failures[@]}"
+		return 1
+	fi
+}
+
+# =============================================================================
 # EDGE-CASE: glob expands to nothing
 # =============================================================================
 
