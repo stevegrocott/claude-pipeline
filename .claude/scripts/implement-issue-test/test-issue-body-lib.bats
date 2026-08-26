@@ -99,6 +99,69 @@ valid_body() {
 	[ -z "$output" ]
 }
 
+@test "valid_agents: resolves the name: frontmatter over a diverging basename" {
+	# Mirrors issue #818: fastify-backend-developer.md declares
+	# `name: backend-developer` — the Task tool dispatches by that
+	# frontmatter name, not the filename.
+	cat > "$ISSUE_BODY_AGENTS_DIR/fastify-backend-developer.md" <<-'EOF'
+	---
+	name: backend-developer
+	description: test fixture
+	---
+	body text
+	EOF
+	run valid_agents
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"backend-developer"* ]]
+	[[ "$output" != *"fastify-backend-developer"* ]]
+}
+
+@test "valid_agents: falls back to the basename when name: is absent" {
+	: > "$ISSUE_BODY_AGENTS_DIR/no-frontmatter-agent.md"
+	run valid_agents
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"no-frontmatter-agent"* ]]
+}
+
+@test "_infer_agent_from_path: resolves to the name: frontmatter, not the filename" {
+	cat > "$ISSUE_BODY_AGENTS_DIR/react-frontend-developer.md" <<-'EOF'
+	---
+	name: frontend-developer
+	description: test fixture
+	---
+	body text
+	EOF
+	export FRONTEND_PATH_PATTERNS='app/*'
+	run _infer_agent_from_path "app/page.tsx"
+	[ "$status" -eq 0 ]
+	[ "$output" == "frontend-developer" ]
+}
+
+@test "assert_issue_valid: rejects a task naming an agent by a basename that diverges from its name: field" {
+	# A task line naming the OLD divergent basename must fail resolution
+	# now that valid_agents() lists the frontmatter name instead — AC4:
+	# it should be rejected as an unknown agent rather than silently
+	# passing and bailing at dispatch.
+	cat > "$ISSUE_BODY_AGENTS_DIR/fastify-backend-developer.md" <<-'EOF'
+	---
+	name: backend-developer
+	description: test fixture
+	---
+	body text
+	EOF
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[fastify-backend-developer]\` **(S)** Fix it — \`.claude/scripts/a.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"unknown agent: fastify-backend-developer"* ]]
+}
+
 # =============================================================================
 # assert_issue_valid() — HAPPY PATH
 # =============================================================================
