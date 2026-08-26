@@ -162,7 +162,7 @@ _issue_body_agent_name() {
 		# name (issue #818). Mirrors _normalize_agent_name().
 		line="${line%$'\r'}"
 		if [[ "$line" == "---" ]]; then
-			((delim_count++))
+			delim_count=$((delim_count + 1))
 			((delim_count >= 2)) && break
 			continue
 		fi
@@ -378,7 +378,7 @@ _issue_body_path_resolves() {
 		parent="${parent%/*}"
 		[[ -z "$parent" ]] && break
 		[[ -d "$repo_root/$parent" ]] && return 0
-		((missing++))
+		missing=$((missing + 1))
 	done
 	return 1
 }
