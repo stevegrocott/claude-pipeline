@@ -7,6 +7,18 @@ on:
       - '.claude/scripts/schemas/**'
       - '.claude/skills/*/SKILL.md'
       - 'plugins/pipeline-core/skills/*/SKILL.md'
+      # The decision-scripts job below runs the whole tests/ tree, so a change
+      # to those tests — or to the scripts they exercise — must fire this
+      # workflow. Without these entries the suite ran only when a skill or
+      # schema happened to change: #821 altered issue-body-lib.sh and three
+      # test files, the job never fired, and the PR merged with its own
+      # acceptance criterion unevaluated (issue #820).
+      - 'tests/**'
+      - '.claude/scripts/issue-body-lib.sh'
+      - '.claude/scripts/implement-issue-orchestrator.sh'
+      # Re-run when this workflow itself changes, so a triggers/scope edit is
+      # verified by the run it configures rather than on the next unrelated PR.
+      - '.github/workflows/skill-golden.yml'
   pull_request:
     paths:
       - '.claude/skills/**'
@@ -15,6 +27,10 @@ on:
       - '.claude/scripts/skill-golden.sh'
       - '.claude/scripts/skill-golden-lib.sh'
       - '.claude/scripts/decide-*.sh'
+      - 'tests/**'
+      - '.claude/scripts/issue-body-lib.sh'
+      - '.claude/scripts/implement-issue-orchestrator.sh'
+      - '.github/workflows/skill-golden.yml'
   workflow_dispatch: {}
   schedule:
     - cron: '0 6 1 * *'  # 1st of each month, 06:00 UTC
@@ -115,8 +131,12 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+            # Must stay in step with this workflow's pull_request paths: filter.
+            # The workflow firing is necessary but NOT sufficient — this gate
+            # decides whether bats actually runs, so a path added above and
+            # omitted here silently skips the suite.
             if printf '%s\n' "$changed" | grep -qE \
-              '^\.claude/(scripts/decide-[^/]+\.sh|scripts/schemas/|skills/[^/]+/SKILL\.md)'; then
+              '^(tests/|\.github/workflows/skill-golden\.yml|\.claude/(scripts/(decide-[^/]+\.sh|issue-body-lib\.sh|implement-issue-orchestrator\.sh|schemas/)|skills/[^/]+/SKILL\.md))'; then
               echo "run=true" >> "$GITHUB_OUTPUT"
             else
               echo "run=false" >> "$GITHUB_OUTPUT"
