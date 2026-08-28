@@ -5733,10 +5733,13 @@ reconcile_failed_tasks_with_branch_evidence() {
 # _lacking_evidence_summary() — formats every task still marked "failed" in
 # $STATUS_FILE into a human-readable list for merge_blocked_reason (#620
 # task 3), so a block names the specific tasks lacking file evidence rather
-# than only reporting a count (AC3). Callers run this only after
-# reconcile_failed_tasks_with_branch_evidence() has already promoted every
-# task it could find evidence for — any task still "failed" at that point is
-# a genuine gap.
+# than only reporting a count (AC3). A task still "failed" after
+# reconcile_failed_tasks_with_branch_evidence() is NOT always a genuine gap:
+# that function refuses to promote ANY task while this run's test suite is
+# red, short-circuiting before it ever checks branch evidence (issue #824).
+# Callers must only treat this summary's output as a genuine gap when this
+# run's test suite was green — see revalidate_partial_block_against_branch()'s
+# reval_tests_green guard, which calls this only on that path.
 #
 # Example output: "task 2 (README install section) [README.md]"
 # Multiple tasks are joined with "; ". Empty output when no task is failed.
