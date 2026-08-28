@@ -5867,15 +5867,40 @@ revalidate_partial_block_against_branch() {
 	done
 	DEGRADED_STAGES=("${reval_kept[@]+"${reval_kept[@]}"}")
 
+	# A red test suite makes reconcile_failed_tasks_with_branch_evidence()
+	# short-circuit before it ever evaluates a task's file evidence (issue
+	# #824) — every task still "failed" afterward then reads as a
+	# missing-evidence gap when the real cause is that suppression. Re-detect
+	# the same DEGRADED_STAGES markers the reconcile function checks so the
+	# blocked reason below can name the actual cause instead.
+	local reval_tests_green=1
+	local reval_red_marker=""
+	local reval_ds
+	for reval_ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		case "$reval_ds" in
+			test:*full_suite_red|test:bats_incomplete:*)
+				reval_tests_green=0
+				reval_red_marker="$reval_ds"
+				break
+				;;
+		esac
+	done
+
 	if ((reval_completed < reval_total)); then
 		DEGRADED_STAGES+=("implement:partial:${reval_completed}/${reval_total}")
 		log "Gate re-evaluation: ${reval_completed}/${reval_total} task(s) evidenced" \
 			"on the branch (${reval_reconciled} reconciled here) —" \
 			"partial merge block stands."
-		local reval_lacking
-		reval_lacking=$(_lacking_evidence_summary)
 		local reval_reason
-		reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking file evidence: ${reval_lacking}}."
+		if ((reval_tests_green == 0)); then
+			# Evidence was never evaluated for the still-failed tasks, so
+			# don't claim it's lacking — name the suppression instead.
+			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}; blocked by a red test suite this run (${reval_red_marker}) — remaining failed task(s)' file evidence was not evaluated."
+		else
+			local reval_lacking
+			reval_lacking=$(_lacking_evidence_summary)
+			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking file evidence: ${reval_lacking}}."
+		fi
 		status_json_write --arg reason "$reval_reason" \
 			'if ((.merge_blocked_reason // "")
 					| (. == "" or startswith("Partial implementation:")))
