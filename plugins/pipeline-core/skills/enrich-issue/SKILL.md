@@ -126,6 +126,7 @@ Break the chosen approach into implementable tasks following the same convention
 - Add a complexity hint: `- [ ] \`[agent]\` **(S)** Description` where S=small, M=medium, L=large
 - **Parseable format required:** Every task line in `## Implementation Tasks` MUST begin with `- [ ] \`[agent-name]\``
 - **Every task MUST include at least one file path, written repo-relative from the repo root** (e.g. `` `.claude/scripts/model-config.sh` ``, never a bare basename like `` `model-config.sh` ``) — `assert_issue_valid` treats every backtick-quoted token as a file path and rejects bare basenames as unresolved
+- **Never author a standalone bundle-regen task.** Tasks run in isolated git worktrees, and the scheduler batches tasks whose file sets don't overlap into the same parallel batch. A task that only runs `./sync.sh bundle` declares `sync.sh` + `plugins/pipeline-core/scripts/`, disjoint from any `.claude/scripts/**` edits it's meant to follow — so it lands in the same batch, in a worktree that can't see those edits, and regenerates the bundle from stale sources. If the plan edits `.claude/scripts/**`, fold `./sync.sh bundle` into the **last** task that edits those scripts instead of giving it its own task.
 
 ### Step 5: Rewrite Issue Body In Place
 
@@ -309,3 +310,4 @@ The `## Implementation Tasks` section must use this parseable convention (identi
 | Skip research, jump to planning | Plan won't account for existing patterns |
 | Task has no file paths | Subagent reads 13+ files to orient; include at least 1 file path per task |
 | File path is a bare basename, not repo-relative | `assert_issue_valid` rejects it as an unresolved path; write the full path from the repo root |
+| Standalone bundle-regen task (`sync.sh`, `plugins/pipeline-core/scripts/`) | Worktree isolation is the reason it fails: it lands in the same batch as the `.claude/scripts/` edits it depends on, in a worktree that cannot see them; fold `./sync.sh bundle` into the last script-editing task instead |
