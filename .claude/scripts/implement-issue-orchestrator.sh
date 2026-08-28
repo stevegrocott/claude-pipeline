@@ -5733,10 +5733,13 @@ reconcile_failed_tasks_with_branch_evidence() {
 # _lacking_evidence_summary() — formats every task still marked "failed" in
 # $STATUS_FILE into a human-readable list for merge_blocked_reason (#620
 # task 3), so a block names the specific tasks lacking file evidence rather
-# than only reporting a count (AC3). Callers run this only after
-# reconcile_failed_tasks_with_branch_evidence() has already promoted every
-# task it could find evidence for — any task still "failed" at that point is
-# a genuine gap.
+# than only reporting a count (AC3). A task still "failed" after
+# reconcile_failed_tasks_with_branch_evidence() is NOT always a genuine gap:
+# that function refuses to promote ANY task while this run's test suite is
+# red, short-circuiting before it ever checks branch evidence (issue #824).
+# Callers must only treat this summary's output as a genuine gap when this
+# run's test suite was green — see revalidate_partial_block_against_branch()'s
+# reval_tests_green guard, which calls this only on that path.
 #
 # Example output: "task 2 (README install section) [README.md]"
 # Multiple tasks are joined with "; ". Empty output when no task is failed.
@@ -5867,15 +5870,40 @@ revalidate_partial_block_against_branch() {
 	done
 	DEGRADED_STAGES=("${reval_kept[@]+"${reval_kept[@]}"}")
 
+	# A red test suite makes reconcile_failed_tasks_with_branch_evidence()
+	# short-circuit before it ever evaluates a task's file evidence (issue
+	# #824) — every task still "failed" afterward then reads as a
+	# missing-evidence gap when the real cause is that suppression. Re-detect
+	# the same DEGRADED_STAGES markers the reconcile function checks so the
+	# blocked reason below can name the actual cause instead.
+	local reval_tests_green=1
+	local reval_red_marker=""
+	local reval_ds
+	for reval_ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		case "$reval_ds" in
+			test:*full_suite_red|test:bats_incomplete:*)
+				reval_tests_green=0
+				reval_red_marker="$reval_ds"
+				break
+				;;
+		esac
+	done
+
 	if ((reval_completed < reval_total)); then
 		DEGRADED_STAGES+=("implement:partial:${reval_completed}/${reval_total}")
 		log "Gate re-evaluation: ${reval_completed}/${reval_total} task(s) evidenced" \
 			"on the branch (${reval_reconciled} reconciled here) —" \
 			"partial merge block stands."
-		local reval_lacking
-		reval_lacking=$(_lacking_evidence_summary)
 		local reval_reason
-		reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking file evidence: ${reval_lacking}}."
+		if ((reval_tests_green == 0)); then
+			# Evidence was never evaluated for the still-failed tasks, so
+			# don't claim it's lacking — name the suppression instead.
+			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}; blocked by a red test suite this run (${reval_red_marker}) — remaining failed task(s)' file evidence was not evaluated."
+		else
+			local reval_lacking
+			reval_lacking=$(_lacking_evidence_summary)
+			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking file evidence: ${reval_lacking}}."
+		fi
 		status_json_write --arg reason "$reval_reason" \
 			'if ((.merge_blocked_reason // "")
 					| (. == "" or startswith("Partial implementation:")))
