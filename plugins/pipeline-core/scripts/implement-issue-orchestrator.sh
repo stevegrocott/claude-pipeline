@@ -2843,6 +2843,41 @@ _apply_stage_action() {
 	esac
 }
 
+# Measures the prose length of a parsed task description, ignoring the
+# leading complexity hint (**(S)**/**(M)**/**(L)**) and the mandatory
+# trailing " — `path`[, `path2`...]" file-path suffix. Both the
+# turn-budget promotion check and the plan-validation "large task
+# description" warning route through this helper so the two checks
+# cannot drift apart (issue #823) — previously each measured the whole
+# line, so the explore/enrich-issue skills' "~120 characters" guidance
+# (which is about the prose alone) was unsatisfiable for any task with a
+# real repo path.
+#
+# Arguments:
+#   $1 - parsed task description (hint + prose + optional path suffix)
+# Outputs:
+#   prose character count on stdout
+_task_desc_prose_len() {
+    local desc="$1"
+    local prose="$desc"
+
+    # Strip a leading "**(S)**", "**(M)**" or "**(L)**" complexity hint.
+    if [[ "$prose" =~ ^\*\*\([SML]\)\*\*[[:space:]]*(.*)$ ]]; then
+        prose="${BASH_REMATCH[1]}"
+    fi
+
+    # Strip a trailing " — `path`[, `path2`...]" suffix — only when the
+    # tail after the rightmost em dash is entirely backtick-quoted,
+    # comma-separated path tokens through end of line. An em dash used
+    # as prose punctuation has non-path text after it and is left
+    # alone, so it is never mistaken for the path-suffix delimiter.
+    if [[ "$prose" =~ ^(.*)[[:space:]]—[[:space:]]\`[^\`]+\`(,[[:space:]]\`[^\`]+\`)*$ ]]; then
+        prose="${BASH_REMATCH[1]}"
+    fi
+
+    printf '%s' "${#prose}"
+}
+
 # =============================================================================
 # STAGE RUNNERS
 # =============================================================================
@@ -6639,11 +6674,12 @@ Commit your changes with a descriptive message."
 				"timeout ${current_timeout}s"
 		fi
 
-		# Hand run_stage the task-description length so an oversized (S)
-		# task gets the M/L turn budget instead of dying at 25 turns.
+		# Hand run_stage the task-description prose length (hint and
+		# path suffix excluded, issue #823) so an oversized (S) task
+		# gets the M/L turn budget instead of dying at 25 turns.
 		# run_stage runs in a command substitution (subshell), so its own
 		# unset cannot reach us — clear it here too.
-		_RUN_STAGE_DESC_LEN=${#task_desc}
+		_RUN_STAGE_DESC_LEN=$(_task_desc_prose_len "$task_desc")
 		if [[ -n "$current_model" ]]; then
 			impl_result=$(run_stage \
 				"implement-task-$task_id" \
@@ -7607,9 +7643,11 @@ Commit your changes with a descriptive message."
 					"timeout ${current_timeout}s"
 			fi
 
-			# Oversized-(S) turn-budget hint; cleared after because
-			# run_stage runs in a subshell and cannot unset it for us.
-			_RUN_STAGE_DESC_LEN=${#tdesc}
+			# Oversized-(S) turn-budget hint (prose length only, hint
+			# and path suffix excluded, issue #823); cleared after
+			# because run_stage runs in a subshell and cannot unset
+			# it for us.
+			_RUN_STAGE_DESC_LEN=$(_task_desc_prose_len "$tdesc")
 			if [[ -n "$current_model" ]]; then
 				impl_result=$(run_stage \
 					"implement-task-$tid" \
@@ -10597,10 +10635,14 @@ $excerpt
 
         # (b) Warn about large task descriptions — matches the explore/enrich-issue
         # skills' stated ~120-char limit (TASK_DESC_PROMOTE_CHARS, issue #746).
+        # Measures prose only via _task_desc_prose_len, the same helper the
+        # turn-budget promotion check uses, so the two checks cannot drift
+        # apart (issue #823).
         for ((i=0; i<task_count; i++)); do
             local check_desc
             check_desc=$(printf '%s' "$tasks_json" | jq -r ".[$i].description")
-            local desc_len=${#check_desc}
+            local desc_len
+            desc_len=$(_task_desc_prose_len "$check_desc")
             if (( desc_len > ${TASK_DESC_PROMOTE_CHARS:-120} )); then
                 log "WARNING: Task $((i+1)) description is $desc_len chars — consider splitting into smaller tasks"
             fi
