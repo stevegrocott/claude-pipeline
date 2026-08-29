@@ -2226,15 +2226,19 @@ EOF
 #
 # $2 (changed_bats_files) is an optional newline-separated list of
 # repo-relative *.bats paths. When non-empty, the command narrows to just
-# those suites instead of globbing every file. The list is split by the two
-# bats roots:
-#   - .claude/scripts/implement-issue-test/ — run via run-tests.sh, which cds
-#     into its own directory first, so it is passed basenames only.
-#   - tests/ — run directly via bats, so full relative paths are kept as-is.
+# those suites instead of globbing every file. Roots are derived from the
+# changed paths themselves rather than a fixed allowlist (issue #836):
+#   - .claude/scripts/implement-issue-test/ — special-cased because it runs
+#     via run-tests.sh, which cds into its own directory first, so it is
+#     passed basenames only.
+#   - anything else ending in *.bats — run directly via bats using its full
+#     relative path, whatever directory it lives in (tests/, scripts/, or
+#     any other root a consuming repo happens to use).
 # Only the halves with at least one member are emitted: a change confined to
 # one root must not invoke the other tool with zero arguments (that would run
-# every suite instead of none). An empty list, or a list whose entries fall
-# outside both known roots, falls back to the unchanged full-suite command.
+# every suite instead of none). An empty list, or a list containing an entry
+# that isn't even a *.bats path, falls back to the unchanged full-suite
+# command.
 # =============================================================================
 
 @test "_build_bash_test_command targets a single implement-issue-test suite by basename" {
@@ -2336,6 +2340,98 @@ EOF
 	[ "$targeted" == "$baseline" ] || \
 		fail "A changed list with no entry under a known bats root must fall back" \
 			"to the unchanged full-suite command. Baseline: $baseline / Targeted: $targeted"
+}
+
+@test "_build_bash_test_command targets a *.bats suite outside tests/ directly by path (issue #836)" {
+	# A consuming repo whose suites sit at scripts/*.bats (outside both the
+	# implement-issue-test and tests/ roots) must still get a narrowed
+	# command that runs the changed suite, derived from its own path,
+	# rather than falling back to the full suite or silently running
+	# nothing. Running exactly this file is how #836's regression was
+	# caught in the first place.
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/foo.bats"
+
+	local baseline targeted
+	baseline=$(_build_bash_test_command "$TEST_TMP")
+	targeted=$(_build_bash_test_command "$TEST_TMP" \
+		"scripts/test-ha-energy-inventory.bats")
+
+	[[ "$targeted" == *"scripts/test-ha-energy-inventory.bats"* ]] || \
+		fail "Expected scripts/test-ha-energy-inventory.bats targeted" \
+			"directly. Got: $targeted"
+	[ "$targeted" != "$baseline" ] || \
+		fail "A *.bats path outside the fixed roots must narrow, not fall" \
+			"back to the unchanged full-suite command. Got: $targeted"
+}
+
+@test "_build_bash_test_command joins bats suites from different non-impl directories in one invocation" {
+	# Roots are derived per-path, not from a fixed allowlist, so a tests/
+	# suite and a scripts/ suite changing together must both run — joined
+	# into the same bats invocation since neither needs run-tests.sh.
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/bar.bats"
+
+	local changed result
+	changed=$(printf '%s\n' \
+		"tests/bar.bats" \
+		"scripts/test-ha-recorder-backfill.bats")
+	result=$(_build_bash_test_command "$TEST_TMP" "$changed")
+
+	[[ "$result" == *"tests/bar.bats"* ]] || \
+		fail "Expected tests/bar.bats targeted. Got: $result"
+	[[ "$result" == *"scripts/test-ha-recorder-backfill.bats"* ]] || \
+		fail "Expected scripts/test-ha-recorder-backfill.bats targeted." \
+			"Got: $result"
+	[[ "$result" != *"implement-issue-test"* ]] || \
+		fail "Must not invoke the implement-issue-test root with zero" \
+			"arguments. Got: $result"
+	[[ "$result" != *"&&"* ]] || \
+		fail "Both non-impl suites belong in one bats invocation, not" \
+			"composed halves. Got: $result"
+}
+
+@test "_build_bash_test_command falls back to the full suite when the changed list mixes a *.bats path with a non-bats path" {
+	# A genuinely unresolved entry (not even a *.bats path) mixed with a
+	# resolvable one must not silently narrow to only the resolvable file
+	# and thereby omit the unresolved one from the run — it must fall back
+	# to the full suite so nothing changed is skipped.
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/bar.bats"
+
+	local changed baseline targeted
+	changed=$(printf '%s\n' \
+		"tests/bar.bats" \
+		".claude/scripts/some-other-script.sh")
+	baseline=$(_build_bash_test_command "$TEST_TMP")
+	targeted=$(_build_bash_test_command "$TEST_TMP" "$changed")
+
+	[ "$targeted" == "$baseline" ] || \
+		fail "A changed list mixing a resolvable *.bats path with a" \
+			"non-bats path must fall back to the full-suite command rather" \
+			"than a narrowed one that omits the unresolved file." \
+			"Baseline: $baseline / Targeted: $targeted"
+}
+
+@test "_build_bash_test_command logs the unresolved file that forced the full-suite fallback" {
+	# The full-suite fallback above silently widens the run, but nothing
+	# names *which* changed file couldn't be narrowed. Without a log line
+	# naming it, the omission from the narrowed command is invisible to
+	# anyone reading the log (issue #836).
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/bar.bats"
+
+	local changed
+	changed=$(printf '%s\n' \
+		"tests/bar.bats" \
+		".claude/scripts/some-other-script.sh")
+	_build_bash_test_command "$TEST_TMP" "$changed" > /dev/null
+
+	grep -qF ".claude/scripts/some-other-script.sh" "$LOG_FILE" || \
+		fail "Expected the unresolved file" \
+			".claude/scripts/some-other-script.sh to be named in $LOG_FILE" \
+			"so the fallback's omission is visible. Log contents:" \
+			"$(cat "$LOG_FILE" 2>/dev/null)"
 }
 
 # =============================================================================

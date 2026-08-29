@@ -8096,15 +8096,22 @@ all_failures_environment_related() {
 #
 # When $2 (changed_bats_files) is a non-empty newline-separated list of
 # repo-relative *.bats paths, the command is narrowed to just those files
-# instead of globbing every suite.  The list is split by the two bats roots:
-#   - .claude/scripts/implement-issue-test/  (run via run-tests.sh, which cds
-#     into its own directory first — so it takes basenames, not full paths)
-#   - tests/  (run directly via bats, so full relative paths are kept as-is)
+# instead of globbing every suite.  Roots are derived from the changed paths
+# themselves rather than a fixed allowlist (issue #836), split into two
+# buckets:
+#   - .claude/scripts/implement-issue-test/  (special-cased: run via
+#     run-tests.sh, which cds into its own directory first — so it takes
+#     basenames, not full paths)
+#   - anything else ending in *.bats  (run directly via bats using its full
+#     relative path, whatever directory it lives in — tests/, scripts/, or
+#     any other root a consuming repo happens to use)
 # Only the halves with at least one member are emitted — a change confined to
-# one root must not invoke the other tool with zero arguments, since that
-# would run every suite instead of none. If every entry falls outside both
-# known roots (or the list is empty), the full-suite command below is
-# emitted unchanged.
+# one bucket must not invoke the other tool with zero arguments, since that
+# would run every suite instead of none. If the list is empty, or it contains
+# an entry that isn't even a *.bats path — including a partial match where
+# some entries resolve and one doesn't — the full-suite command below is
+# emitted unchanged instead of a narrowed command that would silently omit
+# the unresolved file(s) (issue #836).
 #
 # Outputs the constructed command string on stdout.
 # Arguments:
@@ -8138,10 +8145,15 @@ _build_bash_test_command() {
 		bats_cmd="bats"
 	fi
 
-	# Split the changed-suite list by root and emit a targeted command when
-	# at least one changed file lands in a known root.
+	# Split the changed-suite list into buckets derived from the paths
+	# themselves — not a fixed root allowlist — and emit a targeted command
+	# when every changed file resolves to a bucket. An unresolved entry
+	# (one that isn't even a *.bats path) forces the full-suite fallback
+	# below instead of a narrowed command that would silently omit it — see
+	# the docstring note on partial matches (issue #836).
 	local -a targeted_impl_files=()
-	local -a targeted_tests_files=()
+	local -a targeted_other_files=()
+	local -a unresolved_files=()
 	if [[ -n "$changed_bats_files" ]]; then
 		local suite_file
 		while IFS= read -r suite_file; do
@@ -8150,14 +8162,24 @@ _build_bash_test_command() {
 				.claude/scripts/implement-issue-test/*.bats)
 					targeted_impl_files+=("${suite_file##*/}")
 					;;
-				tests/*.bats)
-					targeted_tests_files+=("$suite_file")
+				*.bats)
+					targeted_other_files+=("$suite_file")
+					;;
+				*)
+					unresolved_files+=("$suite_file")
 					;;
 			esac
 		done <<< "$changed_bats_files"
 	fi
 
-	if (( ${#targeted_impl_files[@]} > 0 || ${#targeted_tests_files[@]} > 0 )); then
+	if (( ${#unresolved_files[@]} > 0 )); then
+		log_warn "BATS narrowing fell back to the full suite —" \
+			"changed test file(s) not resolvable to a *.bats path:" \
+			"${unresolved_files[*]}"
+	fi
+
+	if (( ${#unresolved_files[@]} == 0 )) \
+		&& (( ${#targeted_impl_files[@]} > 0 || ${#targeted_other_files[@]} > 0 )); then
 		local -a command_parts=()
 		if (( ${#targeted_impl_files[@]} > 0 )); then
 			if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
@@ -8171,8 +8193,8 @@ _build_bash_test_command() {
 				command_parts+=("$bats_cmd ${prefixed_impl_files[*]}")
 			fi
 		fi
-		if (( ${#targeted_tests_files[@]} > 0 )); then
-			command_parts+=("$bats_cmd ${targeted_tests_files[*]}")
+		if (( ${#targeted_other_files[@]} > 0 )); then
+			command_parts+=("$bats_cmd ${targeted_other_files[*]}")
 		fi
 
 		local joined_parts
@@ -8330,8 +8352,8 @@ run_test_loop() {
         # Pass the detected changed BATS files into the builder so it can
         # narrow the command to just the PR-changed suites. The builder
         # falls back to the full-suite command on its own when the list is
-        # empty or every entry falls outside the known bats roots (see its
-        # docstring) — so this is safe to call unconditionally.
+        # empty or any entry isn't a *.bats path (see its docstring) — so
+        # this is safe to call unconditionally.
         bash_test_command=$(_build_bash_test_command "$loop_dir" "$changed_test_files")
         if [[ -n "$changed_test_files" ]]; then
             log "Narrowed BATS command: $bash_test_command"
