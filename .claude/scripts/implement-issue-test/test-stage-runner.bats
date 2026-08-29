@@ -2338,6 +2338,45 @@ EOF
 			"to the unchanged full-suite command. Baseline: $baseline / Targeted: $targeted"
 }
 
+@test "_build_bash_test_command falls back to the full suite when a changed *.bats path resolves to no known root (issue #836)" {
+	# All changed BATS suites live outside both known roots (e.g. a
+	# consuming repo whose suites sit at scripts/*.bats). A narrowed
+	# command built from zero targeted files would silently run nothing
+	# for this change; the full suite must run instead.
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/foo.bats"
+
+	local baseline targeted
+	baseline=$(_build_bash_test_command "$TEST_TMP")
+	targeted=$(_build_bash_test_command "$TEST_TMP" \
+		"scripts/test-ha-energy-inventory.bats")
+
+	[ "$targeted" == "$baseline" ] || \
+		fail "A *.bats path outside both known roots must fall back to the" \
+			"unchanged full-suite command. Baseline: $baseline / Targeted: $targeted"
+}
+
+@test "_build_bash_test_command falls back to the full suite when the changed list mixes a known root with an unresolved path" {
+	# A partial match (one file under a known root, one file resolving to
+	# no root) must not silently narrow to only the matched file and
+	# thereby omit the unresolved one from the run — it must fall back to
+	# the full suite so nothing changed is skipped.
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/bar.bats"
+
+	local changed baseline targeted
+	changed=$(printf '%s\n' \
+		"tests/bar.bats" \
+		"scripts/test-ha-recorder-backfill.bats")
+	baseline=$(_build_bash_test_command "$TEST_TMP")
+	targeted=$(_build_bash_test_command "$TEST_TMP" "$changed")
+
+	[ "$targeted" == "$baseline" ] || \
+		fail "A changed list mixing a known root with an unresolved path must" \
+			"fall back to the full-suite command rather than a narrowed one" \
+			"that omits the unresolved file. Baseline: $baseline / Targeted: $targeted"
+}
+
 # =============================================================================
 # NON-BLOCKING FULL-SUITE BATS CHECK — runs for every scope, bash included
 #

@@ -8102,9 +8102,11 @@ all_failures_environment_related() {
 #   - tests/  (run directly via bats, so full relative paths are kept as-is)
 # Only the halves with at least one member are emitted — a change confined to
 # one root must not invoke the other tool with zero arguments, since that
-# would run every suite instead of none. If every entry falls outside both
-# known roots (or the list is empty), the full-suite command below is
-# emitted unchanged.
+# would run every suite instead of none. If the list is empty, or ANY entry
+# falls outside both known roots — including a partial match where some
+# entries resolve and others don't — the full-suite command below is emitted
+# unchanged instead of a narrowed command that would silently omit the
+# unresolved file(s) (issue #836).
 #
 # Outputs the constructed command string on stdout.
 # Arguments:
@@ -8139,9 +8141,13 @@ _build_bash_test_command() {
 	fi
 
 	# Split the changed-suite list by root and emit a targeted command when
-	# at least one changed file lands in a known root.
+	# every changed file lands in a known root. A single unresolved entry
+	# (one matching neither root) forces the full-suite fallback below
+	# instead of a narrowed command that would silently omit it — see the
+	# docstring note on partial matches (issue #836).
 	local -a targeted_impl_files=()
 	local -a targeted_tests_files=()
+	local -a unresolved_files=()
 	if [[ -n "$changed_bats_files" ]]; then
 		local suite_file
 		while IFS= read -r suite_file; do
@@ -8153,11 +8159,15 @@ _build_bash_test_command() {
 				tests/*.bats)
 					targeted_tests_files+=("$suite_file")
 					;;
+				*)
+					unresolved_files+=("$suite_file")
+					;;
 			esac
 		done <<< "$changed_bats_files"
 	fi
 
-	if (( ${#targeted_impl_files[@]} > 0 || ${#targeted_tests_files[@]} > 0 )); then
+	if (( ${#unresolved_files[@]} == 0 )) \
+		&& (( ${#targeted_impl_files[@]} > 0 || ${#targeted_tests_files[@]} > 0 )); then
 		local -a command_parts=()
 		if (( ${#targeted_impl_files[@]} > 0 )); then
 			if [[ -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
