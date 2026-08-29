@@ -4108,15 +4108,43 @@ Output a summary of changes made."
             ' "$review_history_file" 2>/dev/null || printf '')
         fi
 
-        # Pre-compute modified files (three-dot merge-base diff) for review stage
+        # Pin the merge-base commit up front rather than re-resolving
+        # "$BASE_BRANCH" at diff time. "$BASE_BRANCH" is a branch name, and
+        # its tip can move after this branch diverged from it (e.g. another
+        # issue merges into it in a shared checkout) — a three-dot diff
+        # against the moved tip no longer matches the commit this branch was
+        # actually forked from. Anchoring to the merge-base SHA keeps the
+        # review input stable and matched to the branch under review, so the
+        # reviewer doesn't compare against a base that has since advanced and
+        # misreport branch content as missing (issue #839).
+        local review_base_commit
+        review_base_commit=$(git -C "$loop_dir" merge-base "$BASE_BRANCH" HEAD 2>/dev/null)
+
+        # Pre-compute modified files against the pinned base commit for review stage.
+        # When merge-base resolution fails, review_base_commit falls back to
+        # the branch name itself — a two-dot diff against it would then use
+        # non-merge-base semantics and could list files the branch never
+        # touched (e.g. divergent history on $BASE_BRANCH). Keep three-dot
+        # semantics in that fallback path so the comparison still anchors to
+        # the common ancestor.
         local review_changed_files_raw review_changed_files
-        review_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+        if [[ -n "$review_base_commit" ]]; then
+            review_changed_files_raw=$(git -C "$loop_dir" diff "$review_base_commit" HEAD --name-only 2>/dev/null || true)
+        else
+            review_base_commit="$BASE_BRANCH"
+            review_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+        fi
         review_changed_files=$(printf '%s\n' "$review_changed_files_raw" | grep -v -E '^$' || true)
 
         local review_prompt="${PLATFORM_PATTERNS_PREFIX}Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
 
 IMPORTANT: This is a task-level quality check within the implementation workflow, NOT a full PR review.
 Your job is to verify code quality for the changes made in this task only.
+
+This task's changes are relative to base commit \`$review_base_commit\`, the
+commit this branch actually diverged from. Do not treat the current tip of
+\`$BASE_BRANCH\` as this branch's base — it may have advanced since
+divergence and no longer matches this branch's actual contents.
 
 Check:
 - Code patterns and standards
@@ -11685,6 +11713,15 @@ $pr_creation_skill}"
         local pr_review_loop_start
         pr_review_loop_start=$(date +%s)
 
+        # Issue #839: retry state for the false-absence guard below. Capped
+        # so a deterministic reviewer that keeps re-asserting the same false
+        # claim can't loop forever on un-counted iterations — after the cap,
+        # the iteration counts normally and the loop terminates via the
+        # existing max-iterations/wall-timeout exits.
+        local pr_false_absence_retry_count=0
+        local -r pr_false_absence_max_retries=2
+        local pr_false_absence_note=""
+
         # Resume safety (issue #651): pr_review_iterations persists in the
         # status file across runs. If a prior run already exhausted the
         # max-iterations budget (and this run is resuming into an
@@ -11747,8 +11784,44 @@ $pr_creation_skill}"
         # Include the diff inline so the reviewer doesn't waste turns running git diff
         # and exploring the entire codebase. For small diffs this dramatically reduces
         # token usage (4.7M → ~50K observed on an 11-line diff).
+        local pr_diff_full
+        pr_diff_full=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null)
+        local pr_diff_total_lines
+        pr_diff_total_lines=$(printf '%s\n' "$pr_diff_full" | wc -l)
+        pr_diff_total_lines="${pr_diff_total_lines//[[:space:]]/}"
         local pr_diff
-        pr_diff=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null | head -500)
+        pr_diff=$(printf '%s\n' "$pr_diff_full" | head -500)
+
+        # A truncated diff silently hides changes from the reviewer — it
+        # sees only the first 500 lines and has no way to know more exists,
+        # so it can approve a PR without ever seeing the rest of the change
+        # (issue #839). When truncated, surface it both to the operator log
+        # and inline in the review prompt, and hand the reviewer the full
+        # changed-file list with added/removed line counts (via
+        # `git diff --numstat`) so it can at least judge the shape of what
+        # it isn't seeing.
+        local pr_diff_truncation_note=""
+        if ((pr_diff_total_lines > 500)); then
+            log_warn "PR review diff truncated: showing 500 of" \
+                "$pr_diff_total_lines lines (iteration $pr_iteration)"
+            local pr_diff_file_stats=""
+            local ns_added ns_removed ns_path
+            while IFS=$'\t' read -r ns_added ns_removed ns_path; do
+                [[ -z "$ns_path" ]] && continue
+                if [[ "$ns_added" == "-" ]]; then
+                    pr_diff_file_stats+="- ${ns_path}: binary
+"
+                else
+                    pr_diff_file_stats+="- ${ns_path}: +${ns_added}/-${ns_removed} lines
+"
+                fi
+            done < <(git diff --numstat "$BASE_BRANCH"...HEAD -- 2>/dev/null)
+            pr_diff_truncation_note="
+**NOTE: the diff above is truncated — showing the first 500 of ${pr_diff_total_lines} total lines.** Full list of changed files with line counts:
+
+${pr_diff_file_stats}
+"
+        fi
 
         # Sibling-file scan: for each directory containing a changed file,
         # collect other .ts/.tsx files (excluding tests and already-diffed files),
@@ -11828,7 +11901,7 @@ Here is the diff to review (do NOT run git diff yourself — use this):
 \`\`\`diff
 $pr_diff
 \`\`\`
-${sibling_files_prompt}
+${pr_diff_truncation_note}${sibling_files_prompt}${pr_false_absence_note}
 Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
@@ -11970,6 +12043,57 @@ $review_summary$followup_comment" "code-reviewer"
             pr_approved=true
             log "PR approved on iteration $pr_iteration"
         else
+            # Issue #839: a changes_requested verdict that cites a file as
+            # missing/absent when that exact file is in this branch's diff
+            # is describing content that doesn't match the branch under
+            # review (the reviewer treated absence-from-input as
+            # absence-from-branch). That verdict carries no actionable
+            # signal, so don't let it spend the max-iterations budget —
+            # undo this iteration's increment and retry instead of
+            # fixing-or-blocking on a false claim.
+            local false_absence_files
+            false_absence_files=$(printf '%s' "$review_result" | jq -r --arg files "$changed_files_nl" '
+                ($files | split("\n") | map(select(length > 0))) as $branch_files |
+                [.output.issues // [] | .[] |
+                    select(.file != null and .file != "" and (.file as $f | $branch_files | index($f) != null)) |
+                    select(.description // "" |
+                        test("(file )?(does ?n.t|didn.t) exist|was never (created|added|committed)|(missing|absent) (from|in) (the |this )?(branch|diff|codebase|repo|PR)|no such file|file not found|not (present|included) (in|on) (the |this )?(branch|diff|codebase|repo|PR)"; "i")) |
+                    .file
+                ] | unique | join(", ")
+            ' 2>/dev/null)
+
+            if [[ -n "$false_absence_files" ]] \
+                    && (( pr_false_absence_retry_count < pr_false_absence_max_retries )); then
+                pr_false_absence_retry_count=$(( pr_false_absence_retry_count + 1 ))
+                log_warn "PR review iteration $pr_iteration verdict cites file(s) as missing that the branch actually contains: $false_absence_files — not counting this iteration toward the max-iterations budget (retry $pr_false_absence_retry_count/$pr_false_absence_max_retries)"
+
+                # Vary the retry input: name the falsely-flagged file(s) and
+                # their actual line counts in the next prompt so a
+                # deterministic reviewer isn't shown byte-identical input and
+                # doesn't just re-emit the same verdict.
+                local fa_numstat_note="" fa_file fa_added fa_removed
+                while IFS= read -r fa_file; do
+                    [[ -z "$fa_file" ]] && continue
+                    IFS=$'\t' read -r fa_added fa_removed _ < <(git diff --numstat "$BASE_BRANCH"...HEAD -- "$fa_file" 2>/dev/null)
+                    if [[ "$fa_added" == "-" ]]; then
+                        fa_numstat_note+="- ${fa_file}: binary
+"
+                    else
+                        fa_numstat_note+="- ${fa_file}: +${fa_added:-0}/-${fa_removed:-0} lines
+"
+                    fi
+                done < <(printf '%s' "$false_absence_files" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                pr_false_absence_note="
+**NOTE:** A previous review iteration incorrectly reported the following file(s) as missing or absent from this branch. They ARE present in the diff under review — do not repeat this claim:
+${fa_numstat_note}"
+
+                status_json_write '.pr_review_iterations = ([.pr_review_iterations - 1, 0] | max) |
+                    .stages.pr_review.iteration = .pr_review_iterations |
+                    .last_update = (now | todate)'
+                sync_status_to_log
+                continue
+            fi
+
             # Budget the verdict, not the round-trip (claude-pipeline#651).
             # This check runs AFTER the review above already produced a
             # verdict for the current state of the branch, so the loop can

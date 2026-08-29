@@ -696,6 +696,111 @@ teardown() {
     [[ "$main_def" == *"break"* ]]
 }
 
+@test "orchestrator does not count false-absence PR review verdicts toward max iterations (issue #839)" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # A changes_requested verdict citing a file the branch's diff actually
+    # contains must be detected and its iteration undone rather than
+    # counted toward the max-iterations block.
+    [[ "$main_def" == *"false_absence_files"* ]]
+    [[ "$main_def" == *'.pr_review_iterations = ([.pr_review_iterations - 1, 0] | max)'* ]]
+    [[ "$main_def" == *"not counting this iteration toward the max-iterations budget"* ]]
+}
+
+# Extract the false-absence classifier's jq program out of the live `main`
+# body so the tests below exercise the real filter. Grepping for literal
+# text only fails when the text is deleted; running the filter fails when
+# its logic is wrong.
+_false_absence_jq_filter() {
+    # `declare -f` re-renders the body with its own indentation and a
+    # trailing `;` on the closing line, so anchor on the surrounding tokens
+    # rather than on exact source formatting.
+    declare -f main | awk '
+        /--arg files "\$changed_files_nl"/ { capture = 1; next }
+        capture && /2>\/dev\/null\);?$/ { exit }
+        capture { print }
+    '
+}
+
+# Run the extracted filter over a synthetic review_result / changed-files pair
+# exactly as the orchestrator does, and echo the comma-joined file list.
+_classify_false_absence() {
+    local review_result="$1" changed_files_nl="$2"
+    printf '%s' "$review_result" \
+        | jq -r --arg files "$changed_files_nl" "$(_false_absence_jq_filter)"
+}
+
+@test "false-absence classifier flags verdicts claiming a diffed file does not exist (issue #839)" {
+    [[ -n "$(_false_absence_jq_filter)" ]]
+
+    local result
+    result='{"output":{"issues":[
+        {"file":"src/auth.ts","description":"The file src/auth.ts does not exist on this branch."},
+        {"file":"src/user.ts","description":"src/user.ts was never added to this PR."},
+        {"file":"src/db.ts","description":"This change is missing from the branch entirely."}
+    ]}}'
+
+    run _classify_false_absence "$result" $'src/auth.ts\nsrc/user.ts\nsrc/db.ts'
+    [ "$status" -eq 0 ]
+    [ "$output" = "src/auth.ts, src/db.ts, src/user.ts" ]
+}
+
+@test "false-absence classifier ignores genuine findings that merely say something is missing (issue #839)" {
+    local result
+    result='{"output":{"issues":[
+        {"file":"src/api.ts","description":"Missing input validation on the request body."},
+        {"file":"src/api.ts","description":"Error handling is missing for the fetch call."},
+        {"file":"src/api.ts","description":"The response schema is not present for POST /users."},
+        {"file":"src/api.ts","description":"This route does not include an auth guard."}
+    ]}}'
+
+    run _classify_false_absence "$result" $'src/api.ts'
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "false-absence classifier ignores absence claims about files outside the diff (issue #839)" {
+    local result
+    result='{"output":{"issues":[
+        {"file":"src/other.ts","description":"The file src/other.ts does not exist."}
+    ]}}'
+
+    run _classify_false_absence "$result" $'src/auth.ts'
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "task-level review pins merge-base and falls back to three-dot semantics (issue #839)" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    [[ "$func_def" == *"review_base_commit"* ]]
+    [[ "$func_def" == *'merge-base "$BASE_BRANCH" HEAD'* ]]
+    # Merge-base failure must keep three-dot diff semantics in the fallback,
+    # not compare directly against the branch tip.
+    [[ "$func_def" == *'diff "$BASE_BRANCH"...HEAD --name-only'* ]]
+}
+
+@test "PR review truncation note reports binary files as binary, not '+-/-- lines' (issue #839)" {
+    # Drive the orchestrator's numstat rendering loop over real `git diff
+    # --numstat` output containing a binary file, so a regression in the
+    # rendering produces a failing string rather than merely deleted text.
+    local numstat pr_diff_file_stats="" ns_added ns_removed ns_path
+    numstat=$'12\t3\tsrc/app.ts\n-\t-\tassets/logo.png'
+
+    local render
+    render=$(declare -f main | sed -n '/while IFS=\$.\\t. read -r ns_added ns_removed ns_path; do/,/^[[:space:]]*done </p' \
+        | sed '$d')
+    [[ -n "$render" ]]
+
+    eval "$render" < <(printf '%s\n' "$numstat")
+
+    [[ "$pr_diff_file_stats" == *"- src/app.ts: +12/-3 lines"* ]]
+    [[ "$pr_diff_file_stats" == *"- assets/logo.png: binary"* ]]
+    [[ "$pr_diff_file_stats" != *"+-/-- lines"* ]]
+}
+
 # =============================================================================
 # LOGGING
 # =============================================================================
