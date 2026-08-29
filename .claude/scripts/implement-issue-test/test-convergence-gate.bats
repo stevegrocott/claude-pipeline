@@ -790,6 +790,62 @@ teardown() {
 }
 
 # =============================================================================
+# UNIT TESTS: _lacking_evidence_summary() evidence-kind labelling (#840
+# task 3). A task still "failed" after reconciliation needs its evidence
+# kind named in the merge-block message — otherwise "lacking evidence"
+# reads as "no file changed" even for an operational task that was never
+# going to produce one.
+# =============================================================================
+
+@test "_lacking_evidence_summary: names file evidence for a plain failed task" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 2, description: "README install section", status: "failed",
+		 affected_files: ["README.md"]}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	expect_glob "$summary" '*task 2 (README install section) \[file evidence: README.md\]*' \
+		"a file-evidenced task must be labelled with the file kind and its path"
+}
+
+@test "_lacking_evidence_summary: names operational evidence for an unevidenced operational task" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	expect_glob "$summary" '*task 1 (apply gate config*) \[operational evidence: ha-lovelace-save.sh --verify\]*' \
+		"an operational task must be labelled with the operational kind and its verification command"
+}
+
+@test "_lacking_evidence_summary: labels each task with its own evidence kind in a mixed roster" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []},
+		{id: 2, description: "README install section", status: "failed",
+		 affected_files: ["README.md"]}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	expect_glob "$summary" '*\[operational evidence: ha-lovelace-save.sh --verify\]*' \
+		"the operational task keeps its own kind"
+	expect_glob "$summary" '*\[file evidence: README.md\]*' \
+		"the file task keeps its own kind"
+}
+
+# =============================================================================
 # UNIT TESTS: revalidate_partial_block_against_branch() (#620 task 2)
 # The implement-stage reconciliation cannot see work a *later* stage lands —
 # and per #620's root-cause analysis the deliverable in #616 was landed by
@@ -1241,5 +1297,5 @@ _run_merge_gate() {
 	# Reason must report the raw stage verdict, the branch-verified verdict,
 	# and the lacking-evidence list (#620 AC3) — not just a bare count.
 	expect_ok "persisted reason must carry the raw verdict, branch-verified verdict, and lacking-evidence list" \
-		grep -qF '_reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking file evidence: ${_lacking_evidence}}."' "$ORCHESTRATOR_SCRIPT"
+		grep -qF '_reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking evidence: ${_lacking_evidence}}."' "$ORCHESTRATOR_SCRIPT"
 }

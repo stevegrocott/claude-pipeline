@@ -5938,7 +5938,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 
 # _lacking_evidence_summary() — formats every task still marked "failed" in
 # $STATUS_FILE into a human-readable list for merge_blocked_reason (#620
-# task 3), so a block names the specific tasks lacking file evidence rather
+# task 3), so a block names the specific tasks lacking evidence rather
 # than only reporting a count (AC3). A task still "failed" after
 # reconcile_failed_tasks_with_branch_evidence() is NOT always a genuine gap:
 # that function refuses to promote ANY task while this run's test suite is
@@ -5947,7 +5947,16 @@ reconcile_failed_tasks_with_branch_evidence() {
 # run's test suite was green — see revalidate_partial_block_against_branch()'s
 # reval_tests_green guard, which calls this only on that path.
 #
-# Example output: "task 2 (README install section) [README.md]"
+# Each entry also names the evidence kind the task was judged by (issue #840
+# task 3): a task declaring an operational deliverable
+# (_task_operational_deliverable()) was judged against a recorded
+# verification-command run, not a file diff, and a reader seeing it in this
+# list needs to know that "lacking evidence" means "no recorded run" rather
+# than "no file changed" — the file path is never coming for that task.
+#
+# Example output:
+#   "task 1 (apply gate config) [operational evidence: ha-lovelace-save.sh --verify]"
+#   "task 2 (README install section) [file evidence: README.md]"
 # Multiple tasks are joined with "; ". Empty output when no task is failed.
 # Each entry is capped at 200 chars and the joined string at 1500 chars
 # (issue #620 review) so several failed tasks — each with a full
@@ -5963,20 +5972,36 @@ _lacking_evidence_summary() {
 	local summary_max=1500
 
 	local -a lacking_parts=()
-	local lacking_entry
-	while IFS= read -r lacking_entry; do
+	local lacking_id
+	while IFS= read -r lacking_id; do
+		[[ -n "$lacking_id" ]] || continue
+		[[ "$lacking_id" =~ ^-?[0-9]+$ ]] || continue
+
+		local lacking_kind="file" lacking_op_cmd=""
+		if lacking_op_cmd=$(_task_operational_deliverable "$lacking_id"); then
+			lacking_kind="operational"
+		fi
+
+		local lacking_entry
+		lacking_entry=$(jq -r --argjson id "$lacking_id" \
+			--arg kind "$lacking_kind" --arg opcmd "$lacking_op_cmd" '
+			(.tasks // [])[] | select(.id == $id)
+			| "task \(.id // "?") (\(.description // "no description")) ["
+				+ $kind + " evidence"
+				+ (if $kind == "operational" then ": " + $opcmd
+					elif ((.affected_files // []) | length) > 0
+						then ": " + ((.affected_files // []) | join(", "))
+					else "" end)
+				+ "]"
+		' "$STATUS_FILE" 2>/dev/null)
+
 		[[ -n "$lacking_entry" ]] || continue
 		if ((${#lacking_entry} > entry_max)); then
 			lacking_entry="${lacking_entry:0:$((entry_max - 3))}..."
 		fi
 		lacking_parts+=("$lacking_entry")
-	done < <(jq -r '
-		(.tasks // [])[] | select(.status == "failed")
-		| "task \(.id // "?") (\(.description // "no description"))"
-			+ (if ((.affected_files // []) | length) > 0
-				then " [\((.affected_files // []) | join(", "))]"
-				else "" end)
-	' "$STATUS_FILE" 2>/dev/null)
+	done < <(jq -r '(.tasks // [])[] | select(.status == "failed") | .id' \
+		"$STATUS_FILE" 2>/dev/null)
 
 	local lacking_summary="" lacking_part
 	for lacking_part in "${lacking_parts[@]+"${lacking_parts[@]}"}"; do
@@ -6108,7 +6133,7 @@ revalidate_partial_block_against_branch() {
 		else
 			local reval_lacking
 			reval_lacking=$(_lacking_evidence_summary)
-			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking file evidence: ${reval_lacking}}."
+			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking evidence: ${reval_lacking}}."
 		fi
 		status_json_write --arg reason "$reval_reason" \
 			'if ((.merge_blocked_reason // "")
@@ -11331,11 +11356,12 @@ $impl_summary" "$tagent"
             # avoid clobbering a reason a prior gate (e.g. convergence) set.
             # Names both verdicts (#620 task 3): the raw stage-reported count
             # and the branch-verified count, plus the specific tasks still
-            # lacking file evidence, not just a bare count (AC3).
+            # lacking evidence — and the evidence kind each was judged by
+            # (issue #840 task 3) — not just a bare count (AC3).
             if [[ -f "$STATUS_FILE" ]]; then
                 local _lacking_evidence _reason
                 _lacking_evidence=$(_lacking_evidence_summary)
-                _reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking file evidence: ${_lacking_evidence}}."
+                _reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking evidence: ${_lacking_evidence}}."
                 status_json_write --arg reason "$_reason" \
                    '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)'
                 sync_status_to_log
