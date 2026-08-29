@@ -1451,6 +1451,86 @@ _assert_e2e_verify_runs_for_scope() {
 }
 
 # =============================================================================
+# ISSUE #837 (task 2): A SKIPPED STAGE MUST BE RECORDED AS "skipped", NOT
+# "completed"
+#
+# Before this fix, every skip branch in run_parallel_post_task_stages()
+# called set_stage_started + set_stage_completed and nothing else, so
+# status.json recorded a plain "completed" for a stage that never actually
+# ran -- indistinguishable from a genuine pass (a false green). The tests
+# below run the real (non-stubbed) set_stage_started/set_stage_completed/
+# update_stage/is_stage_completed so status.json is actually written, then
+# assert on .stages.<stage>.status directly.
+# =============================================================================
+
+# Genuine skip (condition never evaluated, nothing measured): TEST_E2E_CMD
+# unset skips e2e_verify, and "minimal" profile skips acceptance_test. Both
+# must land in status.json as "skipped", not "completed".
+@test "run_parallel_post_task_stages records e2e_verify and acceptance_test as 'skipped' (not 'completed') when their conditions are not met" {
+    unset TEST_E2E_CMD
+    unset RESUME_MODE
+    export BASE_BRANCH=main
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-skip-status
+
+    # comment_issue shells out to $PLATFORM_DIR/comment-issue.sh, which
+    # isn't wired up in this unit-test harness; stub it since this test
+    # only asserts on status.json, not on issue comments.
+    comment_issue() { :; }
+
+    run_parallel_post_task_stages \
+        "feature-issue-837-skip-status" "bash" "minimal" "S"
+
+    local e2e_status acceptance_status
+    e2e_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    acceptance_status=$(jq -r '.stages.acceptance_test.status' "$STATUS_FILE")
+
+    [ "$e2e_status" = "skipped" ] || fail \
+        "expected e2e_verify status 'skipped' (TEST_E2E_CMD unset)," \
+        "got '$e2e_status' -- a skipped stage must not read as a false" \
+        "green 'completed'"
+    [ "$acceptance_status" = "skipped" ] || fail \
+        "expected acceptance_test status 'skipped' (minimal profile)," \
+        "got '$acceptance_status' -- a skipped stage must not read as a" \
+        "false green 'completed'"
+}
+
+# Resume exception: when RESUME_MODE finds the stage already marked
+# "completed" from a PRIOR run, that is a real pass being re-observed, not a
+# fresh skip. Overwriting it to "skipped" here would erase a genuine result
+# and defeat the whole point of this fix (distinguishing real passes from
+# unmeasured stages). It must stay "completed".
+@test "run_parallel_post_task_stages leaves e2e_verify and acceptance_test as 'completed' when RESUME_MODE finds them already completed" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    export RESUME_MODE=1
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-resume-status
+
+    printf '{"stages":{"e2e_verify":{"status":"completed"},' \
+        > "$STATUS_FILE"
+    printf '"acceptance_test":{"status":"completed"}}}' >> "$STATUS_FILE"
+
+    run_parallel_post_task_stages \
+        "feature-issue-837-resume-status" "frontend" "standard" "S"
+
+    local e2e_status acceptance_status
+    e2e_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    acceptance_status=$(jq -r '.stages.acceptance_test.status' "$STATUS_FILE")
+
+    [ "$e2e_status" = "completed" ] || fail \
+        "expected e2e_verify to stay 'completed' on resume of an" \
+        "already-completed stage, got '$e2e_status' -- a real prior pass" \
+        "must not be relabeled 'skipped'"
+    [ "$acceptance_status" = "completed" ] || fail \
+        "expected acceptance_test to stay 'completed' on resume of an" \
+        "already-completed stage, got '$acceptance_status' -- a real" \
+        "prior pass must not be relabeled 'skipped'"
+}
+
+# =============================================================================
 # ISSUE #837: e2e_verify MUST RUN WHEN THE DIFF INCLUDES FRONTEND PATHS, NOT
 # ONLY WHEN change_scope IS EXCLUSIVELY "frontend"/"ts-frontend"
 #
@@ -1542,6 +1622,44 @@ _assert_e2e_verify_runs_for_scope() {
     skip_msg+=" scope diff with no frontend paths, got: $sequence"
     [[ "$sequence" == *'started:e2e_verify completed:e2e_verify'* ]] \
         || fail "$skip_msg"
+}
+
+# =============================================================================
+# ISSUE #837 (task 3): SKIP LOG MUST NAME THE PATHS THAT CLASSIFIED THE SCOPE
+#
+# The e2e_verify skip message only named branch_scope, not which changed
+# files led to it -- when the skip is unexpected (e.g. a frontend file was
+# renamed and no longer matches FRONTEND_PATH_PATTERNS), there was nothing
+# in the log to compare against the configured patterns. The skip log line
+# must include the actual diff paths so the cause is diagnosable from the
+# log alone, without re-running detect_change_scope by hand.
+# =============================================================================
+
+@test "run_parallel_post_task_stages logs the changed file paths when skipping e2e_verify for non-frontend scope" {
+    export FRONTEND_PATH_PATTERNS="web/src/*"
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-skip-log-paths
+
+    mkdir -p src
+    echo "export const add = (a, b) => a + b" > src/math.ts
+    git add src/math.ts
+    git commit -q -m "add backend helper"
+
+    local calls_file="$TEST_TMP/e2e-stage-calls-skip-log-paths.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    run_parallel_post_task_stages \
+        "feature-issue-837-skip-log-paths" "typescript" "minimal" "S"
+
+    grep -q "src/math.ts" "$calls_file" || fail \
+        "expected the e2e_verify skip log to name the changed file" \
+        "'src/math.ts' so an unexpected skip can be diagnosed against" \
+        "FRONTEND_PATH_PATTERNS -- log contents:" \
+        "$(cat "$calls_file")"
 }
 
 # =============================================================================

@@ -9086,20 +9086,29 @@ run_parallel_post_task_stages() {
 	# This avoids STATUS_FILE race conditions on set_stage_started writes.
 	# ------------------------------------------------------------------
 	local run_e2e=true run_acceptance=true
+	local e2e_resumed=false acceptance_resumed=false
 
 	# E2E VERIFY skip logic
 	if [[ -n "$RESUME_MODE" ]] && is_stage_completed "e2e_verify"; then
 		log "Skipping e2e_verify stage (already completed)"
 		run_e2e=false
+		e2e_resumed=true
 	elif [[ -z "${TEST_E2E_CMD:-}" ]]; then
 		log "Skipping e2e_verify stage (TEST_E2E_CMD not configured)"
 		run_e2e=false
 	elif [[ "$branch_scope" != "frontend" \
 		&& "$branch_scope" != "ts-frontend" ]] \
 		&& ! _diff_includes_frontend_paths "${BASE_BRANCH:-main}"; then
+		# Name the paths that drove this classification so an unexpected
+		# skip (e.g. a renamed frontend file no longer matching
+		# FRONTEND_PATH_PATTERNS) can be diagnosed from the log alone.
+		local _e2e_skip_changed_files
+		_e2e_skip_changed_files=$(git diff "${BASE_BRANCH:-main}"...HEAD \
+			--name-only 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 		log "Skipping e2e_verify stage" \
 			"(scope '$branch_scope' is not frontend and diff has" \
-			"no frontend paths)"
+			"no frontend paths -- changed files:" \
+			"${_e2e_skip_changed_files:-<none>})"
 		run_e2e=false
 	fi
 
@@ -9107,15 +9116,37 @@ run_parallel_post_task_stages() {
 	if [[ -n "$RESUME_MODE" ]] && is_stage_completed "acceptance_test"; then
 		log "Skipping acceptance_test stage (already completed)"
 		run_acceptance=false
+		acceptance_resumed=true
 	elif [[ "$pipeline_profile" == "minimal" ]]; then
 		log "Skipping acceptance test: minimal profile (single S-task)"
 		run_acceptance=false
 	fi
 
-	# Handle skipped stages sequentially (no parallelism needed)
+	# Handle skipped stages sequentially (no parallelism needed).
+	#
+	# set_stage_completed is still called first so the token/cost
+	# accumulator, cost_summary rollup, and stage_end event all behave
+	# exactly as they do for a stage that actually ran (mirrors
+	# finalize_e2e_verify_stage_status / finalize_test_loop_stage_status).
+	# update_stage then overrides the persisted status to "skipped" so
+	# status.json distinguishes "condition never met, nothing measured"
+	# from a genuine pass -- a resumed run that still meets the skip
+	# condition re-skips (is_stage_completed only matches "completed"),
+	# while a run whose config changed re-evaluates the stage instead of
+	# treating a stale skip as done forever.
+	#
+	# EXCEPTION: the RESUME_MODE branches above (`e2e_resumed` /
+	# `acceptance_resumed`) short-circuit because the stage genuinely
+	# completed in a *previous* run -- is_stage_completed only matches
+	# status "completed", never "skipped" or "degraded". Overwriting that
+	# stage's status to "skipped" here would erase a real pass and make a
+	# resumed run indistinguishable from one that never measured anything,
+	# which is the opposite of this fix's goal. Leave set_stage_completed's
+	# "completed" status untouched for those two.
 	if ! $run_e2e; then
 		set_stage_started "e2e_verify"
 		set_stage_completed "e2e_verify"
+		$e2e_resumed || update_stage "e2e_verify" "skipped"
 	fi
 	if ! $run_acceptance; then
 		set_stage_started "acceptance_test"
@@ -9124,6 +9155,7 @@ run_parallel_post_task_stages() {
 				"⏭️ Minimal profile (single S-task). Skipping acceptance test."
 		fi
 		set_stage_completed "acceptance_test"
+		$acceptance_resumed || update_stage "acceptance_test" "skipped"
 	fi
 
 	# Both skipped — nothing more to do
