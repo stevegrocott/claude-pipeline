@@ -7867,6 +7867,35 @@ _matches_frontend_pattern() {
     return "$rc"
 }
 
+# Check whether the branch diff touches any frontend path, independent of
+# the overall change_scope classification (issue #837).
+#
+# detect_change_scope() folds frontend files into "mixed" whenever
+# TypeScript/bash files are also present in the diff (has_ts && has_bash
+# takes priority — see the case chain above), so a diff that legitimately
+# touches frontend code can still come back scoped "mixed" rather than
+# "frontend"/"ts-frontend". Gating e2e_verify on scope alone under-runs it
+# for exactly the mixed-change PRs most likely to need E2E coverage.
+# Arguments:
+#   $1 - base branch to diff against
+# Returns:
+#   0 if any changed file matches FRONTEND_PATH_PATTERNS
+#   1 otherwise (including when FRONTEND_PATH_PATTERNS is unset)
+_diff_includes_frontend_paths() {
+    local base="$1"
+    local changed_files
+    changed_files=$(git diff "$base"...HEAD --name-only 2>/dev/null || true)
+
+    [[ -z "$changed_files" ]] && return 1
+
+    local file
+    while IFS= read -r file; do
+        _matches_frontend_pattern "$file" && return 0
+    done <<< "$changed_files"
+
+    return 1
+}
+
 # Warn when TEST_E2E_CMD is configured but FRONTEND_PATH_PATTERNS is empty.
 #
 # detect_change_scope() can only classify a diff as "frontend"/"ts-frontend"
@@ -9066,9 +9095,11 @@ run_parallel_post_task_stages() {
 		log "Skipping e2e_verify stage (TEST_E2E_CMD not configured)"
 		run_e2e=false
 	elif [[ "$branch_scope" != "frontend" \
-		&& "$branch_scope" != "ts-frontend" ]]; then
+		&& "$branch_scope" != "ts-frontend" ]] \
+		&& ! _diff_includes_frontend_paths "${BASE_BRANCH:-main}"; then
 		log "Skipping e2e_verify stage" \
-			"(scope '$branch_scope' is not frontend)"
+			"(scope '$branch_scope' is not frontend and diff has" \
+			"no frontend paths)"
 		run_e2e=false
 	fi
 

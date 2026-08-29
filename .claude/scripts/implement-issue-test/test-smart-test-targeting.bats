@@ -1451,6 +1451,100 @@ _assert_e2e_verify_runs_for_scope() {
 }
 
 # =============================================================================
+# ISSUE #837: e2e_verify MUST RUN WHEN THE DIFF INCLUDES FRONTEND PATHS, NOT
+# ONLY WHEN change_scope IS EXCLUSIVELY "frontend"/"ts-frontend"
+#
+# detect_change_scope() folds frontend files into "mixed" whenever
+# TypeScript AND bash files are both present in the diff (has_ts && has_bash
+# short-circuits ahead of the has_frontend check). A PR that legitimately
+# touches frontend code alongside a backend/bash change was therefore scoped
+# "mixed" and silently skipped e2e_verify even though frontend files were in
+# the diff. The fix adds a diff-level frontend check
+# (_diff_includes_frontend_paths) that runs e2e_verify whenever any changed
+# file matches FRONTEND_PATH_PATTERNS, regardless of the overall scope
+# label.
+# =============================================================================
+
+@test "run_parallel_post_task_stages runs e2e_verify for mixed scope when the diff includes a frontend path" {
+    export FRONTEND_PATH_PATTERNS="web/src/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-mixed-fe
+
+    # Diff has both a frontend file and a bash file — detect_change_scope
+    # would classify this "mixed", not "frontend"/"ts-frontend".
+    mkdir -p web/src
+    echo "export const Button = () => null" > web/src/Button.tsx
+    printf '#!/usr/bin/env bash\necho deploy\n' > deploy.sh
+    git add web/src/Button.tsx deploy.sh
+    git commit -q -m "add frontend component and deploy script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "mixed" ] || fail \
+        "expected scope 'mixed' for a TS+bash diff, got '$scope'"
+
+    # See _assert_e2e_verify_runs_for_scope() above for the shared
+    # run/ordering/schema/agent assertions.
+    local calls_file="$TEST_TMP/e2e-stage-calls-mixed-fe.txt"
+    _assert_e2e_verify_runs_for_scope \
+        "feature-issue-837-mixed-fe" "$scope" "$calls_file" \
+        || return 1
+}
+
+# Negative control for the test above: a "mixed" diff with no file matching
+# FRONTEND_PATH_PATTERNS must still skip e2e_verify. Without this, a
+# regression that ran e2e_verify unconditionally for "mixed" scope (ignoring
+# the diff-content check entirely) would still satisfy the positive
+# assertion above.
+@test "run_parallel_post_task_stages still skips e2e_verify for mixed scope when the diff has no frontend paths" {
+    export FRONTEND_PATH_PATTERNS="web/src/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-mixed-nonfe
+
+    # Diff has TS and bash files, neither under web/src/ — still "mixed",
+    # but no frontend path present.
+    mkdir -p src
+    echo "export const add = (a, b) => a + b" > src/math.ts
+    printf '#!/usr/bin/env bash\necho deploy\n' > deploy.sh
+    git add src/math.ts deploy.sh
+    git commit -q -m "add backend helper and deploy script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "mixed" ] || fail \
+        "expected scope 'mixed' for a TS+bash diff, got '$scope'"
+
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-stage-calls-mixed-nonfe.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-837-mixed-nonfe" "$scope" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    if grep -q "^run_stage:e2e-verify$" "$calls_file"; then
+        fail "e2e_verify ran for mixed scope '$scope' with no frontend" \
+            "paths in the diff — it must skip"
+    fi
+
+    local sequence skip_msg
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    skip_msg="expected e2e_verify to be skipped (started immediately"
+    skip_msg+=" followed by completed, no run_stage call) for a mixed"
+    skip_msg+=" scope diff with no frontend paths, got: $sequence"
+    [[ "$sequence" == *'started:e2e_verify completed:e2e_verify'* ]] \
+        || fail "$skip_msg"
+}
+
+# =============================================================================
 # ISSUE #745: E2E VERDICT UNSUPPORTED BY ITS OWN COUNTS -> UNMEASURED
 #
 # A self-reported 'failed' with tests_run: 0 means the run never finished --
