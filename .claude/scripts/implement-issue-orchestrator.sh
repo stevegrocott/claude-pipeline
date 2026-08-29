@@ -11747,8 +11747,39 @@ $pr_creation_skill}"
         # Include the diff inline so the reviewer doesn't waste turns running git diff
         # and exploring the entire codebase. For small diffs this dramatically reduces
         # token usage (4.7M → ~50K observed on an 11-line diff).
+        local pr_diff_full
+        pr_diff_full=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null)
+        local pr_diff_total_lines
+        pr_diff_total_lines=$(printf '%s\n' "$pr_diff_full" | wc -l)
+        pr_diff_total_lines="${pr_diff_total_lines//[[:space:]]/}"
         local pr_diff
-        pr_diff=$(git diff "$BASE_BRANCH"...HEAD -- 2>/dev/null | head -500)
+        pr_diff=$(printf '%s\n' "$pr_diff_full" | head -500)
+
+        # A truncated diff silently hides changes from the reviewer — it
+        # sees only the first 500 lines and has no way to know more exists,
+        # so it can approve a PR without ever seeing the rest of the change
+        # (issue #839). When truncated, surface it both to the operator log
+        # and inline in the review prompt, and hand the reviewer the full
+        # changed-file list with added/removed line counts (via
+        # `git diff --numstat`) so it can at least judge the shape of what
+        # it isn't seeing.
+        local pr_diff_truncation_note=""
+        if ((pr_diff_total_lines > 500)); then
+            log_warn "PR review diff truncated: showing 500 of" \
+                "$pr_diff_total_lines lines (iteration $pr_iteration)"
+            local pr_diff_file_stats=""
+            local ns_added ns_removed ns_path
+            while IFS=$'\t' read -r ns_added ns_removed ns_path; do
+                [[ -z "$ns_path" ]] && continue
+                pr_diff_file_stats+="- ${ns_path}: +${ns_added}/-${ns_removed} lines
+"
+            done < <(git diff --numstat "$BASE_BRANCH"...HEAD -- 2>/dev/null)
+            pr_diff_truncation_note="
+**NOTE: the diff above is truncated — showing the first 500 of ${pr_diff_total_lines} total lines.** Full list of changed files with line counts:
+
+${pr_diff_file_stats}
+"
+        fi
 
         # Sibling-file scan: for each directory containing a changed file,
         # collect other .ts/.tsx files (excluding tests and already-diffed files),
@@ -11828,7 +11859,7 @@ Here is the diff to review (do NOT run git diff yourself — use this):
 \`\`\`diff
 $pr_diff
 \`\`\`
-${sibling_files_prompt}
+${pr_diff_truncation_note}${sibling_files_prompt}
 Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
