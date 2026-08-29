@@ -2413,6 +2413,27 @@ EOF
 			"Baseline: $baseline / Targeted: $targeted"
 }
 
+@test "_build_bash_test_command logs the unresolved file that forced the full-suite fallback" {
+	# The full-suite fallback above silently widens the run, but nothing
+	# names *which* changed file couldn't be narrowed. Without a log line
+	# naming it, the omission from the narrowed command is invisible to
+	# anyone reading the log (issue #836).
+	mkdir -p "$TEST_TMP/tests"
+	touch "$TEST_TMP/tests/bar.bats"
+
+	local changed
+	changed=$(printf '%s\n' \
+		"tests/bar.bats" \
+		".claude/scripts/some-other-script.sh")
+	_build_bash_test_command "$TEST_TMP" "$changed" > /dev/null
+
+	grep -qF ".claude/scripts/some-other-script.sh" "$LOG_FILE" || \
+		fail "Expected the unresolved file" \
+			".claude/scripts/some-other-script.sh to be named in $LOG_FILE" \
+			"so the fallback's omission is visible. Log contents:" \
+			"$(cat "$LOG_FILE" 2>/dev/null)"
+}
+
 # =============================================================================
 # NON-BLOCKING FULL-SUITE BATS CHECK — runs for every scope, bash included
 #

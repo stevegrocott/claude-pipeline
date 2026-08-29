@@ -8172,6 +8172,12 @@ _build_bash_test_command() {
 		done <<< "$changed_bats_files"
 	fi
 
+	if (( ${#unresolved_files[@]} > 0 )); then
+		log_warn "BATS narrowing fell back to the full suite —" \
+			"changed test file(s) not resolvable to a *.bats path:" \
+			"${unresolved_files[*]}"
+	fi
+
 	if (( ${#unresolved_files[@]} == 0 )) \
 		&& (( ${#targeted_impl_files[@]} > 0 || ${#targeted_other_files[@]} > 0 )); then
 		local -a command_parts=()
