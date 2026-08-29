@@ -229,6 +229,98 @@ teardown() {
 }
 
 # =============================================================================
+# UNIT TESTS: _task_operational_deliverable() (#840 task 1)
+# A task whose deliverable is an action against a live system (a device
+# config write, a service restart) produces no repo diff, so it needs a
+# marker distinct from `deliverable:comment:`/`deliverable:file:` (#634) that
+# the branch-evidence gate can recognise instead of failing it for lacking a
+# file diff.
+# =============================================================================
+
+@test "_task_operational_deliverable: recognises a declared operational marker" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "apply gate station config `deliverable:operational:ha-lovelace-save.sh --verify`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local cmd
+	cmd=$(_task_operational_deliverable 1)
+	expect_ok "task 1 is recognised as an operational deliverable" \
+		_task_operational_deliverable 1
+	expect_glob "$cmd" 'ha-lovelace-save.sh --verify' \
+		"the declared verification command is returned verbatim"
+}
+
+@test "_task_operational_deliverable: a colon-bearing verification command survives" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "restart service `deliverable:operational:curl -s http://gate/api/status | grep muted:true`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local cmd
+	cmd=$(_task_operational_deliverable 1)
+	expect_glob "$cmd" 'curl -s http://gate/api/status | grep muted:true' \
+		"only the leading operational: prefix is stripped"
+}
+
+@test "_task_operational_deliverable: does not recognise a comment deliverable" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "spike a ruling `deliverable:comment:ruling-840`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "a comment-kind deliverable is not an operational one" \
+		_task_operational_deliverable 1
+}
+
+@test "_task_operational_deliverable: does not recognise a file deliverable" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "write report `deliverable:file:docs/ruling.md`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "a file-kind deliverable is not an operational one" \
+		_task_operational_deliverable 1
+}
+
+@test "_task_operational_deliverable: a bare 'operational' with no command is unrecognised" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "apply config `deliverable:operational`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "a markerless operational deliverable fails closed" \
+		_task_operational_deliverable 1
+}
+
+@test "_task_operational_deliverable: a task with no deliverable annotation is unrecognised" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "ordinary code task `src/app.ts`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "an unannotated task is not an operational deliverable" \
+		_task_operational_deliverable 1
+}
+
+@test "_task_operational_deliverable: an unknown task id is unrecognised" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "apply config `deliverable:operational:verify.sh`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "a nonexistent task id has nothing to recognise" \
+		_task_operational_deliverable 99
+}
+
+# =============================================================================
 # UNIT TESTS: reconcile_failed_tasks_with_branch_evidence() (#620 task 2)
 # Exercises the shipped reconciliation function directly — wired to the real
 # task_files_modified_on_branch()/update_task() it calls — rather than a

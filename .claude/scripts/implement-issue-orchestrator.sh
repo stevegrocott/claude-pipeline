@@ -5149,8 +5149,13 @@ _extract_tasks_section() {
 # annotation stays in the description the specialist agent is handed, and the
 # parser-parity contract (section / count / descriptions) is untouched.
 #
-#   `deliverable:<kind>:<ref>`   a NON-COMMIT deliverable (see
-#                                verify_task_deliverable)
+#   `deliverable:<kind>:<ref>`   a NON-COMMIT deliverable. kind "comment" or
+#                                "file" (issue #634, see
+#                                verify_task_deliverable); kind "operational"
+#                                (issue #840, see
+#                                _task_operational_deliverable) names an
+#                                action against a live system instead of an
+#                                artefact in the repo or on the tracker.
 #   `depends-on:<id>[,<id>...]`  inter-task dependency (see
 #                                compute_task_batches)
 #
@@ -5596,6 +5601,53 @@ _task_declared_files() {
 		done < <(_extract_task_files_from_desc "$desc")
 	fi
 	_normalize_declared_paths "${raw[@]+"${raw[@]}"}"
+}
+
+# _task_operational_deliverable() — resolves a task's declared OPERATIONAL
+# deliverable marker by id (issue #840).
+#
+# `deliverable:operational:<verification-command>` names a task whose result
+# is an action against a live system — a device config write, a database
+# edit, a service restart — rather than a commit. Those tasks legitimately
+# produce no repo diff, so task_files_modified_on_branch() can never
+# evidence them: the very check that correctly leaves a genuinely unfinished
+# code task "failed" (no declared file evidence) also swallows a correct
+# operational one, blocking a working PR (issue #840).
+#
+# This function is recognition only. The declared verification command is
+# not run here — reconcile_failed_tasks_with_branch_evidence() (issue #840
+# task 2) is responsible for treating a task recognised here as evidenced by
+# a recorded run of that command instead of by task_files_modified_on_branch().
+#
+# Distinct from the `deliverable:comment:<marker>` / `deliverable:file:<path>`
+# kinds verify_task_deliverable() recognises (issue #634): those name an
+# artefact that already sits somewhere checkable — an issue comment, a file
+# on disk. An operational deliverable has no artefact to point at, only a
+# command that can re-observe the live system's current state.
+#
+# Arguments:
+#   $1 - task id
+# Globals:
+#   STATUS_FILE - read the task's description from
+# Outputs:
+#   The declared verification command on stdout (may itself contain colons,
+#   e.g. a shell pipeline — only the first `operational:` prefix is stripped)
+# Returns:
+#   0 when the task declares an operational deliverable, 1 otherwise
+#   (including when $STATUS_FILE or the task cannot be read)
+_task_operational_deliverable() {
+	local task_id="$1"
+	local desc spec
+
+	desc=$(jq -r --argjson id "$task_id" \
+		'(.tasks[] | select(.id == $id)).description // ""' \
+		"$STATUS_FILE" 2>/dev/null)
+	[[ -n "$desc" ]] || return 1
+
+	spec=$(_task_annotation "$desc" "deliverable" 2>/dev/null) || return 1
+	[[ "$spec" == operational:?* ]] || return 1
+
+	printf '%s' "${spec#operational:}"
 }
 
 # _file_set_contained() — true if every path in newline-separated set A also
