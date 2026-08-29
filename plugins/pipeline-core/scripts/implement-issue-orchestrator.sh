@@ -5149,8 +5149,13 @@ _extract_tasks_section() {
 # annotation stays in the description the specialist agent is handed, and the
 # parser-parity contract (section / count / descriptions) is untouched.
 #
-#   `deliverable:<kind>:<ref>`   a NON-COMMIT deliverable (see
-#                                verify_task_deliverable)
+#   `deliverable:<kind>:<ref>`   a NON-COMMIT deliverable. kind "comment" or
+#                                "file" (issue #634, see
+#                                verify_task_deliverable); kind "operational"
+#                                (issue #840, see
+#                                _task_operational_deliverable) names an
+#                                action against a live system instead of an
+#                                artefact in the repo or on the tracker.
 #   `depends-on:<id>[,<id>...]`  inter-task dependency (see
 #                                compute_task_batches)
 #
@@ -5598,6 +5603,123 @@ _task_declared_files() {
 	_normalize_declared_paths "${raw[@]+"${raw[@]}"}"
 }
 
+# _task_operational_deliverable() — resolves a task's declared OPERATIONAL
+# deliverable marker by id (issue #840).
+#
+# `deliverable:operational:<verification-command>` names a task whose result
+# is an action against a live system — a device config write, a database
+# edit, a service restart — rather than a commit. Those tasks legitimately
+# produce no repo diff, so task_files_modified_on_branch() can never
+# evidence them: the very check that correctly leaves a genuinely unfinished
+# code task "failed" (no declared file evidence) also swallows a correct
+# operational one, blocking a working PR (issue #840).
+#
+# This function is recognition only. The declared verification command is
+# not run here — reconcile_failed_tasks_with_branch_evidence() (issue #840
+# task 2) is responsible for treating a task recognised here as evidenced by
+# a recorded run of that command instead of by task_files_modified_on_branch().
+#
+# Distinct from the `deliverable:comment:<marker>` / `deliverable:file:<path>`
+# kinds verify_task_deliverable() recognises (issue #634): those name an
+# artefact that already sits somewhere checkable — an issue comment, a file
+# on disk. An operational deliverable has no artefact to point at, only a
+# command that can re-observe the live system's current state.
+#
+# Arguments:
+#   $1 - task id
+# Globals:
+#   STATUS_FILE - read the task's description from
+# Outputs:
+#   The declared verification command on stdout (may itself contain colons,
+#   e.g. a shell pipeline — only the first `operational:` prefix is stripped)
+# Returns:
+#   0 when the task declares an operational deliverable, 1 otherwise
+#   (including when $STATUS_FILE or the task cannot be read)
+_task_operational_deliverable() {
+	local task_id="$1"
+	local desc spec
+
+	desc=$(jq -r --argjson id "$task_id" \
+		'(.tasks[] | select(.id == $id)).description // ""' \
+		"$STATUS_FILE" 2>/dev/null)
+	[[ -n "$desc" ]] || return 1
+
+	spec=$(_task_annotation "$desc" "deliverable" 2>/dev/null) || return 1
+	[[ "$spec" == operational:?* ]] || return 1
+
+	printf '%s' "${spec#operational:}"
+}
+
+# _operational_deliverable_evidenced() — the operational counterpart to
+# task_files_modified_on_branch() (issue #840 task 2).
+#
+# An operational deliverable (_task_operational_deliverable() above) changes
+# a live system this process has no path to reach from here — a device, a
+# database, a remote service — so there is no diff to read AND no way to
+# rerun the declared verification command against that system to check it
+# now. Even where a rerun were possible, a fresh run only proves the
+# system's CURRENT state, not that the task's own action produced it.  The
+# only evidence available is a RECORD that someone already ran the
+# verification command and reported what it printed: an issue comment
+# naming the exact command _task_operational_deliverable() returned, with
+# output alongside it.
+#
+# A comment must contain BOTH:
+#   - the verification command, matched as a literal substring (the same
+#     `grep -Fqx`-free literal match verify_task_deliverable() already uses
+#     for `deliverable:comment:<marker>`, issue #634); and
+#   - actual reported output alongside it — not just other prose mentioning
+#     the command. "Will run `cmd` shortly." has non-blank text besides the
+#     command too, but reports no result, so a blank-vs-non-blank check
+#     alone cannot tell it apart from a genuine record. Real output — JSON,
+#     a key:value pair, a shell "->" result line, a quoted value, a number —
+#     is data-shaped: it carries at least one of `: = > " ' 0-9`, characters
+#     a plain descriptive sentence around the command does not. The command
+#     quoted with nothing but prose reported back is not a record of
+#     anything.
+#
+# Deliberately as strict-by-default as verify_task_deliverable(): an
+# unreachable tracker, or no comment carrying both the command and
+# data-shaped output, is treated as unevidenced rather than assumed
+# passing.
+#
+# Arguments:
+#   $1 - the declared verification command (as returned by
+#        _task_operational_deliverable)
+# Globals:
+#   ISSUE_NUMBER, TRACKER - consulted indirectly via
+#                           _fetch_issue_comment_bodies()
+# Returns:
+#   0 when a comment records both the command and its output, 1 otherwise
+#
+_operational_deliverable_evidenced() {
+	local command="$1"
+	[[ -n "$command" ]] || return 1
+
+	local bodies
+	if ! bodies=$(_fetch_issue_comment_bodies); then
+		log_warn "Operational deliverable verification: cannot read" \
+			"comments for issue #$ISSUE_NUMBER" \
+			"(tracker=${TRACKER:-github}) — treating '$command' as" \
+			"unevidenced."
+		return 1
+	fi
+
+	# Data-shaped: at least one of `: = > " ' 0-9` — characters real output
+	# (JSON, key:value, a shell "->" result, a quoted value, a number)
+	# tends to carry, that plain prose around the command does not.
+	local output_pattern='[:=>"'\''0-9]'
+
+	local comment_line remainder
+	while IFS= read -r comment_line; do
+		[[ "$comment_line" == *"$command"* ]] || continue
+		remainder="${comment_line//"$command"/}"
+		[[ "$remainder" =~ $output_pattern ]] && return 0
+	done <<< "$bodies"
+
+	return 1
+}
+
 # _file_set_contained() — true if every path in newline-separated set A also
 # appears in newline-separated set B (A == B counts as contained). Used by
 # the cross-task containment check below.
@@ -5621,6 +5743,17 @@ _file_set_contained() {
 # (issue #616). This walks every task currently marked "failed" in
 # $STATUS_FILE and checks its declared files (_task_declared_files())
 # against the branch diff via task_files_modified_on_branch() (task 1).
+#
+# A task declaring an operational deliverable (_task_operational_deliverable(),
+# issue #840 task 1) is judged on a different kind of evidence entirely: it
+# names an action against a live system that produces no repo diff by
+# design, so it is checked against a recorded run of its declared
+# verification command (_operational_deliverable_evidenced(), issue #840
+# task 2) instead of task_files_modified_on_branch(), ahead of — and to the
+# exclusion of — the file-evidence path below. A promoted operational task
+# is stamped `evidence_kind: "operational"` so a later reader (issue #840
+# task 3) can tell which evidence path judged it; a file-evidenced task
+# carries no such field, "file" being the implicit default.
 #
 # Per the issue's proposed direction, promotion requires BOTH file evidence
 # AND a green test suite — file evidence alone cannot attribute a shared
@@ -5699,6 +5832,44 @@ reconcile_failed_tasks_with_branch_evidence() {
 
 		local recon_files_str="${recon_all_files[$idx]:-}"
 		idx=$((idx + 1))
+
+		# Operational deliverables (issue #840 task 2): judged ahead of the
+		# file-evidence path below, on a recorded run of the declared
+		# verification command instead of a repo diff — the action was
+		# taken against a live system this process has no path to reach
+		# from here, so there is no diff to check in the first place.
+		local recon_op_cmd
+		if recon_op_cmd=$(_task_operational_deliverable "$recon_id"); then
+			if ((tests_green == 0)); then
+				log "Task $recon_id remains failed —" \
+					"test suite not green this run"
+				continue
+			fi
+
+			if _operational_deliverable_evidenced "$recon_op_cmd"; then
+				log "Task $recon_id recorded failed but its declared" \
+					"operational deliverable is evidenced by a recorded" \
+					"run of '$recon_op_cmd' — reconciling to completed."
+				if status_json_write --argjson id "$recon_id" \
+				   '(.tasks[] | select(.id == $id)).status = "completed" |
+				    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
+				    (.tasks[] | select(.id == $id)).evidence_kind = "operational" |
+				    .last_update = (now | todate)'; then
+					sync_status_to_log
+					reconciled=$((reconciled + 1))
+				else
+					log_warn "reconcile_failed_tasks_with_branch_evidence:" \
+						"failed to persist reconciliation for task" \
+						"$recon_id — leaving it recorded as failed"
+				fi
+			else
+				log "Task $recon_id remains failed — no recorded" \
+					"verification command output evidences" \
+					"operational deliverable '$recon_op_cmd'"
+			fi
+			continue
+		fi
+
 		local -a recon_files=()
 		local recon_f
 		while IFS= read -r recon_f; do
@@ -5767,7 +5938,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 
 # _lacking_evidence_summary() — formats every task still marked "failed" in
 # $STATUS_FILE into a human-readable list for merge_blocked_reason (#620
-# task 3), so a block names the specific tasks lacking file evidence rather
+# task 3), so a block names the specific tasks lacking evidence rather
 # than only reporting a count (AC3). A task still "failed" after
 # reconcile_failed_tasks_with_branch_evidence() is NOT always a genuine gap:
 # that function refuses to promote ANY task while this run's test suite is
@@ -5776,7 +5947,16 @@ reconcile_failed_tasks_with_branch_evidence() {
 # run's test suite was green — see revalidate_partial_block_against_branch()'s
 # reval_tests_green guard, which calls this only on that path.
 #
-# Example output: "task 2 (README install section) [README.md]"
+# Each entry also names the evidence kind the task was judged by (issue #840
+# task 3): a task declaring an operational deliverable
+# (_task_operational_deliverable()) was judged against a recorded
+# verification-command run, not a file diff, and a reader seeing it in this
+# list needs to know that "lacking evidence" means "no recorded run" rather
+# than "no file changed" — the file path is never coming for that task.
+#
+# Example output:
+#   "task 1 (apply gate config) [operational evidence: ha-lovelace-save.sh --verify]"
+#   "task 2 (README install section) [file evidence: README.md]"
 # Multiple tasks are joined with "; ". Empty output when no task is failed.
 # Each entry is capped at 200 chars and the joined string at 1500 chars
 # (issue #620 review) so several failed tasks — each with a full
@@ -5792,20 +5972,36 @@ _lacking_evidence_summary() {
 	local summary_max=1500
 
 	local -a lacking_parts=()
-	local lacking_entry
-	while IFS= read -r lacking_entry; do
+	local lacking_id
+	while IFS= read -r lacking_id; do
+		[[ -n "$lacking_id" ]] || continue
+		[[ "$lacking_id" =~ ^-?[0-9]+$ ]] || continue
+
+		local lacking_kind="file" lacking_op_cmd=""
+		if lacking_op_cmd=$(_task_operational_deliverable "$lacking_id"); then
+			lacking_kind="operational"
+		fi
+
+		local lacking_entry
+		lacking_entry=$(jq -r --argjson id "$lacking_id" \
+			--arg kind "$lacking_kind" --arg opcmd "$lacking_op_cmd" '
+			(.tasks // [])[] | select(.id == $id)
+			| "task \(.id // "?") (\(.description // "no description")) ["
+				+ $kind + " evidence"
+				+ (if $kind == "operational" then ": " + $opcmd
+					elif ((.affected_files // []) | length) > 0
+						then ": " + ((.affected_files // []) | join(", "))
+					else "" end)
+				+ "]"
+		' "$STATUS_FILE" 2>/dev/null)
+
 		[[ -n "$lacking_entry" ]] || continue
 		if ((${#lacking_entry} > entry_max)); then
 			lacking_entry="${lacking_entry:0:$((entry_max - 3))}..."
 		fi
 		lacking_parts+=("$lacking_entry")
-	done < <(jq -r '
-		(.tasks // [])[] | select(.status == "failed")
-		| "task \(.id // "?") (\(.description // "no description"))"
-			+ (if ((.affected_files // []) | length) > 0
-				then " [\((.affected_files // []) | join(", "))]"
-				else "" end)
-	' "$STATUS_FILE" 2>/dev/null)
+	done < <(jq -r '(.tasks // [])[] | select(.status == "failed") | .id' \
+		"$STATUS_FILE" 2>/dev/null)
 
 	local lacking_summary="" lacking_part
 	for lacking_part in "${lacking_parts[@]+"${lacking_parts[@]}"}"; do
@@ -5937,7 +6133,7 @@ revalidate_partial_block_against_branch() {
 		else
 			local reval_lacking
 			reval_lacking=$(_lacking_evidence_summary)
-			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking file evidence: ${reval_lacking}}."
+			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}${reval_lacking:+; lacking evidence: ${reval_lacking}}."
 		fi
 		status_json_write --arg reason "$reval_reason" \
 			'if ((.merge_blocked_reason // "")
@@ -11160,11 +11356,12 @@ $impl_summary" "$tagent"
             # avoid clobbering a reason a prior gate (e.g. convergence) set.
             # Names both verdicts (#620 task 3): the raw stage-reported count
             # and the branch-verified count, plus the specific tasks still
-            # lacking file evidence, not just a bare count (AC3).
+            # lacking evidence — and the evidence kind each was judged by
+            # (issue #840 task 3) — not just a bare count (AC3).
             if [[ -f "$STATUS_FILE" ]]; then
                 local _lacking_evidence _reason
                 _lacking_evidence=$(_lacking_evidence_summary)
-                _reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking file evidence: ${_lacking_evidence}}."
+                _reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking evidence: ${_lacking_evidence}}."
                 status_json_write --arg reason "$_reason" \
                    '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)'
                 sync_status_to_log
