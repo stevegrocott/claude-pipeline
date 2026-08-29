@@ -12001,6 +12001,34 @@ $review_summary$followup_comment" "code-reviewer"
             pr_approved=true
             log "PR approved on iteration $pr_iteration"
         else
+            # Issue #839: a changes_requested verdict that cites a file as
+            # missing/absent when that exact file is in this branch's diff
+            # is describing content that doesn't match the branch under
+            # review (the reviewer treated absence-from-input as
+            # absence-from-branch). That verdict carries no actionable
+            # signal, so don't let it spend the max-iterations budget —
+            # undo this iteration's increment and retry instead of
+            # fixing-or-blocking on a false claim.
+            local false_absence_files
+            false_absence_files=$(printf '%s' "$review_result" | jq -r --arg files "$changed_files_nl" '
+                ($files | split("\n") | map(select(length > 0))) as $branch_files |
+                [.output.issues // [] | .[] |
+                    select(.file != null and .file != "" and (.file as $f | $branch_files | index($f) != null)) |
+                    select(.description // "" |
+                        test("missing|never (existed|updated|added|created|modified|touched)|does ?n.t exist|not (present|found|updated|created|added|modified|include|contain)|absent|was never"; "i")) |
+                    .file
+                ] | unique | join(", ")
+            ' 2>/dev/null)
+
+            if [[ -n "$false_absence_files" ]]; then
+                log_warn "PR review iteration $pr_iteration verdict cites file(s) as missing that the branch actually contains: $false_absence_files — not counting this iteration toward the max-iterations budget"
+                status_json_write '.pr_review_iterations = ([.pr_review_iterations - 1, 0] | max) |
+                    .stages.pr_review.iteration = .pr_review_iterations |
+                    .last_update = (now | todate)'
+                sync_status_to_log
+                continue
+            fi
+
             # Budget the verdict, not the round-trip (claude-pipeline#651).
             # This check runs AFTER the review above already produced a
             # verdict for the current state of the branch, so the loop can

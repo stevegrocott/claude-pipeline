@@ -696,6 +696,18 @@ teardown() {
     [[ "$main_def" == *"break"* ]]
 }
 
+@test "orchestrator does not count false-absence PR review verdicts toward max iterations (issue #839)" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # A changes_requested verdict citing a file the branch's diff actually
+    # contains must be detected and its iteration undone rather than
+    # counted toward the max-iterations block.
+    [[ "$main_def" == *"false_absence_files"* ]]
+    [[ "$main_def" == *'.pr_review_iterations = ([.pr_review_iterations - 1, 0] | max)'* ]]
+    [[ "$main_def" == *"not counting this iteration toward the max-iterations budget"* ]]
+}
+
 # =============================================================================
 # LOGGING
 # =============================================================================
