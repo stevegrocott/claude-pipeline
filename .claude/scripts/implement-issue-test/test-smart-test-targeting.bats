@@ -1451,6 +1451,218 @@ _assert_e2e_verify_runs_for_scope() {
 }
 
 # =============================================================================
+# ISSUE #837 (task 2): A SKIPPED STAGE MUST BE RECORDED AS "skipped", NOT
+# "completed"
+#
+# Before this fix, every skip branch in run_parallel_post_task_stages()
+# called set_stage_started + set_stage_completed and nothing else, so
+# status.json recorded a plain "completed" for a stage that never actually
+# ran -- indistinguishable from a genuine pass (a false green). The tests
+# below run the real (non-stubbed) set_stage_started/set_stage_completed/
+# update_stage/is_stage_completed so status.json is actually written, then
+# assert on .stages.<stage>.status directly.
+# =============================================================================
+
+# Genuine skip (condition never evaluated, nothing measured): TEST_E2E_CMD
+# unset skips e2e_verify, and "minimal" profile skips acceptance_test. Both
+# must land in status.json as "skipped", not "completed".
+@test "run_parallel_post_task_stages records e2e_verify and acceptance_test as 'skipped' (not 'completed') when their conditions are not met" {
+    unset TEST_E2E_CMD
+    unset RESUME_MODE
+    export BASE_BRANCH=main
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-skip-status
+
+    # comment_issue shells out to $PLATFORM_DIR/comment-issue.sh, which
+    # isn't wired up in this unit-test harness; stub it since this test
+    # only asserts on status.json, not on issue comments.
+    comment_issue() { :; }
+
+    run_parallel_post_task_stages \
+        "feature-issue-837-skip-status" "bash" "minimal" "S"
+
+    local e2e_status acceptance_status
+    e2e_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    acceptance_status=$(jq -r '.stages.acceptance_test.status' "$STATUS_FILE")
+
+    [ "$e2e_status" = "skipped" ] || fail \
+        "expected e2e_verify status 'skipped' (TEST_E2E_CMD unset)," \
+        "got '$e2e_status' -- a skipped stage must not read as a false" \
+        "green 'completed'"
+    [ "$acceptance_status" = "skipped" ] || fail \
+        "expected acceptance_test status 'skipped' (minimal profile)," \
+        "got '$acceptance_status' -- a skipped stage must not read as a" \
+        "false green 'completed'"
+}
+
+# Resume exception: when RESUME_MODE finds the stage already marked
+# "completed" from a PRIOR run, that is a real pass being re-observed, not a
+# fresh skip. Overwriting it to "skipped" here would erase a genuine result
+# and defeat the whole point of this fix (distinguishing real passes from
+# unmeasured stages). It must stay "completed".
+@test "run_parallel_post_task_stages leaves e2e_verify and acceptance_test as 'completed' when RESUME_MODE finds them already completed" {
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    export RESUME_MODE=1
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-resume-status
+
+    printf '{"stages":{"e2e_verify":{"status":"completed"},' \
+        > "$STATUS_FILE"
+    printf '"acceptance_test":{"status":"completed"}}}' >> "$STATUS_FILE"
+
+    run_parallel_post_task_stages \
+        "feature-issue-837-resume-status" "frontend" "standard" "S"
+
+    local e2e_status acceptance_status
+    e2e_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    acceptance_status=$(jq -r '.stages.acceptance_test.status' "$STATUS_FILE")
+
+    [ "$e2e_status" = "completed" ] || fail \
+        "expected e2e_verify to stay 'completed' on resume of an" \
+        "already-completed stage, got '$e2e_status' -- a real prior pass" \
+        "must not be relabeled 'skipped'"
+    [ "$acceptance_status" = "completed" ] || fail \
+        "expected acceptance_test to stay 'completed' on resume of an" \
+        "already-completed stage, got '$acceptance_status' -- a real" \
+        "prior pass must not be relabeled 'skipped'"
+}
+
+# =============================================================================
+# ISSUE #837: e2e_verify MUST RUN WHEN THE DIFF INCLUDES FRONTEND PATHS, NOT
+# ONLY WHEN change_scope IS EXCLUSIVELY "frontend"/"ts-frontend"
+#
+# detect_change_scope() folds frontend files into "mixed" whenever
+# TypeScript AND bash files are both present in the diff (has_ts && has_bash
+# short-circuits ahead of the has_frontend check). A PR that legitimately
+# touches frontend code alongside a backend/bash change was therefore scoped
+# "mixed" and silently skipped e2e_verify even though frontend files were in
+# the diff. The fix adds a diff-level frontend check
+# (_diff_includes_frontend_paths) that runs e2e_verify whenever any changed
+# file matches FRONTEND_PATH_PATTERNS, regardless of the overall scope
+# label.
+# =============================================================================
+
+@test "run_parallel_post_task_stages runs e2e_verify for mixed scope when the diff includes a frontend path" {
+    export FRONTEND_PATH_PATTERNS="web/src/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-mixed-fe
+
+    # Diff has both a frontend file and a bash file — detect_change_scope
+    # would classify this "mixed", not "frontend"/"ts-frontend".
+    mkdir -p web/src
+    echo "export const Button = () => null" > web/src/Button.tsx
+    printf '#!/usr/bin/env bash\necho deploy\n' > deploy.sh
+    git add web/src/Button.tsx deploy.sh
+    git commit -q -m "add frontend component and deploy script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "mixed" ] || fail \
+        "expected scope 'mixed' for a TS+bash diff, got '$scope'"
+
+    # See _assert_e2e_verify_runs_for_scope() above for the shared
+    # run/ordering/schema/agent assertions.
+    local calls_file="$TEST_TMP/e2e-stage-calls-mixed-fe.txt"
+    _assert_e2e_verify_runs_for_scope \
+        "feature-issue-837-mixed-fe" "$scope" "$calls_file" \
+        || return 1
+}
+
+# Negative control for the test above: a "mixed" diff with no file matching
+# FRONTEND_PATH_PATTERNS must still skip e2e_verify. Without this, a
+# regression that ran e2e_verify unconditionally for "mixed" scope (ignoring
+# the diff-content check entirely) would still satisfy the positive
+# assertion above.
+@test "run_parallel_post_task_stages still skips e2e_verify for mixed scope when the diff has no frontend paths" {
+    export FRONTEND_PATH_PATTERNS="web/src/*"
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-mixed-nonfe
+
+    # Diff has TS and bash files, neither under web/src/ — still "mixed",
+    # but no frontend path present.
+    mkdir -p src
+    echo "export const add = (a, b) => a + b" > src/math.ts
+    printf '#!/usr/bin/env bash\necho deploy\n' > deploy.sh
+    git add src/math.ts deploy.sh
+    git commit -q -m "add backend helper and deploy script"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "mixed" ] || fail \
+        "expected scope 'mixed' for a TS+bash diff, got '$scope'"
+
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    local calls_file="$TEST_TMP/e2e-stage-calls-mixed-nonfe.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-837-mixed-nonfe" "$scope" "minimal" "S" \
+        || exit_code=$?
+    [ "$exit_code" -eq 0 ] || fail \
+        "run_parallel_post_task_stages exited $exit_code, expected 0"
+
+    if grep -q "^run_stage:e2e-verify$" "$calls_file"; then
+        fail "e2e_verify ran for mixed scope '$scope' with no frontend" \
+            "paths in the diff — it must skip"
+    fi
+
+    local sequence skip_msg
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    skip_msg="expected e2e_verify to be skipped (started immediately"
+    skip_msg+=" followed by completed, no run_stage call) for a mixed"
+    skip_msg+=" scope diff with no frontend paths, got: $sequence"
+    [[ "$sequence" == *'started:e2e_verify completed:e2e_verify'* ]] \
+        || fail "$skip_msg"
+}
+
+# =============================================================================
+# ISSUE #837 (task 3): SKIP LOG MUST NAME THE PATHS THAT CLASSIFIED THE SCOPE
+#
+# The e2e_verify skip message only named branch_scope, not which changed
+# files led to it -- when the skip is unexpected (e.g. a frontend file was
+# renamed and no longer matches FRONTEND_PATH_PATTERNS), there was nothing
+# in the log to compare against the configured patterns. The skip log line
+# must include the actual diff paths so the cause is diagnosable from the
+# log alone, without re-running detect_change_scope by hand.
+# =============================================================================
+
+@test "run_parallel_post_task_stages logs the changed file paths when skipping e2e_verify for non-frontend scope" {
+    export FRONTEND_PATH_PATTERNS="web/src/*"
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-837-skip-log-paths
+
+    mkdir -p src
+    echo "export const add = (a, b) => a + b" > src/math.ts
+    git add src/math.ts
+    git commit -q -m "add backend helper"
+
+    local calls_file="$TEST_TMP/e2e-stage-calls-skip-log-paths.txt"
+    _install_e2e_stage_spies "$calls_file"
+
+    run_parallel_post_task_stages \
+        "feature-issue-837-skip-log-paths" "typescript" "minimal" "S"
+
+    grep -q "src/math.ts" "$calls_file" || fail \
+        "expected the e2e_verify skip log to name the changed file" \
+        "'src/math.ts' so an unexpected skip can be diagnosed against" \
+        "FRONTEND_PATH_PATTERNS -- log contents:" \
+        "$(cat "$calls_file")"
+}
+
+# =============================================================================
 # ISSUE #745: E2E VERDICT UNSUPPORTED BY ITS OWN COUNTS -> UNMEASURED
 #
 # A self-reported 'failed' with tests_run: 0 means the run never finished --
