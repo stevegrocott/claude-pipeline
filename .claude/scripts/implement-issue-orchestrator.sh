@@ -5650,6 +5650,76 @@ _task_operational_deliverable() {
 	printf '%s' "${spec#operational:}"
 }
 
+# _operational_deliverable_evidenced() — the operational counterpart to
+# task_files_modified_on_branch() (issue #840 task 2).
+#
+# An operational deliverable (_task_operational_deliverable() above) changes
+# a live system this process has no path to reach from here — a device, a
+# database, a remote service — so there is no diff to read AND no way to
+# rerun the declared verification command against that system to check it
+# now. Even where a rerun were possible, a fresh run only proves the
+# system's CURRENT state, not that the task's own action produced it.  The
+# only evidence available is a RECORD that someone already ran the
+# verification command and reported what it printed: an issue comment
+# naming the exact command _task_operational_deliverable() returned, with
+# output alongside it.
+#
+# A comment must contain BOTH:
+#   - the verification command, matched as a literal substring (the same
+#     `grep -Fqx`-free literal match verify_task_deliverable() already uses
+#     for `deliverable:comment:<marker>`, issue #634); and
+#   - actual reported output alongside it — not just other prose mentioning
+#     the command. "Will run `cmd` shortly." has non-blank text besides the
+#     command too, but reports no result, so a blank-vs-non-blank check
+#     alone cannot tell it apart from a genuine record. Real output — JSON,
+#     a key:value pair, a shell "->" result line, a quoted value, a number —
+#     is data-shaped: it carries at least one of `: = > " ' 0-9`, characters
+#     a plain descriptive sentence around the command does not. The command
+#     quoted with nothing but prose reported back is not a record of
+#     anything.
+#
+# Deliberately as strict-by-default as verify_task_deliverable(): an
+# unreachable tracker, or no comment carrying both the command and
+# data-shaped output, is treated as unevidenced rather than assumed
+# passing.
+#
+# Arguments:
+#   $1 - the declared verification command (as returned by
+#        _task_operational_deliverable)
+# Globals:
+#   ISSUE_NUMBER, TRACKER - consulted indirectly via
+#                           _fetch_issue_comment_bodies()
+# Returns:
+#   0 when a comment records both the command and its output, 1 otherwise
+#
+_operational_deliverable_evidenced() {
+	local command="$1"
+	[[ -n "$command" ]] || return 1
+
+	local bodies
+	if ! bodies=$(_fetch_issue_comment_bodies); then
+		log_warn "Operational deliverable verification: cannot read" \
+			"comments for issue #$ISSUE_NUMBER" \
+			"(tracker=${TRACKER:-github}) — treating '$command' as" \
+			"unevidenced."
+		return 1
+	fi
+
+	# Data-shaped: at least one of `: = > " ' 0-9` — characters real output
+	# (JSON, key:value, a shell "->" result, a quoted value, a number)
+	# tends to carry, that plain prose around the command does not.
+	local output_pattern='[:=>"'\''0-9]'
+
+	local comment_line remainder
+	while IFS= read -r comment_line; do
+		[[ "$comment_line" == *"$command"* ]] || continue
+		remainder="${comment_line//"$command"/}"
+		[[ "$remainder" =~ $output_pattern ]] && return 0
+	done <<< "$bodies"
+
+	return 1
+}
+
 # _file_set_contained() — true if every path in newline-separated set A also
 # appears in newline-separated set B (A == B counts as contained). Used by
 # the cross-task containment check below.
@@ -5673,6 +5743,17 @@ _file_set_contained() {
 # (issue #616). This walks every task currently marked "failed" in
 # $STATUS_FILE and checks its declared files (_task_declared_files())
 # against the branch diff via task_files_modified_on_branch() (task 1).
+#
+# A task declaring an operational deliverable (_task_operational_deliverable(),
+# issue #840 task 1) is judged on a different kind of evidence entirely: it
+# names an action against a live system that produces no repo diff by
+# design, so it is checked against a recorded run of its declared
+# verification command (_operational_deliverable_evidenced(), issue #840
+# task 2) instead of task_files_modified_on_branch(), ahead of — and to the
+# exclusion of — the file-evidence path below. A promoted operational task
+# is stamped `evidence_kind: "operational"` so a later reader (issue #840
+# task 3) can tell which evidence path judged it; a file-evidenced task
+# carries no such field, "file" being the implicit default.
 #
 # Per the issue's proposed direction, promotion requires BOTH file evidence
 # AND a green test suite — file evidence alone cannot attribute a shared
@@ -5751,6 +5832,44 @@ reconcile_failed_tasks_with_branch_evidence() {
 
 		local recon_files_str="${recon_all_files[$idx]:-}"
 		idx=$((idx + 1))
+
+		# Operational deliverables (issue #840 task 2): judged ahead of the
+		# file-evidence path below, on a recorded run of the declared
+		# verification command instead of a repo diff — the action was
+		# taken against a live system this process has no path to reach
+		# from here, so there is no diff to check in the first place.
+		local recon_op_cmd
+		if recon_op_cmd=$(_task_operational_deliverable "$recon_id"); then
+			if ((tests_green == 0)); then
+				log "Task $recon_id remains failed —" \
+					"test suite not green this run"
+				continue
+			fi
+
+			if _operational_deliverable_evidenced "$recon_op_cmd"; then
+				log "Task $recon_id recorded failed but its declared" \
+					"operational deliverable is evidenced by a recorded" \
+					"run of '$recon_op_cmd' — reconciling to completed."
+				if status_json_write --argjson id "$recon_id" \
+				   '(.tasks[] | select(.id == $id)).status = "completed" |
+				    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
+				    (.tasks[] | select(.id == $id)).evidence_kind = "operational" |
+				    .last_update = (now | todate)'; then
+					sync_status_to_log
+					reconciled=$((reconciled + 1))
+				else
+					log_warn "reconcile_failed_tasks_with_branch_evidence:" \
+						"failed to persist reconciliation for task" \
+						"$recon_id — leaving it recorded as failed"
+				fi
+			else
+				log "Task $recon_id remains failed — no recorded" \
+					"verification command output evidences" \
+					"operational deliverable '$recon_op_cmd'"
+			fi
+			continue
+		fi
+
 		local -a recon_files=()
 		local recon_f
 		while IFS= read -r recon_f; do
