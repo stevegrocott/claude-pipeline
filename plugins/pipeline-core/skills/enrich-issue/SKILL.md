@@ -310,4 +310,4 @@ The `## Implementation Tasks` section must use this parseable convention (identi
 | Skip research, jump to planning | Plan won't account for existing patterns |
 | Task has no file paths | Subagent reads 13+ files to orient; include at least 1 file path per task |
 | File path is a bare basename, not repo-relative | `assert_issue_valid` rejects it as an unresolved path; write the full path from the repo root |
-| Standalone bundle-regen task (`sync.sh`, `plugins/pipeline-core/scripts/`) | Worktree isolation is the reason it fails: it lands in the same batch as the `.claude/scripts/` edits it depends on, in a worktree that cannot see them; fold `./sync.sh bundle` into the last script-editing task instead |
+| Standalone `./sync.sh bundle` / bundle-regen task | Worktree isolation — the scheduler batches it alongside the disjoint `.claude/scripts/**` edits it must follow, so it runs in a worktree that can't see them and regenerates from stale sources. Fold it into the last script-editing task instead |
