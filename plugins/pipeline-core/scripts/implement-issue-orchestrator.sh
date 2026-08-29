@@ -4118,12 +4118,22 @@ Output a summary of changes made."
         # reviewer doesn't compare against a base that has since advanced and
         # misreport branch content as missing (issue #839).
         local review_base_commit
-        review_base_commit=$(git -C "$loop_dir" merge-base "$BASE_BRANCH" HEAD \
-            2>/dev/null) || review_base_commit="$BASE_BRANCH"
+        review_base_commit=$(git -C "$loop_dir" merge-base "$BASE_BRANCH" HEAD 2>/dev/null)
 
-        # Pre-compute modified files against the pinned base commit for review stage
+        # Pre-compute modified files against the pinned base commit for review stage.
+        # When merge-base resolution fails, review_base_commit falls back to
+        # the branch name itself — a two-dot diff against it would then use
+        # non-merge-base semantics and could list files the branch never
+        # touched (e.g. divergent history on $BASE_BRANCH). Keep three-dot
+        # semantics in that fallback path so the comparison still anchors to
+        # the common ancestor.
         local review_changed_files_raw review_changed_files
-        review_changed_files_raw=$(git -C "$loop_dir" diff "$review_base_commit" HEAD --name-only 2>/dev/null || true)
+        if [[ -n "$review_base_commit" ]]; then
+            review_changed_files_raw=$(git -C "$loop_dir" diff "$review_base_commit" HEAD --name-only 2>/dev/null || true)
+        else
+            review_base_commit="$BASE_BRANCH"
+            review_changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
+        fi
         review_changed_files=$(printf '%s\n' "$review_changed_files_raw" | grep -v -E '^$' || true)
 
         local review_prompt="${PLATFORM_PATTERNS_PREFIX}Review the code changes for task scope '$stage_prefix' in working directory $loop_dir on branch $loop_branch.
@@ -11703,6 +11713,15 @@ $pr_creation_skill}"
         local pr_review_loop_start
         pr_review_loop_start=$(date +%s)
 
+        # Issue #839: retry state for the false-absence guard below. Capped
+        # so a deterministic reviewer that keeps re-asserting the same false
+        # claim can't loop forever on un-counted iterations — after the cap,
+        # the iteration counts normally and the loop terminates via the
+        # existing max-iterations/wall-timeout exits.
+        local pr_false_absence_retry_count=0
+        local -r pr_false_absence_max_retries=2
+        local pr_false_absence_note=""
+
         # Resume safety (issue #651): pr_review_iterations persists in the
         # status file across runs. If a prior run already exhausted the
         # max-iterations budget (and this run is resuming into an
@@ -11789,8 +11808,13 @@ $pr_creation_skill}"
             local ns_added ns_removed ns_path
             while IFS=$'\t' read -r ns_added ns_removed ns_path; do
                 [[ -z "$ns_path" ]] && continue
-                pr_diff_file_stats+="- ${ns_path}: +${ns_added}/-${ns_removed} lines
+                if [[ "$ns_added" == "-" ]]; then
+                    pr_diff_file_stats+="- ${ns_path}: binary
 "
+                else
+                    pr_diff_file_stats+="- ${ns_path}: +${ns_added}/-${ns_removed} lines
+"
+                fi
             done < <(git diff --numstat "$BASE_BRANCH"...HEAD -- 2>/dev/null)
             pr_diff_truncation_note="
 **NOTE: the diff above is truncated — showing the first 500 of ${pr_diff_total_lines} total lines.** Full list of changed files with line counts:
@@ -11877,7 +11901,7 @@ Here is the diff to review (do NOT run git diff yourself — use this):
 \`\`\`diff
 $pr_diff
 \`\`\`
-${pr_diff_truncation_note}${sibling_files_prompt}
+${pr_diff_truncation_note}${sibling_files_prompt}${pr_false_absence_note}
 Approve or request changes. Output a summary suitable for an issue comment."
 
         local review_result
@@ -12033,13 +12057,36 @@ $review_summary$followup_comment" "code-reviewer"
                 [.output.issues // [] | .[] |
                     select(.file != null and .file != "" and (.file as $f | $branch_files | index($f) != null)) |
                     select(.description // "" |
-                        test("missing|never (existed|updated|added|created|modified|touched)|does ?n.t exist|not (present|found|updated|created|added|modified|include|contain)|absent|was never"; "i")) |
+                        test("(file )?(does ?n.t|didn.t) exist|was never (created|added|committed)|(missing|absent) (from|in) (the |this )?(branch|diff|codebase|repo|PR)|no such file|file not found|not (present|included) (in|on) (the |this )?(branch|diff|codebase|repo|PR)"; "i")) |
                     .file
                 ] | unique | join(", ")
             ' 2>/dev/null)
 
-            if [[ -n "$false_absence_files" ]]; then
-                log_warn "PR review iteration $pr_iteration verdict cites file(s) as missing that the branch actually contains: $false_absence_files — not counting this iteration toward the max-iterations budget"
+            if [[ -n "$false_absence_files" ]] \
+                    && (( pr_false_absence_retry_count < pr_false_absence_max_retries )); then
+                pr_false_absence_retry_count=$(( pr_false_absence_retry_count + 1 ))
+                log_warn "PR review iteration $pr_iteration verdict cites file(s) as missing that the branch actually contains: $false_absence_files — not counting this iteration toward the max-iterations budget (retry $pr_false_absence_retry_count/$pr_false_absence_max_retries)"
+
+                # Vary the retry input: name the falsely-flagged file(s) and
+                # their actual line counts in the next prompt so a
+                # deterministic reviewer isn't shown byte-identical input and
+                # doesn't just re-emit the same verdict.
+                local fa_numstat_note="" fa_file fa_added fa_removed
+                while IFS= read -r fa_file; do
+                    [[ -z "$fa_file" ]] && continue
+                    IFS=$'\t' read -r fa_added fa_removed _ < <(git diff --numstat "$BASE_BRANCH"...HEAD -- "$fa_file" 2>/dev/null)
+                    if [[ "$fa_added" == "-" ]]; then
+                        fa_numstat_note+="- ${fa_file}: binary
+"
+                    else
+                        fa_numstat_note+="- ${fa_file}: +${fa_added:-0}/-${fa_removed:-0} lines
+"
+                    fi
+                done < <(printf '%s' "$false_absence_files" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                pr_false_absence_note="
+**NOTE:** A previous review iteration incorrectly reported the following file(s) as missing or absent from this branch. They ARE present in the diff under review — do not repeat this claim:
+${fa_numstat_note}"
+
                 status_json_write '.pr_review_iterations = ([.pr_review_iterations - 1, 0] | max) |
                     .stages.pr_review.iteration = .pr_review_iterations |
                     .last_update = (now | todate)'
