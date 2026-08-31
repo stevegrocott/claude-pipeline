@@ -1370,6 +1370,37 @@ validate_issue_for_processing() {
 	return 0
 }
 
+# pr_recovery_allowed <stuck_stage>
+#
+# Gate for the PR-exists recovery heuristic in process_issue().  That
+# heuristic was written for one thing: the orchestrator being killed or
+# crashing *after* PR creation but before set_final_state.  There, an
+# existing PR really is evidence the work got far enough to be credited.
+#
+# At the merge stages the premise inverts (issue #848).  PR existence was
+# never in doubt at merge_pr — the PR is precisely what the merge was refused
+# *for*.  merge-mr.sh declines to merge a PR whose required check concluded in
+# failure (platform/merge-mr.sh:107) and exits non-zero without ever calling
+# `gh pr merge`; the orchestrator then sets state=error while current_stage is
+# still merge_pr.  Recovering that as success hands off to /process-pr, which
+# merges — laundering an explicit refusal into a merge, which is how a PR with
+# a failing E2E check reached main.  merge_pr_timeout (set by
+# _handle_merge_pr_timeout) is the same class: the merge was never confirmed
+# either way, so an existing PR says nothing about whether it landed.
+#
+# Returns:
+#   0 — the heuristic may upgrade this error exit to success
+#   1 — recovery is declined; the caller must leave impl_status at "error"
+pr_recovery_allowed() {
+	local stuck_stage="$1"
+
+	case "$stuck_stage" in
+		merge_pr|merge_pr_*) return 1 ;;
+	esac
+
+	return 0
+}
+
 process_issue() {
     local issue_num="$1"
     local issue_log="$LOG_BASE/issue-$issue_num.log"
@@ -1544,6 +1575,8 @@ process_issue() {
         # stages.pr.pr_number was already written (PR created before crash),
         # treat it as recoverable success. Handles the case where the script is
         # killed or crashes after PR creation but before set_final_state("completed").
+        # pr_recovery_allowed() withholds that credit at the stages where an
+        # existing PR is not evidence the work landed (issue #848).
         if [[ "$impl_status" == "error" ]]; then
             local recovered_pr stuck_stage
             recovered_pr=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
@@ -1552,10 +1585,27 @@ process_issue() {
             stuck_stage=$(jq -r '.current_stage // "unknown"' "$issue_status_file" 2>/dev/null)
             [[ -n "$stuck_stage" ]] || stuck_stage="unknown"
             if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
-                log_warn "Orchestrator exited with state='$state' (stuck at: $stuck_stage) but PR #$recovered_pr exists — recovering as success"
-                impl_status="success"
-                pr_number="$recovered_pr"
-                impl_error=""
+                if pr_recovery_allowed "$stuck_stage"; then
+                    log_warn "Orchestrator exited with state='$state' (stuck at: $stuck_stage) but PR #$recovered_pr exists — recovering as success"
+                    impl_status="success"
+                    pr_number="$recovered_pr"
+                    impl_error=""
+                else
+                    # Issue #848: the merge itself was declined, so PR
+                    # existence is not evidence the work landed. Keep
+                    # impl_status at "error" — the !=success arm below
+                    # reconciles against GitHub and records the issue as
+                    # failed, which lands it in progress.failed and reports
+                    # completed_with_errors rather than a false green. It also
+                    # returns before the /process-pr dispatch, so nothing
+                    # downstream gets a second chance to merge the PR.
+                    log_error \
+                        "Orchestrator exited with state='$state' (stuck at:" \
+                        "$stuck_stage) — PR #$recovered_pr exists but the" \
+                        "merge was declined; refusing PR-exists recovery"
+                    pr_number="$recovered_pr"
+                    impl_error="Merge declined at stage '$stuck_stage' for PR #$recovered_pr (state: $state) — not recovered as success"
+                fi
             fi
         fi
     else
