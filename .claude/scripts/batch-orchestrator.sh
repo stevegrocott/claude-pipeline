@@ -1832,11 +1832,40 @@ process_issue() {
             git checkout "$BRANCH" 2>/dev/null || true
             ;;
         changes_requested)
-            # process-pr handles re-implementation internally by calling implement-issue again
-            # If we get here with changes_requested, it means the re-implementation cycle completed
+            # process-pr handles re-implementation internally by calling
+            # implement-issue again, so reaching here does mean the
+            # re-implementation cycle completed — but a completed cycle is not
+            # a merged PR (#847). The review fix gets pushed, the push
+            # restarts CI, and the PR is legitimately mid-flight. Crediting
+            # completion here reported a clean batch over an OPEN PR and an
+            # OPEN issue, and nothing merged it.
+            #
+            # Reconcile against GitHub with check_issue_pr_merged — the same
+            # helper the error arm below already uses for exactly this — so
+            # both arms agree on what "the work landed" means.
             log "Issue #$issue_num: changes were requested and addressed"
-            update_issue_field "$issue_num" "status" "completed"
-            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            if check_issue_pr_merged "$issue_num"; then
+                log "Issue #$issue_num: merge confirmed — $_RECONCILE_REASON"
+                update_issue_field "$issue_num" "status" "completed"
+                update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+                if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
+                    update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
+                fi
+                update_progress
+                git checkout "$BRANCH" 2>/dev/null || true
+                return 0
+            fi
+            # Unresolved, not merely late: record it as a failure so it lands
+            # in progress.failed and the batch reports completed_with_errors
+            # rather than a false green. The error text names the merge, not
+            # process-pr, since process-pr itself behaved correctly.
+            log_error "Issue #$issue_num: PR #${pr_number:-?} not merged after changes were addressed"
+            update_issue_field "$issue_num" "status" "failed"
+            update_issue_field "$issue_num" "error" \
+                "Changes requested and addressed, but PR #${pr_number:-?} is not merged"
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 1
             ;;
         error|rate_limit|*)
             log_error "process-pr failed for #$issue_num: ${proc_error:-status was $proc_status}"
