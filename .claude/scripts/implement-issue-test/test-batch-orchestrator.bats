@@ -1015,7 +1015,9 @@ _extract_timeout_failure_block() {
 # git mocked to capture calls instead of touching the real filesystem or
 # git/gh. Leaves the block's return code in _failure_block_rc (0 or 1).
 # PROC_EXIT_IN (default 0) seeds $proc_exit, needed for the timeout site's
-# "(( proc_exit == 124 ))" guard.
+# "(( proc_exit == 124 ))" guard. PROC_STATUS_IN (default "error") seeds
+# $proc_status so a case-arm block other than the error arm can be selected,
+# and PR_NUMBER_IN (default "") seeds $pr_number for the arms that report it.
 _run_failure_site_block() {
 	local block_file="$1"
 
@@ -1041,9 +1043,9 @@ _run_failure_site_block() {
 	issue_num=695
 	impl_status="error"
 	impl_error="pr stage aborted: already exists"
-	proc_status="error"
+	proc_status="${PROC_STATUS_IN:-error}"
 	proc_error="status was error"
-	pr_number=""
+	pr_number="${PR_NUMBER_IN:-}"
 	BRANCH="main"
 	ISSUE_TIMEOUT=3600
 	proc_exit="${PROC_EXIT_IN:-0}"
@@ -1231,6 +1233,198 @@ GHEOF
 	CF_IN=3 _run_process_issue_call_site "$block_file" 1 false ""
 
 	[[ "$consecutive_failures" -eq 4 ]]
+}
+
+# =============================================================================
+# ISSUE #847: changes_requested must not credit completion without a merge
+# =============================================================================
+#
+# The process-pr result handler's changes_requested arm recorded `completed`
+# unconditionally, reasoning that reaching the arm proved the
+# re-implementation cycle had finished. It does — but a finished cycle is not
+# a merged PR. Observed live: process-pr applied a review fix and pushed it,
+# the push restarted CI, and the batch reported
+# state=completed/completed:1/failed:0 over a PR that was still OPEN and an
+# issue that was still open. A human merged it by hand 25 minutes later.
+#
+# The fix reuses check_issue_pr_merged() — the same reconciliation helper the
+# error arm immediately below already calls — rather than a second
+# implementation, so both arms agree on what "the work landed" means. When
+# the helper reports no merge the arm records an explicitly unresolved status
+# (never `completed`) and returns 1, so the batch's final state is not
+# `completed` either.
+#
+# Negative assertions here are written as `if grep ...; then fail ...; fi`
+# rather than `! grep ...`: bash exempts a `!`-negated pipeline from errexit,
+# so a bare `! grep` only fails the test when it happens to be the last
+# command in the body.
+#
+# The arm is extracted by its stable case pattern and wrapped in its own
+# `case`, mirroring _extract_process_pr_failure_block — a bare case arm is
+# not sourceable bash on its own.
+
+# Extracts one arm of the process-pr `case "$proc_status"` statement, wrapped
+# in a standalone case. Same not-found contract as _extract_impl_failure_block.
+# Usage: _extract_process_pr_case_arm <arm-pattern> <out-basename>
+_extract_process_pr_case_arm() {
+	local arm="$1"
+	local block_file="$TEST_TMP/process_pr_$2_block.bash"
+	{
+		printf 'case "$proc_status" in\n'
+		awk -v arm="$arm" \
+			'$0 ~ "^[[:space:]]+"arm"\\)$" { capture = 1 }
+			 capture { print }
+			 capture && $0 ~ "^[[:space:]]+;;$" { capture = 0 }' \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		printf 'esac\n'
+	} > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+_extract_process_pr_changes_requested_block() {
+	_extract_process_pr_case_arm changes_requested changes_requested
+}
+
+@test "functional: changes_requested records completed when the PR did merge" {
+	# AC5(a): reconciliation confirms the merge, so completion is credited —
+	# and with the merged PR number, matching the other reconciling sites.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	_stub_gh_pr_merged
+
+	PROC_STATUS_IN=changes_requested PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+
+	if grep -qx '695 status failed' "$TEST_TMP/update.out"; then
+		fail "a merged PR must not be recorded as failed"
+	fi
+	grep -qx '695 status completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: changes_requested does not record completed when the PR is still open" {
+	# AC5(b) / AC2: the observed bug. gh reports an OPEN issue and no merged
+	# PR, so nothing landed — the arm must not write `completed`, nor stamp
+	# a completed_at that would make the run look finished.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_STATUS_IN=changes_requested PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+
+	if grep -qx '695 status completed' "$TEST_TMP/update.out"; then
+		fail "unmerged PR was credited as completed"
+	fi
+	if grep -q 'completed_at' "$TEST_TMP/update.out"; then
+		fail "unmerged PR was stamped with completed_at"
+	fi
+}
+
+@test "functional: changes_requested records an unresolved status when the PR is still open" {
+	# AC2: not merely "not completed" — the issue must carry a status that
+	# surfaces as unresolved, so the run does not present as silently clean.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_STATUS_IN=changes_requested PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+
+	grep -qx '695 status failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: changes_requested records why the unmerged PR was not credited" {
+	# The recorded error must distinguish this from a process-pr crash:
+	# process-pr behaved correctly here, the PR simply had not merged.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_STATUS_IN=changes_requested PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+
+	grep -q 'not merged' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+}
+
+@test "functional: changes_requested reuses check_issue_pr_merged, not a second implementation" {
+	# AC1: the arm must call the existing reconciliation helper. Asserted on
+	# the extracted source so a hand-rolled `gh pr list` inline in the arm
+	# fails this test even if it happened to produce the right verdict.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+
+	grep -q 'check_issue_pr_merged' "$block_file"
+	if grep -q 'gh pr list' "$block_file"; then
+		fail "arm re-implements reconciliation instead of reusing the helper"
+	fi
+}
+
+@test "AC3: a batch whose only changes_requested issue did not merge does not report completed" {
+	# Chains production code end to end: the real update_progress jq filter
+	# rolls up the status the arm wrote, and the real final-state block reads
+	# that rollup. Guards the gap the bug hid in — a per-issue status that is
+	# "not completed" but that the batch state never notices.
+	local progress_block final_block arm_file arm_status
+	arm_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	final_block=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+	progress_block=$(_extract_function_body update_progress \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$progress_block" ]] || skip "update_progress not found"
+
+	# The status the arm writes for an unmerged PR is read back out of the
+	# arm itself rather than hardcoded, so this stays honest if the chosen
+	# value changes. The last `status` write in the arm is the unmerged path.
+	arm_status=$(awk -F'"' '/update_issue_field "\$issue_num" "status"/ {
+		print $6 }' "$arm_file" | tail -1)
+	[[ -n "$arm_status" ]]
+
+	jq -n --arg st "$arm_status" '{
+		state: "running",
+		progress: {total: 1, completed: 0, failed: 0, skipped: 0,
+			merge_blocked: 0, pending: 0, in_progress: 0},
+		issues: [{number: "695", status: $st}],
+		cost_summary: {}
+	}' > "$STATUS_FILE"
+
+	eval "$progress_block"
+	update_progress
+
+	local final_failed final_skipped
+	set_state() { printf '%s\n' "$*" >> "$TEST_TMP/final_state.out"; }
+	: > "$TEST_TMP/final_state.out"
+	exit_code=0
+	# shellcheck disable=SC1090
+	source "$final_block"
+
+	[[ -s "$TEST_TMP/final_state.out" ]]
+	if grep -qx 'completed' "$TEST_TMP/final_state.out"; then
+		fail "batch state is 'completed' though its only issue never merged"
+	fi
+}
+
+@test "AC4: the merged arm still credits completion without reconciliation" {
+	# Regression guard: the fix must not leak a merge check into the `merged`
+	# arm, which is already authoritative that the PR merged.
+	local block_file
+	block_file=$(_extract_process_pr_case_arm merged merged) \
+		|| skip "merged arm not found (script changed)"
+
+	grep -q 'status" "completed' "$block_file"
+	if grep -q 'check_issue_pr_merged' "$block_file"; then
+		fail "the merged arm must not re-verify a merge it already proved"
+	fi
 }
 
 # =============================================================================
