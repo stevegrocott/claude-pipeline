@@ -2542,11 +2542,19 @@ _simulate_recovery_with_stage() {
 		"$issue_status" 2>/dev/null)
 	[[ -n "$stuck_stage" ]] || stuck_stage="unknown"
 
+	# The stage gate is NOT replicated — issue #848 added
+	# pr_recovery_allowed() and this simulation sources the real one, so a
+	# future change to which stages are excluded cannot silently diverge
+	# from what these tests assert.
+	eval "$(_extract_function_body pr_recovery_allowed \
+		"$BATCH_ORCHESTRATOR_SCRIPT")"
+
 	# Recovery block (replicates the post-task-4 implementation)
 	local recovered_pr
 	recovered_pr=$(jq -r '.stages.pr.pr_number // empty' \
 		"$issue_status" 2>/dev/null)
-	if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
+	if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]] \
+		&& pr_recovery_allowed "$stuck_stage"; then
 		sim_recovering=true
 		sim_warn_msg="Orchestrator exited with state='$st'"
 		sim_warn_msg+=" (stuck at: $stuck_stage)"
@@ -2557,9 +2565,23 @@ _simulate_recovery_with_stage() {
 }
 
 @test "recovery simulation: warn names the stuck stage when current_stage is set" {
-	_simulate_recovery_with_stage "error" 99 "merge_pr_timeout"
+	# pr_review is after pr and before merge_pr — the genuine post-PR crash
+	# the heuristic exists for, so it still recovers and still names its stage.
+	_simulate_recovery_with_stage "error" 99 "pr_review"
 	[[ "$sim_recovering" == "true" ]]
-	[[ "$sim_warn_msg" == *"merge_pr_timeout"* ]]
+	[[ "$sim_warn_msg" == *"pr_review"* ]]
+}
+
+@test "recovery simulation: merge_pr is not recovered even with a PR (i848)" {
+	_simulate_recovery_with_stage "error" 5857 "merge_pr"
+	[[ "$sim_recovering" == "false" ]]
+	[[ "$sim_impl_status" == "error" ]]
+}
+
+@test "recovery simulation: merge_pr_timeout is not recovered either (i848)" {
+	_simulate_recovery_with_stage "error" 99 "merge_pr_timeout"
+	[[ "$sim_recovering" == "false" ]]
+	[[ "$sim_impl_status" == "error" ]]
 }
 
 @test "recovery simulation: warn names stuck stage for any error state with PR" {
@@ -2582,7 +2604,7 @@ _simulate_recovery_with_stage() {
 }
 
 @test "recovery simulation: still recovers as success when current_stage is set" {
-	_simulate_recovery_with_stage "error" 42 "merge_pr_timeout"
+	_simulate_recovery_with_stage "error" 42 "pr_review"
 	[[ "$sim_impl_status" == "success" ]]
 	[[ "$sim_pr_number" == "42" ]]
 }
