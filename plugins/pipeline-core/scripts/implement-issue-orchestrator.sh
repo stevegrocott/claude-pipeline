@@ -272,6 +272,15 @@ TEST_LOOP_GIT_TIMEOUT="${TEST_LOOP_GIT_TIMEOUT:-30}"
 #   Unset / empty  → use escalation-policy skill (skill-native default)
 #   "bash"         → always use inline bash escalation branches
 ESCALATION_POLICY_BACKEND="${ESCALATION_POLICY_BACKEND:-}"
+
+# Staleness guard for the PARSE ISSUE stage (issue #846).  The pipeline parses
+# the issue BODY and nothing else, so a re-scope written as a comment and never
+# applied to the body leaves the run working from a stale contract.
+# warn_if_issue_body_stale() reports that discrepancy; comments are never read
+# as instructions either way.
+#   0 (default) → warn and continue, so existing runs do not start breaking
+#   1           → refuse the run until the body is brought up to date
+FAIL_ON_STALE_ISSUE_BODY="${FAIL_ON_STALE_ISSUE_BODY:-0}"
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
 # The run-budget soft-threshold warning is emitted at most once per run
@@ -5165,6 +5174,79 @@ _extract_tasks_section() {
 		found && /^##+[[:space:]]/ { exit }
 		found { print }
 	'
+}
+
+# Warns when a non-pipeline comment postdates the last edit of the issue BODY
+# (issue #846).
+#
+# Everything downstream of PARSE ISSUE reads the body and only the body: the
+# task parse above, triage, assert_issue_valid, the convergence gate. That is
+# deliberate — the body is machine-parsed and validated, comments are free
+# prose — but it fails silently when a re-scope or correction is written as a
+# COMMENT and never applied to the body: the run proceeds against a stale
+# contract and nothing says so.
+#
+# This surfaces the discrepancy for a human and stops there. It does NOT read,
+# interpret, or act on comment content: the payload it is handed carries
+# timestamps, an author and a URL, never comment prose (see read-issue.sh), so
+# no comment can alter the parsed tasks or acceptance criteria. "Latest comment
+# wins" was considered and rejected — a later comment is as often a question or
+# a mid-investigation note as a decision, it would bypass assert_issue_valid
+# entirely, and it widens what can steer a run started with
+# --dangerously-skip-permissions.
+#
+# Non-fatal by default so existing runs do not start breaking; set
+# FAIL_ON_STALE_ISSUE_BODY=1 to refuse the run instead.
+#
+# Both timestamps come from one tracker fetch and share one ISO-8601 UTC
+# format, so a lexicographic compare orders them correctly. Trackers that
+# cannot report them (Jira) and any pre-#846 payload leave the fields empty,
+# which is treated as "no evidence" rather than as staleness.
+#
+# Globals:
+#   ISSUE_NUMBER, FAIL_ON_STALE_ISSUE_BODY
+# Arguments:
+#   $1 - the read-issue.sh JSON payload
+# Returns:
+#   0 when the body is current, the payload carries no timestamps, or the
+#   warning is advisory; 1 only when a stale body is detected AND
+#   FAIL_ON_STALE_ISSUE_BODY=1
+#
+warn_if_issue_body_stale() {
+	local issue_json="${1:-}"
+
+	local body_at comment_at
+	body_at=$(printf '%s' "$issue_json" \
+		| jq -r '.bodyUpdatedAt // ""' 2>/dev/null) || body_at=""
+	comment_at=$(printf '%s' "$issue_json" \
+		| jq -r '.latestHumanCommentAt // ""' 2>/dev/null) || comment_at=""
+
+	[[ -n "$body_at" && -n "$comment_at" ]] || return 0
+	[[ "$comment_at" > "$body_at" ]] || return 0
+
+	local comment_author comment_url
+	comment_author=$(printf '%s' "$issue_json" \
+		| jq -r '.latestHumanCommentAuthor // "unknown"' 2>/dev/null) \
+		|| comment_author="unknown"
+	comment_url=$(printf '%s' "$issue_json" \
+		| jq -r '.latestHumanCommentUrl // ""' 2>/dev/null) || comment_url=""
+
+	log_warn "Issue #$ISSUE_NUMBER body may be STALE:" \
+		"a non-pipeline comment by @$comment_author at $comment_at postdates" \
+		"the last body edit ($body_at).${comment_url:+ See $comment_url.}" \
+		"The pipeline parses the issue BODY only — comments are never read" \
+		"as tasks or acceptance criteria. If that comment re-scoped the work," \
+		"apply it to the body and re-run."
+
+	if [[ "${FAIL_ON_STALE_ISSUE_BODY:-0}" == "1" ]]; then
+		log_error "FAIL_ON_STALE_ISSUE_BODY=1 — refusing to run issue" \
+			"#$ISSUE_NUMBER against a body that may not reflect the latest" \
+			"decision. Apply the comment to the body, or re-run without the" \
+			"flag to proceed on the warning alone."
+		return 1
+	fi
+
+	return 0
 }
 
 # Reads one backtick-delimited task annotation out of a task description
@@ -10465,11 +10547,23 @@ Log directory: \`$LOG_BASE\`"
         set_stage_started "parse_issue"
 
         log "Fetching issue #$ISSUE_NUMBER..."
-        local issue_body
-        issue_body=$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>>"${LOG_FILE:-/dev/stderr}" | jq -r '.body')
+        # Captured whole rather than piped straight into jq so the staleness
+        # guard below reads the SAME payload (issue #846) — it must not cost a
+        # second tracker fetch.
+        local issue_json issue_body
+        issue_json=$("$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" 2>>"${LOG_FILE:-/dev/stderr}")
+        issue_body=$(printf '%s' "$issue_json" | jq -r '.body' 2>/dev/null)
 
         if [[ -z "$issue_body" ]]; then
             log_error "Failed to fetch issue #$ISSUE_NUMBER body"
+            set_final_state "error"
+            exit 1
+        fi
+
+        # Surfaces a body/comment discrepancy for a human; never lets comment
+        # content reach the parse below.  Advisory unless
+        # FAIL_ON_STALE_ISSUE_BODY=1.
+        if ! warn_if_issue_body_stale "$issue_json"; then
             set_final_state "error"
             exit 1
         fi
