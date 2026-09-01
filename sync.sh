@@ -340,6 +340,7 @@ BUNDLE_SCRIPT_SUBDIRS=(platform prompts schemas)
 # guardrail a consumer loses the moment it migrates off copied .claude/hooks/.
 BUNDLE_HOOKS=(
     block-gh-issue-create.sh
+    block-gh-pr-merge.sh
     pipeline-status-inject.sh
     post-pr-simplify.sh
     pre-commit-skill-validate.sh

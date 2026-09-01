@@ -1391,6 +1391,47 @@ validate_issue_for_processing() {
 # Returns:
 #   0 — the heuristic may upgrade this error exit to success
 #   1 — recovery is declined; the caller must leave impl_status at "error"
+# perform_scripted_merge <issue_num> <pr_number>
+#
+# Merges an approved PR from SHELL, via the platform wrapper, rather than
+# leaving the merge to a model following a SKILL.md instruction (issue #853).
+#
+# process-pr used to merge internally: SKILL.md Step 4b told the model to run
+# merge-mr.sh, but nothing bound it, so the guard that refuses a PR whose
+# required check concluded in failure applied only if the model chose to go
+# through it. #848 showed the cost — merge-mr.sh refused at 13:51 and the PR
+# merged at 13:54 with a failing e2e check. Performing the merge here removes
+# the model from the decision: merge-mr.sh is the only path, and its refusal
+# is this function's failure.
+#
+# Globals:
+#   PLATFORM_DIR
+# Returns:
+#   0 when merge-mr.sh merged the PR, 1 on any refusal or error
+perform_scripted_merge() {
+	local issue_num="$1" pr_number="$2"
+
+	local merge_script="$PLATFORM_DIR/merge-mr.sh"
+	if [[ ! -x "$merge_script" ]]; then
+		log_error "Issue #$issue_num: merge wrapper not executable:" \
+			"$merge_script — refusing to merge PR #$pr_number by any" \
+			"other means"
+		return 1
+	fi
+
+	log "Issue #$issue_num: merging PR #$pr_number via merge-mr.sh"
+	if "$merge_script" "$pr_number"; then
+		return 0
+	fi
+
+	# merge-mr.sh already explained itself on stderr (a failed check, a
+	# conflict, or a mergeability timeout). Do not retry and do not fall back
+	# to a direct merge — a refusal is a decision, not a transient error.
+	log_error "Issue #$issue_num: merge-mr.sh declined to merge PR" \
+		"#$pr_number — leaving it open"
+	return 1
+}
+
 pr_recovery_allowed() {
 	local stuck_stage="$1"
 
@@ -1872,6 +1913,36 @@ process_issue() {
     log "process-pr status: $proc_status"
 
     case "$proc_status" in
+        approved)
+            # The review passed and the skill deliberately did NOT merge
+            # (issue #853). We perform the merge here, in shell, so the
+            # concluded-check-failure guard inside merge-mr.sh is on the only
+            # path to the base branch rather than on a path the model may or
+            # may not take.
+            if ! perform_scripted_merge "$issue_num" "$pr_number"; then
+                # A declined merge is a real failure: record it as such so it
+                # lands in progress.failed and the batch reports
+                # completed_with_errors instead of a false green (#847).
+                update_issue_field "$issue_num" "status" "failed"
+                update_issue_field "$issue_num" "error" \
+                    "PR #${pr_number:-?} approved but the merge was declined — see merge-mr.sh output"
+                update_issue_field "$issue_num" "follow_ups" "$follow_ups" "true"
+                update_progress
+                git checkout "$BRANCH" 2>/dev/null || true
+                return 1
+            fi
+            log "Issue #$issue_num completed. PR #$pr_number merged."
+            update_issue_field "$issue_num" "status" "completed"
+            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            update_issue_field "$issue_num" "follow_ups" "$follow_ups" "true"
+            # The issue is closed here rather than by the skill: the skill no
+            # longer knows whether the merge succeeded.
+            "$PLATFORM_DIR/transition-issue.sh" "$issue_num" 2>/dev/null || \
+                log_warn "Issue #$issue_num: merged PR #$pr_number but could not close the issue"
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+            ;;
         merged)
             log "Issue #$issue_num completed. PR #$pr_number merged."
             update_issue_field "$issue_num" "status" "completed"
