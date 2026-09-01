@@ -64,6 +64,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bats jq
 
+      # Many suites build a scratch repo and commit into it. A runner has no
+      # global git identity, so `git commit` exits 128 with "Author identity
+      # unknown" and every such test fails in setup() — 286 failures on the
+      # first sharded run, essentially all from this. Local machines have an
+      # identity configured, which is why this is invisible until CI runs.
+      - name: Configure git identity for scratch repos
+        run: |
+          git config --global user.email "ci@claude-pipeline.invalid"
+          git config --global user.name "claude-pipeline CI"
+
       - name: Show the suites this shard will run
         working-directory: .claude/scripts/implement-issue-test
         env:
