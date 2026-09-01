@@ -229,6 +229,161 @@ teardown() {
 }
 
 # =============================================================================
+# UNIT TESTS: _task_operational_deliverable() (#840 task 1)
+# A task whose deliverable is an action against a live system (a device
+# config write, a service restart) produces no repo diff, so it needs a
+# marker distinct from `deliverable:comment:`/`deliverable:file:` (#634) that
+# the branch-evidence gate can recognise instead of failing it for lacking a
+# file diff.
+# =============================================================================
+
+@test "_task_operational_deliverable: recognises a declared operational marker" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "apply gate station config `deliverable:operational:ha-lovelace-save.sh --verify`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local cmd
+	cmd=$(_task_operational_deliverable 1)
+	expect_ok "task 1 is recognised as an operational deliverable" \
+		_task_operational_deliverable 1
+	expect_glob "$cmd" 'ha-lovelace-save.sh --verify' \
+		"the declared verification command is returned verbatim"
+}
+
+@test "_task_operational_deliverable: a colon-bearing verification command survives" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "restart service `deliverable:operational:curl -s http://gate/api/status | grep muted:true`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local cmd
+	cmd=$(_task_operational_deliverable 1)
+	expect_glob "$cmd" 'curl -s http://gate/api/status | grep muted:true' \
+		"only the leading operational: prefix is stripped"
+}
+
+@test "_task_operational_deliverable: does not recognise a comment deliverable" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "spike a ruling `deliverable:comment:ruling-840`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "a comment-kind deliverable is not an operational one" \
+		_task_operational_deliverable 1
+}
+
+@test "_task_operational_deliverable: does not recognise a file deliverable" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "write report `deliverable:file:docs/ruling.md`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "a file-kind deliverable is not an operational one" \
+		_task_operational_deliverable 1
+}
+
+@test "_task_operational_deliverable: a bare 'operational' with no command is unrecognised" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "apply config `deliverable:operational`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "a markerless operational deliverable fails closed" \
+		_task_operational_deliverable 1
+}
+
+@test "_task_operational_deliverable: a task with no deliverable annotation is unrecognised" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "ordinary code task `src/app.ts`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "an unannotated task is not an operational deliverable" \
+		_task_operational_deliverable 1
+}
+
+@test "_task_operational_deliverable: an unknown task id is unrecognised" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "apply config `deliverable:operational:verify.sh`", status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	expect_not_ok "a nonexistent task id has nothing to recognise" \
+		_task_operational_deliverable 99
+}
+
+# =============================================================================
+# UNIT TESTS: _operational_deliverable_evidenced() (#840 task 2)
+# An operational deliverable changes a live system this process cannot reach
+# from here, so it is evidenced by a RECORD of a run — an issue comment
+# naming the verification command with output alongside it — never by
+# rerunning the command.
+# =============================================================================
+
+@test "_operational_deliverable_evidenced: evidenced when a comment records the command and its output" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "Ran \`ha-lovelace-save.sh --verify\` -> muted:true"
+	}
+
+	expect_ok "command plus reported output counts as a recorded run" \
+		_operational_deliverable_evidenced "ha-lovelace-save.sh --verify"
+}
+
+@test "_operational_deliverable_evidenced: not evidenced when the command is quoted with no output" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "Will run \`ha-lovelace-save.sh --verify\` shortly."
+	}
+
+	expect_not_ok \
+		"the bare command with nothing reported back is not evidence" \
+		_operational_deliverable_evidenced "ha-lovelace-save.sh --verify"
+}
+
+@test "_operational_deliverable_evidenced: not evidenced when no comment names the command" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "This comment never mentions the verification command."
+	}
+
+	expect_not_ok "an absent command has no run recorded" \
+		_operational_deliverable_evidenced "ha-lovelace-save.sh --verify"
+}
+
+@test "_operational_deliverable_evidenced: fails closed when the tracker is unreachable" {
+	_fetch_issue_comment_bodies() { return 1; }
+
+	expect_not_ok "an unreachable tracker cannot supply evidence" \
+		_operational_deliverable_evidenced "ha-lovelace-save.sh --verify"
+}
+
+@test "_operational_deliverable_evidenced: fails closed on an empty command" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "output here but no command declared"
+	}
+
+	expect_not_ok "an empty command has nothing to search for" \
+		_operational_deliverable_evidenced ""
+}
+
+@test "_operational_deliverable_evidenced: matches the command among several unrelated comments" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "An unrelated comment."
+		printf '%s\n' "Ran \`ha-lovelace-save.sh --verify\` -> muted:true"
+		printf '%s\n' "Another unrelated comment."
+	}
+
+	expect_ok "the recorded run is found among unrelated comments" \
+		_operational_deliverable_evidenced "ha-lovelace-save.sh --verify"
+}
+
+# =============================================================================
 # UNIT TESTS: reconcile_failed_tasks_with_branch_evidence() (#620 task 2)
 # Exercises the shipped reconciliation function directly — wired to the real
 # task_files_modified_on_branch()/update_task() it calls — rather than a
@@ -482,6 +637,212 @@ teardown() {
 	status2=$(jq -r '(.tasks[] | select(.id == 2)).status' "$STATUS_FILE")
 	expect_glob "$status1" 'completed' "the evidenced task is promoted"
 	expect_glob "$status2" 'failed' "the genuine gap survives reconciliation"
+}
+
+# =============================================================================
+# UNIT TESTS: reconcile_failed_tasks_with_branch_evidence() and operational
+# deliverables (#840 task 2). A task declaring `deliverable:operational:` has
+# no repo diff to speak of by design (#840 task 1) — these prove it is judged
+# on a recorded run of its verification command instead, ahead of the
+# file-evidence path, rather than falling into "no declared file evidence".
+# =============================================================================
+
+@test "reconcile: promotes a failed operational-deliverable task with a recorded verification run" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' \
+			"Ran \`ha-lovelace-save.sh --verify\` -> muted:true"
+	}
+
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '1' \
+		"a recorded verification run reconciles the operational task"
+
+	local status kind
+	status=$(jq -r '(.tasks[] | select(.id == 1)).status' "$STATUS_FILE")
+	kind=$(jq -r '(.tasks[] | select(.id == 1)).evidence_kind' "$STATUS_FILE")
+	expect_glob "$status" 'completed' "the task is promoted"
+	expect_glob "$kind" 'operational' \
+		"the promotion is stamped with the operational evidence kind"
+}
+
+@test "reconcile: leaves a failed operational-deliverable task failed with no recorded run" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "No verification was ever reported here."
+	}
+
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '0' \
+		"no recorded run means the operational task cannot reconcile"
+
+	local status
+	status=$(jq -r '(.tasks[] | select(.id == 1)).status' "$STATUS_FILE")
+	expect_glob "$status" 'failed' "the task stays failed"
+}
+
+@test "reconcile: does not promote an evidenced operational task while the test suite is red" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' \
+			"Ran \`ha-lovelace-save.sh --verify\` -> muted:true"
+	}
+
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	DEGRADED_STAGES=("test:full_suite_red")
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '0' \
+		"a red test suite blocks promotion even with a recorded run"
+
+	local status
+	status=$(jq -r '(.tasks[] | select(.id == 1)).status' "$STATUS_FILE")
+	expect_glob "$status" 'failed' \
+		"the operational task remains failed while the test suite is red"
+}
+
+@test "reconcile: an operational task with no repo files never falls into the file-evidence path" {
+	# Regression guard: before #840 task 2, a task declaring no affected
+	# files (which every operational task does, by design) hit "no declared
+	# file evidence" and was left failed regardless of what actually
+	# happened. This proves the operational check runs BEFORE that
+	# short-circuit rather than being masked by it.
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' \
+			"Ran \`ha-lovelace-save.sh --verify\` -> muted:true"
+	}
+
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '1' \
+		"the operational path reconciles the task despite no declared files"
+}
+
+@test "reconcile: an evidenced operational task and an evidenced file task both reconcile in the same run" {
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' \
+			"Ran \`ha-lovelace-save.sh --verify\` -> muted:true"
+	}
+
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []},
+		{id: 2, description: "task two", status: "failed",
+		 affected_files: ["src/two.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	mkdir -p src
+	echo "two" > src/two.sh
+	git add src
+	git commit -q -m "implement task two"
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '2' \
+		"both the operational and file-evidenced tasks reconcile"
+
+	local status1 status2 kind1 kind2
+	status1=$(jq -r '(.tasks[] | select(.id == 1)).status' "$STATUS_FILE")
+	status2=$(jq -r '(.tasks[] | select(.id == 2)).status' "$STATUS_FILE")
+	kind1=$(jq -r '(.tasks[] | select(.id == 1)).evidence_kind' "$STATUS_FILE")
+	kind2=$(jq -r '(.tasks[] | select(.id == 2)).evidence_kind // "file"' \
+		"$STATUS_FILE")
+	expect_glob "$status1" 'completed' "the operational task is promoted"
+	expect_glob "$status2" 'completed' "the file-evidenced task is promoted"
+	expect_glob "$kind1" 'operational' \
+		"the operational task carries the operational evidence kind"
+	expect_glob "$kind2" 'file' \
+		"the file-evidenced task has no evidence_kind field (implicit file)"
+}
+
+# =============================================================================
+# UNIT TESTS: _lacking_evidence_summary() evidence-kind labelling (#840
+# task 3). A task still "failed" after reconciliation needs its evidence
+# kind named in the merge-block message — otherwise "lacking evidence"
+# reads as "no file changed" even for an operational task that was never
+# going to produce one.
+# =============================================================================
+
+@test "_lacking_evidence_summary: names file evidence for a plain failed task" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 2, description: "README install section", status: "failed",
+		 affected_files: ["README.md"]}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	expect_glob "$summary" '*task 2 (README install section) \[file evidence: README.md\]*' \
+		"a file-evidenced task must be labelled with the file kind and its path"
+}
+
+@test "_lacking_evidence_summary: names operational evidence for an unevidenced operational task" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	expect_glob "$summary" '*task 1 (apply gate config*) \[operational evidence: ha-lovelace-save.sh --verify\]*' \
+		"an operational task must be labelled with the operational kind and its verification command"
+}
+
+@test "_lacking_evidence_summary: labels each task with its own evidence kind in a mixed roster" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1,
+		 description: "apply gate config `deliverable:operational:ha-lovelace-save.sh --verify`",
+		 status: "failed", affected_files: []},
+		{id: 2, description: "README install section", status: "failed",
+		 affected_files: ["README.md"]}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	expect_glob "$summary" '*\[operational evidence: ha-lovelace-save.sh --verify\]*' \
+		"the operational task keeps its own kind"
+	expect_glob "$summary" '*\[file evidence: README.md\]*' \
+		"the file task keeps its own kind"
 }
 
 # =============================================================================
@@ -936,5 +1297,5 @@ _run_merge_gate() {
 	# Reason must report the raw stage verdict, the branch-verified verdict,
 	# and the lacking-evidence list (#620 AC3) — not just a bare count.
 	expect_ok "persisted reason must carry the raw verdict, branch-verified verdict, and lacking-evidence list" \
-		grep -qF '_reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking file evidence: ${_lacking_evidence}}."' "$ORCHESTRATOR_SCRIPT"
+		grep -qF '_reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking evidence: ${_lacking_evidence}}."' "$ORCHESTRATOR_SCRIPT"
 }
