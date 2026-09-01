@@ -7,7 +7,7 @@
     {
       "name": "pipeline-core",
       "source": "./plugins/pipeline-core",
-      "version": "0.8.4",
+      "version": "0.8.5",
       "description": "Core explore -> issue -> implement engine, platform scripts, and hooks for the Claude Pipeline."
     }
   ]
