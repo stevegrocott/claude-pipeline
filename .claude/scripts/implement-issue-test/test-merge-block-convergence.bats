@@ -458,14 +458,35 @@ teardown() {
 
 	[[ -f "$skill_file" ]]
 
-	local block_line merge_line
+	# The skill no longer merges (issue #853): it returns `approved` and the
+	# orchestrator performs the merge in shell via merge-mr.sh, so the guard
+	# refusing a PR with a failed check sits on the only path rather than on a
+	# path the model may or may not take. The ordering invariant this test
+	# exists for is unchanged — the merge block must be evaluated BEFORE the
+	# skill hands off for merging — but the handoff is now the `approved`
+	# return rather than a merge-mr.sh invocation.
+	local block_line handoff_line
 	block_line=$(grep -n 'merge_blocked_reason // empty' "$skill_file" | head -1 | cut -d: -f1)
-	# Match the actual invocation line (contains PLATFORM_DIR), not prose references
-	merge_line=$(grep -n 'PLATFORM_DIR.*merge-mr\.sh\|merge-mr\.sh.*PR_NUMBER' "$skill_file" | head -1 | cut -d: -f1)
+	handoff_line=$(grep -n '^### Step 4b:' "$skill_file" | head -1 | cut -d: -f1)
 
 	[[ -n "$block_line" ]]
-	[[ -n "$merge_line" ]]
-	(( block_line < merge_line ))
+	[[ -n "$handoff_line" ]]
+	(( block_line < handoff_line ))
+}
+
+@test "process-pr SKILL.md does not merge — the orchestrator does (issue #853)" {
+	local skill_file
+	skill_file="$(dirname "$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")")/plugins/pipeline-core/skills/process-pr/SKILL.md"
+	[[ -f "$skill_file" ]] || skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+
+	[[ -f "$skill_file" ]]
+
+	# An executable merge-mr.sh invocation must not reappear in the skill: that
+	# is what made the merge contingent on model compliance.
+	if grep -qE '^"\$PLATFORM_DIR/merge-mr\.sh" "\$PR_NUMBER"' "$skill_file"; then
+		fail "SKILL.md instructs the model to merge again — see #853"
+	fi
+	grep -q 'approved' "$skill_file"
 }
 
 @test "process-pr SKILL.md exits without merging when MERGE_BLOCKED_REASON is set" {
