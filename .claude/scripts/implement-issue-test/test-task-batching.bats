@@ -394,7 +394,7 @@ teardown() {
 
 	# Verify worktree and branch are gone
 	[[ ! -d "${wt_base}/task-20" ]]
-	! git rev-parse --verify "wt-task-20" 2>/dev/null
+	refute git rev-parse --verify "wt-task-20" 2>/dev/null
 
 	git checkout -q main
 	git branch -D feature/cleanup-test 2>/dev/null || true
@@ -430,7 +430,7 @@ teardown() {
 
 	# Branch and worktree are gone
 	[[ ! -d "${wt_base}/task-7" ]]
-	! git rev-parse --verify "$wt_branch" 2>/dev/null
+	refute git rev-parse --verify "$wt_branch" 2>/dev/null
 
 	# Salvage tag exists and points at the unmerged commit
 	run git rev-parse "salvage/issue-42-task7"
@@ -2253,7 +2253,7 @@ _setup_parallel_stage_mocks() {
 	[ $? -eq 0 ]
 
 	# run_stage should never have been called (both skipped)
-	! grep -q "^run_stage_called" "$calls_file"
+	refute grep -q "^run_stage_called" "$calls_file"
 
 	# Both stages should have been marked started and completed
 	grep -q "started:e2e_verify" "$calls_file"

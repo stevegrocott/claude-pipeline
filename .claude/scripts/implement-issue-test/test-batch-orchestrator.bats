@@ -1095,7 +1095,7 @@ GHEOF
 
 	grep -qw 'completed' "$TEST_TMP/update.out"
 	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 0 ]]
 }
 
@@ -1138,7 +1138,7 @@ GHEOF
 
 	grep -qw 'completed' "$TEST_TMP/update.out"
 	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 0 ]]
 }
 
@@ -1164,7 +1164,7 @@ GHEOF
 
 	grep -qw 'completed' "$TEST_TMP/update.out"
 	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 0 ]]
 }
 
@@ -1190,7 +1190,7 @@ GHEOF
 
 	grep -qw 'completed' "$TEST_TMP/update.out"
 	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 0 ]]
 }
 
@@ -1466,9 +1466,9 @@ _extract_process_pr_changes_requested_block() {
 	MAX_CONSECUTIVE_FAILURES=3 CF_IN=2 _run_process_issue_call_site \
 		"$block_file" 0 true "body failed structural validation"
 
-	! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+	refute grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
 	[[ ! -s "$TEST_TMP/state.out" ]]
-	! grep -q 'batch_paused' "$TEST_TMP/events.out"
+	refute grep -q 'batch_paused' "$TEST_TMP/events.out"
 	[[ "$exit_code" -eq 0 ]]
 }
 
@@ -1484,7 +1484,7 @@ _extract_process_pr_changes_requested_block() {
 		CF_IN="$cf" _run_process_issue_call_site \
 			"$block_file" 0 true "body failed structural validation"
 		cf="$consecutive_failures"
-		! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+		refute grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
 		[[ "$exit_code" -eq 0 ]]
 	done
 
@@ -2709,7 +2709,7 @@ source_sweep_implement_followups() {
 	# Depth-1 follow-up #100 WAS implemented.
 	grep -qx '100' "$TEST_TMP/process_issue.calls"
 	# Depth-2 follow-up #200 was NOT implemented (beyond MAX_FOLLOWUP_DEPTH).
-	! grep -qx '200' "$TEST_TMP/process_issue.calls"
+	refute grep -qx '200' "$TEST_TMP/process_issue.calls"
 	# Depth-2 follow-up #200 WAS surfaced as a warning for manual triage.
 	grep -q '200' "$TEST_TMP/warn.out"
 	grep -q 'MAX_FOLLOWUP_DEPTH' "$TEST_TMP/warn.out"

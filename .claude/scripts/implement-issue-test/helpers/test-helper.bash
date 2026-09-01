@@ -469,6 +469,27 @@ fail() {
     return 1
 }
 
+# refute <command> [args...]
+#
+# Asserts the command FAILS. Use this instead of `! cmd` (issue #854).
+#
+# Bash exempts a `!`-negated pipeline from errexit:
+#
+#     bash -c 'set -e; ! true; echo REACHED'   # prints REACHED
+#
+# bats takes a test's status from the LAST command in its body, so `! cmd`
+# anywhere else cannot fail the test regardless of what it finds — a hollow
+# assertion. refute reports the failure explicitly, so it bites wherever it
+# appears.
+#
+# `! cmd || fail "..."` is also sound and does not need converting: the `||`
+# handler runs when the negation yields 1.
+refute() {
+    if "$@"; then
+        fail "expected to fail, but it succeeded: $*"
+    fi
+}
+
 # Assert string not empty
 assert_not_empty() {
     local value="$1"
