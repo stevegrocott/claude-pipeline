@@ -1,0 +1,97 @@
+# bats-suite.yml — runs the CI-safe bats suites (issue #855).
+#
+# Before this workflow, CI ran 2 of 59 suites in
+# .claude/scripts/implement-issue-test/. Everything else was unrun. That is how
+# a merge-block ordering test in test-merge-block-convergence.bats went red on
+# main after #853 changed the process-pr skill and stayed red: no workflow
+# executed it, so #856 merged clean and #857 had to fix it afterwards.
+#
+# SCOPE CONTRACT — this workflow deliberately does NOT touch
+# orchestrator-guards.yml or bundle-parity.yml. Those own the timeout invariant
+# and the canonical/bundle byte-identity contract respectively, and their file
+# lists are curated on purpose ("do not 'helpfully' expand this to *.bats").
+# The two suites they run are excluded here to avoid paying for them twice —
+# see CI_EXCLUDED_SUITES in run-tests.sh, which is the single source of truth
+# for what runs.
+#
+# The suite list is NOT enumerated here. `run-tests.sh --ci` globs test-*.bats
+# and subtracts the exclusion list, so a newly added suite is covered the
+# moment it lands rather than waiting for someone to remember this file.
+#
+# (Paths are duplicated between push and pull_request rather than shared via a
+# YAML anchor — the Actions workflow parser does not reliably support
+# anchors/aliases, per bundle-parity.yml:1-31.)
+name: Bats Suite
+
+on:
+  push:
+    paths:
+      - '.claude/scripts/**'
+      - '.claude/hooks/**'
+      - 'plugins/pipeline-core/scripts/**'
+      - 'plugins/pipeline-core/hooks/**'
+      - 'tests/**'
+      - '.github/workflows/bats-suite.yml'
+  pull_request:
+    paths:
+      - '.claude/scripts/**'
+      - '.claude/hooks/**'
+      - 'plugins/pipeline-core/scripts/**'
+      - 'plugins/pipeline-core/hooks/**'
+      - 'tests/**'
+      - '.github/workflows/bats-suite.yml'
+
+jobs:
+  bats:
+    # Sharded because the full list runs serially in over 30 minutes on a
+    # runner — the first version of this workflow was killed by its own
+    # timeout at 30m21s. Four shards bring each job to roughly a quarter of
+    # that. fail-fast is off so one failing shard does not hide failures in
+    # the others; a red shard is usually not the only red shard.
+    name: Bats Suite (shard ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats jq
+
+      # Many suites build a scratch repo and commit into it. A runner has no
+      # global git identity, so `git commit` exits 128 with "Author identity
+      # unknown" and every such test fails in setup() — 286 failures on the
+      # first sharded run, essentially all from this. Local machines have an
+      # identity configured, which is why this is invisible until CI runs.
+      - name: Configure git identity for scratch repos
+        run: |
+          git config --global user.email "ci@claude-pipeline.invalid"
+          git config --global user.name "claude-pipeline CI"
+
+      - name: Show the suites this shard will run
+        working-directory: .claude/scripts/implement-issue-test
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
+        run: |
+          echo "shard ${SHARD_INDEX}/${SHARD_TOTAL} ($(./run-tests.sh --list-ci | wc -l) suites):"
+          ./run-tests.sh --list-ci
+
+      # run-tests.sh exits 1 when any suite fails, which fails the job.
+      - name: Run CI-safe bats suites
+        working-directory: .claude/scripts/implement-issue-test
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
+        run: ./run-tests.sh --ci
+
+      # Only on one shard — tests/ is fast and does not need fanning out.
+      - name: Run repo-root tests/
+        if: matrix.shard == 0
+        run: bats tests/
