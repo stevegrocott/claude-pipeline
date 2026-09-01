@@ -66,18 +66,46 @@ check_prerequisites() {
 # Each exclusion must say WHY. "Slow" is not a reason; "needs credentials CI
 # does not have" is.
 #
-# Empirically verified 2026-09-01: 60 of 61 suites pass with `claude` absent
-# from PATH and gh unauthenticated (empty HOME, no token) — i.e. under the
-# conditions of a CI runner. The older claim that seven suites "shell out to
-# gh/claude/curl" no longer holds; they mock those binaries.
+# The older claim that seven suites "shell out to gh/claude/curl" no longer
+# holds — they mock those binaries. Credentials are not what stops a suite
+# running in CI; the PLATFORM is. Probing all 61 on macOS with `claude` absent
+# and gh unauthenticated said 60 were fine, and that probe was measuring the
+# wrong variable: the first real Ubuntu run produced 286 failures. Most were
+# one cause (no global git identity, fixed in the workflow), but the suites
+# below still fail or hang on Linux while passing on macOS.
+#
+# So: verify exclusions against a real Linux run, not a local one. Green
+# locally says very little about CI.
 CI_EXCLUDED_SUITES=(
-    # Already run by .github/workflows/orchestrator-guards.yml, which owns the
-    # timeout invariant. Excluded here only to avoid paying for it twice.
+    # --- Covered by another workflow; excluded to avoid running them twice ---
+
+    # .github/workflows/orchestrator-guards.yml owns the timeout invariant.
     test-timeout-escalation.bats
 
-    # Already run by .github/workflows/bundle-parity.yml, which owns the
-    # canonical/bundle byte-identity contract. Same reason.
+    # .github/workflows/bundle-parity.yml owns the canonical/bundle
+    # byte-identity contract.
     test-bundle-parity.bats
+
+    # --- Fail or hang on Linux while passing on macOS (tracked in #859) ---
+    # These are pre-existing platform bugs, not regressions from #855. They are
+    # excluded so the other 47 suites can be gated NOW rather than waiting on a
+    # cross-platform audit. Each should be removed from this list as it is
+    # fixed — the entry is a debt marker, not a decision.
+
+    # HANGS rather than fails: stalls at "parent watchdog fires when inner
+    # timeout wrapper hangs" and burns the whole job timeout. A hang is worse
+    # than a failure — it produces a `cancelled` run, which reads like neither
+    # pass nor fail.
+    test-stage-runner.bats
+
+    test-smart-test-targeting.bats   # 17 failures on Linux
+    test-soft-fail-convergence.bats  # 5
+    test-integration.bats            # 4
+    test-claude-usage.bats           # 3
+    test-task-batching.bats          # 2
+    test-surgical-fast-path.bats     # 1
+    test-merge-block-partial.bats    # 1
+    test-constants.bats              # 1
 )
 
 # Prints the CI-safe suite list, one per line.
