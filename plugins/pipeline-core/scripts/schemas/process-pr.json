@@ -5,8 +5,8 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["merged", "changes_requested", "merge_blocked", "error", "rate_limit"],
-      "description": "Final status of PR processing"
+      "enum": ["approved", "merged", "changes_requested", "merge_blocked", "error", "rate_limit"],
+      "description": "Final status of PR processing. \"approved\" means the review passed and the PR is ready to merge, but the skill did NOT merge it — the orchestrator performs the merge in shell via merge-mr.sh so the concluded-check-failure guard cannot be bypassed (issue #853). \"merged\" is retained for older skill revisions that merged internally; the orchestrator reconciles it against GitHub rather than trusting it."
     },
     "follow_up_issues": {
       "type": "array",

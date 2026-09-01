@@ -43,6 +43,23 @@ _has_concluded_check_failure() {
   ' <<<"$rollup_json" >/dev/null 2>&1
 }
 
+# Names the first check in a statusCheckRollup array that concluded in a
+# failing state, for the refusal message. Shared by both poll paths so the two
+# refusals cannot drift apart (issue #853).
+_first_failed_check() {
+  local rollup_json="$1"
+
+  jq -r '
+    [.[]? |
+      if .__typename == "CheckRun" then
+        (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
+      else
+        (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
+      end
+    ] | first // "unknown check"
+  ' <<<"$rollup_json" 2>/dev/null || echo "unknown check"
+}
+
 wait_for_mergeable() {
   local pr="$1"
   local interval="${MERGE_MR_POLL_INTERVAL:-10}"
@@ -51,8 +68,22 @@ wait_for_mergeable() {
 
   if [ "$MERGE_MR_MERGE_STATE_GATE" != "1" ]; then
     while [ "$elapsed" -lt "$max" ]; do
-      local state
-      state=$(gh pr view "$pr" --json mergeable --jq '.mergeable' 2>/dev/null || echo "UNKNOWN")
+      # The concluded-check-failure test is NOT part of the mergeStateStatus
+      # gate that this branch opts out of (issue #853). MERGE_MR_MERGE_STATE_GATE
+      # selects the coarser `mergeable` poll; it must not also disable the last
+      # thing standing between a failing check and the base branch. On a repo
+      # that cannot enable branch protection this refusal is the only gate, and
+      # `mergeable` reports MERGEABLE for a PR whose checks have failed, so
+      # without this the legacy path merges it.
+      local legacy_json state rollup
+      legacy_json=$(gh pr view "$pr" --json mergeable,statusCheckRollup 2>/dev/null || echo "{}")
+      state=$(jq -r '.mergeable // "UNKNOWN"' <<<"$legacy_json" 2>/dev/null || echo "UNKNOWN")
+      rollup=$(jq -c '.statusCheckRollup // []' <<<"$legacy_json" 2>/dev/null || echo "[]")
+
+      if _has_concluded_check_failure "$rollup"; then
+        echo "PR #$pr has check \"$(_first_failed_check "$rollup")\" that concluded in failure (mergeable: $state); refusing to wait" >&2
+        return 1
+      fi
 
       case "$state" in
         MERGEABLE)
@@ -94,17 +125,7 @@ wait_for_mergeable() {
         rollup=$(jq -c '.statusCheckRollup // []' <<<"$json" 2>/dev/null || echo "[]")
 
         if _has_concluded_check_failure "$rollup"; then
-          local failed_check
-          failed_check=$(jq -r '
-            [.[]? |
-              if .__typename == "CheckRun" then
-                (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
-              else
-                (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
-              end
-            ] | first // "unknown check"
-          ' <<<"$rollup" 2>/dev/null || echo "unknown check")
-          echo "PR #$pr has check \"$failed_check\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
+          echo "PR #$pr has check \"$(_first_failed_check "$rollup")\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
           return 1
         fi
 
