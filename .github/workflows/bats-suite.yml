@@ -43,9 +43,18 @@ on:
 
 jobs:
   bats:
-    name: Bats Suite
+    # Sharded because the full list runs serially in over 30 minutes on a
+    # runner — the first version of this workflow was killed by its own
+    # timeout at 30m21s. Four shards bring each job to roughly a quarter of
+    # that. fail-fast is off so one failing shard does not hide failures in
+    # the others; a red shard is usually not the only red shard.
+    name: Bats Suite (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
 
     steps:
       - uses: actions/checkout@v4
@@ -55,16 +64,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bats jq
 
-      - name: Show the suite list CI will run
+      - name: Show the suites this shard will run
         working-directory: .claude/scripts/implement-issue-test
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
         run: |
-          echo "CI-safe suites ($(./run-tests.sh --list-ci | wc -l)):"
+          echo "shard ${SHARD_INDEX}/${SHARD_TOTAL} ($(./run-tests.sh --list-ci | wc -l) suites):"
           ./run-tests.sh --list-ci
 
       # run-tests.sh exits 1 when any suite fails, which fails the job.
       - name: Run CI-safe bats suites
         working-directory: .claude/scripts/implement-issue-test
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
         run: ./run-tests.sh --ci
 
+      # Only on one shard — tests/ is fast and does not need fanning out.
       - name: Run repo-root tests/
+        if: matrix.shard == 0
         run: bats tests/

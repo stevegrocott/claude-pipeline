@@ -81,14 +81,28 @@ CI_EXCLUDED_SUITES=(
 )
 
 # Prints the CI-safe suite list, one per line.
+#
+# With SHARD_INDEX/SHARD_TOTAL set, prints only this shard's slice. The whole
+# list runs serially in well over 30 minutes on a CI runner — the first
+# attempt at this workflow was killed by its own timeout — so the workflow
+# fans it out across parallel jobs. Round-robin (NR % total) rather than
+# contiguous blocks: suite runtimes vary by an order of magnitude, and
+# interleaving spreads the slow ones instead of stacking them in one shard.
 ci_suite_list() {
-    local f excluded
+    local f excluded n=0
     for f in test-*.bats; do
         excluded=0
         for skip in "${CI_EXCLUDED_SUITES[@]}"; do
             [[ "$f" == "$skip" ]] && { excluded=1; break; }
         done
-        (( excluded )) || printf '%s\n' "$f"
+        (( excluded )) && continue
+        if [[ -n "${SHARD_TOTAL:-}" && -n "${SHARD_INDEX:-}" ]]; then
+            (( n % SHARD_TOTAL == SHARD_INDEX % SHARD_TOTAL )) \
+                && printf '%s\n' "$f"
+            n=$(( n + 1 ))
+        else
+            printf '%s\n' "$f"
+        fi
     done
 }
 
