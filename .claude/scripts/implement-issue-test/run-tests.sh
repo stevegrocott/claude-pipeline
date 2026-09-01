@@ -52,6 +52,47 @@ check_prerequisites() {
 }
 
 # =============================================================================
+# CI EXCLUSIONS  (issue #855)
+# =============================================================================
+#
+# THIS IS THE LIST CI USES. `--ci` runs every test-*.bats in this directory
+# EXCEPT the entries below, so a new suite is covered by CI the moment it is
+# added — no workflow edit required, and no way to be silently forgotten.
+#
+# Before #855, CI ran 2 of 59 suites. Everything else was unrun, which is how
+# a merge-block ordering test stayed red on main after #853 changed the
+# process-pr skill: nothing executed it. Add to this list only with a reason.
+#
+# Each exclusion must say WHY. "Slow" is not a reason; "needs credentials CI
+# does not have" is.
+#
+# Empirically verified 2026-09-01: 60 of 61 suites pass with `claude` absent
+# from PATH and gh unauthenticated (empty HOME, no token) — i.e. under the
+# conditions of a CI runner. The older claim that seven suites "shell out to
+# gh/claude/curl" no longer holds; they mock those binaries.
+CI_EXCLUDED_SUITES=(
+    # Already run by .github/workflows/orchestrator-guards.yml, which owns the
+    # timeout invariant. Excluded here only to avoid paying for it twice.
+    test-timeout-escalation.bats
+
+    # Already run by .github/workflows/bundle-parity.yml, which owns the
+    # canonical/bundle byte-identity contract. Same reason.
+    test-bundle-parity.bats
+)
+
+# Prints the CI-safe suite list, one per line.
+ci_suite_list() {
+    local f excluded
+    for f in test-*.bats; do
+        excluded=0
+        for skip in "${CI_EXCLUDED_SUITES[@]}"; do
+            [[ "$f" == "$skip" ]] && { excluded=1; break; }
+        done
+        (( excluded )) || printf '%s\n' "$f"
+    done
+}
+
+# =============================================================================
 # HELP
 # =============================================================================
 
@@ -61,6 +102,8 @@ show_help() {
     echo "Options:"
     echo "  --tap        Output in TAP format"
     echo "  --verbose    Verbose output"
+    echo "  --ci         Run the CI-safe subset (all but CI_EXCLUDED_SUITES)"
+    echo "  --list-ci    Print the CI-safe suite list and exit"
     echo "  --help       Show this help"
     echo ""
     echo "Test Files:"
@@ -86,6 +129,7 @@ show_help() {
 main() {
     local bats_args=()
     local test_files=()
+    local ci_mode=0
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -97,6 +141,18 @@ main() {
             --verbose|-v)
                 bats_args+=("--verbose-run")
                 shift
+                ;;
+            --ci)
+                # Run everything except CI_EXCLUDED_SUITES. Used by
+                # .github/workflows/bats-suite.yml (issue #855).
+                ci_mode=1
+                shift
+                ;;
+            --list-ci)
+                # Print the CI-safe list and exit — lets a contributor see
+                # exactly what CI will run without running it.
+                ci_suite_list
+                exit 0
                 ;;
             --help|-h)
                 show_help
@@ -119,7 +175,12 @@ main() {
 
     # If no test files specified, run all
     if (( ${#test_files[@]} == 0 )); then
-        test_files=(test-*.bats)
+        if (( ci_mode )); then
+            # shellcheck disable=SC2207
+            test_files=($(ci_suite_list))
+        else
+            test_files=(test-*.bats)
+        fi
     fi
 
     # Verify test files exist

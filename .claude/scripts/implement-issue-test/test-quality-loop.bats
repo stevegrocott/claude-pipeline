@@ -22,6 +22,28 @@ setup() {
     mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
     mkdir -p "$SCHEMA_DIR"
 
+    # run_quality_loop shells out to git against its loop_dir — notably
+    # `review_base_commit=$(git -C "$loop_dir" merge-base "$BASE_BRANCH" HEAD
+    # 2>/dev/null)`, a command substitution with no `|| true`. Under errexit a
+    # non-repo path makes that exit 128 and the whole function dies before any
+    # assertion runs. These tests previously passed the literal "$QUALITY_LOOP_DIR",
+    # which is not a repository (and on a clean machine does not exist at all),
+    # so 21 of them failed for that reason alone rather than for anything they
+    # were testing (issue #855).
+    #
+    # Give the loop a real repository with BASE_BRANCH present, so merge-base
+    # and diff resolve and the tests exercise the logic they were written for.
+    QUALITY_LOOP_DIR="$TEST_TMP/worktree"
+    mkdir -p "$QUALITY_LOOP_DIR"
+    git -C "$QUALITY_LOOP_DIR" init -q
+    # symbolic-ref rather than `init -b`: it does not depend on git >= 2.28,
+    # and it puts the first commit directly on BASE_BRANCH.
+    git -C "$QUALITY_LOOP_DIR" symbolic-ref HEAD "refs/heads/$BASE_BRANCH"
+    git -C "$QUALITY_LOOP_DIR" config user.email "test@example.com"
+    git -C "$QUALITY_LOOP_DIR" config user.name "test"
+    git -C "$QUALITY_LOOP_DIR" commit -q --allow-empty -m "init"
+    export QUALITY_LOOP_DIR
+
     # Create required schemas
     for schema in implement-issue-implement implement-issue-test implement-issue-review implement-issue-fix implement-issue-simplify; do
         echo '{"type":"object"}' > "$SCHEMA_DIR/${schema}.json"
@@ -72,7 +94,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     local iterations
     iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
@@ -101,7 +123,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     local stage_iteration
     stage_iteration=$(jq -r '.stages.quality_loop.iteration' "$STATUS_FILE")
@@ -145,7 +167,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Should eventually succeed after retrying past the error
@@ -308,7 +330,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Should succeed after retry
@@ -381,7 +403,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Verify we went through multiple review iterations
     local final_count
@@ -576,7 +598,7 @@ HIST_EOF
     }
     export -f run_stage
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # The captured prompt from the second iteration must include PRIOR ITERATION FINDINGS
     [[ -f "$prompt_capture" ]]
@@ -610,7 +632,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # History file should exist
     [[ -f "$history_file" ]]
@@ -671,7 +693,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # History file should have 2 entries (one per iteration)
     [[ -f "$history_file" ]]
@@ -991,7 +1013,7 @@ _setup_git_repo_with_diff() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Should succeed after retrying past the timeout
@@ -1044,7 +1066,7 @@ _setup_git_repo_with_diff() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Fix should NOT have been called (timeout should skip to next iteration)
     local was_fix_called
@@ -1108,7 +1130,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Loop should exit 0 (convergence triggers loop_approved=true, not exit 2)
@@ -1187,7 +1209,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     [ "$exit_status" -eq 0 ]
@@ -1240,7 +1262,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Simplify should have been called only ONCE:
     # iter 1: simplify runs (no changes → skip_simplify=true); review times out → continue
@@ -1316,7 +1338,7 @@ FAKE_EOF
     chmod +x "$fake_script_dir/decide-action.sh"
     SCRIPT_DIR="$fake_script_dir"
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Simplify should be called at least twice: iter1 (no changes), iter3 (after fix reset)
     local simplify_call_count
@@ -1407,7 +1429,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Fix prompt must exist
     [[ -f "$fix_prompt_file" ]] || fail "Fix prompt was not captured"
@@ -1463,7 +1485,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     [[ -f "$fix_prompt_file" ]]
     local captured
@@ -1525,7 +1547,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     [[ -f "$fix_prompt_file" ]]
     local captured
@@ -1577,7 +1599,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     [[ -f "$fix_prompt_file" ]]
     local captured
@@ -1628,7 +1650,7 @@ HIST_EOF
     # Pass complexity "M" as arg 6 to run_quality_loop.
     # Run in a subshell for isolation. Max iterations uses soft-fail
     # (DEGRADED_STAGES + break) so the complexity file is written.
-    ( run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "M" ) || true
+    ( run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test" "" 1 "M" ) || true
 
     [[ -f "$complexity_file" ]] || fail "fix-review stage was not called"
     local captured_complexity
@@ -1659,7 +1681,7 @@ HIST_EOF
     export -f comment_issue
 
     # Pass complexity "L" as arg 6 to run_quality_loop
-    run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "L"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test" "" 1 "L"
 
     [[ -f "$simplify_complexity_file" ]] || fail "simplify stage was not called"
     local captured_complexity
@@ -1690,7 +1712,7 @@ HIST_EOF
     export -f comment_issue
 
     # Pass complexity "S" as arg 6 to run_quality_loop
-    run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "S"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test" "" 1 "S"
 
     [[ -f "$review_complexity_file" ]] || fail "review stage was not called"
     local captured_complexity
@@ -1724,7 +1746,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Should succeed without override

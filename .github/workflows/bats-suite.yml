@@ -1,0 +1,70 @@
+# bats-suite.yml — runs the CI-safe bats suites (issue #855).
+#
+# Before this workflow, CI ran 2 of 59 suites in
+# .claude/scripts/implement-issue-test/. Everything else was unrun. That is how
+# a merge-block ordering test in test-merge-block-convergence.bats went red on
+# main after #853 changed the process-pr skill and stayed red: no workflow
+# executed it, so #856 merged clean and #857 had to fix it afterwards.
+#
+# SCOPE CONTRACT — this workflow deliberately does NOT touch
+# orchestrator-guards.yml or bundle-parity.yml. Those own the timeout invariant
+# and the canonical/bundle byte-identity contract respectively, and their file
+# lists are curated on purpose ("do not 'helpfully' expand this to *.bats").
+# The two suites they run are excluded here to avoid paying for them twice —
+# see CI_EXCLUDED_SUITES in run-tests.sh, which is the single source of truth
+# for what runs.
+#
+# The suite list is NOT enumerated here. `run-tests.sh --ci` globs test-*.bats
+# and subtracts the exclusion list, so a newly added suite is covered the
+# moment it lands rather than waiting for someone to remember this file.
+#
+# (Paths are duplicated between push and pull_request rather than shared via a
+# YAML anchor — the Actions workflow parser does not reliably support
+# anchors/aliases, per bundle-parity.yml:1-31.)
+name: Bats Suite
+
+on:
+  push:
+    paths:
+      - '.claude/scripts/**'
+      - '.claude/hooks/**'
+      - 'plugins/pipeline-core/scripts/**'
+      - 'plugins/pipeline-core/hooks/**'
+      - 'tests/**'
+      - '.github/workflows/bats-suite.yml'
+  pull_request:
+    paths:
+      - '.claude/scripts/**'
+      - '.claude/hooks/**'
+      - 'plugins/pipeline-core/scripts/**'
+      - 'plugins/pipeline-core/hooks/**'
+      - 'tests/**'
+      - '.github/workflows/bats-suite.yml'
+
+jobs:
+  bats:
+    name: Bats Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats jq
+
+      - name: Show the suite list CI will run
+        working-directory: .claude/scripts/implement-issue-test
+        run: |
+          echo "CI-safe suites ($(./run-tests.sh --list-ci | wc -l)):"
+          ./run-tests.sh --list-ci
+
+      # run-tests.sh exits 1 when any suite fails, which fails the job.
+      - name: Run CI-safe bats suites
+        working-directory: .claude/scripts/implement-issue-test
+        run: ./run-tests.sh --ci
+
+      - name: Run repo-root tests/
+        run: bats tests/
