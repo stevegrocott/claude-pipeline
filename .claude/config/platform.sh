@@ -20,6 +20,12 @@ MERGE_STYLE="${MERGE_STYLE:-squash}"      # squash | merge | rebase
 # Set to 0 to leave the PR open for manual review and merging.
 # MERGE_STYLE (above) controls the merge method used when AUTO_MERGE=1.
 AUTO_MERGE="${AUTO_MERGE:-0}"             # 0 = manual merge | 1 = auto-merge when checks pass
+# MERGE_MR_NON_BLOCKING_CHECKS: comma-separated CI check names whose failure must
+# NOT block the merge (informational jobs — `continue-on-error`, a known-red
+# baseline being burned down). GitHub reports such a PR as UNSTABLE; without
+# this the merge gate refuses it even when every blocking check is green
+# (issue #861). Matched exactly against the check-run name. Empty = none.
+MERGE_MR_NON_BLOCKING_CHECKS="${MERGE_MR_NON_BLOCKING_CHECKS:-}"  # e.g. "frontend-unit-tests"
 
 # Test commands (set during /adapt based on project stack)
 TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpunit", "pytest"
