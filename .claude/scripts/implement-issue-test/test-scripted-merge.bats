@@ -59,6 +59,18 @@ _load_merge_mr_functions() {
 	[[ -n "$wait_body" ]] \
 		|| fail "wait_for_mergeable() not defined in merge-mr.sh"
 
+	# Issue #861: the gate consults the non-blocking allowlist through three
+	# more helpers and four module-level assignments; load them the same way so
+	# the extracted functions run exactly as in production.
+	local helper
+	for helper in _non_blocking_checks_json _ignored_failed_checks _has_pending_check; do
+		local body
+		body=$(_extract_function_body "$helper" "$MERGE_MR")
+		[[ -n "$body" ]] || fail "$helper() not defined in merge-mr.sh"
+		eval "$body"
+	done
+	eval "$(grep -E '^(MERGE_MR_NON_BLOCKING_CHECKS|_JQ_CHECK_NAME|_JQ_IS_FAILED_STATE|_JQ_FAILED_CHECK_NAME)=' "$MERGE_MR")"
+
 	eval "$gate_body"
 	eval "$name_body"
 	eval "$wait_body"
@@ -182,6 +194,89 @@ _run_merge_hook() {
 # =============================================================================
 # AC1 — direct `gh pr merge` is hard-blocked, regardless of model behaviour
 # =============================================================================
+
+# ---------------------------------------------------------------------------
+# Issue #861: MERGE_MR_NON_BLOCKING_CHECKS — informational checks must not
+# turn an otherwise-green PR into a refusal.
+# ---------------------------------------------------------------------------
+
+@test "#861 AC1: UNSTABLE from an allowlisted check only, nothing pending -> mergeable, names the ignored check" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"validate"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"e2e"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 5979
+	[[ "$status" -eq 0 ]] \
+		|| fail "gate refused a PR whose only red check is allowlisted: $output"
+	assert_contains "$output" "non-blocking check(s) [frontend-unit-tests]"
+}
+
+@test "#861 AC2: an allowlisted failure plus a real failure is still refused, naming the real one" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"e2e"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 5979
+	[[ "$status" -ne 0 ]] \
+		|| fail "gate merged despite a non-allowlisted FAILURE"
+	assert_contains "$output" 'check "e2e" that concluded in failure'
+}
+
+@test "#861 AC2: an allowlisted failure with another check still running keeps waiting (times out, no merge)" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":"","name":"e2e"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=2
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 5979
+	[[ "$status" -ne 0 ]] \
+		|| fail "gate proceeded while a blocking check was still running"
+	assert_contains "$output" "Waiting for PR #5979"
+	assert_contains "$output" "Timed out"
+}
+
+@test "#861 AC1: an empty allowlist changes nothing — the same UNSTABLE PR is refused" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"validate"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS= MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 5979
+	[[ "$status" -ne 0 ]] \
+		|| fail "empty allowlist merged an UNSTABLE PR"
+	assert_contains "$output" 'check "frontend-unit-tests" that concluded in failure'
+}
+
+@test "#861 AC3: legacy gate (MERGE_MR_MERGE_STATE_GATE=0) honours the allowlist and is otherwise unchanged" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeable":"MERGEABLE","mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests MERGE_MR_MERGE_STATE_GATE=0 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 5979
+	[[ "$status" -eq 0 ]] \
+		|| fail "legacy gate refused an allowlisted-only failure: $output"
+}
+
+@test "#861: legacy commit-status entries are matched by context, and names are trimmed" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"StatusContext","state":"FAILURE","context":"ci/informational"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"validate"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=" ci/informational , other " MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 5979
+	[[ "$status" -eq 0 ]] \
+		|| fail "status-context allowlist entry not honoured: $output"
+	assert_contains "$output" "[ci/informational]"
+}
 
 @test "AC1: hook blocks a direct gh pr merge" {
 	run _run_merge_hook 'gh pr merge 5857 --squash --delete-branch'
