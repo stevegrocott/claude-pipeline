@@ -49,6 +49,17 @@ _non_blocking_checks_json() {
 # jq filter body: the name a rollup entry is matched by (CheckRun vs status).
 _JQ_CHECK_NAME='(if .__typename == "CheckRun" then .name else .context end)'
 
+# jq filter body: true when the piped-in conclusion/state string is a
+# concluded-failure value. Shared so the failing-state list can't drift
+# between the three functions below (issue #861 follow-up).
+_JQ_IS_FAILED_STATE='(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED" or . == "STARTUP_FAILURE")'
+
+# jq filter body: a rollup entry's name/context if it concluded in failure,
+# nothing otherwise. CheckRun entries report status/conclusion (conclusion is
+# only trustworthy once status is COMPLETED); legacy commit-status entries
+# report state directly.
+_JQ_FAILED_CHECK_NAME='(if .__typename == "CheckRun" then (select(.status == "COMPLETED" and (.conclusion | '"$_JQ_IS_FAILED_STATE"')) | .name) else (select(.state | '"$_JQ_IS_FAILED_STATE"') | .context) end)'
+
 # Names in the rollup that concluded in failure but are allowlisted — for the
 # merge log, so an ignored red check is visible rather than silent.
 _ignored_failed_checks() {
@@ -56,11 +67,7 @@ _ignored_failed_checks() {
   jq -r --argjson ignore "$(_non_blocking_checks_json)" '
     [.[]? |
       select(('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) |
-      if .__typename == "CheckRun" then
-        (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
-      else
-        (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
-      end
+      '"$_JQ_FAILED_CHECK_NAME"'
     ] | join(", ")
   ' <<<"$rollup_json" 2>/dev/null || echo ""
 }
@@ -91,14 +98,8 @@ _has_concluded_check_failure() {
   jq -e --argjson ignore "$(_non_blocking_checks_json)" '
     [.[]? |
       select((('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) | not) |
-      if .__typename == "CheckRun" then
-        (select(.status == "COMPLETED") | .conclusion)
-      else
-        .state
-      end
-    ] | any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or
-        . == "TIMED_OUT" or . == "ACTION_REQUIRED" or
-        . == "STARTUP_FAILURE")
+      '"$_JQ_FAILED_CHECK_NAME"'
+    ] | length > 0
   ' <<<"$rollup_json" >/dev/null 2>&1
 }
 
@@ -111,11 +112,7 @@ _first_failed_check() {
   jq -r --argjson ignore "$(_non_blocking_checks_json)" '
     [.[]? |
       select((('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) | not) |
-      if .__typename == "CheckRun" then
-        (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
-      else
-        (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
-      end
+      '"$_JQ_FAILED_CHECK_NAME"'
     ] | first // "unknown check"
   ' <<<"$rollup_json" 2>/dev/null || echo "unknown check"
 }

@@ -60,7 +60,7 @@ _load_merge_mr_functions() {
 		|| fail "wait_for_mergeable() not defined in merge-mr.sh"
 
 	# Issue #861: the gate consults the non-blocking allowlist through three
-	# more helpers and two module-level assignments; load them the same way so
+	# more helpers and four module-level assignments; load them the same way so
 	# the extracted functions run exactly as in production.
 	local helper
 	for helper in _non_blocking_checks_json _ignored_failed_checks _has_pending_check; do
@@ -69,7 +69,7 @@ _load_merge_mr_functions() {
 		[[ -n "$body" ]] || fail "$helper() not defined in merge-mr.sh"
 		eval "$body"
 	done
-	eval "$(grep -E '^(MERGE_MR_NON_BLOCKING_CHECKS|_JQ_CHECK_NAME)=' "$MERGE_MR")"
+	eval "$(grep -E '^(MERGE_MR_NON_BLOCKING_CHECKS|_JQ_CHECK_NAME|_JQ_IS_FAILED_STATE|_JQ_FAILED_CHECK_NAME)=' "$MERGE_MR")"
 
 	eval "$gate_body"
 	eval "$name_body"
