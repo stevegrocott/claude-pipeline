@@ -23,64 +23,60 @@ MR="$1"
 # `mergeable`-only behavior.
 MERGE_MR_MERGE_STATE_GATE="${MERGE_MR_MERGE_STATE_GATE:-1}"
 
-# Comma-separated list of EXACT check names the consumer has declared
-# informational (issue #861). A check named here never blocks the merge: it
-# is dropped before the concluded-failure test, and a PR that GitHub reports
-# as UNSTABLE only because of such a check is merged instead of refused.
-#
-# Exact names only — no globs, no prefixes. A too-broad allowlist hides real
-# regressions, so every ignored check name is echoed into the merge log
-# before the merge proceeds.
-#
-# Empty by default: with no allowlist the gate behaves exactly as it did
-# before #861.
+# Check-run names (comma-separated) whose failure must NOT block the merge —
+# jobs the consumer runs as informational (`continue-on-error`, a known-red
+# baseline being burned down). GitHub reports such a PR as UNSTABLE, which the
+# gate below would otherwise refuse outright (issue #861: 7 of 13 approved PRs
+# in one day, every blocking gate green). Names are matched exactly against
+# CheckRun `.name` / commit-status `.context`. Empty by default: nothing is
+# ignored unless the consumer says so in config/platform.sh.
 MERGE_MR_NON_BLOCKING_CHECKS="${MERGE_MR_NON_BLOCKING_CHECKS:-}"
 
-# Renders MERGE_MR_NON_BLOCKING_CHECKS as a JSON array for jq --argjson.
-# Surrounding whitespace is trimmed and empty entries dropped, so
-# "a, b," yields ["a","b"]. Emits [] when unset or unparseable.
+# The allowlist as a JSON array, for jq --argjson.
 _non_blocking_checks_json() {
-  jq -cn --arg raw "${MERGE_MR_NON_BLOCKING_CHECKS:-}" '
-    $raw | split(",")
-      | map(gsub("^[ \t]+|[ \t]+$"; ""))
-      | map(select(length > 0))
-  ' 2>/dev/null || echo '[]'
+  # printf with a trailing newline: `jq -R` on a zero-line input emits nothing at
+  # all, which would hand `--argjson` an empty string and make every caller fail
+  # open. One (possibly empty) line always yields a JSON array.
+  local json
+  json=$(printf '%s\n' "$MERGE_MR_NON_BLOCKING_CHECKS" \
+    | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))' 2>/dev/null)
+  case "$json" in
+    \[*\]) printf '%s' "$json" ;;
+    *) printf '[]' ;;
+  esac
 }
 
-# Returns success when any entry in a statusCheckRollup JSON array has
-# concluded in a failing state. CheckRun entries report status/conclusion
-# (conclusion is only trustworthy once status is COMPLETED); legacy
-# commit-status entries report state directly.
-#
-# Checks whose name (CheckRun) or context (commit status) appears in
-# MERGE_MR_NON_BLOCKING_CHECKS are excluded from the test entirely.
-_has_concluded_check_failure() {
+# jq filter body: the name a rollup entry is matched by (CheckRun vs status).
+_JQ_CHECK_NAME='(if .__typename == "CheckRun" then .name else .context end)'
+
+# jq filter body: true when the piped-in conclusion/state string is a
+# concluded-failure value. Shared so the failing-state list can't drift
+# between the three functions below (issue #861 follow-up).
+_JQ_IS_FAILED_STATE='(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED" or . == "STARTUP_FAILURE")'
+
+# jq filter body: a rollup entry's name/context if it concluded in failure,
+# nothing otherwise. CheckRun entries report status/conclusion (conclusion is
+# only trustworthy once status is COMPLETED); legacy commit-status entries
+# report state directly.
+_JQ_FAILED_CHECK_NAME='(if .__typename == "CheckRun" then (select(.status == "COMPLETED" and (.conclusion | '"$_JQ_IS_FAILED_STATE"')) | .name) else (select(.state | '"$_JQ_IS_FAILED_STATE"') | .context) end)'
+
+# Names in the rollup that concluded in failure but are allowlisted — for the
+# merge log, so an ignored red check is visible rather than silent.
+_ignored_failed_checks() {
   local rollup_json="$1"
-  local allow
-  allow="$(_non_blocking_checks_json)"
-
-  jq -e --argjson allow "$allow" '
+  jq -r --argjson ignore "$(_non_blocking_checks_json)" '
     [.[]? |
-      (.name // .context // "") as $n |
-      select(($allow | index($n)) == null) |
-      if .__typename == "CheckRun" then
-        (select(.status == "COMPLETED") | .conclusion)
-      else
-        .state
-      end
-    ] | any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or
-        . == "TIMED_OUT" or . == "ACTION_REQUIRED" or
-        . == "STARTUP_FAILURE")
-  ' <<<"$rollup_json" >/dev/null 2>&1
+      select(('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) |
+      '"$_JQ_FAILED_CHECK_NAME"'
+    ] | join(", ")
+  ' <<<"$rollup_json" 2>/dev/null || echo ""
 }
 
-# Returns success when any entry in a statusCheckRollup array has NOT yet
-# concluded. Allowlisted or not: a check that is still running means the PR
-# is not finished, so the UNSTABLE shortcut below must keep waiting rather
-# than merge on a partial picture.
+# Returns success when any rollup entry is still running or queued. Used so an
+# UNSTABLE PR whose only red checks are allowlisted is merged only once every
+# other check has actually finished — never while a blocking one is pending.
 _has_pending_check() {
   local rollup_json="$1"
-
   jq -e '
     [.[]? |
       if .__typename == "CheckRun" then
@@ -88,28 +84,23 @@ _has_pending_check() {
       else
         (.state == "PENDING" or .state == "EXPECTED")
       end
-    ] | any(. == true)
+    ] | any
   ' <<<"$rollup_json" >/dev/null 2>&1
 }
 
-# Comma-separated names of the allowlisted checks that DID conclude in
-# failure, for the merge log. Empty string when nothing was waved through.
-_ignored_failed_checks() {
+# Returns success when any entry in a statusCheckRollup JSON array has
+# concluded in a failing state. CheckRun entries report status/conclusion
+# (conclusion is only trustworthy once status is COMPLETED); legacy
+# commit-status entries report state directly.
+_has_concluded_check_failure() {
   local rollup_json="$1"
-  local allow
-  allow="$(_non_blocking_checks_json)"
 
-  jq -r --argjson allow "$allow" '
+  jq -e --argjson ignore "$(_non_blocking_checks_json)" '
     [.[]? |
-      (.name // .context // "") as $n |
-      select(($allow | index($n)) != null) |
-      if .__typename == "CheckRun" then
-        (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
-      else
-        (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
-      end
-    ] | join(", ")
-  ' <<<"$rollup_json" 2>/dev/null || echo ""
+      select((('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) | not) |
+      '"$_JQ_FAILED_CHECK_NAME"'
+    ] | length > 0
+  ' <<<"$rollup_json" >/dev/null 2>&1
 }
 
 # Names the first check in a statusCheckRollup array that concluded in a
@@ -117,18 +108,11 @@ _ignored_failed_checks() {
 # refusals cannot drift apart (issue #853).
 _first_failed_check() {
   local rollup_json="$1"
-  local allow
-  allow="$(_non_blocking_checks_json)"
 
-  jq -r --argjson allow "$allow" '
+  jq -r --argjson ignore "$(_non_blocking_checks_json)" '
     [.[]? |
-      (.name // .context // "") as $n |
-      select(($allow | index($n)) == null) |
-      if .__typename == "CheckRun" then
-        (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
-      else
-        (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
-      end
+      select((('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) | not) |
+      '"$_JQ_FAILED_CHECK_NAME"'
     ] | first // "unknown check"
   ' <<<"$rollup_json" 2>/dev/null || echo "unknown check"
 }
@@ -193,34 +177,6 @@ wait_for_mergeable() {
         echo "PR has unresolvable merge conflicts" >&2
         return 1
         ;;
-      UNSTABLE)
-        # UNSTABLE means a non-required check is red or still running. When
-        # every red check is on the MERGE_MR_NON_BLOCKING_CHECKS allowlist
-        # and nothing is still running, the PR is as green as it will ever
-        # get — merge it, naming what was ignored (issue #861). Any
-        # non-allowlisted failure still refuses, and a still-running check
-        # still waits, so this cannot merge an untested PR.
-        local unstable_rollup
-        unstable_rollup=$(jq -c '.statusCheckRollup // []' <<<"$json" \
-          2>/dev/null || echo "[]")
-
-        if _has_concluded_check_failure "$unstable_rollup"; then
-          echo "PR #$pr has check \"$(_first_failed_check "$unstable_rollup")\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
-          return 1
-        fi
-
-        local ignored
-        ignored=$(_ignored_failed_checks "$unstable_rollup")
-        if [[ -n "$ignored" ]] \
-          && ! _has_pending_check "$unstable_rollup"; then
-          echo "PR #$pr: ignoring non-blocking check(s) \"$ignored\" (MERGE_MR_NON_BLOCKING_CHECKS); every other check passed — proceeding to merge" >&2
-          return 0
-        fi
-
-        echo "Waiting for PR #$pr to become mergeable (mergeStateStatus: $merge_state, ${elapsed}s elapsed)..." >&2
-        sleep "$interval"
-        elapsed=$((elapsed + interval))
-        ;;
       *)
         local rollup
         rollup=$(jq -c '.statusCheckRollup // []' <<<"$json" 2>/dev/null || echo "[]")
@@ -228,6 +184,19 @@ wait_for_mergeable() {
         if _has_concluded_check_failure "$rollup"; then
           echo "PR #$pr has check \"$(_first_failed_check "$rollup")\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
           return 1
+        fi
+
+        # UNSTABLE means "a check failed"; if every failed check is on the
+        # non-blocking list and nothing is still running, that is the green
+        # state the consumer asked for (issue #861). While anything is pending
+        # keep waiting — a blocking check may still fail.
+        if [ "$merge_state" = "UNSTABLE" ] && ! _has_pending_check "$rollup"; then
+          local ignored
+          ignored=$(_ignored_failed_checks "$rollup")
+          if [ -n "$ignored" ]; then
+            echo "PR #$pr is UNSTABLE only because of non-blocking check(s) [$ignored] (MERGE_MR_NON_BLOCKING_CHECKS); proceeding" >&2
+            return 0
+          fi
         fi
 
         echo "Waiting for PR #$pr to become mergeable (mergeStateStatus: $merge_state, ${elapsed}s elapsed)..." >&2
