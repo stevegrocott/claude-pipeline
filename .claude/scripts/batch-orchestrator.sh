@@ -1923,6 +1923,14 @@ process_issue() {
         fi
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "${impl_error:-implement-issue failed with status: $impl_status}"
+        # Issue #870: a merge_pr-stage failure leaves the PR OPEN, but this arm
+        # historically recorded only status+error. wait_for_pr_merged() keys off
+        # .issues[].pr, so the batch forked the next issue on top of an open PR
+        # — the exact conflict #861 was filed to stop. Record it here, as the
+        # merge_blocked arm already does.
+        if [[ -n "$pr_number" ]]; then
+            update_issue_field "$issue_num" "pr" "$pr_number" "true"
+        fi
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
         return 1
@@ -2495,6 +2503,14 @@ wait_for_pr_merged() {
 	pr=$(jq -r --arg num "$issue_num" \
 		'.issues[] | select(.number == $num) | .pr // empty' \
 		"$STATUS_FILE" 2>/dev/null) || pr=""
+	# Defence in depth (#870): .pr is written by the arms that expect to leave
+	# a PR open, so any path that misses that write would silently disable the
+	# park. The orchestrator always records the PR it created in its own stage
+	# file, so consult that before concluding there is nothing to wait for.
+	if [[ -z "$pr" || "$pr" == "null" ]]; then
+		pr=$(jq -r '.stages.pr.pr_number // empty' \
+			"$LOG_BASE/issue-$issue_num-status.json" 2>/dev/null) || pr=""
+	fi
 	if [[ -z "$pr" || "$pr" == "null" ]]; then
 		return 0
 	fi

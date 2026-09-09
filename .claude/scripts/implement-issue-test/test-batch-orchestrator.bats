@@ -4098,6 +4098,93 @@ _gh_call_count() {
 		|| fail "the timeout cleared the PR number"
 }
 
+# ---------------------------------------------------------------------------
+# #870: a merge_pr-stage failure leaves the PR OPEN but reaches the batch as
+# state:error, whose arm historically recorded only status+error. The park
+# keyed off .issues[].pr, so the batch forked the next issue on top of it.
+# ---------------------------------------------------------------------------
+
+# Seeds status.json with the issue carrying NO .pr (the merge_pr-failure
+# shape), plus the orchestrator's own stage record that does carry the PR.
+_seed_merge_pr_failure() {
+	jq -n '{
+		state: "running",
+		issues: [
+			{number: "6010", status: "failed", pr: null,
+			 error: "Merge declined at merge_pr for PR #6017"},
+			{number: "6011", status: "pending", pr: null}
+		],
+		progress: {total: 2, completed: 0, pending: 1, failed: 1}
+	}' > "$STATUS_FILE"
+	jq -n '{state: "error", current_stage: "merge_pr",
+		stages: {pr: {pr_number: "6017"}}}' \
+		> "$LOG_BASE/issue-6010-status.json"
+}
+
+@test "AC1(#870): the failure arm records the open PR, not just the error" {
+	# The fallback in wait_for_pr_merged() would mask a missing write here, so
+	# assert the primary fix independently of it: the generic failure arm must
+	# persist .pr the way the merge_blocked arm does.
+	local body
+	body=$(_extract_function_body process_issue "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$body" ]] || fail "process_issue() not defined in batch-orchestrator.sh"
+
+	local failure_arm
+	failure_arm=${body##*implement-issue failed with status: \$impl_status}
+	failure_arm=${failure_arm%%return 1*}
+
+	[[ "$failure_arm" == *'update_issue_field "$issue_num" "pr"'* ]] \
+		|| fail "failure arm does not persist the PR number: $failure_arm"
+	[[ "$failure_arm" == *'-n "$pr_number"'* ]] \
+		|| fail "the PR write is not guarded by a non-empty check: $failure_arm"
+}
+
+@test "AC1(#870): a merge_pr failure with an OPEN PR parks the batch" {
+	_load_wait_for_merge_functions
+	_seed_merge_pr_failure
+	_stub_gh_pr_states "OPEN" "OPEN" "MERGED"
+	_stub_comment_issue
+
+	run wait_for_pr_merged 6010
+	[ "$status" -eq 0 ] || fail "expected park-then-resume, got: $output"
+
+	# It genuinely polled rather than short-circuiting on an empty .pr.
+	local calls
+	calls=$(_gh_call_count)
+	(( calls > 1 )) || fail "expected repeated polls, saw $calls gh call(s)"
+}
+
+@test "AC3(#870): the PR is recovered from the stage record when .pr is empty" {
+	_load_wait_for_merge_functions
+	_seed_merge_pr_failure
+	_stub_gh_pr_states "MERGED"
+	_stub_comment_issue
+
+	run wait_for_pr_merged 6010
+	[ "$status" -eq 0 ] || fail "expected success, got: $output"
+
+	# The PR number can only have come from .stages.pr.pr_number.
+	grep -q "6017" "$TEST_TMP/gh-calls.log" \
+		|| fail "wait never queried PR 6017; gh-calls: $(cat "$TEST_TMP/gh-calls.log")"
+}
+
+@test "AC2(#870): a merge_pr failure whose PR is CLOSED does not park" {
+	_load_wait_for_merge_functions
+	_seed_merge_pr_failure
+	_stub_gh_pr_states "CLOSED"
+	_stub_comment_issue
+
+	run wait_for_pr_merged 6010
+	[ "$status" -eq 0 ] || fail "a CLOSED PR must not halt the batch: $output"
+
+	# One state query and no park: no comment, state untouched.
+	[ ! -s "$TEST_TMP/comments.log" ] \
+		|| fail "CLOSED PR must not post a park comment: $(cat "$TEST_TMP/comments.log")"
+	local st
+	st=$(jq -r '.state' "$STATUS_FILE")
+	[[ "$st" == "running" ]] || fail "state should stay running, got '$st'"
+}
+
 @test "AC5(#861): BATCH_WAIT_FOR_MERGE_MAX=0 restores immediate continuation" {
 	_load_wait_for_merge_functions
 	_seed_status_with_open_pr
