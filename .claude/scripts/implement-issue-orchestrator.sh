@@ -327,12 +327,37 @@ readonly ISSUE_TASKS_HEADING_ERE='^##+[[:space:]]+implementation tasks'
 #
 # The named helper _timeout_perl_fallback is always defined so that BATS tests
 # can call it directly to verify exit-124 semantics independent of host binaries.
+#
+# Empty / non-numeric durations are REJECTED with exit 125, matching GNU
+# timeout ("invalid time interval", exit 125 = "timeout itself failed").
+# Perl's alarm() would instead coerce "" to 0, which means NO alarm — so a
+# caller that passed an unset timeout variable ran unbounded on macOS and
+# hard-failed only in Linux CI. That divergence is exactly how issue #859
+# hid: TEST_LOOP_GIT_TIMEOUT was empty in the bats harness, `timeout ""
+# git diff ...` returned 125 on Linux and silently succeeded on macOS.
+# Failing loudly on both platforms is the correct direction: the alternative
+# (substituting a default here) would make Linux stop reporting the bug
+# instead of making macOS start reporting it, and a timeout silently
+# disabled is worse than a timeout loudly refused.
 
 _timeout_perl_fallback() {
     local duration="$1"; shift
+    # Accept GNU timeout's DURATION grammar: a number with an optional
+    # fraction and an optional s/m/h/d suffix. Anything else — empty
+    # included — is an invalid time interval.  The pattern lives in a
+    # variable because bash 3.2 treats a QUOTED =~ right-hand side as a
+    # literal string.
+    local _duration_re='^[0-9]+(\.[0-9]+)?[smhd]?$'
+    if [[ ! "$duration" =~ $_duration_re ]]; then
+        printf "timeout: invalid time interval '%s'\n" "$duration" >&2
+        return 125
+    fi
     perl -e '
         use POSIX ":sys_wait_h";
-        alarm shift @ARGV;
+        my $d = shift @ARGV;
+        my %mult = (s => 1, m => 60, h => 3600, d => 86400);
+        $d = $1 * $mult{$2} if $d =~ /^([0-9.]+)([smhd])$/;
+        alarm $d;
         $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
         $pid = fork // die "fork: $!";
         if ($pid == 0) { exec @ARGV; die "exec: $!" }

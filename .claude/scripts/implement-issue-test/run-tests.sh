@@ -88,9 +88,17 @@ CI_EXCLUDED_SUITES=(
 
     # --- Fail or hang on Linux while passing on macOS (tracked in #859) ---
     # These are pre-existing platform bugs, not regressions from #855. They are
-    # excluded so the other 47 suites can be gated NOW rather than waiting on a
-    # cross-platform audit. Each should be removed from this list as it is
-    # fixed — the entry is a debt marker, not a decision.
+    # excluded so every OTHER suite can be gated NOW rather than waiting on a
+    # cross-platform audit (`run-tests.sh --list-ci | wc -l` for the current
+    # count). Each should be removed from this list as it is fixed — the entry
+    # is a debt marker, not a decision.
+    #
+    # REMOVED from this list: test-smart-test-targeting.bats (was 17 failures)
+    # and test-soft-fail-convergence.bats (was 5). Both failed with exit 125
+    # from `timeout "$TEST_LOOP_GIT_TIMEOUT" git ...` because the harness
+    # extractor dropped every non-MAX_* config default, leaving the duration
+    # empty; GNU timeout rejects an empty interval, the macOS perl fallback
+    # did not. Fixed in source_orchestrator_functions() and the timeout shim.
 
     # HANGS rather than fails: stalls at "parent watchdog fires when inner
     # timeout wrapper hangs" and burns the whole job timeout. A hang is worse
@@ -98,8 +106,6 @@ CI_EXCLUDED_SUITES=(
     # pass nor fail.
     test-stage-runner.bats
 
-    test-smart-test-targeting.bats   # 17 failures on Linux
-    test-soft-fail-convergence.bats  # 5
     test-integration.bats            # 4
     test-claude-usage.bats           # 3
     test-task-batching.bats          # 2
