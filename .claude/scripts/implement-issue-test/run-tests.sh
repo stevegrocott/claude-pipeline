@@ -86,26 +86,14 @@ CI_EXCLUDED_SUITES=(
     # byte-identity contract.
     test-bundle-parity.bats
 
-    # --- Fail or hang on Linux while passing on macOS (tracked in #859) ---
-    # These are pre-existing platform bugs, not regressions from #855. They are
-    # excluded so the other 47 suites can be gated NOW rather than waiting on a
-    # cross-platform audit. Each should be removed from this list as it is
-    # fixed — the entry is a debt marker, not a decision.
-
-    # HANGS rather than fails: stalls at "parent watchdog fires when inner
-    # timeout wrapper hangs" and burns the whole job timeout. A hang is worse
-    # than a failure — it produces a `cancelled` run, which reads like neither
-    # pass nor fail.
+    # --- DIAGNOSTIC BRANCH ONLY (#859) — DO NOT MERGE ---
+    # The eight failing suites below have been temporarily un-excluded to
+    # capture their real Linux failures. Only the hanging suite stays
+    # excluded: it stalls at "parent watchdog fires when inner timeout
+    # wrapper hangs" and burns the whole job timeout, producing a
+    # `cancelled` run that would cut short the logs of whatever shares its
+    # shard — which is exactly the evidence this branch exists to collect.
     test-stage-runner.bats
-
-    test-smart-test-targeting.bats   # 17 failures on Linux
-    test-soft-fail-convergence.bats  # 5
-    test-integration.bats            # 4
-    test-claude-usage.bats           # 3
-    test-task-batching.bats          # 2
-    test-surgical-fast-path.bats     # 1
-    test-merge-block-partial.bats    # 1
-    test-constants.bats              # 1
 )
 
 # Prints the CI-safe suite list, one per line.
