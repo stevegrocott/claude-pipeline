@@ -37,6 +37,13 @@
 #     3. tags unmerged commits as salvage/issue-<n>-task<m> before delete
 #     4. does not create a salvage tag when branch has no unmerged commits
 #
+#   stale-branch salvage (issue #838):
+#     1. cleanup_stale_worktrees tags a stale branch's unmerged commits
+#     2. cleanup_stale_worktrees leaves a merged stale branch untagged
+#     3. create_task_worktree tags a prior-run branch's unmerged commits
+#     4. create_task_worktree leaves a merged prior-run branch untagged
+#     5. the git-worktree-add rollback still deletes without tagging
+#
 #   execute_batch_serial:
 #     1. returns completed array with task IDs (mocked run_stage)
 #     2. returns failed array when run_stage fails
@@ -459,6 +466,151 @@ teardown() {
 
 	git checkout -q main
 	git branch -D feature/no-salvage-test 2>/dev/null || true
+}
+
+# =============================================================================
+# cleanup_stale_worktrees / create_task_worktree stale-branch salvage
+# (issue #838)
+# =============================================================================
+
+@test "cleanup_stale_worktrees: salvage-tags a stale branch's unmerged commits" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# A branch left behind by a crashed prior run: it committed, never
+	# merged, and no worktree is registered for it any more.
+	git checkout -q -b wt-i42-t7 main
+	printf 'crashed run work\n' > stale-work.txt
+	git add stale-work.txt
+	git commit -q -m "work from a prior run"
+	local orphan_sha
+	orphan_sha=$(git rev-parse wt-i42-t7)
+	git checkout -q main
+
+	cleanup_stale_worktrees
+
+	# Branch is gone...
+	refute git rev-parse --verify --quiet refs/heads/wt-i42-t7
+
+	# ...but the commit is still addressable via the salvage tag.
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task7"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$orphan_sha" ]
+
+	# And the salvage is logged.
+	run grep -F "Salvaged unmerged commits on wt-i42-t7 as tag salvage/issue-42-task7" \
+		"$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "cleanup_stale_worktrees: merged stale branch deleted with no tag, no noise" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# Same shape, except the work did reach main before the crash.
+	git checkout -q -b wt-i42-t8 main
+	printf 'landed work\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that landed"
+	git checkout -q main
+	git merge -q --no-edit wt-i42-t8
+
+	cleanup_stale_worktrees
+
+	refute git rev-parse --verify --quiet refs/heads/wt-i42-t8
+
+	# No tag for work that is already reachable...
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task8"
+	[ "$status" -ne 0 ]
+
+	# ...and no salvage line in the log either.
+	refute grep -q "Salvaged unmerged commits" "$LOG_FILE"
+}
+
+@test "create_task_worktree: salvage-tags a prior-run branch's unmerged commits" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/prior-run main
+
+	# A prior run's branch for the same issue/task, holding a commit that
+	# never reached the feature branch. create_task_worktree deletes it to
+	# make room for the new worktree.
+	git checkout -q -b wt-i42-t9 main
+	printf 'prior run work\n' > prior.txt
+	git add prior.txt
+	git commit -q -m "prior run commit"
+	local orphan_sha
+	orphan_sha=$(git rev-parse wt-i42-t9)
+	git checkout -q feature/prior-run
+
+	local wt_base="$TEST_TMP/worktrees"
+	create_task_worktree "$wt_base" "feature/prior-run" "9" "42" \
+		>/dev/null
+
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task9"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$orphan_sha" ]
+
+	run grep -F "as tag salvage/issue-42-task9" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+
+	git worktree remove --force "${wt_base}/task-9" 2>/dev/null || true
+	git checkout -q main
+	git branch -D wt-i42-t9 2>/dev/null || true
+	git branch -D feature/prior-run 2>/dev/null || true
+	git tag -d "salvage/issue-42-task9" 2>/dev/null || true
+}
+
+@test "create_task_worktree: no tag when the prior-run branch is fully merged" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/prior-merged main
+
+	git checkout -q -b wt-i42-t10 feature/prior-merged
+	printf 'merged prior work\n' > prior-merged.txt
+	git add prior-merged.txt
+	git commit -q -m "prior run commit"
+	git checkout -q feature/prior-merged
+	git merge -q --no-edit wt-i42-t10
+
+	local wt_base="$TEST_TMP/worktrees"
+	create_task_worktree "$wt_base" "feature/prior-merged" "10" "42" \
+		>/dev/null
+
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task10"
+	[ "$status" -ne 0 ]
+
+	refute grep -q "Salvaged unmerged commits" "$LOG_FILE"
+
+	git worktree remove --force "${wt_base}/task-10" 2>/dev/null || true
+	git checkout -q main
+	git branch -D wt-i42-t10 2>/dev/null || true
+	git branch -D feature/prior-merged 2>/dev/null || true
+}
+
+@test "create_task_worktree: worktree-add rollback deletes the branch untagged" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/rollback main
+
+	# Force `git worktree add` to fail: the target path already exists and
+	# is not empty. The branch it rolls back was just created at the
+	# feature branch tip, so it carries nothing to salvage — the rollback
+	# must stay a plain delete.
+	local wt_base="$TEST_TMP/worktrees"
+	mkdir -p "${wt_base}/task-30"
+	printf 'in the way\n' > "${wt_base}/task-30/occupied.txt"
+
+	run create_task_worktree "$wt_base" "feature/rollback" "30" "42"
+	[ "$status" -ne 0 ]
+
+	refute git rev-parse --verify --quiet refs/heads/wt-i42-t30
+
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task30"
+	[ "$status" -ne 0 ]
+
+	git checkout -q main
+	git branch -D feature/rollback 2>/dev/null || true
 }
 
 # =============================================================================
