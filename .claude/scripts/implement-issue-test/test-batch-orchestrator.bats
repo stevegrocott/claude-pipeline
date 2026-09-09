@@ -3849,3 +3849,353 @@ MOCKGH
 		-name 'batch-orchestrator.*' -type f | wc -l)
 	[[ "$copy_count" -eq 0 ]]
 }
+
+# =============================================================================
+# ISSUE #861 — the batch must not fork issue N+1 while PR N is still open
+# =============================================================================
+#
+# "Sequential" meant sequential pipeline stages, not sequential merges: the
+# loop advanced the moment process_issue returned, so issue N+1 branched off a
+# main that did not contain PR N. In beegee-farm-3 that produced same-file
+# conflicts (#5980 vs #5979, #5992 vs #5991) and, once a PR went DIRTY, GitHub
+# ran no pull_request workflow on it at all — CI stopped silently.
+#
+# wait_for_pr_merged() parks the loop until the PR reports MERGED, bounded by
+# BATCH_WAIT_FOR_MERGE_MAX, with state paused_on_pr, the PR number in
+# status.json, and exactly one comment on the issue.
+
+# Sources wait_for_pr_merged() and everything it calls out of the real script,
+# with the collaborators the extracted functions cannot supply themselves:
+# log*, a `timeout` shim (macOS ships none, and the script's own shim is
+# top-level code this extraction skips) and a no-op sleep so the poll loop
+# costs no real seconds while still advancing `elapsed` exactly as it does in
+# production.
+_load_wait_for_merge_functions() {
+	local fn body
+	for fn in set_state set_paused_on_pr comment_paused_on_pr \
+		pr_merge_state wait_for_pr_merged; do
+		body=$(_extract_function_body "$fn" "$BATCH_ORCHESTRATOR_SCRIPT")
+		[[ -n "$body" ]] \
+			|| fail "$fn() not defined in batch-orchestrator.sh"
+		eval "$body"
+	done
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	log_error() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	timeout() { shift; "$@"; }
+	sleep() { :; }
+	: > "$TEST_TMP/batch.log"
+}
+
+# status.json with issue 5980 carrying PR 1234, and two untouched issues
+# after it — so a halt can be checked against a real manifest.
+_seed_status_with_open_pr() {
+	jq -n '{
+		state: "running",
+		issues: [
+			{number: "5980", status: "completed", pr: "1234"},
+			{number: "5981", status: "pending", pr: null},
+			{number: "5982", status: "pending", pr: null}
+		],
+		progress: {total: 3, completed: 1, pending: 2, failed: 0}
+	}' > "$STATUS_FILE"
+}
+
+# Stubs `gh pr view --json state`. Each queued line is consumed by one call;
+# once the queue is empty the PR reports OPEN forever.
+_stub_gh_pr_states() {
+	mkdir -p "$TEST_TMP/bin"
+	printf '%s\n' "$@" > "$TEST_TMP/pr-states"
+	: > "$TEST_TMP/gh-calls.log"
+
+	cat > "$TEST_TMP/bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_TMP/gh-calls.log"
+state=\$(head -1 "$TEST_TMP/pr-states" 2>/dev/null)
+tail -n +2 "$TEST_TMP/pr-states" > "$TEST_TMP/pr-states.next" 2>/dev/null
+mv "$TEST_TMP/pr-states.next" "$TEST_TMP/pr-states" 2>/dev/null
+[[ -n "\$state" ]] || state="OPEN"
+printf '%s\n' "\$state"
+exit 0
+STUB
+	chmod +x "$TEST_TMP/bin/gh"
+	PATH="$TEST_TMP/bin:$PATH"
+}
+
+# Stubs the platform comment script, recording one line per invocation.
+_stub_comment_issue() {
+	export PLATFORM_DIR="$TEST_TMP/platform"
+	mkdir -p "$PLATFORM_DIR"
+	: > "$TEST_TMP/comments.log"
+
+	cat > "$PLATFORM_DIR/comment-issue.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s|%s\n' "\$1" "\$2" >> "$TEST_TMP/comments.log"
+exit 0
+STUB
+	chmod +x "$PLATFORM_DIR/comment-issue.sh"
+}
+
+# grep -c prints 0 AND exits 1 on an empty file, so the count must be taken
+# from the substitution rather than chained with `||` (which would print a
+# second 0 and make every arithmetic comparison a syntax error).
+_gh_call_count() {
+	local n
+	n=$(grep -c . "$TEST_TMP/gh-calls.log" 2>/dev/null) || n=0
+	printf '%s\n' "$n"
+}
+
+@test "AC4(#861): the batch parks on an open PR and resumes once it is MERGED" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	# OPEN on the pre-check and the first two polls, MERGED on the third.
+	_stub_gh_pr_states OPEN OPEN OPEN MERGED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] \
+		|| fail "wait_for_pr_merged failed on a PR that merged: $output"
+
+	# It genuinely waited: the pre-check alone is one call, so more than one
+	# means the poll loop ran before the PR reported MERGED.
+	local calls
+	calls=$(_gh_call_count)
+	(( calls > 1 )) \
+		|| fail "returned after $calls gh call(s) — it never polled"
+	grep -q "merged after" "$TEST_TMP/batch.log" \
+		|| fail "no 'merged' line in the batch log: $(cat "$TEST_TMP/batch.log")"
+}
+
+@test "AC4(#861): status.json carries paused_on_pr and the PR number" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=3 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+
+	local state pr
+	state=$(jq -r '.state' "$STATUS_FILE")
+	pr=$(jq -r '.paused_on_pr' "$STATUS_FILE")
+	[[ "$state" == "paused_on_pr" ]] \
+		|| fail "state is \"$state\", expected paused_on_pr"
+	[[ "$pr" == "1234" ]] \
+		|| fail "paused_on_pr is \"$pr\", expected the PR number 1234"
+}
+
+@test "AC4(#861): exactly one comment is posted, however long the park runs" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=10 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+
+	# Ten polls, one comment.
+	local comments
+	comments=$(grep -c . "$TEST_TMP/comments.log")
+	[[ "$comments" -eq 1 ]] \
+		|| fail "posted $comments comments, expected exactly 1"
+	grep -q '^5980|' "$TEST_TMP/comments.log" \
+		|| fail "the comment did not go to issue 5980"
+	grep -q 'PR #1234' "$TEST_TMP/comments.log" \
+		|| fail "the comment does not name the PR being waited on"
+}
+
+@test "AC4(#861): an already-merged PR neither parks nor comments" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states MERGED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "refused to continue past a merged PR"
+	[[ ! -s "$TEST_TMP/comments.log" ]] \
+		|| fail "commented on an issue whose PR had already merged"
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "running" ]] \
+		|| fail "state was changed even though there was nothing to wait for"
+}
+
+@test "AC4(#861): an issue with no PR recorded does not park the batch" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	# 5981 has pr: null.
+	run wait_for_pr_merged 5981
+	[[ "$status" -eq 0 ]] || fail "parked on an issue that opened no PR"
+	[[ "$(_gh_call_count)" -eq 0 ]] \
+		|| fail "queried the platform for a PR that does not exist"
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "running" ]] \
+		|| fail "state changed for an issue with no PR"
+}
+
+@test "AC4(#861): a PR closed without merging does not park the batch" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states CLOSED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] \
+		|| fail "parked for the full timeout on a PR that can never merge"
+	[[ ! -s "$TEST_TMP/comments.log" ]] \
+		|| fail "commented about waiting for a PR that was closed"
+}
+
+@test "AC5(#861): the wait is bounded — it fails once the ceiling passes" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=5 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 1 ]] \
+		|| fail "expected a bounded failure, got status $status"
+	grep -q "WAIT-FOR-MERGE TIMEOUT" "$TEST_TMP/batch.log" \
+		|| fail "the timeout was not reported: $(cat "$TEST_TMP/batch.log")"
+	# The halt state names the PR the operator has to deal with.
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "paused_on_pr" ]] \
+		|| fail "the timeout cleared the paused_on_pr state"
+	[[ "$(jq -r '.paused_on_pr' "$STATUS_FILE")" == "1234" ]] \
+		|| fail "the timeout cleared the PR number"
+}
+
+@test "AC5(#861): BATCH_WAIT_FOR_MERGE_MAX=0 restores immediate continuation" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=0 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "MAX=0 still blocked the batch"
+	[[ "$(_gh_call_count)" -eq 0 ]] \
+		|| fail "MAX=0 still polled the platform"
+	[[ ! -s "$TEST_TMP/comments.log" ]] \
+		|| fail "MAX=0 still commented on the issue"
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "running" ]] \
+		|| fail "MAX=0 still moved the batch into paused_on_pr"
+}
+
+@test "AC5(#861): the default ceiling is 7200s, not an unbounded wait" {
+	local body
+	body=$(_extract_function_body wait_for_pr_merged \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'BATCH_WAIT_FOR_MERGE_MAX:-7200'* ]] \
+		|| fail "wait_for_pr_merged does not default the ceiling to 7200s"
+}
+
+# -----------------------------------------------------------------------------
+# The call site: the main loop must consult the wait and halt like the
+# circuit breaker when it times out.
+# -----------------------------------------------------------------------------
+
+# Extracts the real `if ! wait_for_pr_merged ...` block from the main loop, so
+# the halt semantics below are checked against shipped source rather than a
+# re-typed copy. Returns 1 if the anchor is gone so the caller can skip.
+_extract_wait_call_block() {
+	local block_file="$TEST_TMP/wait_call_block.bash"
+	awk '/^    if ! wait_for_pr_merged /,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'wait_for_pr_merged' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+@test "AC4(#861): the main loop calls wait_for_pr_merged after process_issue" {
+	# The call must sit between the process_issue result handling and the end
+	# of the loop body — not before it, where there would be no PR yet.
+	local region
+	region=$(awk '/^    if process_issue "\$issue"; then/,/^done$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$region" ]] || fail "main loop region not found"
+	[[ "$region" == *'wait_for_pr_merged "$issue"'* ]] \
+		|| fail "the main loop never waits for the issue's PR to merge"
+}
+
+@test "AC5(#861): a wait timeout halts the loop with exit_code 2" {
+	local block_file
+	block_file=$(_extract_wait_call_block) \
+		|| skip "wait call block not found (script changed)"
+
+	# Drive the real block through a stand-in loop over the manifest, with
+	# the wait failing on the first issue exactly as a timeout does.
+	wait_for_pr_merged() { return 1; }
+	local exit_code=0 issue processed=""
+	for issue in 5980 5981 5982; do
+		processed="$processed $issue"
+		# shellcheck disable=SC1090
+		source "$block_file"
+	done
+
+	[[ "$exit_code" -eq 2 ]] \
+		|| fail "expected exit_code 2 (circuit-breaker parity), got $exit_code"
+	[[ "$processed" == " 5980" ]] \
+		|| fail "the loop kept going after the timeout:$processed"
+}
+
+@test "AC5(#861): remaining issues are still pending after a wait timeout" {
+	_seed_status_with_open_pr
+	local block_file
+	block_file=$(_extract_wait_call_block) \
+		|| skip "wait call block not found (script changed)"
+
+	wait_for_pr_merged() { return 1; }
+	local exit_code=0 issue
+	for issue in 5980 5981 5982; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+	done
+
+	# The halt leaves the manifest untouched, so a resume re-runs them.
+	local still_pending
+	still_pending=$(jq -r \
+		'[.issues[] | select(.status == "pending") | .number] | join(",")' \
+		"$STATUS_FILE")
+	[[ "$still_pending" == "5981,5982" ]] \
+		|| fail "remaining issues are \"$still_pending\", expected 5981,5982"
+}
+
+@test "AC5(#861): a successful wait does not halt the loop" {
+	local block_file
+	block_file=$(_extract_wait_call_block) \
+		|| skip "wait call block not found (script changed)"
+
+	wait_for_pr_merged() { return 0; }
+	local exit_code=0 issue processed=""
+	for issue in 5980 5981 5982; do
+		processed="$processed $issue"
+		# shellcheck disable=SC1090
+		source "$block_file"
+	done
+
+	[[ "$exit_code" -eq 0 ]] \
+		|| fail "a merged PR halted the batch with exit_code $exit_code"
+	[[ "$processed" == " 5980 5981 5982" ]] \
+		|| fail "the loop stopped early:$processed"
+}
