@@ -1680,9 +1680,19 @@ _setup_parallel_stage_mocks() {
 
 	mkdir -p "$LOG_BASE/stages"
 
-	# Mock run_stage to succeed
+	# Mock run_stage to succeed. Two contract requirements, both of which
+	# this mock predated and neither of which it was migrated to (see the
+	# sibling mock in "execute_batch_serial runs tasks sequentially"):
+	#  - #536: run_stage nests structured fields under .output, and
+	#    execute_batch_serial reads .output.status — a bare top-level
+	#    {"status":"success"} reads as null and the task is marked failed.
+	#  - #790: the silent no-op guard treats an unmoved HEAD as a failure,
+	#    so the mock must actually commit.
 	run_stage() {
-		printf '%s' '{"status":"success","commit":"retry123","summary":"retried"}'
+		printf 'retry output\n' > task-15-out.txt
+		git add task-15-out.txt
+		git commit -q -m "task 15"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"retry123","summary":"retried"}}'
 	}
 	should_run_quality_loop() { return 1; }
 	get_max_review_attempts() { printf '%s' "1"; }
@@ -1702,11 +1712,17 @@ _setup_parallel_stage_mocks() {
 	# Must complete successfully (same as if it ran in first pass)
 	local comp_len
 	comp_len=$(printf '%s' "$retry_result" | jq '.completed | length')
-	[[ "$comp_len" -eq 1 ]]
+	# expect_ok, not a bare [[ ]]: these assertions are not the last command
+	# in the function, so bash 3.2 absorbs a bare failure and reports green.
+	# That is exactly how the stale mock above hid — the task was landing in
+	# .failed on every platform, and only bash 5 said so.
+	expect_ok "retried task completes (got $comp_len)" \
+		test "$comp_len" -eq 1
 
 	local comp_id
 	comp_id=$(printf '%s' "$retry_result" | jq '.completed[0]')
-	[[ "$comp_id" -eq 15 ]]
+	expect_ok "completed task is id 15 (got $comp_id)" \
+		test "$comp_id" -eq 15
 
 	git checkout -q main
 	git branch -D feature/conf-retry 2>/dev/null || true
@@ -1726,9 +1742,14 @@ _setup_parallel_stage_mocks() {
 	git add myfile.ts
 	git commit -q -m "add myfile"
 
-	# Mock for serial path
+	# Mock for serial path. Must use the #536 .output envelope and actually
+	# commit to clear the #790 silent-no-op guard — see the sibling mock in
+	# "execute_batch_serial runs tasks sequentially".
 	run_stage() {
-		printf '%s' '{"status":"success","commit":"sha1","summary":"done"}'
+		printf 'serial change\n' > task-20-out.ts
+		git add task-20-out.ts
+		git commit -q -m "task 20"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"sha1","summary":"done"}}'
 	}
 	should_run_quality_loop() { return 1; }
 	get_max_review_attempts() { printf '%s' "1"; }
@@ -1780,10 +1801,16 @@ _setup_parallel_stage_mocks() {
 	par_fail=$(printf '%s' "$par_result" | jq '.failed | length')
 
 	# Both paths should report 1 completed, 0 failed
-	[[ "$serial_comp" -eq 1 ]]
-	[[ "$serial_fail" -eq 0 ]]
-	[[ "$par_comp" -eq 1 ]]
-	[[ "$par_fail" -eq 0 ]]
+	# expect_ok, not bare [[ ]]: only the last of these four would ever be
+	# reported on bash 3.2, which is how the stale mock above stayed hidden.
+	expect_ok "serial completes the task (got $serial_comp)" \
+		test "$serial_comp" -eq 1
+	expect_ok "serial fails nothing (got $serial_fail)" \
+		test "$serial_fail" -eq 0
+	expect_ok "parallel completes the task (got $par_comp)" \
+		test "$par_comp" -eq 1
+	expect_ok "parallel fails nothing (got $par_fail)" \
+		test "$par_fail" -eq 0
 
 	git worktree prune 2>/dev/null || true
 	git checkout -q main 2>/dev/null || true

@@ -789,6 +789,12 @@ JSON
     export MOCK_GH_MERGE_STATE_CTR="$TEST_TMP/merge_ctr"
     export FAST_PATH_MERGE_CHECK_ATTEMPTS=3
     export FAST_PATH_MERGE_CHECK_DELAY=0
+    # Implement must produce a delta, or the #428 empty_changed_paths guard
+    # bails long before the merge-state loop is ever reached — which is
+    # exactly what had been happening here since #428 retrofitted this export
+    # into sibling tests 14/15/17/21 and missed this one. Tests 29-33 all set
+    # it for the same reason.
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
 
     run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
 
@@ -799,6 +805,11 @@ JSON
     # Merge must NOT have run.
     merge_status=$(jq -r '.stages.fast_path_merge.status // "pending"' "$STATUS_FILE")
     [[ "$merge_status" != "completed" ]]
+    # The attempt cap genuinely fired: exactly the budget was spent. Without
+    # this, an unrelated earlier bail can masquerade as this one — the very
+    # failure mode that hid this test's breakage for three months.
+    polls=$(cat "$TEST_TMP/merge_ctr" 2>/dev/null || echo 0)
+    [[ "$polls" -eq 3 ]]
 }
 
 @test "23 resume: fast_path_implement already completed → skips implement, runs PR + merge" {

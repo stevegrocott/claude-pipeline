@@ -388,21 +388,34 @@ teardown() {
 	[[ "$persisted" == "Quality loop convergence failure" ]]
 }
 
-@test "all three pr_review degradation sites also persist a merge_blocked_reason" {
+@test "every pr_review degradation site also persists a merge_blocked_reason" {
 	# Static wiring guard: each DEGRADED_STAGES+=("pr_review:...") append in the
 	# PR review loop must be paired with a persist_merge_blocked_reason call so
-	# the block is durable across a resume. Extract the three-guard region and
-	# assert one persist call per pr_review append.
-	local script_content
-	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	# the block is durable across a resume.
+	#
+	# This used to assert a hard count of exactly three appends. The count was
+	# never the invariant — the PAIRING is — and it went stale as soon as more
+	# sites were added (there are five now: 3× max_iterations, 2× wall_timeout).
+	# It had been failing ever since, invisibly on bash 3.2, which swallows a
+	# bare [[ ]] failure that is not the last command in a function.
+	#
+	# Asserting the pairing directly means a newly added site is covered
+	# automatically, instead of turning this test red for the wrong reason.
+	local unpaired
+	unpaired=$(awk '
+		/DEGRADED_STAGES\+=\("pr_review:/ { site = NR; next }
+		site && /persist_merge_blocked_reason/ { site = 0; next }
+		site && NR > site + 8 { print site; site = 0 }
+		END { if (site) print site }
+	' "$ORCHESTRATOR_SCRIPT")
 
-	local pr_appends persist_calls
-	pr_appends=$(grep -c 'DEGRADED_STAGES+=("pr_review:' <<< "$script_content")
-	# Persist calls that name a pr_review cause.
-	persist_calls=$(grep -c 'persist_merge_blocked_reason' <<< "$script_content")
+	expect_ok "each pr_review degradation site persists a reason (unpaired at lines: ${unpaired:-none})" \
+		test -z "$unpaired"
 
-	# Three pr_review appends (2× wall_timeout, 1× max_iterations).
-	[[ "$pr_appends" -eq 3 ]]
-	# At least three persist calls exist (the three pr_review sites).
-	[[ "$persist_calls" -ge 3 ]]
+	# Guard against the awk above matching nothing at all: if the append
+	# spelling ever changes, the check would otherwise pass vacuously.
+	local pr_appends
+	pr_appends=$(grep -c 'DEGRADED_STAGES+=("pr_review:' "$ORCHESTRATOR_SCRIPT")
+	expect_ok "pr_review degradation sites still exist (found: $pr_appends)" \
+		test "$pr_appends" -ge 3
 }
