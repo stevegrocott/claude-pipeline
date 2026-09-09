@@ -6521,6 +6521,57 @@ compute_task_batches() {
 # WORKTREE-BASED PARALLEL TASK EXECUTION
 # =============================================================================
 
+# Tag a branch's would-be-orphaned commits before it is force-deleted.
+#
+# `git branch -D` on a branch that holds commits living nowhere else
+# makes those commits unreachable and the work is effectively lost.
+# Tagging first keeps them addressable as salvage/issue-<n>-task<m>.
+#
+# The comparison base decides what "unmerged" means:
+#   - With an explicit base — cleanup_worktree knows the feature branch
+#     the task was meant to land on — commits count as unmerged when
+#     they are absent from that base.
+#   - With no base — the stale-branch paths, where a branch abandoned by
+#     a crashed prior run has no recorded destination — commits count as
+#     unmerged when no *other* ref reaches them. That is the exact
+#     question `git branch -D` poses: it stays silent for work already
+#     merged, pushed or salvaged, and still fires for work held only
+#     here, without having to guess a base that may be wrong.
+#
+# Arguments:
+#   $1 - branch about to be deleted
+#   $2 - salvage tag name
+#   $3 - comparison base (optional; empty means "any other ref")
+#
+salvage_unmerged_commits() {
+	local wt_branch="$1"
+	local salvage_tag="$2"
+	local base="${3:-}"
+
+	git show-ref --verify --quiet \
+		"refs/heads/$wt_branch" 2>/dev/null || return 0
+
+	local unmerged
+	if [[ -n "$base" ]]; then
+		unmerged=$(git rev-list \
+			"${base}..${wt_branch}" 2>/dev/null)
+	else
+		unmerged=$(git rev-list "$wt_branch" --not \
+			--exclude="refs/heads/$wt_branch" --all \
+			2>/dev/null)
+	fi
+	[[ -n "$unmerged" ]] || return 0
+
+	if git tag -f "$salvage_tag" "$wt_branch" \
+		>/dev/null 2>&1; then
+		log "Salvaged unmerged commits on" \
+			"$wt_branch as tag $salvage_tag"
+	else
+		log_warn "Failed to tag $wt_branch" \
+			"as $salvage_tag"
+	fi
+}
+
 # Create a git worktree for a single task.
 #
 # Clean up stale worktree branches from previous failed runs.
@@ -6564,6 +6615,19 @@ cleanup_stale_worktrees() {
 		done
 		if [[ "$is_active" == "false" ]]; then
 			log "Cleaning stale branch: $branch_name"
+			# The branch may carry commits a crashed prior
+			# run never merged; tag them before -D drops
+			# them beyond recovery.
+			local stale_tag="salvage/${branch_name}"
+			if [[ "$branch_name" == wt-i*-t* ]]; then
+				local stale_issue="${branch_name#wt-i}"
+				stale_issue="${stale_issue%%-t*}"
+				local stale_task="${branch_name##*-t}"
+				stale_tag="salvage/issue-${stale_issue}"
+				stale_tag="${stale_tag}-task${stale_task}"
+			fi
+			salvage_unmerged_commits "$branch_name" \
+				"$stale_tag"
 			git branch -D "$branch_name" 2>&1 \
 				| while IFS= read -r line; do
 					log "  $line"
@@ -6612,6 +6676,11 @@ create_task_worktree() {
 		fi
 		log "Removing stale branch $wt_branch" \
 			"from prior run"
+		# Same hazard as cleanup_stale_worktrees: the prior
+		# run may have committed here and died before the
+		# merge back. Salvage first, then delete.
+		salvage_unmerged_commits "$wt_branch" \
+			"salvage/issue-${issue_num}-task${task_id}"
 		git branch -D "$wt_branch" 2>&1 \
 			| while IFS= read -r line; do
 				log "  $line"
@@ -7098,21 +7167,9 @@ cleanup_worktree() {
 	local task_id="$4"
 	local feature_branch="${5:-HEAD}"
 
-	if git show-ref --verify --quiet \
-		"refs/heads/$wt_branch" 2>/dev/null; then
-		if [[ -n "$(git rev-list \
-			"${feature_branch}..${wt_branch}" 2>/dev/null)" ]]; then
-			local salvage_tag="salvage/issue-${issue_num}-task${task_id}"
-			if git tag -f "$salvage_tag" "$wt_branch" \
-				>/dev/null 2>&1; then
-				log "Salvaged unmerged commits on" \
-					"$wt_branch as tag $salvage_tag"
-			else
-				log_warn "Failed to tag $wt_branch" \
-					"as $salvage_tag"
-			fi
-		fi
-	fi
+	salvage_unmerged_commits "$wt_branch" \
+		"salvage/issue-${issue_num}-task${task_id}" \
+		"$feature_branch"
 
 	if [[ -d "$wt_path" ]]; then
 		git worktree remove --force "$wt_path" \
