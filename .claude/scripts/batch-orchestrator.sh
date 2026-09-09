@@ -2273,6 +2273,158 @@ sweep_implement_followups() {
 }
 
 # =============================================================================
+# WAIT FOR THE PREVIOUS PR TO MERGE (issue #861)
+# =============================================================================
+#
+# "Sequential" used to mean sequential pipeline stages, not sequential merges:
+# the loop advanced the moment process_issue returned, so issue N+1 forked its
+# branch from a main that did not yet contain PR N. In beegee-farm-3 that
+# produced same-file conflicts (#5980 vs #5979, #5992 vs #5991) and, once a PR
+# went DIRTY, GitHub stopped running pull_request workflows on it at all — CI
+# silently halted until a human noticed.
+#
+# So the loop now parks after each issue until that issue's PR reports MERGED.
+# The park is bounded and legible while it waits:
+#
+#   * BATCH_WAIT_FOR_MERGE_MAX      seconds to wait (default 7200).
+#                                   0 disables the wait entirely and restores
+#                                   the pre-#861 immediate continuation.
+#   * BATCH_WAIT_FOR_MERGE_INTERVAL poll interval in seconds (default 30).
+#   * status.json                   state "paused_on_pr" plus .paused_on_pr
+#                                   carrying the PR number.
+#   * one comment                   posted on issue N when the park begins,
+#                                   never once per poll.
+
+# Current platform state of a PR: MERGED, CLOSED, OPEN, or UNKNOWN when the
+# lookup fails. Data-returning — every diagnostic belongs in the caller's log,
+# so nothing else may be written to stdout here.
+pr_merge_state() {
+	local pr="$1"
+	local state=""
+
+	state=$(timeout 30 gh pr view "$pr" --json state --jq '.state' \
+		2>/dev/null) || state=""
+	if [[ -z "$state" ]]; then
+		state="UNKNOWN"
+	fi
+
+	printf '%s\n' "$state"
+}
+
+# Records (or clears, when passed an empty PR) the PR the batch is parked on.
+set_paused_on_pr() {
+	local pr="$1"
+	local pr_json="null"
+
+	if [[ -n "$pr" ]]; then
+		pr_json="\"$pr\""
+	fi
+
+	jq --argjson pr "$pr_json" \
+		'.paused_on_pr = $pr | .last_update = (now | todate)' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+}
+
+# Posts the single "batch is parked" comment on the issue whose PR is open.
+# Called exactly once per park, before the poll loop. A comment failure is a
+# warning, never a batch failure.
+comment_paused_on_pr() {
+	local issue_num="$1" pr="$2" max="$3"
+	local commenter="$PLATFORM_DIR/comment-issue.sh"
+
+	if [[ ! -x "$commenter" ]]; then
+		log_warn "Issue #$issue_num: $commenter is not executable —" \
+			"skipping the paused_on_pr comment"
+		return 0
+	fi
+
+	local body
+	body="Batch paused: waiting for PR #$pr to merge before the next issue"
+	body="$body in this batch forks its branch. The batch waits up to"
+	body="$body ${max}s, then stops with the remaining issues left pending."
+	body="$body Set BATCH_WAIT_FOR_MERGE_MAX=0 to continue immediately"
+	body="$body instead of waiting."
+
+	"$commenter" "$issue_num" "$body" >/dev/null 2>&1 \
+		|| log_warn "Issue #$issue_num: failed to post the" \
+			"paused_on_pr comment (non-fatal)"
+}
+
+# Globals:
+#   STATUS_FILE, PLATFORM_DIR
+# Returns:
+#   0 when the PR merged, was closed, or there was nothing to wait for
+#   1 on timeout — the caller halts the batch like the circuit breaker does
+wait_for_pr_merged() {
+	local issue_num="$1"
+	local max="${BATCH_WAIT_FOR_MERGE_MAX:-7200}"
+	local interval="${BATCH_WAIT_FOR_MERGE_INTERVAL:-30}"
+	local elapsed=0
+	local pr="" state=""
+
+	if [[ "$max" == "0" ]]; then
+		return 0
+	fi
+
+	pr=$(jq -r --arg num "$issue_num" \
+		'.issues[] | select(.number == $num) | .pr // empty' \
+		"$STATUS_FILE" 2>/dev/null) || pr=""
+	if [[ -z "$pr" || "$pr" == "null" ]]; then
+		return 0
+	fi
+
+	state=$(pr_merge_state "$pr")
+	case "$state" in
+		MERGED)
+			return 0
+			;;
+		CLOSED)
+			log_warn "Issue #$issue_num: PR #$pr is CLOSED without a" \
+				"merge — not waiting for it"
+			return 0
+			;;
+	esac
+
+	set_state "paused_on_pr"
+	set_paused_on_pr "$pr"
+	log "Issue #$issue_num: PR #$pr is still open (state: $state) —" \
+		"pausing the batch for up to ${max}s before the next issue"
+	comment_paused_on_pr "$issue_num" "$pr" "$max"
+
+	while ((elapsed < max)); do
+		sleep "$interval"
+		elapsed=$((elapsed + interval))
+		state=$(pr_merge_state "$pr")
+		case "$state" in
+			MERGED)
+				log "Issue #$issue_num: PR #$pr merged after" \
+					"${elapsed}s — resuming the batch"
+				set_paused_on_pr ""
+				set_state "running"
+				return 0
+				;;
+			CLOSED)
+				log_warn "Issue #$issue_num: PR #$pr was CLOSED" \
+					"without merging after ${elapsed}s —" \
+					"resuming the batch"
+				set_paused_on_pr ""
+				set_state "running"
+				return 0
+				;;
+		esac
+		log "Waiting for PR #$pr to merge (state: $state," \
+			"${elapsed}s/${max}s elapsed)"
+	done
+
+	# Leave state paused_on_pr and .paused_on_pr set: the batch is stopping
+	# BECAUSE of this PR, and the operator needs to see which one.
+	log_error "WAIT-FOR-MERGE TIMEOUT: PR #$pr for issue #$issue_num is" \
+		"still open after ${max}s. Stopping batch."
+	return 1
+}
+
+# =============================================================================
 # MAIN LOOP
 # =============================================================================
 
@@ -2379,6 +2531,16 @@ for issue in "${ISSUE_ARRAY[@]}"; do
             exit_code=2
             break
         fi
+    fi
+
+    # Do not fork the next issue while this issue's PR is still open (issue
+    # #861). Applies to failures too: a merge_blocked issue leaves exactly
+    # the open PR the next branch would conflict with. A timeout halts the
+    # batch the way the circuit breaker does — exit_code=2, remaining issues
+    # untouched and still `pending` in the manifest.
+    if ! wait_for_pr_merged "$issue"; then
+        exit_code=2
+        break
     fi
 
     # Per-batch token/cost budget breaker (issue #583).  Checked after every

@@ -48,20 +48,18 @@ teardown() {
 _load_merge_mr_functions() {
 	[[ -f "$MERGE_MR" ]] || fail "merge-mr.sh not found: $MERGE_MR"
 
-	local gate_body name_body wait_body
-	gate_body=$(_extract_function_body _has_concluded_check_failure "$MERGE_MR")
-	[[ -n "$gate_body" ]] \
-		|| fail "_has_concluded_check_failure() not defined in merge-mr.sh"
-	name_body=$(_extract_function_body _first_failed_check "$MERGE_MR")
-	[[ -n "$name_body" ]] \
-		|| fail "_first_failed_check() not defined in merge-mr.sh"
-	wait_body=$(_extract_function_body wait_for_mergeable "$MERGE_MR")
-	[[ -n "$wait_body" ]] \
-		|| fail "wait_for_mergeable() not defined in merge-mr.sh"
-
-	eval "$gate_body"
-	eval "$name_body"
-	eval "$wait_body"
+	# Every function wait_for_mergeable depends on. The allowlist helpers
+	# (issue #861) are listed here too: omitting one leaves the sourced
+	# wait_for_mergeable calling an undefined command, which fails as a
+	# refusal and would quietly "pass" the negative tests below.
+	local fn body
+	for fn in _non_blocking_checks_json _has_concluded_check_failure \
+		_has_pending_check _ignored_failed_checks _first_failed_check \
+		wait_for_mergeable; do
+		body=$(_extract_function_body "$fn" "$MERGE_MR")
+		[[ -n "$body" ]] || fail "$fn() not defined in merge-mr.sh"
+		eval "$body"
+	done
 
 	# Neutralise the poll back-off. The loop still increments `elapsed` by
 	# MERGE_MR_POLL_INTERVAL, so it terminates on MERGE_MR_POLL_MAX exactly as
@@ -311,4 +309,201 @@ STUB
 @test "AC5: surgical fast path still guards its direct merge" {
 	[[ -f "$FAST_PATH" ]] || fail "surgical-fast-path.sh not found"
 	assert_file_contains "$FAST_PATH" "_fast_path_check_concluded_failure"
+}
+
+# =============================================================================
+# ISSUE #861 — MERGE_MR_NON_BLOCKING_CHECKS: informational checks by name
+# =============================================================================
+#
+# A consumer that ships a knowingly-red informational job (beegee-farm-3's
+# `frontend-unit-tests`, `continue-on-error` in CI) had no way to say so:
+# GitHub reports the PR as UNSTABLE, _has_concluded_check_failure sees
+# conclusion FAILURE, and merge-mr.sh refused every such PR — 7 of 13 in the
+# batch that produced this issue, with every blocking gate green.
+#
+# The allowlist takes EXACT check names. These tests pin the three edges that
+# make it safe: it waives only what it names, it never waives a check that is
+# still running, and with no allowlist set nothing changes.
+
+# UNSTABLE, one allowlisted red check, everything else green.
+_rollup_allowlisted_only() {
+	printf '%s' '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"e2e"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"build"}]}'
+}
+
+# The same PR plus a second, NOT allowlisted, concluded failure.
+_rollup_extra_failure() {
+	printf '%s' '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"e2e"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"build"}]}'
+}
+
+# The same PR plus a check that has not concluded yet.
+_rollup_still_running() {
+	printf '%s' '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":null,"name":"e2e"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"build"}]}'
+}
+
+@test "AC1(#861): UNSTABLE PR whose only red check is allowlisted merges" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view "$(_rollup_allowlisted_only)"
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	[[ "$status" -eq 0 ]] \
+		|| fail "allowlisted-only UNSTABLE PR was still refused: $output"
+}
+
+@test "AC1(#861): the ignored check name is written to the merge log" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view "$(_rollup_allowlisted_only)"
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	# The name must appear inside the "ignoring" sentence, not merely
+	# somewhere in the output — the polled state also mentions the check.
+	assert_contains "$output" \
+		'ignoring non-blocking check(s) "frontend-unit-tests"'
+}
+
+@test "AC1(#861): control — the same PR is refused with no allowlist set" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view "$(_rollup_allowlisted_only)"
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=""
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	[[ "$status" -ne 0 ]] \
+		|| fail "merged an UNSTABLE PR with a red check and NO allowlist"
+	assert_contains "$output" \
+		'check "frontend-unit-tests" that concluded in failure'
+}
+
+@test "AC1(#861): the allowlist matches exact names, not prefixes" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view "$(_rollup_allowlisted_only)"
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	[[ "$status" -ne 0 ]] \
+		|| fail "\"frontend\" waived \"frontend-unit-tests\" by prefix"
+	assert_contains "$output" \
+		'check "frontend-unit-tests" that concluded in failure'
+}
+
+@test "AC2(#861): a second, non-allowlisted failure is still refused" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view "$(_rollup_extra_failure)"
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	[[ "$status" -ne 0 ]] \
+		|| fail "merged a PR with a real, non-allowlisted failure"
+	# The refusal must name the BLOCKING check, not the waived one.
+	assert_contains "$output" 'check "e2e" that concluded in failure'
+}
+
+@test "AC2(#861): a non-allowlisted failure never reaches the merge branch" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view "$(_rollup_extra_failure)"
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	if printf '%s' "$output" | grep -q 'proceeding to merge'; then
+		fail "the allowlist shortcut fired despite a blocking failure"
+	fi
+}
+
+@test "AC2(#861): a still-running check keeps waiting to MERGE_MR_POLL_MAX" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view "$(_rollup_still_running)"
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	[[ "$status" -ne 0 ]] \
+		|| fail "merged while a check was still IN_PROGRESS"
+	# It waited rather than refusing: the loop ran to the poll ceiling.
+	assert_contains "$output" \
+		"Timed out waiting for GitHub to compute mergeability"
+	assert_contains "$output" "mergeStateStatus: UNSTABLE"
+}
+
+@test "AC2(#861): a still-running check is not waved through as ignored" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view "$(_rollup_still_running)"
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	if printf '%s' "$output" | grep -q 'proceeding to merge'; then
+		fail "merged on a partial picture while a check was running"
+	fi
+}
+
+@test "AC3(#861): CLEAN still returns success with an allowlist set" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"CLEAN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"e2e"}]}'
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	[[ "$status" -eq 0 ]] || fail "CLEAN PR refused: $output"
+}
+
+@test "AC3(#861): DIRTY is still a conflict refusal, not an allowlist merge" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"DIRTY","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"}]}'
+
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	[[ "$status" -ne 0 ]] || fail "merged a DIRTY (conflicting) PR"
+	assert_contains "$output" "unresolvable merge conflicts"
+}
+
+@test "AC3(#861): legacy gate=0 still refuses a non-allowlisted failure" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeable":"MERGEABLE","mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"e2e"}]}'
+
+	MERGE_MR_MERGE_STATE_GATE=0 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL \
+		MERGE_MR_POLL_MAX MERGE_MR_NON_BLOCKING_CHECKS
+
+	run wait_for_mergeable 5980
+	[[ "$status" -ne 0 ]] \
+		|| fail "the allowlist blanket-disabled the legacy gate"
+	assert_contains "$output" 'check "e2e" that concluded in failure'
 }
