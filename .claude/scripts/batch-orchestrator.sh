@@ -1107,6 +1107,106 @@ check_issue_resolved_upstream() {
 	return 1
 }
 
+# _iso_to_epoch <iso8601-timestamp>
+#
+# Normalise an ISO-8601 timestamp to epoch seconds on stdout. Both forms in
+# play here are handled: GitHub's UTC "2026-08-13T20:44:24Z" and the
+# local-offset "2026-08-17T14:01:41+10:00" that `date -Iseconds` writes into
+# status.json. Converting both to a common epoch is what makes them
+# comparable — string-comparing the two ISO forms silently orders a "Z"
+# stamp against a "+10:00" one by its printed digits, not its instant.
+#
+# GNU date parses ISO-8601 directly; BSD date (macOS) has no -d and wants an
+# explicit format with a colon-less offset, so try GNU first and fall back to
+# `date -j -f` — the same pattern the pipeline uses elsewhere.
+#
+# Prints nothing and returns 1 when the value is absent or unparseable, so a
+# caller can tell "unknown" apart from "old".
+_iso_to_epoch() {
+	local ts="$1"
+	[[ -n "$ts" && "$ts" != "null" ]] || return 1
+
+	# Both "…Z" and "…+10:00" become "…+1000" for BSD date's %z.
+	case "$ts" in
+		*Z) ts="${ts%Z}+0000" ;;
+	esac
+	case "$ts" in
+		*[+-][0-9][0-9]:[0-9][0-9])
+			ts="${ts%:*}${ts##*:}"
+			;;
+	esac
+
+	local epoch=""
+	epoch=$(date -d "$ts" +%s 2>/dev/null) \
+		|| epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$ts" +%s \
+			2>/dev/null) \
+		|| epoch=""
+
+	case "$epoch" in
+		'' | *[!0-9]*) return 1 ;;
+	esac
+	printf '%s\n' "$epoch"
+}
+
+# _merged_pr_within_run <issue_num> <merged_at>
+#
+# #817: bound failure-site reconciliation by merge time. #740's rationale
+# holds only for a PR merged during the run that just executed. A PR merged
+# days earlier is stale evidence about *prior* work, and accepting it records
+# `completed` for a run that did nothing — silently skipping the real work in
+# exactly the artefact an operator checks.
+#
+# The window opens at the issue's own `started_at` (written to status.json
+# when the issue entered processing), less RECONCILE_SKEW_SECS of tolerance
+# for clock skew between GitHub and the runner. That tolerance is generous
+# against skew and still orders of magnitude tighter than the multi-day gaps
+# observed on the failing batches.
+#
+# A missing or unparseable timestamp on either side accepts and logs a WARN:
+# reconciliation must degrade toward #740's safety, never away from it, so a
+# parse failure can never re-arm the circuit breaker #740 fixed.
+#
+# Returns:
+#   0 — the merge falls inside this run's window, or is unknown; reconcile
+#   1 — the merge predates this run; the reported failure stands
+_merged_pr_within_run() {
+	local issue_num="$1"
+	local merged_at="$2"
+	local tolerance="${RECONCILE_SKEW_SECS:-120}"
+
+	local started_at=""
+	if [[ -n "${STATUS_FILE:-}" && -f "${STATUS_FILE:-}" ]]; then
+		started_at=$(jq -r --arg num "$issue_num" \
+			'(.issues[] | select(.number == $num)
+				| .started_at) // empty' \
+			"$STATUS_FILE" 2>/dev/null) || started_at=""
+	fi
+
+	local started_epoch=""
+	started_epoch=$(_iso_to_epoch "$started_at") || started_epoch=""
+	if [[ -z "$started_epoch" ]]; then
+		log_warn "issue #$issue_num has no parseable started_at" \
+			"(\"$started_at\") — accepting the merged-PR" \
+			"reconciliation unbounded (#817)"
+		return 0
+	fi
+
+	local merged_epoch=""
+	merged_epoch=$(_iso_to_epoch "$merged_at") || merged_epoch=""
+	if [[ -z "$merged_epoch" ]]; then
+		log_warn "issue #$issue_num merged PR has no parseable" \
+			"mergedAt (\"$merged_at\") — accepting the merged-PR" \
+			"reconciliation unbounded (#817)"
+		return 0
+	fi
+
+	local cutoff=$((started_epoch - tolerance))
+	if ((merged_epoch >= cutoff)); then
+		return 0
+	fi
+	return 1
+}
+
 # check_issue_pr_merged <issue_num>
 #
 # Post-hoc failure-site reconciliation (#740): a stage reported a failure —
@@ -1122,6 +1222,14 @@ check_issue_resolved_upstream() {
 # issue-close propagated, leaving an OPEN issue with a merged branch PR.
 # Requiring a CLOSED issue here would record `failed`, increment
 # consecutive_failures and re-arm the circuit breaker #740 fixed.
+#
+# #817 bounds that evidence in time without reversing #740. "The run that
+# just executed" was always the intent of the comment above; the code never
+# enforced it, so a PR merged days ago reconciled a failure from a run that
+# did nothing. The most recently merged PR is now selected (by mergedAt,
+# rather than whichever the API happened to list first) and it reconciles
+# only when it merged at or after this issue's `started_at` — see
+# _merged_pr_within_run for the tolerance and the accept-on-unknown rule.
 #
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the reported failure stands.
@@ -1145,15 +1253,32 @@ check_issue_pr_merged() {
 		return 0
 	fi
 
-	local merged_pr=""
-	merged_pr=$(gh pr list --state merged \
+	# "<number> <mergedAt>" for the most recently merged PR on the branch.
+	local merged_row=""
+	merged_row=$(gh pr list --state merged \
 		--head "feature/issue-$issue_num" \
-		--json number --jq '.[0].number // empty' \
+		--json number,mergedAt \
+		--jq 'if length == 0 then empty else
+			(sort_by(.mergedAt // "") | last
+			| "\(.number) \(.mergedAt // "")") end' \
 		2>/dev/null) || true
-	if [[ -n "$merged_pr" ]]; then
-		_RECONCILE_REASON="PR #$merged_pr already merged"
-		_RECONCILE_PR="$merged_pr"
-		return 0
+	if [[ -n "$merged_row" ]]; then
+		local merged_pr="${merged_row%% *}"
+		local merged_at=""
+		if [[ "$merged_row" == *" "* ]]; then
+			merged_at="${merged_row#* }"
+		fi
+
+		if _merged_pr_within_run "$issue_num" "$merged_at"; then
+			_RECONCILE_REASON="PR #$merged_pr already merged"
+			_RECONCILE_PR="$merged_pr"
+			return 0
+		fi
+
+		log "Issue #$issue_num: most recently merged PR" \
+			"#$merged_pr merged at $merged_at, before this run" \
+			"began — stale evidence, the reported failure" \
+			"stands (#817)"
 	fi
 
 	return 1

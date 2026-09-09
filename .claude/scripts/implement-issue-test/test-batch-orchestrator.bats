@@ -1023,6 +1023,9 @@ _run_failure_site_block() {
 
 	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
 	log_error()          { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	# Mirrors production's WARN: prefix so the #817 accept-on-unknown
+	# warnings are assertable from the captured log.
+	log_warn()           { printf 'WARN: %s\n' "$*" >> "$TEST_TMP/log.out"; }
 	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
 	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
 	# shellcheck disable=SC2317
@@ -1040,7 +1043,9 @@ _run_failure_site_block() {
 	source_check_issue_pr_merged \
 		|| { _failure_block_rc=1; return 1; }
 
-	issue_num=695
+	# ISSUE_NUM_IN lets a caller replay a specific issue number (#817
+	# AC5) so status.json's per-issue started_at can be matched.
+	issue_num="${ISSUE_NUM_IN:-695}"
 	impl_status="error"
 	impl_error="pr stage aborted: already exists"
 	proc_status="${PROC_STATUS_IN:-error}"
@@ -1535,8 +1540,17 @@ source_check_issue_resolved_upstream() {
 # skipping still-open issues up front.
 source_check_issue_pr_merged() {
 	local func_file="$TEST_TMP/check_issue_pr_merged.bash"
-	_extract_function_body check_issue_pr_merged \
-		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	{
+		_extract_function_body check_issue_pr_merged \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		# #817: the gate delegates its merge-time bound to these two
+		# helpers. Source them from the same script so the tests run
+		# the shipped comparison rather than an undefined command.
+		_extract_function_body _merged_pr_within_run \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		_extract_function_body _iso_to_epoch \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+	} > "$func_file"
 	grep -q 'check_issue_pr_merged' "$func_file" 2>/dev/null \
 		|| return 1
 	# shellcheck disable=SC1090
@@ -4198,4 +4212,437 @@ _extract_wait_call_block() {
 		|| fail "a merged PR halted the batch with exit_code $exit_code"
 	[[ "$processed" == " 5980 5981 5982" ]] \
 		|| fail "the loop stopped early:$processed"
+}
+
+# =============================================================================
+# ISSUE #817: failure-site reconciliation must be bounded by merge time
+# =============================================================================
+#
+# check_issue_pr_merged() reconciled a reported failure against ANY merged PR
+# on feature/issue-<num>, with no bound on when it merged. A PR merged days
+# earlier therefore reconciled a failure from a run that did nothing, and the
+# issue was recorded `completed` — silently skipping the real work.
+#
+# #740 is not reversed here: a PR merged during the run still reconciles. The
+# window simply opens at the issue's own started_at (less a skew tolerance),
+# which is what "the run that just executed" in #740's own rationale always
+# meant. When either timestamp is missing or unparseable the gate accepts and
+# logs a WARN, so a parse failure can never re-arm #740's circuit breaker.
+
+# Writes a minimal status.json carrying one issue's started_at, the timestamp
+# the merge-time bound compares against. An empty started_at writes JSON null,
+# which is what the field holds before an issue enters processing.
+_write_status_started_at() {
+	local issue_num="$1"
+	local started_at="$2"
+	jq -n --arg num "$issue_num" --arg started "$started_at" \
+		'{issues: [{number: $num, started_at:
+			(if $started == "" then null else $started end)}]}' \
+		> "$STATUS_FILE"
+}
+
+# Mocked `gh` that behaves like the real one for the call that matters:
+# `gh pr list --json number,mergedAt --jq <filter>` runs the PRODUCTION jq
+# filter, through real jq, over the fixture PR list. Selection of the most
+# recently merged PR is therefore performed by the shipped expression rather
+# than by the stub — a stub that simply echoed a chosen number would assert
+# nothing about AC3.
+_stub_gh_with_pr_fixture() {
+	local fixture_json="$1"
+	local mock_bin="$TEST_TMP/mock-bin-fixture-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	printf '%s\n' "$fixture_json" > "$mock_bin/prs.json"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+mock_dir="$(cd "$(dirname "$0")" && pwd)"
+if [[ "$1" == "issue" ]]; then
+	printf '%s\n' "${GH_ISSUE_STATE:-OPEN}"
+	exit 0
+fi
+if [[ "$1" == "pr" ]]; then
+	filter=""
+	while [[ $# -gt 0 ]]; do
+		if [[ "$1" == "--jq" ]]; then
+			filter="$2"
+			break
+		fi
+		shift
+	done
+	if [[ -z "$filter" ]]; then
+		echo "gh pr list called without --jq" >&2
+		exit 1
+	fi
+	jq -r "$filter" "$mock_dir/prs.json"
+	exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 1
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+# Captures log output so the WARN / stale-evidence messages can be asserted.
+_capture_log() {
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_warn() { printf 'WARN: %s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+}
+
+@test "AC1(#817): a merge predating started_at does not reconcile" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# Merged three days before the run began — stale evidence.
+	_stub_gh_with_pr_fixture \
+		'[{"number":5657,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	_write_status_started_at 5634 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 5634 || rc=$?
+
+	[[ "$rc" -eq 1 ]] \
+		|| fail "stale merge reconciled the failure (rc=$rc)"
+	[[ -z "$_RECONCILE_PR" ]] \
+		|| fail "_RECONCILE_PR set to '$_RECONCILE_PR' for a stale merge"
+	[[ -z "$_RECONCILE_REASON" ]] \
+		|| fail "_RECONCILE_REASON set to '$_RECONCILE_REASON'"
+	# The rejection must be visible in the run log, not silent.
+	grep -q '5657' "$TEST_TMP/log.out" \
+		|| fail "stale merge not reported in the log"
+}
+
+@test "AC2(#817): a merge after started_at still reconciles (#740 preserved)" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# started_at 14:01:41+10:00 is 04:01:41Z; this merge is four minutes
+	# later — #740's canonical case (merge lands, run then times out).
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-17T04:05:00Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "an in-run merge failed to reconcile (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	[[ "$_RECONCILE_REASON" == *'735'* ]] \
+		|| fail "_RECONCILE_REASON was '$_RECONCILE_REASON'"
+}
+
+@test "AC2(#817): a merge exactly at started_at reconciles" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# The boundary itself is inside the window: >= not >.
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-17T04:01:41Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a merge at exactly started_at was rejected (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+}
+
+@test "AC2(#817): a merge inside the skew tolerance reconciles" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# 60s before started_at — inside the 120s clock-skew tolerance, so a
+	# genuine in-run merge is not rejected because GitHub's clock leads
+	# the runner's.
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-17T04:00:41Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a merge inside the skew tolerance was rejected (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+}
+
+@test "AC1(#817): a merge just outside the skew tolerance does not reconcile" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# 121s before started_at — one second past the tolerance. Pairs with
+	# the test above so the boundary is pinned from both sides and the
+	# tolerance cannot silently widen to "any age".
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-17T03:59:40Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a merge outside the tolerance reconciled (rc=$rc)"
+	[[ -z "$_RECONCILE_PR" ]] \
+		|| fail "_RECONCILE_PR set to '$_RECONCILE_PR'"
+}
+
+@test "AC3(#817): the most recently merged PR is selected, not the first listed" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# The API order deliberately differs from merge order: the old
+	# `.[0].number` selection would have named 5640.
+	_stub_gh_with_pr_fixture \
+		'[{"number":5640,"mergedAt":"2026-08-10T01:00:00Z"},
+		  {"number":5662,"mergedAt":"2026-08-14T06:31:22Z"},
+		  {"number":5657,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	# started_at well before every merge, so selection — not the time
+	# bound — is what this test measures.
+	_write_status_started_at 5634 "2026-08-01T00:00:00+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 5634 || rc=$?
+
+	[[ "$rc" -eq 0 ]] || fail "expected reconciliation (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "5662" ]] \
+		|| fail "selected PR was '$_RECONCILE_PR', expected 5662"
+	[[ "$_RECONCILE_REASON" == *'5662'* ]] \
+		|| fail "_RECONCILE_REASON was '$_RECONCILE_REASON'"
+	[[ "$_RECONCILE_REASON" != *'5640'* ]] \
+		|| fail "_RECONCILE_REASON named the first-listed PR 5640"
+	[[ "$_RECONCILE_REASON" != *'5657'* ]] \
+		|| fail "_RECONCILE_REASON named the older PR 5657"
+}
+
+@test "AC4(#817): a missing started_at accepts and logs a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# started_at is JSON null — the issue never reached processing, or
+	# status.json predates the field. Rejecting here would re-arm the
+	# circuit breaker #740 fixed, so the gate must accept.
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	_write_status_started_at 695 ""
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a missing started_at blocked reconciliation (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for a missing started_at"
+	grep -q 'started_at' "$TEST_TMP/log.out" \
+		|| fail "the WARN does not name the missing field"
+}
+
+@test "AC4(#817): an unparseable started_at accepts and logs a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	_write_status_started_at 695 "not-a-timestamp"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "an unparseable started_at blocked reconciliation"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for an unparseable started_at"
+}
+
+@test "AC4(#817): an absent status file accepts and logs a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# No status.json at all — nothing to compare against, so accept.
+	rm -f "$STATUS_FILE"
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "an absent status file blocked reconciliation (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for an absent status file"
+}
+
+@test "AC4(#817): a null mergedAt accepts and logs a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# GitHub reported a merged PR without a mergedAt. The age is unknown,
+	# not old — degrade toward #740's safety and accept.
+	_stub_gh_with_pr_fixture '[{"number":735,"mergedAt":null}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a null mergedAt blocked reconciliation (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for a null mergedAt"
+	grep -q 'mergedAt' "$TEST_TMP/log.out" \
+		|| fail "the WARN does not name the missing field"
+}
+
+@test "AC4(#817): the legacy number-only gh response still reconciles" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# A gh build (or a stub) that returns only the PR number carries no
+	# merge time. That is "unknown", not "old", so #740's reconciliation
+	# must survive it.
+	_stub_gh_pr_merged
+	GIT_HOST=github
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a number-only gh response blocked reconciliation"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for a missing merge time"
+}
+
+@test "AC1(#817): no merged PR at all still returns 1 without a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# An empty PR list must short-circuit before the time bound is
+	# consulted — otherwise every genuine failure would emit a WARN.
+	_stub_gh_with_pr_fixture '[]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 1 ]] || fail "an empty PR list reconciled (rc=$rc)"
+	[[ -z "$_RECONCILE_PR" ]] \
+		|| fail "_RECONCILE_PR set to '$_RECONCILE_PR'"
+	refute grep -q 'WARN' "$TEST_TMP/log.out"
+}
+
+@test "AC5(#817): replaying the 2026-08-17 batch records failed, not completed" {
+	# The reported case in full: issue #5634 started at 14:01:41+10:00,
+	# with PRs #5657 and #5662 merged two and three days earlier. Driven
+	# through the real implement-issue failure site, so the verdict that
+	# reaches status.json is the one under test — not just the gate's
+	# return code.
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+
+	_stub_gh_with_pr_fixture \
+		'[{"number":5657,"mergedAt":"2026-08-13T20:44:24Z"},
+		  {"number":5662,"mergedAt":"2026-08-14T06:31:22Z"}]'
+	_write_status_started_at 5634 "2026-08-17T14:01:41+10:00"
+
+	ISSUE_NUM_IN=5634 _run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out" \
+		|| fail "issue #5634 was not recorded failed"
+	refute grep -qw 'completed' "$TEST_TMP/update.out"
+	# The stale PR must not be attached to the issue either.
+	refute grep -q '5662' "$TEST_TMP/update.out"
+	refute grep -q '5657' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]] \
+		|| fail "the failure site returned $_failure_block_rc, expected 1"
+}
+
+@test "AC5(#817): the same replay with an in-run merge still records completed" {
+	# The complement of the replay above: identical fixture except the
+	# most recent merge lands after the run began. Without this pair, a
+	# gate that rejected everything would pass the AC5 test.
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+
+	_stub_gh_with_pr_fixture \
+		'[{"number":5657,"mergedAt":"2026-08-13T20:44:24Z"},
+		  {"number":5662,"mergedAt":"2026-08-17T04:30:00Z"}]'
+	_write_status_started_at 5634 "2026-08-17T14:01:41+10:00"
+
+	ISSUE_NUM_IN=5634 _run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out" \
+		|| fail "an in-run merge failed to reconcile at the failure site"
+	grep -q '5662' "$TEST_TMP/update.out" \
+		|| fail "the reconciling PR number was not recorded"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]] \
+		|| fail "the failure site returned $_failure_block_rc, expected 0"
+}
+
+@test "AC1(#817): _iso_to_epoch normalises UTC and local-offset to one scale" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# 2026-08-17T14:01:41+10:00 and 2026-08-17T04:01:41Z are the same
+	# instant. String comparison would order them by their printed digits
+	# ("1" vs "0") and get the answer backwards; epoch comparison does not.
+	local local_epoch utc_epoch
+	local_epoch=$(_iso_to_epoch "2026-08-17T14:01:41+10:00") \
+		|| fail "_iso_to_epoch rejected a local-offset timestamp"
+	utc_epoch=$(_iso_to_epoch "2026-08-17T04:01:41Z") \
+		|| fail "_iso_to_epoch rejected a UTC timestamp"
+
+	[[ "$local_epoch" == "$utc_epoch" ]] \
+		|| fail "same instant parsed as $local_epoch vs $utc_epoch"
+	[[ "$local_epoch" =~ ^[0-9]+$ ]] \
+		|| fail "_iso_to_epoch returned non-numeric '$local_epoch'"
+}
+
+@test "AC4(#817): _iso_to_epoch rejects empty, null and malformed input" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	refute _iso_to_epoch ""
+	refute _iso_to_epoch "null"
+	refute _iso_to_epoch "not-a-timestamp"
+	refute _iso_to_epoch "2026-13-45T99:99:99Z"
 }
