@@ -327,12 +327,37 @@ readonly ISSUE_TASKS_HEADING_ERE='^##+[[:space:]]+implementation tasks'
 #
 # The named helper _timeout_perl_fallback is always defined so that BATS tests
 # can call it directly to verify exit-124 semantics independent of host binaries.
+#
+# Empty / non-numeric durations are REJECTED with exit 125, matching GNU
+# timeout ("invalid time interval", exit 125 = "timeout itself failed").
+# Perl's alarm() would instead coerce "" to 0, which means NO alarm — so a
+# caller that passed an unset timeout variable ran unbounded on macOS and
+# hard-failed only in Linux CI. That divergence is exactly how issue #859
+# hid: TEST_LOOP_GIT_TIMEOUT was empty in the bats harness, `timeout ""
+# git diff ...` returned 125 on Linux and silently succeeded on macOS.
+# Failing loudly on both platforms is the correct direction: the alternative
+# (substituting a default here) would make Linux stop reporting the bug
+# instead of making macOS start reporting it, and a timeout silently
+# disabled is worse than a timeout loudly refused.
 
 _timeout_perl_fallback() {
     local duration="$1"; shift
+    # Accept GNU timeout's DURATION grammar: a number with an optional
+    # fraction and an optional s/m/h/d suffix. Anything else — empty
+    # included — is an invalid time interval.  The pattern lives in a
+    # variable because bash 3.2 treats a QUOTED =~ right-hand side as a
+    # literal string.
+    local _duration_re='^[0-9]+(\.[0-9]+)?[smhd]?$'
+    if [[ ! "$duration" =~ $_duration_re ]]; then
+        printf "timeout: invalid time interval '%s'\n" "$duration" >&2
+        return 125
+    fi
     perl -e '
         use POSIX ":sys_wait_h";
-        alarm shift @ARGV;
+        my $d = shift @ARGV;
+        my %mult = (s => 1, m => 60, h => 3600, d => 86400);
+        $d = $1 * $mult{$2} if $d =~ /^([0-9.]+)([smhd])$/;
+        alarm $d;
         $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
         $pid = fork // die "fork: $!";
         if ($pid == 0) { exec @ARGV; die "exec: $!" }
@@ -8102,6 +8127,28 @@ filter_implementation_files() {
     || true
 }
 
+# Drop integration test files from a newline-delimited file list.
+#
+# Integration tests are deliberately excluded from the targeted jest command
+# built by run_test_loop (they need infrastructure the loop does not stand
+# up), so any file list that describes the SCOPE OF THAT RUN must exclude
+# them too. Kept as one named helper so the two sites that need it — the
+# changed-test-file detection that builds the jest command, and the CHANGED
+# FILES list handed to the validator — cannot drift apart and disagree about
+# the same file (claude-pipeline#859).
+#
+# Deliberately NOT folded into filter_implementation_files(): an integration
+# test IS an implementation-relevant file. It is out of scope here only
+# because of what the test command ran, which is run_test_loop's concern,
+# not a property of the file.
+# Arguments:
+#   stdin - newline-delimited file list
+# Outputs:
+#   Filtered file list (newline-delimited)
+filter_out_integration_tests() {
+    grep -v -E '\.integration\.test\.' || true
+}
+
 # Check if a file is a Playwright spec (lives in tests/e2e/ or similar E2E directories).
 # Arguments:
 #   $1 - file path
@@ -8511,7 +8558,7 @@ run_test_loop() {
         fi
         changed_test_files=$(printf '%s' "$_tl_git_raw" \
             | grep -E "$changed_test_pattern" \
-            | grep -v '\.integration\.test\.' \
+            | filter_out_integration_tests \
             || true)
     fi
 
@@ -8674,7 +8721,13 @@ run_test_loop() {
         # exclude .claude/ pipeline files, docs, and non-code configs.
         local changed_files_raw changed_files
         changed_files_raw=$(git -C "$loop_dir" diff "$BASE_BRANCH"...HEAD --name-only 2>/dev/null || true)
-        changed_files=$(printf '%s\n' "$changed_files_raw" | filter_implementation_files)
+        # Integration tests are excluded from the jest command STEP 1 runs,
+        # so they must not appear in the CHANGED FILES list either — telling
+        # the validator to assess coverage for a file that was never executed
+        # is incoherent (claude-pipeline#859).
+        changed_files=$(printf '%s\n' "$changed_files_raw" \
+            | filter_implementation_files \
+            | filter_out_integration_tests)
 
         # Build BATS section.
         # bash scope (.claude/scripts changes): BLOCKING — failures fail the stage.
@@ -8724,7 +8777,7 @@ If tests failed in Step 1, set validation_result to 'skipped' and skip this step
 
 Validate test comprehensiveness for issue #$ISSUE_NUMBER.
 
-CHANGED FILES (implementation-relevant only, .claude/ and docs excluded):
+CHANGED FILES (implementation-relevant only; .claude/, docs and integration tests excluded):
 $changed_files
 
 ONLY validate tests for these specific files. Do NOT expand scope beyond this list.

@@ -168,12 +168,28 @@ teardown_test_env() {
 # PORTABLE TIMEOUT (macOS does not ship GNU timeout)
 # =============================================================================
 
+#
+# This stub must stay behaviourally identical to _timeout_perl_fallback() in
+# implement-issue-orchestrator.sh, INCLUDING its exit-125 rejection of an
+# empty / non-numeric duration. Without that rejection the stub silently runs
+# with no alarm at all, so a config variable the extractor fails to carry into
+# the harness (see source_orchestrator_functions) produces a green macOS run
+# and exit 125 in Linux CI — issue #859.
+
 if ! command -v timeout &>/dev/null; then
     timeout() {
         local duration="$1"; shift
+        local _duration_re='^[0-9]+(\.[0-9]+)?[smhd]?$'
+        if [[ ! "$duration" =~ $_duration_re ]]; then
+            printf "timeout: invalid time interval '%s'\n" "$duration" >&2
+            return 125
+        fi
         perl -e '
             use POSIX ":sys_wait_h";
-            alarm shift @ARGV;
+            my $d = shift @ARGV;
+            my %mult = (s => 1, m => 60, h => 3600, d => 86400);
+            $d = $1 * $mult{$2} if $d =~ /^([0-9.]+)([smhd])$/;
+            alarm $d;
             $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
             $pid = fork // die "fork: $!";
             if ($pid == 0) { exec @ARGV; die "exec: $!" }
@@ -584,6 +600,33 @@ HEADER
         # Extract configurable limit declarations (MAX_* and ORCHESTRATOR_START_EPOCH)
         /^MAX_[A-Z_]+=/ { print; next }
         /^ORCHESTRATOR_START_EPOCH=/ { print; next }
+
+        # Extract module-level config defaults of the exact shape
+        #
+        #     NAME="${NAME:-<literal>}"
+        #
+        # These are the env-overridable knobs (timeouts, budgets, slacks,
+        # kill-switches). Without this rule only the MAX_* subset survived
+        # extraction and every other one was EMPTY inside the harness, so a
+        # call like `timeout "$TEST_LOOP_GIT_TIMEOUT" git ...` became
+        # `timeout "" git ...` — which GNU timeout rejects with exit 125 on
+        # Linux while the perl fallback silently ran with no alarm on macOS
+        # (issue #859). Re-sourcing is safe because the :- form preserves a
+        # value a test already set.
+        #
+        # The pattern is deliberately narrow. It requires the default to be
+        # a literal: no dollar sign, backtick, or embedded double quote, and
+        # the assignment must CLOSE on the same line ("}" then the quote then
+        # end-of-line). That is what keeps SCRIPT_DIR= and SCRIPT_PATH= out
+        # of it. SCRIPT_DIR spans several lines and its default is a $(...)
+        # command substitution; SCRIPT_PATH defaults to $0. Both contain a
+        # dollar sign, so neither can match, and SCRIPT_DIR keeps its own
+        # dedicated multi-line rule further down (the resume tests depend on
+        # SCRIPT_DIR being extracted and clobbered to TEST_TMP).
+        #
+        # NOTE: this awk program is inside a single-quoted shell string, so
+        # no comment here may contain an apostrophe.
+        /^[A-Z_][A-Z_0-9]*="\$\{[A-Z_][A-Z_0-9]*:-[^$`"]*\}"$/ { print; next }
 
         # Extract array declarations (DEGRADED_STAGES)
         /^declare -a [A-Z_]+=/ { print; next }

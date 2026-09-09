@@ -1113,3 +1113,68 @@ WRAPPER
         fail "Did not expect a warning when TEST_E2E_CMD is unset. Log: $(cat "$LOG_FILE")"
 }
 
+
+# =============================================================================
+# HARNESS CONFIG EXTRACTION + TIMEOUT SHIM (issue #859)
+#
+# source_orchestrator_functions() used to keep only readonly/MAX_*/declare -a
+# lines out of the orchestrator, so every other module-level config default
+# arrived EMPTY. `timeout "$TEST_LOOP_GIT_TIMEOUT" git diff ...` then became
+# `timeout "" git diff ...`, which GNU timeout rejects with exit 125 on Linux
+# while the perl fallback silently ran with no alarm on macOS.
+# =============================================================================
+
+@test "extractor carries TEST_LOOP_GIT_TIMEOUT into the harness" {
+    [ "$TEST_LOOP_GIT_TIMEOUT" = "30" ]
+}
+
+@test "extractor carries the other dropped config defaults" {
+    [ "$MERGE_GIT_TIMEOUT" = "60" ]
+    [ "$MERGE_COMMENT_TIMEOUT" = "60" ]
+    [ "$MERGE_MR_STEP_TIMEOUT" = "120" ]
+    [ "$VALIDATE_PLAN_GIT_TIMEOUT" = "30" ]
+    [ "$IMPLEMENT_GIT_TIMEOUT" = "30" ]
+    [ "$TEST_ITER_WALL_TIME_SLACK" = "120" ]
+    [ "$PR_REVIEW_WALL_TIME_SLACK" = "120" ]
+    [ "$TEST_LOOP_PLANNED_ITERATIONS" = "3" ]
+    [ "$RUN_BUDGET_SOFT_PCT" = "80" ]
+    [ "$STATUS_LOCK_TIMEOUT" = "10" ]
+}
+
+@test "extractor does not capture SCRIPT_PATH (default contains \$0)" {
+    local extract="$TEST_TMP/orchestrator_functions.bash"
+    [ -f "$extract" ]
+    refute grep -q '^SCRIPT_PATH=' "$extract"
+}
+
+@test "extractor still captures the multi-line SCRIPT_DIR assignment" {
+    local extract="$TEST_TMP/orchestrator_functions.bash"
+    grep -q '^SCRIPT_DIR="\${_IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR:-\$($' \
+        "$extract" || fail "multi-line SCRIPT_DIR opener missing from extract"
+    grep -q '^)}"$' "$extract" \
+        || fail "multi-line SCRIPT_DIR closer missing from extract"
+    # ...and the resume tests depend on it resolving to TEST_TMP.
+    [ "$SCRIPT_DIR" = "$TEST_TMP" ]
+}
+
+@test "_timeout_perl_fallback rejects an empty duration with exit 125" {
+    run _timeout_perl_fallback "" true
+    [ "$status" -eq 125 ]
+    [[ "$output" == *"invalid time interval"* ]]
+}
+
+@test "_timeout_perl_fallback rejects a non-numeric duration with exit 125" {
+    run _timeout_perl_fallback abc true
+    [ "$status" -eq 125 ]
+    [[ "$output" == *"invalid time interval"* ]]
+}
+
+@test "_timeout_perl_fallback still passes a valid duration through" {
+    run _timeout_perl_fallback 5 bash -c "exit 42"
+    [ "$status" -eq 42 ]
+}
+
+@test "_timeout_perl_fallback still exits 124 when the command overruns" {
+    run _timeout_perl_fallback 1 sleep 5
+    [ "$status" -eq 124 ]
+}
