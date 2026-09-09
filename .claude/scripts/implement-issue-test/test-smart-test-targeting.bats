@@ -600,12 +600,19 @@ test('adds', () => expect(add(2, 3)).toBe(5));" > math.test.ts
 
     run_test_loop "$TEST_TMP/repo" "feature-ts-only-integration" "" "typescript"
 
-    local captured
-    captured=$(< "$prompt_file")
-    # Should NOT contain the integration test file
-    [[ "$captured" != *"integration.test.ts"* ]]
+    # Hard assertions (expect_*) — a bare [[ ]] here is inert: bats takes the
+    # test status from the LAST command only, and under bash 3.2 a failing
+    # [[ ]] mid-body is swallowed entirely. Both of these must bite.
+    #
+    # The integration test file must appear NOWHERE in the prompt: not in the
+    # jest command (it is excluded from the run) and not in the CHANGED FILES
+    # validation scope either, since asking the validator to assess coverage
+    # for a file that was never executed is incoherent.
+    expect_not_ok "prompt must not mention the integration test file" \
+        grep -qF "integration.test.ts" "$prompt_file"
     # Should fall back to --changedSince since no non-integration test files exist
-    [[ "$captured" == *"changedSince"* ]]
+    expect_ok "prompt should fall back to --changedSince" \
+        grep -qF "changedSince" "$prompt_file"
 }
 
 @test "run_test_loop handles mixed scope with explicit test files" {
