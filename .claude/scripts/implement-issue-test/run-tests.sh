@@ -106,12 +106,6 @@ CI_EXCLUDED_SUITES=(
     # pass nor fail.
     test-stage-runner.bats
 
-    test-integration.bats            # 4
-    test-claude-usage.bats           # 3
-    test-task-batching.bats          # 2
-    test-surgical-fast-path.bats     # 1
-    test-merge-block-partial.bats    # 1
-    test-constants.bats              # 1
 )
 
 # Prints the CI-safe suite list, one per line.
