@@ -85,6 +85,22 @@ RTK_ENABLED="${RTK_ENABLED:-0}"
 # e.g., "src/components/*|src/pages/*|tests/e2e/*"
 FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 
+# E2E spec path patterns — pipe-separated globs used by
+# _diff_includes_e2e_spec_paths() to decide whether a branch changes a
+# Playwright/Cypress spec.  A match runs the e2e_verify stage on its own,
+# independent of FRONTEND_PATH_PATTERNS: a PR whose only relevant change is a
+# brand-new spec matches no frontend path, so without this the spec's first
+# real execution is the repo's own CI after merge (issue #872).
+# Defaults to "tests/e2e/*" in the orchestrator when unset here.
+# e.g., "tests/e2e/*|e2e/*.spec.ts|cypress/e2e/*"
+TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
+
+# E2E_VERIFY_BLOCKING — when 1 (default), a PR that changes a file matching
+# TEST_E2E_PATH_PATTERNS is not auto-merged while e2e_verify is degraded
+# (no run on the branch reported a single test executing).  Set to 0 for a
+# repo with no local stack, where e2e_verify can never measure anything.
+E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
+
 # Migration path patterns — pipe-separated globs used by _select_deploy_cmd()
 # to detect when a branch touches database migrations (schema changes, seeders,
 # data fixes).  Matching files promote a Tier-3 backend deploy to Tier 2

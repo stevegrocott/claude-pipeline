@@ -281,6 +281,37 @@ ESCALATION_POLICY_BACKEND="${ESCALATION_POLICY_BACKEND:-}"
 #   0 (default) → warn and continue, so existing runs do not start breaking
 #   1           → refuse the run until the body is brought up to date
 FAIL_ON_STALE_ISSUE_BODY="${FAIL_ON_STALE_ISSUE_BODY:-0}"
+
+# E2E spec path patterns — pipe-separated globs matched against the branch
+# diff by _diff_includes_e2e_spec_paths() (issue #872).  A branch whose only
+# frontend-relevant change is a NEW Playwright spec matches no
+# FRONTEND_PATH_PATTERNS entry, so e2e_verify used to be skipped on exactly
+# the PRs that ship an unproven spec — the spec first executed in the repo's
+# own CI, one cycle late.  Defaulted here rather than only in platform.sh so
+# a consumer that has not refreshed its config still gets the trigger.
+TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
+
+# Direct-execution path for e2e_verify (issue #872).  When set (the default),
+# the stage runs TEST_E2E_CMD itself and parses the runner's own summary
+# counts instead of asking an agent to run it and self-report — deterministic,
+# no turn budget to exhaust, and no LLM cost.  The agent path is still used as
+# a fallback when the runner's output carries no parseable summary.
+#   1 (default) → run TEST_E2E_CMD directly, fall back to the agent on an
+#                 unparseable report
+#   0           → always use the agent path (pre-#872 behaviour)
+E2E_DIRECT_EXEC="${E2E_DIRECT_EXEC:-1}"
+
+# Wall-clock cap (seconds) on the direct TEST_E2E_CMD run above.
+E2E_DIRECT_EXEC_TIMEOUT="${E2E_DIRECT_EXEC_TIMEOUT:-900}"
+
+# Merge gate for a degraded e2e_verify on a branch that changed an E2E spec
+# (issue #872).  "degraded" means the stage's own counts never showed a spec
+# executing (tests_run == 0, or a verdict its counts do not support), which on
+# a spec-adding PR means the new spec was never proven anywhere but the repo's
+# CI.  Default on; E2E_VERIFY_BLOCKING=0 restores the pre-#872 non-blocking
+# behaviour.
+E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
+
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
 # The run-budget soft-threshold warning is emitted at most once per run
@@ -3069,6 +3100,20 @@ run_stage() {
         local _max_fix_review="${MAX_TURNS_FIX_REVIEW:-30}"
         turns_args=(--max-turns "$_max_fix_review")
         log "  Max turns: $_max_fix_review (fix/fix-review sonnet — targeted fix, env: MAX_TURNS_FIX_REVIEW)"
+    elif [[ "${_matched_prefix:-}" == "e2e-verify" ]]; then
+        # Issue #872: e2e-verify is light-tier, so it inherited the blanket
+        # 10-turn cap below — and 10 turns is not enough to bring up a stack
+        # and run a spec. On the observed runs the agent hit max_turns in
+        # ~90s with tests_run 0, the escalation produced nothing, and the
+        # stage recorded "degraded" without a browser ever starting. The
+        # direct TEST_E2E_CMD path (E2E_DIRECT_EXEC) is what normally runs
+        # this stage now; this budget is for the fallback, which is reached
+        # only when the runner's output has no parseable summary and is
+        # therefore the harder case, not the easier one.
+        local _max_e2e="${MAX_TURNS_E2E_VERIFY:-25}"
+        turns_args=(--max-turns "$_max_e2e")
+        log "  Max turns: $_max_e2e (e2e-verify — stack bring-up + spec" \
+            "execution, env: MAX_TURNS_E2E_VERIFY)"
     elif [[ "$model" == "haiku" && "$_inherent_tier" == "light" ]]; then
         turns_args=(--max-turns 10)
         log "  Max turns: 10 (inherently light stage)"
@@ -8088,6 +8133,70 @@ _diff_includes_frontend_paths() {
     return 1
 }
 
+# Check a single path against TEST_E2E_PATH_PATTERNS (issue #872).
+#
+# Same pipe-separated-glob contract as _matches_frontend_pattern(), including
+# the `set -f` guard: the unquoted expansion below is word-split on IFS so
+# each pattern becomes its own loop item, and without `set -f` bash would
+# ALSO pathname-expand each word against real files in the cwd — silently
+# replacing a pattern like "tests/e2e/*" with whatever spec filenames happen
+# to exist there before the candidate path is ever compared (the #650
+# glob-corruption bug).
+# Arguments:
+#   $1 - file path
+# Returns:
+#   0 if the path matches a pattern
+#   1 otherwise (including when TEST_E2E_PATH_PATTERNS is empty)
+_matches_e2e_spec_pattern() {
+	local file="$1"
+
+	if [[ -z "${TEST_E2E_PATH_PATTERNS:-}" ]]; then
+		return 1
+	fi
+
+	local pattern
+	local rc=1
+	local IFS='|'
+
+	set -f
+	for pattern in $TEST_E2E_PATH_PATTERNS; do
+		# shellcheck disable=SC2254
+		case "$file" in
+			$pattern) rc=0; break ;;
+		esac
+	done
+	set +f
+
+	return "$rc"
+}
+
+# Check whether the branch diff touches an E2E spec (issue #872).
+#
+# _diff_includes_frontend_paths() consults FRONTEND_PATH_PATTERNS only, so a
+# branch whose only relevant change is a NEW tests/e2e/** spec matches
+# nothing and e2e_verify is skipped — the very PRs that ship an unproven
+# spec are the ones that never run one. This is the second, independent
+# trigger for that case.
+# Arguments:
+#   $1 - base branch to diff against
+# Returns:
+#   0 if any changed file matches TEST_E2E_PATH_PATTERNS
+#   1 otherwise
+_diff_includes_e2e_spec_paths() {
+	local base="$1"
+	local changed_files
+	changed_files=$(git diff "$base"...HEAD --name-only 2>/dev/null || true)
+
+	[[ -z "$changed_files" ]] && return 1
+
+	local file
+	while IFS= read -r file; do
+		_matches_e2e_spec_pattern "$file" && return 0
+	done <<< "$changed_files"
+
+	return 1
+}
+
 # Warn when TEST_E2E_CMD is configured but FRONTEND_PATH_PATTERNS is empty.
 #
 # detect_change_scope() can only classify a diff as "frontend"/"ts-frontend"
@@ -8182,6 +8291,170 @@ _build_targeted_e2e_cmd() {
     else
         printf '%s' "$TEST_E2E_CMD"
     fi
+}
+
+# Pull "<n> <word>" out of a runner summary blob (issue #872).
+# Arguments:
+#   $1 - text to scan
+#   $2 - the count's word ("passed", "failed", "flaky")
+# Outputs:
+#   The first matching count, or 0 when the word never appears.
+_e2e_count_for() {
+	local text="$1"
+	local word="$2"
+	local n
+
+	n=$(printf '%s\n' "$text" \
+		| grep -oE "[0-9]+ $word" \
+		| head -1 \
+		| grep -oE '[0-9]+' \
+		|| true)
+
+	printf '%s' "${n:-0}"
+}
+
+# Parse a Playwright / Jest / Vitest run's own summary counts (issue #872).
+#
+# The point of parsing the report rather than asking an agent to read it is
+# determinism: the counts come from the runner, not from a self-report that
+# can claim "passed" on a run that never started a browser.
+#
+# Two summary shapes are recognised, both emitted at the very end of a run:
+#   Playwright  "  2 passed (3.4s)" / "  1 failed" / "  1 flaky"
+#   Jest/Vitest "Tests:       1 failed, 2 passed, 3 total"
+# Only the tail of the output is scanned so a count-shaped string inside a
+# test title or an app log line cannot be mistaken for the summary.
+#
+# A "flaky" test passed on retry, so it counts toward tests_run and
+# tests_passed — never toward tests_failed. That keeps the invariant the
+# downstream cross-check enforces (passed + failed == run) exact.
+# Arguments:
+#   $1 - the runner's combined stdout+stderr
+# Outputs:
+#   "<tests_run> <tests_passed> <tests_failed>" on stdout
+# Returns:
+#   0 on a parsed summary, 1 when no summary line was found
+_parse_e2e_report_counts() {
+	local output="$1"
+	local tail_text
+	tail_text=$(printf '%s\n' "$output" | tail -40)
+
+	local jest_line pw_lines source_text=""
+	jest_line=$(printf '%s\n' "$tail_text" \
+		| grep -E '^[[:space:]]*Tests:[[:space:]]+[0-9]' \
+		| tail -1 || true)
+	pw_lines=$(printf '%s\n' "$tail_text" \
+		| grep -E '^[[:space:]]*[0-9]+ (passed|failed|flaky)([^a-z]|$)' \
+		|| true)
+
+	if [[ -n "$jest_line" ]]; then
+		source_text="$jest_line"
+	elif [[ -n "$pw_lines" ]]; then
+		source_text="$pw_lines"
+	else
+		return 1
+	fi
+
+	local passed failed flaky
+	passed=$(_e2e_count_for "$source_text" passed)
+	failed=$(_e2e_count_for "$source_text" failed)
+	flaky=$(_e2e_count_for "$source_text" flaky)
+
+	printf '%s %s %s' \
+		"$((passed + failed + flaky))" \
+		"$((passed + flaky))" \
+		"$failed"
+}
+
+# Run TEST_E2E_CMD directly and emit the e2e-verify stage's result shape
+# (issue #872).
+#
+# Replaces the agent round-trip for the common case. The agent path could not
+# execute a spec inside its turn budget — a 10-turn haiku hit max_turns after
+# ~90s with tests_run 0 — so the stage reported "degraded" without ever
+# starting a browser. Running the command here has no turn budget to exhaust,
+# costs nothing, and yields counts the downstream cross-check can trust.
+#
+# Emits the same JSON envelope run_stage returns for this stage
+# (.output.result / .output.tests_run / .output.tests_passed /
+# .output.tests_failed / .output.summary), so the caller's verdict
+# cross-checks apply unchanged to either path.
+#
+# Verdict rules:
+#   tests_failed > 0            → "failed"  (measured, enters the fix loop)
+#   tests_run == 0              → "unmeasured" (nothing executed)
+#   runner exited non-zero      → "unmeasured" (it broke without counting a
+#                                 failure — missing browsers, config error)
+#   otherwise                   → "passed"
+# Arguments:
+#   $1 - the E2E command to run
+#   $2 - optional path to write the runner's raw output to
+# Outputs:
+#   The result JSON on stdout
+# Returns:
+#   0 when the report parsed, 1 when it did not (caller falls back to the
+#   agent path rather than inventing counts)
+_e2e_direct_verify() {
+	local cmd="$1"
+	local log_path="${2:-}"
+
+	# _build_targeted_e2e_cmd appends the changed specs straight from
+	# `git diff --name-only`, so the command string carries one spec per
+	# LINE. That reads fine in an agent prompt, but a newline is a command
+	# separator to `bash -c` — the second spec would be run as its own
+	# command. Fold the whitespace so every spec stays an argument of the
+	# one runner invocation. (A spec path containing a literal space is
+	# not supported here, the same limitation the targeted command has
+	# always had.)
+	local run_cmd
+	run_cmd=$(printf '%s' "$cmd" | tr '\n' ' ')
+
+	local out rc=0
+	out=$(timeout "${E2E_DIRECT_EXEC_TIMEOUT:-900}" \
+		bash -c "$run_cmd" 2>&1) || rc=$?
+
+	if [[ -n "$log_path" ]]; then
+		printf '%s\n' "$out" > "$log_path" 2>/dev/null || true
+	fi
+
+	local counts
+	counts=$(_parse_e2e_report_counts "$out") || {
+		log_warn "e2e-verify: TEST_E2E_CMD produced no parseable test" \
+			"summary (exit $rc) — falling back to the agent path"
+		return 1
+	}
+
+	local run passed failed
+	read -r run passed failed <<< "$counts"
+
+	local result="passed"
+	if ((failed > 0)); then
+		result="failed"
+	elif ((run == 0)); then
+		result="unmeasured"
+	elif ((rc != 0)); then
+		result="unmeasured"
+	fi
+
+	local summary
+	summary="Ran \`$cmd\` directly (exit $rc): "
+	summary+="$run run, $passed passed, $failed failed."
+	if [[ -n "$log_path" ]]; then
+		summary+=" Full output: $log_path"
+	fi
+	summary+="
+Last lines of the run:
+$(printf '%s\n' "$out" | tail -20)"
+
+	jq -n \
+		--arg result "$result" \
+		--arg summary "$summary" \
+		--argjson run "$run" \
+		--argjson passed "$passed" \
+		--argjson failed "$failed" \
+		'{output: {result: $result, summary: $summary,
+			tests_run: $run, tests_passed: $passed,
+			tests_failed: $failed}}'
 }
 
 # Detect the scope of changes on the current branch vs the base branch.
@@ -9302,6 +9575,47 @@ finalize_e2e_verify_stage_status() {
 	return 0
 }
 
+# _e2e_verify_merge_block_reason() — merge gate for an e2e_verify that never
+# executed this branch's spec (issue #872).
+#
+# run_parallel_post_task_stages records "e2e_verify:blocking:spec_changed"
+# when the stage came back degraded/unmeasured on a diff that changed a file
+# matching TEST_E2E_PATH_PATTERNS. "degraded" is not a blocking state on its
+# own, which is how five consecutive PRs shipped a brand-new Playwright spec
+# whose first execution anywhere was the repo's own CI — every one of them
+# failing there on environment facts one local run would have exposed.
+#
+# Emits nothing and returns 1 when the run is clean, or when the operator has
+# opted out with E2E_VERIFY_BLOCKING=0 (pre-#872 behaviour: degraded and
+# merged anyway).
+# Globals:
+#   DEGRADED_STAGES     - scanned for the blocking marker
+#   E2E_VERIFY_BLOCKING - "0" disables the gate
+# Outputs:
+#   The merge-block reason on stdout when the gate fires
+# Returns:
+#   0 when the merge must be blocked, 1 otherwise
+_e2e_verify_merge_block_reason() {
+	if [[ "${E2E_VERIFY_BLOCKING:-1}" == "0" ]]; then
+		return 1
+	fi
+
+	local _ds_e2e_block
+	for _ds_e2e_block in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		if [[ "$_ds_e2e_block" == e2e_verify:blocking:* ]]; then
+			printf '%s' "The \`e2e_verify\` stage never executed \
+this branch's E2E spec — no run on this branch reported a single test \
+executing (degraded_stages: $_ds_e2e_block). This PR changes a file \
+matching TEST_E2E_PATH_PATTERNS \
+(\`${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}\`), so the spec's first real \
+execution would be the repo's own CI after merge."
+			return 0
+		fi
+	done
+
+	return 1
+}
+
 # =============================================================================
 # PARALLEL POST-TASK STAGES
 #
@@ -9330,6 +9644,16 @@ run_parallel_post_task_stages() {
 	local run_e2e=true run_acceptance=true
 	local e2e_resumed=false acceptance_resumed=false
 
+	# Issue #872: does this branch change an E2E spec? Drives BOTH the skip
+	# decision below (a spec-only diff must still run the stage) and the
+	# blocking gate at the end (a spec that never executed must not merge on
+	# a "degraded" verdict). Computed once, before the parallel subshells,
+	# so both reads see the same answer.
+	local _e2e_spec_changed=false
+	if _diff_includes_e2e_spec_paths "${BASE_BRANCH:-main}"; then
+		_e2e_spec_changed=true
+	fi
+
 	# E2E VERIFY skip logic
 	if [[ -n "$RESUME_MODE" ]] && is_stage_completed "e2e_verify"; then
 		log "Skipping e2e_verify stage (already completed)"
@@ -9340,7 +9664,8 @@ run_parallel_post_task_stages() {
 		run_e2e=false
 	elif [[ "$branch_scope" != "frontend" \
 		&& "$branch_scope" != "ts-frontend" ]] \
-		&& ! _diff_includes_frontend_paths "${BASE_BRANCH:-main}"; then
+		&& ! _diff_includes_frontend_paths "${BASE_BRANCH:-main}" \
+		&& ! $_e2e_spec_changed; then
 		# Name the paths that drove this classification so an unexpected
 		# skip (e.g. a renamed frontend file no longer matching
 		# FRONTEND_PATH_PATTERNS) can be diagnosed from the log alone.
@@ -9348,10 +9673,15 @@ run_parallel_post_task_stages() {
 		_e2e_skip_changed_files=$(git diff "${BASE_BRANCH:-main}"...HEAD \
 			--name-only 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 		log "Skipping e2e_verify stage" \
-			"(scope '$branch_scope' is not frontend and diff has" \
-			"no frontend paths -- changed files:" \
+			"(scope '$branch_scope' is not frontend, diff has" \
+			"no frontend paths, and no file matches" \
+			"TEST_E2E_PATH_PATTERNS" \
+			"'${TEST_E2E_PATH_PATTERNS:-<unset>}' -- changed files:" \
 			"${_e2e_skip_changed_files:-<none>})"
 		run_e2e=false
+	elif $_e2e_spec_changed; then
+		log "Running e2e_verify: the diff changes an E2E spec" \
+			"(TEST_E2E_PATH_PATTERNS='${TEST_E2E_PATH_PATTERNS:-}')"
 	fi
 
 	# ACCEPTANCE TEST skip logic
@@ -9500,12 +9830,34 @@ navigation, visual regressions
 
 Report result as 'passed' or 'failed' with a detailed summary."
 
-			local e2e_verify_result
-			e2e_verify_result=$(run_stage "e2e-verify" \
-				"$e2e_verify_prompt" \
-				"implement-issue-e2e-validate.json" \
-				"playwright-test-developer")
-			_halt_if_budget_exceeded
+			# Issue #872: run the suite here rather than asking an
+			# agent to run it and self-report. The agent path could
+			# not execute a spec inside its budget — a 10-turn haiku
+			# hit max_turns in ~90s with tests_run 0 — so the stage
+			# went "degraded" without a browser ever starting. The
+			# agent is kept only as a fallback for a runner whose
+			# output carries no parseable summary.
+			local e2e_verify_result=""
+			local _e2e_direct_used=false
+			if [[ "${E2E_DIRECT_EXEC:-1}" != "0" ]]; then
+				if e2e_verify_result=$(_e2e_direct_verify \
+					"$e2e_cmd" \
+					"$LOG_BASE/e2e-verify-direct.log"); then
+					_e2e_direct_used=true
+					log "e2e-verify: ran TEST_E2E_CMD" \
+						"directly (no agent turn budget)"
+				else
+					e2e_verify_result=""
+				fi
+			fi
+
+			if ! $_e2e_direct_used; then
+				e2e_verify_result=$(run_stage "e2e-verify" \
+					"$e2e_verify_prompt" \
+					"implement-issue-e2e-validate.json" \
+					"playwright-test-developer")
+				_halt_if_budget_exceeded
+			fi
 
 			local e2e_verify_status e2e_verify_summary
 			e2e_verify_status=$(printf '%s' "$e2e_verify_result" \
@@ -9579,6 +9931,21 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			elif [[ "$e2e_verify_status" == "passed" \
 				&& "$e2e_tests_failed" -gt 0 ]]; then
 				e2e_verify_status="failed"
+			elif $_e2e_spec_changed \
+				&& ((e2e_tests_run == 0)); then
+				# Issue #872: #763 AC4 deliberately lets a
+				# genuine zero-spec run stand as a pass —
+				# nothing failed and no count is short. That
+				# exemption cannot hold when THIS branch adds
+				# or changes a spec: zero tests run means the
+				# new spec never executed, so there is nothing
+				# to pass. Narrowed to the spec-changed case so
+				# the #763 exemption survives for every other
+				# diff.
+				log_warn "E2E verify ran 0 tests but this" \
+					"branch changes an E2E spec" \
+					"— treating as unmeasured"
+				e2e_verify_status="unmeasured"
 			fi
 
 			local e2e_icon="✅"
@@ -9918,6 +10285,16 @@ Report result as 'passed' or 'failed' with a detailed summary."
 			elif [[ "$rerun_status" == "passed" \
 				&& "$rerun_tests_failed" -gt 0 ]]; then
 				rerun_status="failed"
+			elif $_e2e_spec_changed \
+				&& ((rerun_tests_run == 0)); then
+				# Issue #872 parity with the initial call: a
+				# zero-test rerun on a branch that changes a
+				# spec never executed that spec, so it cannot
+				# be the pass that exits the fix loop.
+				log_warn "E2E rerun ran 0 tests but this" \
+					"branch changes an E2E spec" \
+					"— treating as unmeasured"
+				rerun_status="unmeasured"
 			fi
 
 			local rerun_icon="✅"
@@ -10023,6 +10400,38 @@ Investigate the root cause and fix the issue. Commit your changes."
 
 	# Clean up temp files
 	rm -f "$e2e_fail_file" "$acceptance_fail_file" "$e2e_unmeasured_file"
+
+	# ------------------------------------------------------------------
+	# Issue #872 — E2E BLOCKING MARKER
+	#
+	# An "unmeasured" e2e_verify means the stage never produced counts
+	# showing a spec execute. On a branch that ADDS or CHANGES a spec that
+	# is the whole failure being fixed here: the spec's first real run
+	# would otherwise be the repo's own CI, ~25 minutes after the PR
+	# opened, and every environment fact it depends on goes unchecked
+	# until then. Record a distinct marker the merge gate can act on.
+	#
+	# The E2E_VERIFY_BLOCKING opt-out is read at the GATE, not here: the
+	# marker is a fact about this run and belongs in degraded_stages
+	# either way, and reading the env in one place keeps the two from
+	# disagreeing across a resume.
+	# ------------------------------------------------------------------
+	if $run_e2e && $_e2e_spec_changed; then
+		local _ds_e2e_gate
+		for _ds_e2e_gate in \
+			"${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+			if [[ "$_ds_e2e_gate" == e2e_verify:unmeasured* ]]; then
+				DEGRADED_STAGES+=(
+					"e2e_verify:blocking:spec_changed"
+				)
+				log_warn "E2E verification never executed this" \
+					"branch's spec ($_ds_e2e_gate) —" \
+					"recorded as a merge-blocking condition" \
+					"(override: E2E_VERIFY_BLOCKING=0)"
+				break
+			fi
+		done
+	fi
 
 	# Mark completed AFTER parallelism (sequential writes, no race).
 	# e2e_verify routes through finalize_e2e_verify_stage_status so an
@@ -12551,11 +12960,60 @@ $complete_summary
                 fi
             fi
         fi
+        # Gate C — e2e_verify never executed this branch's E2E spec (issue
+        # #872).  Override: E2E_VERIFY_BLOCKING=0.  Evaluated last so it
+        # cannot displace a convergence or partial reason, both of which
+        # describe a broader failure; the decision itself lives in
+        # _e2e_verify_merge_block_reason() so the gate is testable directly
+        # rather than re-implemented in a test.
+        if [[ -z "$merge_blocked_reason" ]]; then
+            local _e2e_block_reason
+            if _e2e_block_reason=$(_e2e_verify_merge_block_reason); then
+                merge_blocked_reason="$_e2e_block_reason"
+                merge_block_kind="e2e"
+            fi
+        fi
+
         log "merge_pr: merge_blocked_reason check done — blocked='${merge_blocked_reason:-<none>}' kind='${merge_block_kind:-none}'"
 
         if [[ -n "$merge_blocked_reason" ]]; then
             local _task_summary_line
             _task_summary_line=$(_format_task_summary_line)
+
+            # E2E-verification block (issue #872): the PR adds or changes an
+            # E2E spec that no run on this branch ever executed.  Same
+            # merge_blocked state and exit 0 as the convergence gate — the PR
+            # is left open for a human — but with its own comment naming the
+            # stage and its own override, so the operator is told which gate
+            # fired and how to bypass exactly that one.
+            if [[ "$merge_block_kind" == "e2e" ]]; then
+                log_warn "Merge blocked for PR #$pr_number: e2e_verify never executed this branch's spec"
+                comment_pr "$pr_number" "Merge Blocked — E2E Verification Did Not Run" \
+                    "🚫 Auto-merge was blocked by the **\`e2e_verify\`** stage. This PR has been left **open** for a human to run the spec and merge (or push further fixes).
+
+$merge_blocked_reason${_task_summary_line:+
+
+$_task_summary_line}
+
+To override this gate and merge anyway, re-run with \`E2E_VERIFY_BLOCKING=0\`." \
+                    "playwright-test-developer"
+                comment_issue "Merge: Blocked (E2E Verification)" \
+                    "🚫 Merge of PR #$pr_number blocked — the \`e2e_verify\` stage never executed this branch's E2E spec. PR left open for human review.
+
+$merge_blocked_reason" \
+                    "default"
+                set_final_state "merge_blocked"
+                cp "$STATUS_FILE" "$LOG_BASE/status.json"
+
+                log "=========================================="
+                log "Implement Issue Complete (merge blocked — e2e_verify)"
+                log "=========================================="
+                log "Issue: #$ISSUE_NUMBER"
+                log "PR: #$pr_number"
+                log "Branch: $branch"
+                log "Status: merge_blocked"
+                exit 0
+            fi
 
             # Partial-delivery / unresolved-review block (issue #577): distinct
             # completed_partial state and a non-zero exit (2) so batch metrics

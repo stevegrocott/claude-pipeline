@@ -67,6 +67,15 @@ setup_test_env() {
     TEST_TMP=$(mktemp -d)
     export TEST_TMP
 
+    # e2e_verify's direct-execution path (issue #872) runs TEST_E2E_CMD for
+    # real. Every existing suite sets TEST_E2E_CMD to a placeholder like
+    # "npx playwright test" purely to get past the stage's skip guard, so
+    # leaving the executor enabled would have those tests shell out to a
+    # package manager — slow, network-dependent, and machine-dependent.
+    # Default it off here so a suite exercises the agent path unless it
+    # explicitly opts in (export E2E_DIRECT_EXEC=1) with a stub command.
+    export E2E_DIRECT_EXEC=0
+
     # Create minimal directory structure
     mkdir -p "$TEST_TMP/logs"
     mkdir -p "$TEST_TMP/schemas"
