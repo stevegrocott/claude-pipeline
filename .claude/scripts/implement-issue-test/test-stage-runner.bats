@@ -3113,3 +3113,68 @@ _count_bats_incomplete_markers() {
 	[ "$stage_status" = "completed" ] || \
 		fail "Expected test_loop status 'completed' for a finished run; got: $stage_status"
 }
+
+# =============================================================================
+# ISSUE #872: e2e-verify's TURN BUDGET
+#
+# e2e-verify is a light-tier stage, so it inherited the blanket 10-turn cap
+# for light-tier haiku stages — and 10 turns cannot bring up a stack and run
+# a Playwright spec. On the observed runs the agent hit max_turns in ~90s
+# with tests_run 0 and the stage recorded "degraded" without a browser ever
+# starting. The direct TEST_E2E_CMD executor is what normally runs this
+# stage now; this budget covers the fallback, which is reached only when the
+# runner's output has no parseable summary — the harder case, not the easier
+# one.
+# =============================================================================
+
+@test "run_stage gives e2e-verify a turn budget above the light-tier default" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "e2e-verify" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 25" "$claude_calls" || \
+        fail "Expected --max-turns 25 for e2e-verify. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage applies the e2e-verify budget to the rerun-after-fix stages too" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "e2e-verify-rerun-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 25" "$claude_calls" || \
+        fail "Expected --max-turns 25 for an e2e-verify rerun. Calls: $(cat "$claude_calls")"
+}
+
+@test "MAX_TURNS_E2E_VERIFY overrides the e2e-verify turn budget" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    export MAX_TURNS_E2E_VERIFY=40
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "e2e-verify" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 40" "$claude_calls" || \
+        fail "Expected --max-turns 40 from MAX_TURNS_E2E_VERIFY. Calls: $(cat "$claude_calls")"
+}

@@ -3249,3 +3249,464 @@ EOF
         jq . <<< "$out" > /dev/null
     fi
 }
+
+# =============================================================================
+# ISSUE #872: A SPEC-ONLY DIFF MUST TRIGGER e2e_verify, AND THE STAGE MUST
+# EXECUTE THE SPEC RATHER THAN ASK AN AGENT TO
+#
+# The skip guard in run_parallel_post_task_stages() consulted
+# _diff_includes_frontend_paths() alone, which reads FRONTEND_PATH_PATTERNS.
+# A PR whose only relevant change is a brand-new tests/e2e/** spec matches no
+# frontend path, so the stage was skipped on exactly the PRs that ship an
+# unproven spec -- five consecutive ones on a consumer repo, every spec first
+# executing in that repo's own CI ~25 minutes after the PR opened and every
+# one failing there.  When the stage DID run, a 10-turn haiku agent hit
+# max_turns in ~90s with tests_run 0 and the run continued to merge anyway,
+# because "degraded" was not a blocking state.
+# =============================================================================
+
+@test "_matches_e2e_spec_pattern matches specs under the default tests/e2e pattern" {
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*"
+
+    expect_ok "a top-level spec must match" \
+        _matches_e2e_spec_pattern "tests/e2e/login.spec.ts"
+    expect_ok "a nested spec must match" \
+        _matches_e2e_spec_pattern "tests/e2e/flows/checkout.spec.ts"
+    expect_not_ok "a src file must not match" \
+        _matches_e2e_spec_pattern "src/app/page.tsx"
+    expect_not_ok "a unit test outside the pattern must not match" \
+        _matches_e2e_spec_pattern "tests/unit/login.test.ts"
+}
+
+@test "_matches_e2e_spec_pattern honours a multi-pattern list and never matches when unset" {
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*|cypress/e2e/*"
+    expect_ok "the second pattern must be reachable" \
+        _matches_e2e_spec_pattern "cypress/e2e/smoke.cy.ts"
+
+    export TEST_E2E_PATH_PATTERNS=""
+    expect_not_ok "an empty pattern list must never match" \
+        _matches_e2e_spec_pattern "tests/e2e/login.spec.ts"
+}
+
+# Regression guard mirroring the #650 glob-corruption bug: without the
+# `set -f` around the unquoted pattern expansion, bash pathname-expands each
+# pattern against real files in the cwd, replacing "tests/e2e/*" with the
+# spec that already exists on disk -- so a DIFFERENT, newly added spec stops
+# matching and the stage goes back to being skipped.
+@test "_matches_e2e_spec_pattern is not corrupted by on-disk files under the pattern prefix" {
+    cd "$TEST_TMP/repo"
+    mkdir -p tests/e2e
+    touch tests/e2e/already-here.spec.ts
+
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*"
+    expect_ok "a newly added spec must still match with siblings on disk" \
+        _matches_e2e_spec_pattern "tests/e2e/brand-new.spec.ts"
+}
+
+@test "_diff_includes_e2e_spec_paths sees a spec added on the branch and ignores a non-spec diff" {
+    cd "$TEST_TMP/repo"
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*"
+
+    git checkout -q -b feature-issue-872-diff-nonspec
+    mkdir -p src
+    printf 'export const a = 1;\n' > src/thing.ts
+    git add src/thing.ts
+    git commit -q -m "add a ts file"
+    expect_not_ok "a diff with no spec must not trigger" \
+        _diff_includes_e2e_spec_paths "main"
+
+    git checkout -q main
+    git checkout -q -b feature-issue-872-diff-spec
+    mkdir -p tests/e2e
+    printf 'test("smoke", async () => {});\n' > tests/e2e/smoke.spec.ts
+    git add tests/e2e/smoke.spec.ts
+    git commit -q -m "add e2e smoke spec"
+    expect_ok "a diff that adds a spec must trigger" \
+        _diff_includes_e2e_spec_paths "main"
+}
+
+# AC1 (end to end): the real skip guard, driven with FRONTEND_PATH_PATTERNS
+# empty -- exactly the consumer configuration where every spec-adding PR was
+# silently skipped.
+@test "run_parallel_post_task_stages runs e2e_verify for a diff whose only change is a new tests/e2e spec" {
+    export FRONTEND_PATH_PATTERNS=""
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*"
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-872-spec-only
+    mkdir -p tests/e2e
+    printf 'test("smoke", async () => {});\n' > tests/e2e/smoke.spec.ts
+    git add tests/e2e/smoke.spec.ts
+    git commit -q -m "add e2e smoke spec"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    expect_glob "$scope" "typescript" \
+        "a lone .ts spec classifies as typescript, so scope alone can never run e2e_verify"
+
+    local calls_file="$TEST_TMP/e2e-872-spec-only-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        printf '%s' '{"output":{"result":"passed","summary":"ok","tests_run":2,"tests_passed":2,"tests_failed":0}}'
+    }
+
+    local -a DEGRADED_STAGES=()
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-872-spec-only" "$scope" "minimal" "S" || exit_code=$?
+    expect_glob "$exit_code" "0" "run_parallel_post_task_stages must return 0"
+
+    local sequence
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    expect_glob "$sequence" \
+        '*started:e2e_verify*run_stage:e2e-verify*completed:e2e_verify*' \
+        "e2e_verify must run for a spec-only diff. Calls: $sequence"
+    # The skip branches all emit started immediately followed by completed
+    # with no run_stage between them.  Written as an explicit `exit 1`
+    # rather than `[[ ... ]]` or `! grep`: a bare test in the middle of a
+    # bats body is inert, and `!` is exempt from errexit (#854).
+    if [[ "$sequence" == *'started:e2e_verify completed:e2e_verify'* ]]; then
+        printf 'FAIL: a skip branch fired for a spec-only diff.\n  calls: %s\n' \
+            "$sequence" >&2
+        exit 1
+    fi
+}
+
+# Negative control for AC1: the new trigger must not run e2e_verify for a
+# diff that touches no spec and no frontend path.  Without this, a trigger
+# that fired unconditionally would satisfy the test above.
+@test "run_parallel_post_task_stages still skips e2e_verify when the diff has neither a frontend path nor a spec" {
+    export FRONTEND_PATH_PATTERNS=""
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*"
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-872-no-spec
+    mkdir -p src
+    printf 'export const a = 1;\n' > src/thing.ts
+    git add src/thing.ts
+    git commit -q -m "add a ts file"
+
+    local calls_file="$TEST_TMP/e2e-872-no-spec-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+    run_stage() {
+        printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"
+        printf '%s' '{"output":{"result":"passed","summary":"ok","tests_run":1,"tests_passed":1,"tests_failed":0}}'
+    }
+
+    local -a DEGRADED_STAGES=()
+    local exit_code=0
+    run_parallel_post_task_stages \
+        "feature-issue-872-no-spec" "typescript" "minimal" "S" || exit_code=$?
+    expect_glob "$exit_code" "0" "run_parallel_post_task_stages must return 0"
+
+    local sequence
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    expect_glob "$sequence" '*started:e2e_verify completed:e2e_verify*' \
+        "expected the skip branch for a diff with no spec and no frontend path. Calls: $sequence"
+}
+
+# -----------------------------------------------------------------------
+# AC2: the stage executes the spec itself and reads the runner's own counts
+# -----------------------------------------------------------------------
+
+@test "_parse_e2e_report_counts reads a Playwright summary" {
+    local out counts
+    out=$(printf '%s\n' \
+        "Running 3 tests using 1 worker" \
+        "  1 failed" \
+        "    tests/e2e/smoke.spec.ts:3:1 > smoke" \
+        "  2 passed (4.2s)")
+
+    counts=$(_parse_e2e_report_counts "$out")
+    expect_glob "$counts" "3 2 1" \
+        "expected 'run passed failed' = '3 2 1' from the Playwright summary"
+}
+
+@test "_parse_e2e_report_counts counts a flaky test as run and passed, never as failed" {
+    local counts
+    counts=$(_parse_e2e_report_counts "$(printf '%s\n' \
+        "  1 flaky" "  2 passed (4.2s)")")
+    expect_glob "$counts" "3 3 0" \
+        "a flaky test passed on retry: it must count toward run+passed only"
+}
+
+@test "_parse_e2e_report_counts reads a Jest/Vitest summary" {
+    local counts
+    counts=$(_parse_e2e_report_counts "$(printf '%s\n' \
+        "Test Suites: 1 failed, 1 passed, 2 total" \
+        "Tests:       1 failed, 2 passed, 3 total" \
+        "Time:        4.2 s")")
+    expect_glob "$counts" "3 2 1" \
+        "expected 'run passed failed' = '3 2 1' from the Jest summary"
+}
+
+@test "_parse_e2e_report_counts fails rather than inventing counts when there is no summary" {
+    expect_not_ok "a crash with no summary must not parse" \
+        _parse_e2e_report_counts \
+        "Error: browserType.launch: Executable doesn't exist"
+}
+
+# Writes a fake E2E runner to $1 that prints the lines in $3.. and exits $2.
+_write_e2e_stub() {
+    local path="$1" rc="$2"
+    shift 2
+    {
+        printf '#!/usr/bin/env bash\n'
+        local line
+        for line in "$@"; do
+            printf 'printf %%s\\\\n %q\n' "$line"
+        done
+        printf 'exit %s\n' "$rc"
+    } > "$path"
+    chmod +x "$path"
+}
+
+@test "_e2e_direct_verify runs the command and reports the runner's own counts" {
+    log_warn() { :; }
+    local stub="$TEST_TMP/e2e-stub-pass.sh"
+    _write_e2e_stub "$stub" 0 "Running 2 tests using 1 worker" "  2 passed (1.0s)"
+
+    local json
+    json=$(_e2e_direct_verify "$stub" "$TEST_TMP/e2e-direct.log")
+
+    expect_glob "$(printf '%s' "$json" | jq -r '.output.result')" "passed" \
+        "a clean run must report passed"
+    expect_glob "$(printf '%s' "$json" | jq -r '.output.tests_run')" "2" \
+        "tests_run must come from the runner's summary"
+    expect_glob "$(printf '%s' "$json" | jq -r '.output.tests_failed')" "0" \
+        "tests_failed must come from the runner's summary"
+    expect_ok "the raw runner output must be written to the log path" \
+        test -s "$TEST_TMP/e2e-direct.log"
+}
+
+@test "_e2e_direct_verify reports failed with the runner's failure count" {
+    log_warn() { :; }
+    local stub="$TEST_TMP/e2e-stub-fail.sh"
+    _write_e2e_stub "$stub" 1 "  1 failed" "  2 passed (1.0s)"
+
+    local json
+    json=$(_e2e_direct_verify "$stub" "")
+    expect_glob "$(printf '%s' "$json" | jq -r '.output.result')" "failed" \
+        "a run with counted failures must report failed"
+    expect_glob "$(printf '%s' "$json" | jq -r '.output.tests_failed')" "1" \
+        "tests_failed must be the runner's own count"
+}
+
+@test "_e2e_direct_verify reports unmeasured when the runner executed nothing" {
+    log_warn() { :; }
+    local stub="$TEST_TMP/e2e-stub-zero.sh"
+    _write_e2e_stub "$stub" 0 "  0 passed (0.4s)"
+
+    local json
+    json=$(_e2e_direct_verify "$stub" "")
+    expect_glob "$(printf '%s' "$json" | jq -r '.output.result')" "unmeasured" \
+        "zero tests executed is not a pass"
+}
+
+@test "_e2e_direct_verify reports unmeasured when the runner exits non-zero without counting a failure" {
+    log_warn() { :; }
+    local stub="$TEST_TMP/e2e-stub-broken.sh"
+    _write_e2e_stub "$stub" 1 "  2 passed (1.0s)"
+
+    local json
+    json=$(_e2e_direct_verify "$stub" "")
+    expect_glob "$(printf '%s' "$json" | jq -r '.output.result')" "unmeasured" \
+        "a non-zero exit with no counted failure is an unfinished run"
+}
+
+@test "_e2e_direct_verify returns non-zero so the caller can fall back to the agent" {
+    log_warn() { :; }
+    local stub="$TEST_TMP/e2e-stub-unparseable.sh"
+    _write_e2e_stub "$stub" 1 "Error: browserType.launch: Executable doesn't exist"
+
+    expect_not_ok "an unparseable report must not produce a verdict" \
+        _e2e_direct_verify "$stub" ""
+}
+
+# AC2 end to end: with a stubbed TEST_E2E_CMD the stage runs the command
+# itself, reports the runner's counts, and never spends an agent turn.
+@test "e2e_verify executes TEST_E2E_CMD directly and does not call the agent when the report parses" {
+    export FRONTEND_PATH_PATTERNS=""
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*"
+    export BASE_BRANCH=main
+    export E2E_DIRECT_EXEC=1
+    unset RESUME_MODE
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-872-direct
+    mkdir -p tests/e2e
+    printf 'test("smoke", async () => {});\n' > tests/e2e/smoke.spec.ts
+    git add tests/e2e/smoke.spec.ts
+    git commit -q -m "add e2e smoke spec"
+
+    local stub="$TEST_TMP/e2e-stub-integration.sh"
+    _write_e2e_stub "$stub" 0 "Running 2 tests using 1 worker" "  2 passed (1.0s)"
+    export TEST_E2E_CMD="$stub"
+
+    local calls_file="$TEST_TMP/e2e-872-direct-calls.txt"
+    _install_e2e_stage_spies "$calls_file"
+    run_stage() { printf 'run_stage:%s\n' "$1" >> "$E2E_SPY_CALLS"; }
+
+    local -a DEGRADED_STAGES=()
+    local exit_code=0
+    # Scope "frontend" so the direct-executor coverage does not depend on
+    # the spec-diff trigger fix — each fix must be revertible on its own
+    # and show up as a distinct failure.
+    run_parallel_post_task_stages \
+        "feature-issue-872-direct" "frontend" "minimal" "S" || exit_code=$?
+    expect_glob "$exit_code" "0" "run_parallel_post_task_stages must return 0"
+
+    local sequence
+    sequence=$(tr '\n' ' ' < "$calls_file")
+    expect_glob "$sequence" '*started:e2e_verify*completed:e2e_verify*' \
+        "the stage must still run. Calls: $sequence"
+    refute grep -q '^run_stage:e2e-verify$' "$calls_file"
+    expect_ok "the direct runner's output must be captured" \
+        test -s "$LOG_BASE/e2e-verify-direct.log"
+    expect_glob "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}" "" \
+        "a measured pass must record no degraded marker"
+}
+
+# AC2 (second half): "completed" must be impossible with tests_run == 0 once
+# the branch changes a spec.  #763 AC4 deliberately lets a genuine zero-spec
+# run stand as a pass; that exemption cannot hold when the diff adds the very
+# spec that did not run.
+@test "e2e_verify cannot complete with tests_run == 0 when the branch changes a spec" {
+    export FRONTEND_PATH_PATTERNS=""
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*"
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-872-zero-run
+    mkdir -p tests/e2e
+    printf 'test("smoke", async () => {});\n' > tests/e2e/smoke.spec.ts
+    git add tests/e2e/smoke.spec.ts
+    git commit -q -m "add e2e smoke spec"
+
+    # Only the side-effecting collaborators are stubbed: set_stage_completed
+    # and update_stage stay real so the persisted status is the thing under
+    # test (same idiom as the #763 persistence test above).
+    is_stage_completed()       { return 1; }
+    log()                      { :; }
+    log_warn()                 { :; }
+    log_error()                { :; }
+    comment_issue()            { :; }
+    verify_on_feature_branch() { return 0; }
+    rebuild_and_health_check() {
+        printf '%s' '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+    }
+    _build_targeted_e2e_cmd()  { printf '%s' "$TEST_E2E_CMD"; }
+
+    # The observed payload: the agent hit max_turns and self-reported a
+    # pass over zero tests.
+    run_stage() {
+        case "$1" in
+            e2e-verify)
+                printf '%s' '{"output":{"result":"passed","summary":"Reached maximum number of turns (10)","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+                ;;
+            *) fail "unexpected run_stage call '$1'" ;;
+        esac
+    }
+
+    local -a DEGRADED_STAGES=()
+    local exit_code=0
+    # Scope "frontend" deliberately: the stage would run on the scope gate
+    # alone, so this test covers the zero-run classification and the
+    # blocking marker INDEPENDENTLY of the spec-diff trigger. Reverting one
+    # fix must not be masked by the other still being in place.
+    run_parallel_post_task_stages \
+        "feature-issue-872-zero-run" "frontend" "minimal" "S" || exit_code=$?
+    expect_glob "$exit_code" "0" "run_parallel_post_task_stages must return 0"
+
+    local stage_status
+    stage_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    expect_glob "$stage_status" "degraded" \
+        "a zero-test run on a spec-adding branch must not persist as completed"
+    expect_glob "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}" \
+        "*e2e_verify:blocking:spec_changed*" \
+        "the merge-blocking marker must be recorded. Got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# Guard on the narrowing: the #763 zero-spec exemption must survive for a
+# branch that changes no spec, so this fix cannot be mistaken for a blanket
+# "tests_run == 0 is always a failure" rule.
+@test "a zero-test e2e_verify still passes when the branch changes no spec" {
+    export FRONTEND_PATH_PATTERNS=""
+    export TEST_E2E_PATH_PATTERNS="tests/e2e/*"
+    export TEST_E2E_CMD="npx playwright test"
+    export BASE_BRANCH=main
+    unset RESUME_MODE
+
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-issue-872-zero-run-nospec
+    mkdir -p src
+    printf 'export const a = 1;\n' > src/thing.ts
+    git add src/thing.ts
+    git commit -q -m "add a ts file"
+
+    is_stage_completed()       { return 1; }
+    log()                      { :; }
+    log_warn()                 { :; }
+    log_error()                { :; }
+    comment_issue()            { :; }
+    verify_on_feature_branch() { return 0; }
+    rebuild_and_health_check() {
+        printf '%s' '{"rebuild":"skipped","health":"skipped","elapsed_secs":0}'
+    }
+    _build_targeted_e2e_cmd()  { printf '%s' "$TEST_E2E_CMD"; }
+    run_stage() {
+        printf '%s' '{"output":{"result":"passed","summary":"No E2E specs matched this change.","tests_run":0,"tests_passed":0,"tests_failed":0}}'
+    }
+
+    local -a DEGRADED_STAGES=()
+    local exit_code=0
+    # scope "frontend" so the stage runs on the scope gate alone.
+    run_parallel_post_task_stages \
+        "feature-issue-872-zero-run-nospec" "frontend" "minimal" "S" \
+        || exit_code=$?
+    expect_glob "$exit_code" "0" "run_parallel_post_task_stages must return 0"
+
+    local stage_status
+    stage_status=$(jq -r '.stages.e2e_verify.status' "$STATUS_FILE")
+    expect_glob "$stage_status" "completed" \
+        "the #763 zero-spec exemption must survive for a non-spec diff"
+    expect_glob "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}" "" \
+        "no blocking marker for a branch that changes no spec"
+}
+
+# _build_targeted_e2e_cmd appends the changed specs straight from
+# `git diff --name-only`, one per LINE. That is harmless in an agent prompt
+# but a newline is a command separator to `bash -c`, so the direct executor
+# must fold the command back onto one line — otherwise only the first spec
+# is ever passed to the runner and the rest are run as commands of their own.
+@test "_e2e_direct_verify runs a multi-spec targeted command as a single invocation" {
+    log_warn() { :; }
+    local stub="$TEST_TMP/e2e-stub-args.sh"
+    cat > "$stub" <<'STUB'
+#!/usr/bin/env bash
+printf 'args: %s\n' "$*"
+printf '  %d passed (1.0s)\n' "$#"
+STUB
+    chmod +x "$stub"
+
+    local specs cmd
+    specs=$(printf '%s\n%s' "tests/e2e/a.spec.ts" "tests/e2e/b.spec.ts")
+    cmd=$(printf '%s -- %s' "$stub" "$specs")
+
+    local json
+    json=$(_e2e_direct_verify "$cmd" "")
+
+    # The stub reports its own argc as the passed count: 3 ("--" plus both
+    # specs) when the command survived intact, 2 if the newline split it.
+    expect_glob "$(printf '%s' "$json" | jq -r '.output.tests_run')" "3" \
+        "every changed spec must reach the runner in one invocation"
+}
