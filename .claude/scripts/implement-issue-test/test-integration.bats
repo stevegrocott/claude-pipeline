@@ -713,12 +713,16 @@ teardown() {
 # text only fails when the text is deleted; running the filter fails when
 # its logic is wrong.
 _false_absence_jq_filter() {
-    # `declare -f` re-renders the body with its own indentation and a
-    # trailing `;` on the closing line, so anchor on the surrounding tokens
-    # rather than on exact source formatting.
+    # `declare -f` is a DEPARSER, not a source echo: it re-renders the body
+    # with its own indentation, a trailing `;` on the closing line, and —
+    # version-dependently — its own spacing around redirection operators.
+    # bash 3.2 emits `2>/dev/null`; bash 5 emits `2> /dev/null`. The end
+    # anchor below must tolerate both, or on bash 5 awk never exits and
+    # returns the whole of `main` (23KB) as the supposed jq program.
+    # Anchor on surrounding tokens, never on operator spacing.
     declare -f main | awk '
         /--arg files "\$changed_files_nl"/ { capture = 1; next }
-        capture && /2>\/dev\/null\);?$/ { exit }
+        capture && /2> ?\/dev\/null\);?$/ { exit }
         capture { print }
     '
 }
@@ -789,10 +793,23 @@ _classify_false_absence() {
     local numstat pr_diff_file_stats="" ns_added ns_removed ns_path
     numstat=$'12\t3\tsrc/app.ts\n-\t-\tassets/logo.png'
 
+    # Two traps in extracting a live loop out of `declare -f`:
+    #  1. bash normalises ANSI-C quoting, so the source's `IFS=$'\t'` is
+    #     re-rendered as `IFS='<literal TAB>'` on BOTH 3.2 and 5. Matching
+    #     the `$'\t'` source form finds nothing, `render` is empty, the eval
+    #     is a no-op and every assertion below passes vacuously — which is
+    #     how this test sat hollow. Anchor on the variable names instead;
+    #     `ns_added ns_removed ns_path` is unique within `main`.
+    #  2. The old `sed '$d'` deleted the whole final line, taking `done` with
+    #     it and leaving an unterminated loop. Strip only the redirection.
     local render
-    render=$(declare -f main | sed -n '/while IFS=\$.\\t. read -r ns_added ns_removed ns_path; do/,/^[[:space:]]*done </p' \
-        | sed '$d')
+    render=$(declare -f main | sed -n '/while IFS=.*read -r ns_added ns_removed ns_path; do/,/^[[:space:]]*done </p' \
+        | sed '$s/^\([[:space:]]*done\) <.*$/\1/')
     [[ -n "$render" ]]
+    # Non-emptiness alone is far too weak a gate — 23KB of unrelated bash is
+    # also non-empty. Require the loop to be intact and plausibly small.
+    [[ "$render" == *"ns_path"* && "$render" == *"done"* ]]
+    [[ "$(printf '%s\n' "$render" | wc -l)" -lt 30 ]]
 
     eval "$render" < <(printf '%s\n' "$numstat")
 

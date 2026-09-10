@@ -60,9 +60,19 @@ _usage_error() { _usage_log "ERROR claude-usage: $*"; }
 _cache_age_seconds() {
     [[ -f "$_CLAUDE_USAGE_CACHE_FILE" ]] || { printf '999999\n'; return; }
     local mtime now
-    mtime=$(stat -f %m "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null \
-         || stat -c %Y "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null \
-         || echo 0)
+    # Probe GNU first. `-f` means --format on BSD but --file-system on GNU,
+    # where it SUCCEEDS (exit 0) and prints a multi-line filesystem blob — so
+    # a BSD-first probe never falls through on Linux and feeds that blob to
+    # the arithmetic below. GNU's `-c` has no BSD counterpart, so probing it
+    # first fails cleanly on macOS and falls through as intended.
+    mtime=$(stat -c %Y "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null \
+         || stat -f %m "$_CLAUDE_USAGE_CACHE_FILE" 2>/dev/null)
+    # Belt and braces: never let a non-integer reach $(( )). A future stat
+    # variant that prints something unexpected degrades to "very old cache"
+    # rather than raising a syntax error mid-run.
+    case "$mtime" in
+        ''|*[!0-9]*) mtime=0 ;;
+    esac
     now=$(date +%s)
     printf '%s\n' $((now - mtime))
 }

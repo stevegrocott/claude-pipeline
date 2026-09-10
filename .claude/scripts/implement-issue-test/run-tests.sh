@@ -87,31 +87,43 @@ CI_EXCLUDED_SUITES=(
     test-bundle-parity.bats
 
     # --- Fail or hang on Linux while passing on macOS (tracked in #859) ---
-    # These are pre-existing platform bugs, not regressions from #855. They are
-    # excluded so every OTHER suite can be gated NOW rather than waiting on a
-    # cross-platform audit (`run-tests.sh --list-ci | wc -l` for the current
-    # count). Each should be removed from this list as it is fixed — the entry
-    # is a debt marker, not a decision.
+    # These are pre-existing platform bugs, not regressions from #855. Each
+    # should be removed from this list as it is fixed — the entry is a debt
+    # marker, not a decision. Use `run-tests.sh --list-ci | wc -l` for the
+    # current gated-suite count.
     #
-    # REMOVED from this list: test-smart-test-targeting.bats (was 17 failures)
-    # and test-soft-fail-convergence.bats (was 5). Both failed with exit 125
-    # from `timeout "$TEST_LOOP_GIT_TIMEOUT" git ...` because the harness
-    # extractor dropped every non-MAX_* config default, leaving the duration
-    # empty; GNU timeout rejects an empty interval, the macOS perl fallback
-    # did not. Fixed in source_orchestrator_functions() and the timeout shim.
+    # #859 opened with 34 failures across 8 suites. All 34 are now fixed:
+    #
+    #   #869 — test-smart-test-targeting.bats (17) and
+    #   test-soft-fail-convergence.bats (5). Both exited 125 from
+    #   `timeout "$TEST_LOOP_GIT_TIMEOUT" git ...` because the harness
+    #   extractor dropped every non-MAX_* config default, leaving the
+    #   duration empty; GNU timeout rejects an empty interval, the macOS
+    #   perl fallback did not.
+    #
+    #   This change — the remaining 12, across the six suites below.
+    #   test-integration (4), test-claude-usage (3), test-task-batching (2),
+    #   test-surgical-fast-path (1), test-merge-block-partial (1),
+    #   test-constants (1). One was a real portability defect: claude-usage
+    #   probed `stat -f` before `stat -c`, and `-f` means --format on BSD
+    #   but --file-system on GNU, where it SUCCEEDS and prints a filesystem
+    #   blob into the cache-age arithmetic. The other eleven were stale
+    #   tests — hard-coded counts that drifted, mocks never migrated to the
+    #   #536 .output envelope or the #790 no-op guard, a mock export missed
+    #   by #428, and two `declare -f` extractions anchored on redirection
+    #   spacing that bash 5 renders differently from bash 3.2.
+    #
+    # A note on why these hid for so long: bash 3.2 silently swallows a
+    # failing bare `[[ ]]` that is not the last command in a function, and a
+    # bats @test IS a function. Most of the eleven were failing on macOS too
+    # — only Linux/bash 5 reported it. Local green proves very little here;
+    # verify against a real Linux run.
 
     # HANGS rather than fails: stalls at "parent watchdog fires when inner
     # timeout wrapper hangs" and burns the whole job timeout. A hang is worse
     # than a failure — it produces a `cancelled` run, which reads like neither
-    # pass nor fail.
+    # pass nor fail. Out of scope for #859's failure fixes; still open.
     test-stage-runner.bats
-
-    test-integration.bats            # 4
-    test-claude-usage.bats           # 3
-    test-task-batching.bats          # 2
-    test-surgical-fast-path.bats     # 1
-    test-merge-block-partial.bats    # 1
-    test-constants.bats              # 1
 )
 
 # Prints the CI-safe suite list, one per line.
