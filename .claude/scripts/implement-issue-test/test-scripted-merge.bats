@@ -261,6 +261,47 @@ _run_merge_hook() {
 }
 
 # ---------------------------------------------------------------------------
+# End-to-end: run the real script, not extracted functions.
+#
+# Every other case here extracts a function and calls it through bats `run`,
+# which captures the status and so never trips `set -e`. That is precisely why
+# the #876 regression shipped: _pr_terminal_state returns 1 on the normal
+# "still open, proceed" path, and a bare call under `set -euo pipefail` aborted
+# merge-mr.sh before it ever reached the mergeability wait. Every merge of an
+# open PR failed with exit 1 and no output, and the whole suite stayed green.
+# ---------------------------------------------------------------------------
+
+@test "#876 regression: the script reaches the merge for an OPEN, CLEAN PR" {
+	mkdir -p "$TEST_TMP/bin"
+	: > "$TEST_TMP/gh-e2e.log"
+	cat > "$TEST_TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "GHLOG"
+for a in "$@"; do
+  case "$a" in
+    state) printf 'OPEN\n'; exit 0 ;;
+    mergeStateStatus,statusCheckRollup)
+      printf '%s\n' '{"mergeStateStatus":"CLEAN","statusCheckRollup":[]}'; exit 0 ;;
+  esac
+done
+case "$1 $2" in
+  "pr merge") printf 'merged\n'; exit 0 ;;
+esac
+printf '{}\n'; exit 0
+STUB
+	sed -i.bak "s|GHLOG|$TEST_TMP/gh-e2e.log|" "$TEST_TMP/bin/gh"
+	chmod +x "$TEST_TMP/bin/gh"
+
+	PATH="$TEST_TMP/bin:$PATH" run "$MERGE_MR" 5979
+	[[ "$status" -eq 0 ]] \
+		|| fail "script aborted on an OPEN PR (exit $status) — set -e regression: $output"
+
+	# It must actually have got as far as merging, not just exited 0 early.
+	grep -q "pr merge" "$TEST_TMP/gh-e2e.log" \
+		|| fail "script exited 0 without merging; gh calls: $(cat "$TEST_TMP/gh-e2e.log")"
+}
+
+# ---------------------------------------------------------------------------
 # Issue #876: a MERGED or CLOSED PR reports mergeStateStatus UNKNOWN forever.
 # Polling one wastes MERGE_MR_POLL_MAX and reports a false decline, which the
 # batch counts as a failed issue.
