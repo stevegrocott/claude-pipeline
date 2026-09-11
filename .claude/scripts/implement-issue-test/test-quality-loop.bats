@@ -1957,9 +1957,9 @@ _install_fix_stage_stubs() {
         fail "committed fix must post its success comment, got: $comments"
 }
 
-@test "main pushes to the PR only when the fix stage result is accepted" {
-    # The push lives in main's review loop; the guard's return code gates it,
-    # so an uncommitted fix can no longer trigger a no-op push.
+@test "main defers the PR push only when the fix stage result is accepted" {
+    # The deferral lives in main's review loop; the guard's return code gates
+    # it, so an uncommitted fix can no longer schedule a no-op push.
     local main_def
     main_def=$(declare -f main)
 
@@ -1967,10 +1967,139 @@ _install_fix_stage_stubs() {
     fix_block=$(printf '%s' "$main_def" \
         | awk '/if _handle_fix_stage_result/,/^ *fi$/')
 
-    [[ "$fix_block" == *"git push origin"* ]] || \
-        fail "push must sit inside the _handle_fix_stage_result success branch"
+    [[ "$fix_block" == *"mark_review_push_pending"* ]] || \
+        fail "the push marker must sit inside the _handle_fix_stage_result success branch"
     [[ "$fix_block" == *"did not land its changes"* ]] || \
         fail "the failure branch must log that the changes did not land"
+}
+
+# =============================================================================
+# ISSUE #878 — one push per review loop, not one per iteration
+#
+# Each push is a full CI run on the consumer. The review loop diffs LOCAL git
+# (`git diff "$BASE_BRANCH"...HEAD`), so nothing inside the loop needs origin
+# to be current, and only the final head is ever merged — N intermediate
+# pushes buy no signal. The push moves to the loop exit, with the EXIT trap as
+# the safety net for a run halted mid-loop (batch-orchestrator recovers that
+# as "PR exists" and hands the PR to a standalone /process-pr, which merges
+# whatever is on origin — an unpushed fix would be silently dropped).
+# =============================================================================
+
+@test "#878: the review loop no longer pushes inside its fix branch" {
+    local main_def
+    main_def=$(declare -f main)
+
+    local fix_block
+    fix_block=$(printf '%s' "$main_def" \
+        | awk '/if _handle_fix_stage_result/,/^ *fi$/')
+
+    if [[ "$fix_block" == *"git push origin"* ]]; then
+        fail "the fix branch still pushes per iteration: $fix_block"
+    fi
+}
+
+@test "#878: the loop flushes the deferred push before the pr_review stage completes" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # The tail of the pr_review stage: everything between the loop marker and
+    # the stage-completed call that closes it.
+    local tail_block
+    tail_block=$(printf '%s' "$main_def" \
+        | awk '/if _handle_fix_stage_result/,/set_stage_completed "pr_review"/')
+
+    [[ "$tail_block" == *"flush_review_push"* ]] || \
+        fail "the loop never flushes its deferred push: $tail_block"
+
+    # ...and the flush must precede the stage completion, or the complete and
+    # merge stages run against a remote head missing the last fix.
+    local before_completion
+    before_completion=${tail_block%%set_stage_completed \"pr_review\"*}
+    [[ "$before_completion" == *"flush_review_push"* ]] || \
+        fail "flush runs after the stage completes, so merge-mr.sh could merge a stale remote head"
+}
+
+@test "#878: three review iterations result in exactly one push" {
+    local push_log="$TEST_TMP/git-push.log"
+    git() {
+        if [[ "$1" == "push" ]]; then
+            printf '%s\n' "$*" >> "$push_log"
+            return 0
+        fi
+        command git "$@"
+    }
+
+    mark_review_push_pending "fix/issue-878"
+    mark_review_push_pending "fix/issue-878"
+    mark_review_push_pending "fix/issue-878"
+    flush_review_push
+
+    assert_file_exists "$push_log"
+    local pushes
+    pushes=$(grep -c . "$push_log")
+    [[ "$pushes" -eq 1 ]] || \
+        fail "expected exactly 1 push for 3 iterations, got $pushes: $(< "$push_log")"
+    assert_file_contains "$push_log" "push origin fix/issue-878"
+}
+
+@test "#878: a loop that committed nothing pushes nothing" {
+    local push_log="$TEST_TMP/git-push.log"
+    git() {
+        if [[ "$1" == "push" ]]; then
+            printf '%s\n' "$*" >> "$push_log"
+            return 0
+        fi
+        command git "$@"
+    }
+
+    flush_review_push
+
+    if [[ -f "$push_log" ]]; then
+        fail "pushed with no fix committed: $(< "$push_log")"
+    fi
+}
+
+@test "#878: the flush is idempotent — the loop exit and the EXIT trap push once between them" {
+    local push_log="$TEST_TMP/git-push.log"
+    git() {
+        if [[ "$1" == "push" ]]; then
+            printf '%s\n' "$*" >> "$push_log"
+            return 0
+        fi
+        command git "$@"
+    }
+
+    mark_review_push_pending "fix/issue-878"
+    flush_review_push
+    # Second call stands in for the EXIT trap firing after the loop flushed.
+    flush_review_push
+
+    local pushes
+    pushes=$(grep -c . "$push_log")
+    [[ "$pushes" -eq 1 ]] || \
+        fail "flush is not idempotent — expected 1 push, got $pushes"
+}
+
+@test "#878: the EXIT trap flushes a pending push so a halted run cannot leave the fix unpushed" {
+    local trap_line
+    trap_line=$(grep -n "^trap '" "$ORCHESTRATOR_SCRIPT" | grep "EXIT$")
+    [[ -n "$trap_line" ]] || fail "no EXIT trap registered in the orchestrator"
+    [[ "$trap_line" == *"flush_review_push"* ]] || \
+        fail "EXIT trap does not flush the deferred push: $trap_line"
+}
+
+@test "#878: flush_review_push is defined before the EXIT trap registers it" {
+    # The trap can fire from any exit after registration; a helper defined
+    # further down the file would be a "command not found" at that point.
+    local def_line trap_reg_line
+    def_line=$(grep -n '^flush_review_push() {' "$ORCHESTRATOR_SCRIPT" \
+        | cut -d: -f1)
+    trap_reg_line=$(grep -n "^trap '.*' EXIT$" "$ORCHESTRATOR_SCRIPT" \
+        | cut -d: -f1)
+    [[ -n "$def_line" && -n "$trap_reg_line" ]] || \
+        fail "could not locate flush_review_push ($def_line) or the EXIT trap ($trap_reg_line)"
+    (( def_line < trap_reg_line )) || \
+        fail "flush_review_push (line $def_line) is defined after the EXIT trap (line $trap_reg_line)"
 }
 
 @test "_handle_fix_stage_result accepts a clean no-op without failing the stage" {

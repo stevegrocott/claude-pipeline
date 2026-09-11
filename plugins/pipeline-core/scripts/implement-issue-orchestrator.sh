@@ -2288,10 +2288,62 @@ _TIMED_OUT_STAGE_NAMES=""
 # exit 143 is called, preventing orphaned child processes.
 _bg_pids=()
 
+# Deferred push for the PR review loop (issue #878).
+#
+# The loop used to push after every fix iteration, so an N-iteration review
+# cost N full CI runs on a consumer whose expensive suite runs per push. Only
+# the FINAL state of the branch is ever merged, and the reviewer builds its
+# diff from local git (`git diff "$BASE_BRANCH"...HEAD`), never from origin —
+# so the intermediate pushes buy no review signal, only minutes. Mark the
+# branch here instead and flush once when the loop exits.
+#
+# The flush is deliberately also wired into the EXIT trap. A run halted inside
+# the loop (budget ceiling -> exit 2, SIGTERM from the batch per-issue
+# timeout) is recovered by batch-orchestrator as "PR exists" and handed to a
+# standalone /process-pr, which merges whatever is on origin. Without the
+# trap, the last fix commit would sit unpushed and that merge would silently
+# drop it — the #638 lost-fix failure mode, one layer up. Per-iteration
+# pushing used to mask this; the flush replaces that protection rather than
+# removing it.
+PR_REVIEW_PUSH_PENDING="${PR_REVIEW_PUSH_PENDING:-0}"
+PR_REVIEW_PUSH_BRANCH="${PR_REVIEW_PUSH_BRANCH:-}"
+
+# Records that the review loop has commits the remote does not have yet.
+# Cheap and idempotent: N iterations still flush as one push.
+#
+# Arguments:
+#   $1 - branch to push when the loop ends
+mark_review_push_pending() {
+    PR_REVIEW_PUSH_BRANCH="$1"
+    PR_REVIEW_PUSH_PENDING=1
+    log "Review fix committed on $1 — push deferred to the loop exit"
+}
+
+# Pushes the review loop's commits once, if any are pending. A no-op when the
+# loop committed nothing, and self-clearing so the post-loop call and the EXIT
+# trap between them push at most once.
+flush_review_push() {
+    [[ "${PR_REVIEW_PUSH_PENDING:-0}" == "1" ]] || return 0
+    PR_REVIEW_PUSH_PENDING=0
+
+    local branch="${PR_REVIEW_PUSH_BRANCH:-}"
+    if [[ -z "$branch" ]]; then
+        log "Review push pending with no branch recorded — nothing to push"
+        return 0
+    fi
+
+    log "Pushing review-loop commits to PR (one push per loop)..."
+    git push origin "$branch" 2>/dev/null \
+        || log "Warning: Could not push to origin"
+}
+
 # Register EXIT trap so interrupted runs surface as a distinct state and
 # metrics are always exported.  All helpers are forward-referenced —
 # bash traps evaluate at exit time, so the definitions need not precede this
 # line.  Call order:
+#   0. flush_review_push              — push any review-loop commit the loop
+#      had not flushed yet, so a halted run cannot hand /process-pr a remote
+#      head that is missing the last fix (issue #878)
 #   1. _rewrite_running_to_interrupted — rewrite state="running" to
 #      "interrupted_during_<stage>" before anything else reads it
 #   2. write_task_summary_to_status   — persist task summary
@@ -2299,7 +2351,7 @@ _bg_pids=()
 #   4. _cleanup_status_lock_artifacts — remove lock file/dir left on disk
 #   5. cleanup_reexec_copy            — remove the private re-exec snapshot
 #      created at startup (issue #778), if any
-trap '_rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics; _cleanup_status_lock_artifacts; cleanup_reexec_copy' EXIT
+trap 'flush_review_push; _rewrite_running_to_interrupted; write_task_summary_to_status; export_metrics; _cleanup_status_lock_artifacts; cleanup_reexec_copy' EXIT
 
 # Catch SIGTERM so the EXIT trap above fires properly.  Without this, bash may
 # not run the EXIT pseudo-signal handler when it is blocked waiting on a child
@@ -12795,14 +12847,21 @@ Fix the issues and commit. Output a summary of fixes applied."
                 # a review-fix commit re-diverged the bundle).
                 regenerate_bundle_if_needed "." "$BASE_BRANCH"
 
-                # Push updates (quality loop skipped — re-review will catch remaining issues)
-                log "Pushing updates to PR..."
-                git push origin "$branch" 2>/dev/null || log "Warning: Could not push to origin"
+                # Defer the push (issue #878). The next review iteration
+                # diffs local git, not origin, so nothing in this loop needs
+                # the remote to be current — and only the final head is ever
+                # merged. flush_review_push() below (and the EXIT trap) turns
+                # N iterations into one push, and so one CI run.
+                mark_review_push_pending "$branch"
             else
                 log_error "fix-pr-review-iter-$pr_iteration did not land its changes — re-reviewing unchanged branch"
             fi
         fi
         done
+
+        # One push for the whole loop, before the complete/merge stages —
+        # merge-mr.sh merges the REMOTE head, so this must land first.
+        flush_review_push
 
         set_stage_completed "pr_review"
     fi

@@ -728,15 +728,34 @@ _init_pipeline_git_repo() {
 # .claude/scripts/ file just as easily as the initial implementation — left
 # alone, that post-PR commit re-diverges the bundle and the push carries a
 # stale one. Assert a second call site exists, and that it sits immediately
-# before the fix-stage's push, not just somewhere in the file.
-@test "(#675) the regeneration hook also runs before the post-PR fix-stage push" {
+# before the fix stage hands its commit to the push, not just somewhere in
+# the file.
+#
+# Since #878 the loop no longer pushes per iteration: it marks the branch with
+# mark_review_push_pending and flush_review_push does one push when the loop
+# exits. The hazard and the guarantee are unchanged — the regeneration must
+# still run before the fix-stage commit is handed over — so this binds to the
+# hand-over point rather than to a push that is now one call away.
+@test "(#675) the regeneration hook also runs before the post-PR fix-stage push is queued" {
 	local -a regen_lines
 	local push_line closest_regen line between
 
-	push_line=$(grep -n 'git push origin "\$branch"' "$ORCHESTRATOR" \
+	push_line=$(grep -n 'mark_review_push_pending "\$branch"' "$ORCHESTRATOR" \
 		| head -1 | cut -d: -f1)
 	[[ -n "$push_line" ]] || {
-		printf 'FAIL: could not locate the fix-stage push in %s\n' \
+		printf 'FAIL: could not locate the fix-stage push hand-over in %s\n' \
+			"$ORCHESTRATOR" >&2
+		return 1
+	}
+
+	# ...and that hand-over must really reach a push: the flush is what
+	# turns the mark into `git push`, and the loop must call it.
+	grep -q 'git push origin "\$branch"' "$ORCHESTRATOR" || {
+		printf 'FAIL: nothing in %s pushes the branch\n' "$ORCHESTRATOR" >&2
+		return 1
+	}
+	grep -q '^[[:space:]]*flush_review_push$' "$ORCHESTRATOR" || {
+		printf 'FAIL: the deferred push is never flushed in %s\n' \
 			"$ORCHESTRATOR" >&2
 		return 1
 	}
@@ -759,7 +778,7 @@ _init_pipeline_git_repo() {
 		(( line < push_line )) && closest_regen=$line
 	done
 	(( closest_regen > 0 )) || {
-		printf 'FAIL: no regenerate_bundle_if_needed call precedes the fix-stage push (line %s)\n' \
+		printf 'FAIL: no regenerate_bundle_if_needed call precedes the fix-stage push hand-over (line %s)\n' \
 			"$push_line" >&2
 		return 1
 	}
