@@ -64,13 +64,15 @@ _load_merge_mr_functions() {
 	# the extracted functions run exactly as in production.
 	local helper
 	for helper in _non_blocking_checks_json _ignored_failed_checks \
-		_pending_ignored_checks _has_pending_check _pr_terminal_state; do
+		_pending_ignored_checks _has_pending_check _pr_terminal_state \
+		_pr_head_sha _check_runs_json _latest_full_run_id \
+		_post_label_run_state wait_for_full_run; do
 		local body
 		body=$(_extract_function_body "$helper" "$MERGE_MR")
 		[[ -n "$body" ]] || fail "$helper() not defined in merge-mr.sh"
 		eval "$body"
 	done
-	eval "$(grep -E '^(MERGE_MR_NON_BLOCKING_CHECKS|_JQ_CHECK_NAME|_JQ_IS_FAILED_STATE|_JQ_FAILED_CHECK_NAME)=' "$MERGE_MR")"
+	eval "$(grep -E '^(MERGE_MR_NON_BLOCKING_CHECKS|MERGE_MR_FULL_RUN_LABEL|MERGE_MR_FULL_RUN_CHECK|_JQ_CHECK_NAME|_JQ_IS_FAILED_STATE|_JQ_FAILED_CHECK_NAME)=' "$MERGE_MR")"
 
 	eval "$gate_body"
 	eval "$name_body"
@@ -107,6 +109,50 @@ case "\$*" in
 		;;
 	*"pr merge"*)
 		printf 'merged\n'
+		;;
+esac
+exit 0
+STUB
+	chmod +x "$TEST_TMP/bin/gh"
+	PATH="$TEST_TMP/bin:$PATH"
+}
+
+# Stubs `gh` for the full-run wait (issue #878).
+#
+#   $1 - head SHA reported BEFORE the label is applied
+#   $2 - head SHA reported AFTER  the label is applied (same as $1 unless the
+#        test is exercising the head-moved refusal)
+#   $3 - `gh api` check-runs payload BEFORE the label is applied
+#   $4 - `gh api` check-runs payload AFTER  the label is applied
+#
+# Splitting before/after is the point: it lets a test present a run that was
+# already green on the head at label time and assert the wait is NOT satisfied
+# by it.
+_stub_gh_full_run() {
+	local sha_before="$1" sha_after="$2" before="$3" after="$4"
+
+	mkdir -p "$TEST_TMP/bin"
+	printf '%s' "$before" > "$TEST_TMP/check-runs-before.json"
+	printf '%s' "$after" > "$TEST_TMP/check-runs-after.json"
+	cat > "$TEST_TMP/bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_TMP/gh-calls.log"
+if [[ -f "$TEST_TMP/label-applied" ]]; then
+	_sha='$sha_after'
+	_runs="$TEST_TMP/check-runs-after.json"
+else
+	_sha='$sha_before'
+	_runs="$TEST_TMP/check-runs-before.json"
+fi
+case "\$*" in
+	*"pr edit"*)
+		: > "$TEST_TMP/label-applied"
+		;;
+	*"pr view"*headRefOid*)
+		printf '%s\n' "\$_sha"
+		;;
+	*api*check-runs*)
+		cat "\$_runs"
 		;;
 esac
 exit 0
@@ -427,6 +473,160 @@ STUB
 	[[ "$status" -eq 0 ]] \
 		|| fail "status-context allowlist entry not honoured: $output"
 	assert_contains "$output" "[ci/informational]"
+}
+
+
+# ---------------------------------------------------------------------------
+# Issue #878: one full E2E per merge, requested by label on the FINAL head.
+#
+# The consumer's curated suite runs on PR-open and on demand via a label, so a
+# PR that took review-fix pushes can otherwise merge on a head the suite never
+# covered. merge-mr.sh adds the label and waits — but the run it waits for must
+# be one the label created. A suite that went green at PR-open time is still
+# attached to the same head SHA, so a wait keyed on the SHA alone matches it
+# instantly and waits for nothing.
+# ---------------------------------------------------------------------------
+
+_RUN_GREEN_111='{"check_runs":[{"id":111,"name":"e2e","status":"completed","conclusion":"success"}]}'
+
+@test "#878 AC1: a pre-label green e2e run on the same head does NOT satisfy the wait" {
+	_load_merge_mr_functions
+	# The same payload before and after: the head already carries a green
+	# `e2e` run and the label triggers nothing new.
+	_stub_gh_full_run deadbeef deadbeef "$_RUN_GREEN_111" "$_RUN_GREEN_111"
+
+	MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_POLL_INTERVAL=1 MERGE_MR_FULL_RUN_POLL_MAX=2
+	export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_POLL_INTERVAL MERGE_MR_FULL_RUN_POLL_MAX
+
+	run wait_for_full_run 6051
+	[[ "$status" -ne 0 ]] \
+		|| fail "a stale pre-label green run satisfied the wait: $output"
+	assert_contains "$output" "Timed out waiting for a post-label e2e run"
+	# ...and it still asked for the run, so this is a real wait, not a
+	# short-circuit that never requested anything.
+	assert_file_contains "$TEST_TMP/gh-calls.log" "pr edit 6051 --add-label full-e2e"
+}
+
+@test "#878 AC1: a run created after the label satisfies the wait once it succeeds" {
+	_load_merge_mr_functions
+	_stub_gh_full_run deadbeef deadbeef "$_RUN_GREEN_111" \
+		'{"check_runs":[{"id":111,"name":"e2e","status":"completed","conclusion":"success"},{"id":222,"name":"e2e","status":"completed","conclusion":"success"}]}'
+
+	MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_POLL_INTERVAL=1 MERGE_MR_FULL_RUN_POLL_MAX=4
+	export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_POLL_INTERVAL MERGE_MR_FULL_RUN_POLL_MAX
+
+	run wait_for_full_run 6051
+	[[ "$status" -eq 0 ]] \
+		|| fail "a post-label green run did not satisfy the wait: $output"
+	assert_contains "$output" "(run 222) concluded success"
+}
+
+@test "#878 AC1: a post-label run still in progress keeps the merge waiting" {
+	_load_merge_mr_functions
+	_stub_gh_full_run deadbeef deadbeef "$_RUN_GREEN_111" \
+		'{"check_runs":[{"id":111,"name":"e2e","status":"completed","conclusion":"success"},{"id":222,"name":"e2e","status":"in_progress","conclusion":null}]}'
+
+	MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_POLL_INTERVAL=1 MERGE_MR_FULL_RUN_POLL_MAX=2
+	export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_POLL_INTERVAL MERGE_MR_FULL_RUN_POLL_MAX
+
+	run wait_for_full_run 6051
+	[[ "$status" -ne 0 ]] \
+		|| fail "merged while the requested run was still in progress: $output"
+	assert_contains "$output" "run 222 on deadbeef (status: in_progress"
+}
+
+@test "#878 AC1: a post-label run that fails is refused immediately, not waited out" {
+	_load_merge_mr_functions
+	_stub_gh_full_run deadbeef deadbeef "$_RUN_GREEN_111" \
+		'{"check_runs":[{"id":111,"name":"e2e","status":"completed","conclusion":"success"},{"id":222,"name":"e2e","status":"completed","conclusion":"failure"}]}'
+
+	MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_POLL_INTERVAL=1 MERGE_MR_FULL_RUN_POLL_MAX=4
+	export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_POLL_INTERVAL MERGE_MR_FULL_RUN_POLL_MAX
+
+	run wait_for_full_run 6051
+	[[ "$status" -ne 0 ]] \
+		|| fail "a failed post-label run was treated as a green full run"
+	assert_contains "$output" "(run 222) concluded failure"
+	if [[ "$output" == *"Timed out"* ]]; then
+		fail "a concluded failure must refuse at once, not poll to the timeout"
+	fi
+}
+
+@test "#878 AC1: a head that moves while waiting is refused rather than merged" {
+	_load_merge_mr_functions
+	_stub_gh_full_run deadbeef cafe1234 "$_RUN_GREEN_111" \
+		'{"check_runs":[{"id":222,"name":"e2e","status":"completed","conclusion":"success"}]}'
+
+	MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_POLL_INTERVAL=1 MERGE_MR_FULL_RUN_POLL_MAX=4
+	export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_POLL_INTERVAL MERGE_MR_FULL_RUN_POLL_MAX
+
+	run wait_for_full_run 6051
+	[[ "$status" -ne 0 ]] \
+		|| fail "merged a head the requested run did not cover: $output"
+	assert_contains "$output" "head moved from deadbeef to cafe1234"
+}
+
+@test "#878 AC1: an unreadable check-runs payload refuses rather than assuming a zero watermark" {
+	_load_merge_mr_functions
+	# A zero watermark would make the pre-existing green run count as "new".
+	_stub_gh_full_run deadbeef deadbeef '{"message":"Bad credentials"}' \
+		"$_RUN_GREEN_111"
+
+	MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_POLL_INTERVAL=1 MERGE_MR_FULL_RUN_POLL_MAX=2
+	export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_POLL_INTERVAL MERGE_MR_FULL_RUN_POLL_MAX
+
+	run wait_for_full_run 6051
+	[[ "$status" -ne 0 ]] \
+		|| fail "an unreadable baseline was treated as 'no runs yet': $output"
+	assert_contains "$output" "Cannot read the check runs on deadbeef"
+	if [[ -f "$TEST_TMP/gh-calls.log" ]] \
+		&& grep -q 'pr edit' "$TEST_TMP/gh-calls.log"; then
+		fail "labelled the PR despite being unable to establish a watermark"
+	fi
+}
+
+@test "#878 AC2: with MERGE_MR_FULL_RUN_LABEL unset the wait is a no-op — no label, no API call" {
+	_load_merge_mr_functions
+	_stub_gh_full_run deadbeef deadbeef "$_RUN_GREEN_111" "$_RUN_GREEN_111"
+
+	MERGE_MR_FULL_RUN_LABEL="" MERGE_MR_FULL_RUN_POLL_INTERVAL=1 MERGE_MR_FULL_RUN_POLL_MAX=2
+	export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_POLL_INTERVAL MERGE_MR_FULL_RUN_POLL_MAX
+
+	expect_ok "unset label must be an immediate no-op" wait_for_full_run 6051
+	if [[ -f "$TEST_TMP/gh-calls.log" ]]; then
+		fail "unset label still called gh: $(< "$TEST_TMP/gh-calls.log")"
+	fi
+}
+
+@test "#878 AC1: the check name the label must re-trigger is configurable" {
+	# Exported BEFORE the functions are loaded, so the module-level
+	# `${MERGE_MR_FULL_RUN_CHECK:-e2e}` default is evaluated with the
+	# consumer's value in scope — a hardcoded check name fails here.
+	MERGE_MR_FULL_RUN_CHECK=curated-e2e
+	export MERGE_MR_FULL_RUN_CHECK
+	_load_merge_mr_functions
+	_stub_gh_full_run deadbeef deadbeef \
+		'{"check_runs":[{"id":111,"name":"curated-e2e","status":"completed","conclusion":"success"}]}' \
+		'{"check_runs":[{"id":111,"name":"curated-e2e","status":"completed","conclusion":"success"},{"id":222,"name":"curated-e2e","status":"completed","conclusion":"success"},{"id":333,"name":"e2e","status":"completed","conclusion":"failure"}]}'
+
+	MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_POLL_INTERVAL=1 MERGE_MR_FULL_RUN_POLL_MAX=4
+	export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_POLL_INTERVAL MERGE_MR_FULL_RUN_POLL_MAX
+
+	run wait_for_full_run 6051
+	[[ "$status" -eq 0 ]] \
+		|| fail "the configured check name was not the one awaited: $output"
+	assert_contains "$output" "curated-e2e (run 222) concluded success"
+}
+
+@test "#878 AC2: the github arm requests the full run before the mergeability wait" {
+	local arm
+	arm=$(awk '/^case "\$GIT_HOST" in/,/^esac/' "$MERGE_MR")
+	[[ "$arm" == *'wait_for_full_run "$MR" || exit 1'* ]] \
+		|| fail "github arm never requests the full run: $arm"
+	local before
+	before=${arm%%wait_for_mergeable*}
+	[[ "$before" == *'wait_for_full_run'* ]] \
+		|| fail "the full-run request runs after the mergeability wait, so a merge could land before the suite was even requested"
 }
 
 @test "AC1: hook blocks a direct gh pr merge" {

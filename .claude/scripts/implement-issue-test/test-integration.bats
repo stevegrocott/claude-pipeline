@@ -612,7 +612,13 @@ teardown() {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"git push origin"* ]]
+    # Since #878 the loop defers the push: each accepted fix marks the branch
+    # and one flush at the loop exit performs the single `git push`. Both
+    # halves must be present — a mark with no flush would never push at all.
+    [[ "$main_def" == *"mark_review_push_pending"* ]] || \
+        fail "the review loop no longer records that a fix needs pushing"
+    [[ "$main_def" == *"flush_review_push"* ]] || \
+        fail "the review loop never flushes its deferred push"
 }
 
 @test "PR review loop uses comment_pr" {
