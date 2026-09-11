@@ -430,8 +430,11 @@ case "$GIT_HOST" in
   github)
     # Check the terminal states before polling: a merged PR is success, a
     # closed one is a refusal, and neither ever leaves UNKNOWN (issue #876).
-    _pr_terminal_state "$MR"
-    case $? in
+    # `set -e` is active: a bare call would abort the script on the function's
+    # own "still open, proceed" return of 1. Capture the status instead.
+    _terminal_rc=0
+    _pr_terminal_state "$MR" || _terminal_rc=$?
+    case "$_terminal_rc" in
       0) exit 0 ;;
       2) exit 1 ;;
     esac
