@@ -241,8 +241,44 @@ wait_for_mergeable() {
   return 1
 }
 
+# Reports whether the PR has already reached a terminal state, so the caller can
+# skip the mergeability poll entirely.
+#
+# A MERGED or CLOSED PR reports `mergeStateStatus: UNKNOWN` forever. Without
+# this, wait_for_mergeable() polls it to MERGE_MR_POLL_MAX and reports a
+# decline — the batch then counts a *failure* for a PR that actually merged and
+# feeds the circuit breaker (issue #876: the inner orchestrator merged PR #6032,
+# the batch re-merged it, waited 1,790s on UNKNOWN and recorded the issue failed).
+#
+# Returns:
+#   0  already MERGED — the caller is done, nothing to merge
+#   2  CLOSED without a merge — a refusal, not a transient state
+#   1  still open (or state unreadable) — proceed to the mergeability wait
+_pr_terminal_state() {
+  local pr="$1" state
+  state=$(gh pr view "$pr" --json state --jq '.state' 2>/dev/null) || state=""
+  case "$state" in
+    MERGED)
+      echo "PR #$pr is already MERGED — nothing to do" >&2
+      return 0
+      ;;
+    CLOSED)
+      echo "PR #$pr is CLOSED without having been merged — refusing to merge" >&2
+      return 2
+      ;;
+  esac
+  return 1
+}
+
 case "$GIT_HOST" in
   github)
+    # Check the terminal states before polling: a merged PR is success, a
+    # closed one is a refusal, and neither ever leaves UNKNOWN (issue #876).
+    _pr_terminal_state "$MR"
+    case $? in
+      0) exit 0 ;;
+      2) exit 1 ;;
+    esac
     wait_for_mergeable "$MR" || exit 1
     case "$MERGE_STYLE" in
       squash) gh pr merge "$MR" --squash --delete-branch ;;
