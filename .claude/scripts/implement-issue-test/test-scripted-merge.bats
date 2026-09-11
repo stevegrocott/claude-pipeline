@@ -64,7 +64,7 @@ _load_merge_mr_functions() {
 	# the extracted functions run exactly as in production.
 	local helper
 	for helper in _non_blocking_checks_json _ignored_failed_checks \
-		_pending_ignored_checks _has_pending_check; do
+		_pending_ignored_checks _has_pending_check _pr_terminal_state; do
 		local body
 		body=$(_extract_function_body "$helper" "$MERGE_MR")
 		[[ -n "$body" ]] || fail "$helper() not defined in merge-mr.sh"
@@ -212,6 +212,86 @@ _run_merge_hook() {
 	[[ "$status" -eq 0 ]] \
 		|| fail "gate refused a PR whose only red check is allowlisted: $output"
 	assert_contains "$output" "non-blocking check(s) [frontend-unit-tests]"
+}
+
+# ---------------------------------------------------------------------------
+# Issue #876: a MERGED or CLOSED PR reports mergeStateStatus UNKNOWN forever.
+# Polling one wastes MERGE_MR_POLL_MAX and reports a false decline, which the
+# batch counts as a failed issue.
+# ---------------------------------------------------------------------------
+
+# Stubs `gh pr view --json state`, recording every call so the API-call count
+# can be asserted.
+_stub_gh_pr_state() {
+	mkdir -p "$TEST_TMP/bin"
+	: > "$TEST_TMP/gh-state-calls.log"
+	cat > "$TEST_TMP/bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_TMP/gh-state-calls.log"
+printf '%s\n' "$1"
+exit 0
+STUB
+	chmod +x "$TEST_TMP/bin/gh"
+	PATH="$TEST_TMP/bin:$PATH"
+}
+
+@test "#876 AC1: an already-MERGED PR short-circuits in one API call" {
+	_load_merge_mr_functions
+	_stub_gh_pr_state "MERGED"
+
+	run _pr_terminal_state 6032
+	[[ "$status" -eq 0 ]] \
+		|| fail "a MERGED PR must report done, got status $status: $output"
+	assert_contains "$output" "already MERGED"
+
+	local calls
+	calls=$(grep -c . "$TEST_TMP/gh-state-calls.log" 2>/dev/null) || calls=0
+	[[ "$calls" -eq 1 ]] \
+		|| fail "expected exactly one API call, saw $calls"
+}
+
+@test "#876 AC1: a CLOSED-unmerged PR is refused, naming the state" {
+	_load_merge_mr_functions
+	_stub_gh_pr_state "CLOSED"
+
+	run _pr_terminal_state 6032
+	[[ "$status" -eq 2 ]] \
+		|| fail "a CLOSED PR must be a distinct refusal, got status $status"
+	assert_contains "$output" "CLOSED without having been merged"
+}
+
+@test "#876 AC1: an OPEN PR falls through to the mergeability wait" {
+	_load_merge_mr_functions
+	_stub_gh_pr_state "OPEN"
+
+	run _pr_terminal_state 6032
+	[[ "$status" -eq 1 ]] \
+		|| fail "an OPEN PR must proceed to the wait, got status $status"
+}
+
+@test "#876 AC1: an unreadable state falls through rather than short-circuiting" {
+	_load_merge_mr_functions
+	_stub_gh_pr_state ""
+
+	run _pr_terminal_state 6032
+	[[ "$status" -eq 1 ]] \
+		|| fail "an unknown state must not be treated as terminal, got $status"
+}
+
+@test "#876 AC2: the github arm consults the terminal check before waiting" {
+	# The batch treats merge-mr.sh's exit 0 as merged, so the MERGED
+	# short-circuit is what stops a false 'failed' issue. Assert the wiring.
+	local arm
+	arm=$(awk '/^case "\$GIT_HOST" in/,/^esac/' "$MERGE_MR")
+	[[ "$arm" == *'_pr_terminal_state "$MR"'* ]] \
+		|| fail "github arm does not consult _pr_terminal_state: $arm"
+	[[ "$arm" == *'0) exit 0 ;;'* ]] \
+		|| fail "MERGED does not exit 0, so the batch would count a failure"
+	# ...and it must come before the poll, or it saves nothing.
+	local before after
+	before=${arm%%wait_for_mergeable*}
+	[[ "$before" == *'_pr_terminal_state'* ]] \
+		|| fail "terminal check runs after the poll, defeating its purpose"
 }
 
 # ---------------------------------------------------------------------------
