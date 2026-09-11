@@ -72,13 +72,34 @@ _ignored_failed_checks() {
   ' <<<"$rollup_json" 2>/dev/null || echo ""
 }
 
-# Returns success when any rollup entry is still running or queued. Used so an
-# UNSTABLE PR whose only red checks are allowlisted is merged only once every
-# other check has actually finished — never while a blocking one is pending.
+# Names in the rollup that are still running but allowlisted — for the merge
+# log, so an ignored in-flight check is visible rather than silent (issue #877).
+_pending_ignored_checks() {
+  local rollup_json="$1"
+  jq -r --argjson ignore "$(_non_blocking_checks_json)" '
+    [.[]? |
+      select(('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) |
+      if .__typename == "CheckRun" then
+        (select(.status != "COMPLETED") | .name)
+      else
+        (select(.state == "PENDING" or .state == "EXPECTED") | .context)
+      end
+    ] | join(", ")
+  ' <<<"$rollup_json" 2>/dev/null || echo ""
+}
+
+# Returns success when any BLOCKING rollup entry is still running or queued.
+# Checks named in MERGE_MR_NON_BLOCKING_CHECKS are excluded, exactly as they are
+# from the failure test: a check that cannot fail the merge is not worth waiting
+# for (issue #877 — a 25-33 min allowlisted job turned every merge into
+# merge_pr_timeout and the batch counted a failure with all blocking checks
+# green). Used so an UNSTABLE or BLOCKED PR whose only outstanding checks are
+# allowlisted merges immediately, while a pending blocking check still waits.
 _has_pending_check() {
   local rollup_json="$1"
-  jq -e '
+  jq -e --argjson ignore "$(_non_blocking_checks_json)" '
     [.[]? |
+      select((('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) | not) |
       if .__typename == "CheckRun" then
         (.status != "COMPLETED")
       else
@@ -190,11 +211,21 @@ wait_for_mergeable() {
         # non-blocking list and nothing is still running, that is the green
         # state the consumer asked for (issue #861). While anything is pending
         # keep waiting — a blocking check may still fail.
-        if [ "$merge_state" = "UNSTABLE" ] && ! _has_pending_check "$rollup"; then
-          local ignored
+        if { [ "$merge_state" = "UNSTABLE" ] || [ "$merge_state" = "BLOCKED" ]; } \
+          && ! _has_pending_check "$rollup"; then
+          local ignored pending_ignored remaining
           ignored=$(_ignored_failed_checks "$rollup")
-          if [ -n "$ignored" ]; then
-            echo "PR #$pr is UNSTABLE only because of non-blocking check(s) [$ignored] (MERGE_MR_NON_BLOCKING_CHECKS); proceeding" >&2
+          pending_ignored=$(_pending_ignored_checks "$rollup")
+          remaining="$ignored"
+          if [ -n "$pending_ignored" ]; then
+            if [ -n "$remaining" ]; then
+              remaining="$remaining, $pending_ignored (still running)"
+            else
+              remaining="$pending_ignored (still running)"
+            fi
+          fi
+          if [ -n "$remaining" ]; then
+            echo "PR #$pr is $merge_state only because of non-blocking check(s) [$remaining] (MERGE_MR_NON_BLOCKING_CHECKS); proceeding" >&2
             return 0
           fi
         fi

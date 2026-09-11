@@ -63,7 +63,8 @@ _load_merge_mr_functions() {
 	# more helpers and four module-level assignments; load them the same way so
 	# the extracted functions run exactly as in production.
 	local helper
-	for helper in _non_blocking_checks_json _ignored_failed_checks _has_pending_check; do
+	for helper in _non_blocking_checks_json _ignored_failed_checks \
+		_pending_ignored_checks _has_pending_check; do
 		local body
 		body=$(_extract_function_body "$helper" "$MERGE_MR")
 		[[ -n "$body" ]] || fail "$helper() not defined in merge-mr.sh"
@@ -211,6 +212,76 @@ _run_merge_hook() {
 	[[ "$status" -eq 0 ]] \
 		|| fail "gate refused a PR whose only red check is allowlisted: $output"
 	assert_contains "$output" "non-blocking check(s) [frontend-unit-tests]"
+}
+
+# ---------------------------------------------------------------------------
+# Issue #877: a *pending* allowlisted check must not hold the merge either.
+# A 25-33 min allowlisted job turned every merge into merge_pr_timeout and the
+# batch counted a failure with every blocking check green.
+# ---------------------------------------------------------------------------
+
+@test "#877 AC1: UNSTABLE with only an allowlisted check still running -> merges on the first poll" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":"","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"validate"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"e2e"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 6051
+	[[ "$status" -eq 0 ]] \
+		|| fail "waited on an allowlisted check that was still running: $output"
+	assert_contains "$output" "frontend-unit-tests (still running)"
+}
+
+@test "#877 AC1: BLOCKED with only an allowlisted check still running -> merges on the first poll" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":"","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"validate"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 6051
+	[[ "$status" -eq 0 ]] \
+		|| fail "BLOCKED with only an allowlisted check pending was not accepted: $output"
+	assert_contains "$output" "is BLOCKED only because of non-blocking check(s)"
+}
+
+@test "#877 AC2: a NON-allowlisted check still running keeps waiting (unchanged)" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":"","name":"e2e"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 6051
+	[[ "$status" -ne 0 ]] \
+		|| fail "merged while a BLOCKING check was still running"
+	assert_contains "$output" "Timed out waiting"
+}
+
+@test "#877 AC2: an allowlisted pending check with a real FAILURE is still refused" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":"","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"e2e"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS=frontend-unit-tests MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 6051
+	[[ "$status" -ne 0 ]] \
+		|| fail "merged despite a real FAILURE while an allowlisted check ran"
+	assert_contains "$output" 'check "e2e" that concluded in failure'
+}
+
+@test "#877 AC3: with no allowlist, a pending check still holds the merge" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":"","name":"frontend-unit-tests"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS","name":"validate"}]}'
+
+	MERGE_MR_NON_BLOCKING_CHECKS="" MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_NON_BLOCKING_CHECKS MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 6051
+	[[ "$status" -ne 0 ]] \
+		|| fail "an empty allowlist must not waive a pending check"
 }
 
 @test "#861 AC2: an allowlisted failure plus a real failure is still refused, naming the real one" {
