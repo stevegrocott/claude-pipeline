@@ -348,6 +348,53 @@ teardown() {
     [ "$result" -eq 3 ]
 }
 
+# ---------------------------------------------------------------------------
+# Issue #886: platform.sh is consumer-owned and seeded once (sync.sh:7), so a
+# repo that adopted the pipeline before CLAUDE_CLI was added to the template
+# (2026-03-01) has no assignment for it. Under `set -u` the orchestrator then
+# dies on the first stage that shells out.
+# ---------------------------------------------------------------------------
+
+@test "#886: CLAUDE_CLI is defaulted, so a pre-2026-03 consumer platform.sh still runs" {
+	# Reproduce that consumer: a platform.sh with no CLAUDE_CLI assignment.
+	local legacy="$TEST_TMP/legacy-platform.sh"
+	printf '%s\n' 'TRACKER="github"' 'GIT_HOST="github"' > "$legacy"
+	refute grep -q 'CLAUDE_CLI' "$legacy"
+
+	# Take the orchestrator's own default line and apply it after that config,
+	# under the same `set -u` the script runs with.
+	local default_line
+	default_line=$(grep -m1 '^CLAUDE_CLI=' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$default_line" ]] \
+		|| fail "orchestrator has no CLAUDE_CLI default — #886 would recur"
+
+	run /bin/bash -c "set -euo pipefail; source '$legacy'; $default_line; printf '%s' \"\$CLAUDE_CLI\""
+	[[ "$status" -eq 0 ]] \
+		|| fail "unbound CLAUDE_CLI under set -u with a legacy platform.sh: $output"
+	[[ "$output" == "claude" ]] \
+		|| fail "expected the PATH default 'claude', got '$output'"
+}
+
+@test "#886: an explicit CLAUDE_CLI still wins over the default" {
+	local default_line
+	default_line=$(grep -m1 '^CLAUDE_CLI=' "$ORCHESTRATOR_SCRIPT")
+	run /bin/bash -c "set -euo pipefail; CLAUDE_CLI=/custom/claude; $default_line; printf '%s' \"\$CLAUDE_CLI\""
+	[[ "$output" == "/custom/claude" ]] \
+		|| fail "the default overrode an explicit setting, got '$output'"
+}
+
+@test "#886: the default is applied after platform.sh is sourced, not before" {
+	# Before the source, platform.sh would overwrite it and the bug returns.
+	local content src_line def_line
+	content=$(cat "$ORCHESTRATOR_SCRIPT")
+	src_line=$(grep -n '^source "\$PLATFORM_SH_FILE"' "$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	def_line=$(grep -n '^CLAUDE_CLI=' "$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	[[ -n "$src_line" && -n "$def_line" ]] \
+		|| fail "could not locate both the source and the default"
+	(( def_line > src_line )) \
+		|| fail "CLAUDE_CLI default at line $def_line precedes the platform.sh source at $src_line"
+}
+
 @test "get_max_review_attempts returns 3 for unrecognised size (safe default)" {
     local result
     result=$(get_max_review_attempts "XL")

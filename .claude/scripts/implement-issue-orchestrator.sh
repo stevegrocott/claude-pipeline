@@ -136,6 +136,17 @@ PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
 }
 # shellcheck disable=SC1090  # path resolved at runtime by resolve_consumer_file
 source "$PLATFORM_SH_FILE"
+
+# platform.sh is CONSUMER-OWNED and seeded once (sync.sh:7), so a repo that
+# adopted the pipeline before CLAUDE_CLI was added to the template (2026-03-01,
+# fa5f870f) has no assignment for it. The orchestrator runs under `set -u` and
+# reads "$CLAUDE_CLI" at five stage-dispatch sites, so such a consumer dies with
+# `CLAUDE_CLI: unbound variable` on the first stage — 0/N tasks, before any real
+# work (issue #886). Default it here so the orchestrator does not depend on the
+# age of the consumer's config; an explicit setting, from platform.sh or the
+# environment, still wins.
+CLAUDE_CLI="${CLAUDE_CLI:-claude}"
+
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
 # Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work
