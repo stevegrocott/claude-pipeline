@@ -6302,6 +6302,13 @@ _task_deliverable_by_id() {
 #
 # Arguments:
 #   $1 - deliverable spec ("comment:<marker>" or "file:<path>")
+#   $2 - optional base directory a RELATIVE `file:<path>` resolves against.
+#        Defaults to the current working directory, which is what every
+#        caller running in the main checkout wants.  The parallel no-op
+#        guard runs in the main checkout while its task ran in a worktree,
+#        so it passes the worktree path to ask the distinct question "is
+#        the artefact in THAT tree?" (issue #795).  Absolute paths ignore
+#        it.
 # Returns:
 #   0 when the artefact is present, 1 otherwise
 #
@@ -6312,6 +6319,7 @@ _task_deliverable_by_id() {
 #
 verify_task_deliverable() {
 	local spec="${1:-}"
+	local base_dir="${2:-}"
 
 	case "$spec" in
 		comment:?*)
@@ -6327,6 +6335,9 @@ verify_task_deliverable() {
 			;;
 		file:?*)
 			local artefact_path="${spec#file:}"
+			if [[ -n "$base_dir" && "$artefact_path" != /* ]]; then
+				artefact_path="${base_dir%/}/${artefact_path}"
+			fi
 			[[ -s "$artefact_path" ]]
 			;;
 		*)
@@ -6911,6 +6922,14 @@ run_task_in_worktree() {
 		return 1
 	}
 
+	# Baseline for the result-file writer below (issue #794) — captured
+	# before any stage runs so "did this task commit anything?" is answered
+	# from the worktree's own starting point rather than from HEAD~1, which
+	# names whatever the feature branch already carried.
+	local wt_head_before
+	wt_head_before=$(git -C "$wt_path" rev-parse HEAD 2>/dev/null \
+		|| printf '')
+
 	local max_attempts
 	max_attempts=$(get_max_review_attempts "$task_size")
 	local review_attempts=0
@@ -7051,20 +7070,45 @@ Commit your changes with a descriptive message."
 				"$quality_max" "$task_size"
 		fi
 
-		local commit_sha
-		commit_sha=$(printf '%s' "$impl_result" \
-			| jq -r '.output.commit')
 		local impl_summary
 		impl_summary=$(printf '%s' "$impl_result" \
 			| jq -r '.output.summary // "Implementation completed"')
 
+		# already_done is carried through to the result file so the
+		# collector's no-op guard can tell a genuine idempotent task from a
+		# silent no-op (issue #796) and the downstream already-done check
+		# stops reading a field nobody ever wrote.
+		local impl_already_done
+		impl_already_done=$(printf '%s' "$impl_result" \
+			| jq -r '(.output.already_done // false) | tostring' \
+			2>/dev/null)
+		[[ "$impl_already_done" == "true" ]] || impl_already_done="false"
+
+		# Issue #794: HEAD~1..HEAD names the feature branch's own last
+		# commit when the task committed nothing, which would credit this
+		# task with files it never touched. Compare against the worktree's
+		# starting point instead and record a no-commit task honestly.
+		local wt_head_after
+		wt_head_after=$(git -C "$wt_path" rev-parse HEAD 2>/dev/null \
+			|| printf '')
+		local commit_sha
 		local files_changed_wt_json
-		files_changed_wt_json=$(git -C "$wt_path" diff --name-only HEAD~1 HEAD \
-			2>/dev/null | jq -R -s 'split("\n") | map(select(length>0))')
+		if [[ -n "$wt_head_after" \
+			&& "$wt_head_after" != "$wt_head_before" ]]; then
+			commit_sha=$(printf '%s' "$impl_result" \
+				| jq -r '.output.commit')
+			files_changed_wt_json=$(git -C "$wt_path" diff --name-only \
+				HEAD~1 HEAD \
+				2>/dev/null | jq -R -s 'split("\n") | map(select(length>0))')
+		else
+			commit_sha="none"
+			files_changed_wt_json="[]"
+		fi
 		printf '%s' "{
 \"status\":\"success\",
 \"review_attempts\":$review_attempts,
 \"commit\":\"$commit_sha\",
+\"already_done\":${impl_already_done},
 \"files_changed\":${files_changed_wt_json:-[]},
 \"summary\":$(printf '%s' "$impl_summary" | jq -Rs .)
 }" > "$result_file"
@@ -7312,6 +7356,65 @@ cleanup_worktree() {
 	git branch -D "$wt_branch" 2>/dev/null >&2 || true
 }
 
+# Formats `git status --porcelain` output as a space-separated path list for
+# an error message.
+#
+# Porcelain v1 lines are "XY <path>"; a rename reads "R  old -> new".  Shared
+# by the two task no-op guards and verify_fix_stage_commit so all three name
+# uncommitted work the same way (issue #796).
+#
+# Arguments:
+#   $1 - `git status --porcelain` output (may be empty)
+# Outputs:
+#   The paths, space separated, on stdout.  Empty input produces no output.
+#
+_porcelain_dirty_paths() {
+	local porcelain="${1:-}"
+	[[ -n "$porcelain" ]] || return 0
+
+	local -a dirty_paths=()
+	local line
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		dirty_paths+=("${line:3}")
+	done <<< "$porcelain"
+
+	printf '%s' "${dirty_paths[*]+"${dirty_paths[*]}"}"
+}
+
+# True when a task that produced no commit and left a clean tree may be
+# credited as a genuine no-op (issue #796).
+#
+# verify_fix_stage_commit accepts every clean tree, because a fix stage is
+# handed review findings that may already be addressed and "nothing to do"
+# is a routine outcome there.  A planned implementation task is different:
+# it was scheduled precisely because something was supposed to change, and
+# "claimed success, committed nothing, tree clean" is the exact silent no-op
+# the guard was built for (issue #790).  The tree alone cannot tell the two
+# apart, so the escape hatch requires the stage to say so: the implement
+# schema already carries `already_done`, which is the only positive signal
+# distinguishing "this had already landed" from "I did nothing".
+#
+# Arguments:
+#   $1 - the stage result JSON (either a task result file, which carries
+#        already_done at the top level, or a run_stage envelope, which
+#        nests it under .output)
+# Returns:
+#   0 when the result declares already_done, 1 otherwise (including
+#   unparseable or empty input — fails closed)
+#
+_task_noop_is_genuine() {
+	local result_json="${1:-}"
+	[[ -n "$result_json" ]] || return 1
+
+	local claimed
+	claimed=$(printf '%s' "$result_json" \
+		| jq -r '(.already_done // .output.already_done // false)
+			| tostring' 2>/dev/null)
+
+	[[ "$claimed" == "true" ]]
+}
+
 # Execute a batch of tasks in parallel using worktrees.
 #
 # Arguments:
@@ -7509,21 +7612,75 @@ execute_batch_parallel() {
 				log "Task $tid produced no commits, but its declared" \
 					"deliverable ($tid_deliverable) verified" \
 					"— accepting as a non-commit deliverable"
-			else
-				if [[ -n "$tid_deliverable" ]]; then
+			elif [[ -n "$tid_deliverable" ]]; then
+				# Issue #795: this guard runs in the MAIN checkout, but the
+				# task ran in $wp. Re-ask the question against the worktree
+				# so an artefact that was written there and never committed
+				# is named as exactly that, instead of being reported as
+				# never produced. It still fails: cleanup_worktree is about
+				# to remove $wp and
+				# reconcile_noncommit_tasks_with_deliverables re-verifies
+				# against the main checkout later in the run, so an
+				# uncommitted worktree file cannot honestly be credited.
+				if [[ -n "$wp" ]] && verify_task_deliverable \
+					"$tid_deliverable" "$wp"; then
+					log_error "Task $tid declared deliverable" \
+						"($tid_deliverable) and the artefact exists only" \
+						"inside its worktree ($wp), uncommitted — it does" \
+						"not survive worktree cleanup, so it cannot be" \
+						"credited. Commit the artefact, or declare a" \
+						"deliverable:comment:<marker> instead." \
+						"Marking failed (silent no-op guard)"
+				else
 					log_error "Task $tid declared deliverable" \
 						"($tid_deliverable) but it could not be" \
 						"verified — marking failed" \
-						"(silent no-op guard)"
-				else
-					log_error "Task $tid reported success but" \
-						"produced no commits — marking failed" \
 						"(silent no-op guard)"
 				fi
 				failed+=("$tid")
 				cleanup_worktree "$wp" "$wb" \
 					"$ISSUE_NUMBER" "$tid" "$feature_branch"
 				continue
+			else
+				# No deliverable declared and no commit. Mirror the
+				# dirty-vs-clean distinction verify_fix_stage_commit makes
+				# (issue #796): only a DIRTY tree with no commit is a lost
+				# fix. A clean worktree means nothing was written at all,
+				# which is either a genuine idempotent no-op (the change
+				# already landed via an earlier task on this branch) or the
+				# silent no-op issue #790 exists to catch. Those two are
+				# indistinguishable from the tree alone, so the accept
+				# requires the stage's own already_done claim — see
+				# _task_noop_is_genuine.
+				local wt_dirty=""
+				if [[ -n "$wp" && -d "$wp" ]]; then
+					wt_dirty=$(git -C "$wp" status --porcelain \
+						2>/dev/null || printf '')
+				fi
+				if [[ -n "$wt_dirty" ]]; then
+					log_error "Task $tid reported success but produced no" \
+						"commits while leaving changes in its worktree" \
+						"— marking failed (silent no-op guard)." \
+						"Uncommitted paths:" \
+						"$(_porcelain_dirty_paths "$wt_dirty")"
+					failed+=("$tid")
+					cleanup_worktree "$wp" "$wb" \
+						"$ISSUE_NUMBER" "$tid" "$feature_branch"
+					continue
+				fi
+				if _task_noop_is_genuine "$(cat "$rf" 2>/dev/null)"; then
+					log "Task $tid produced no commits, left a clean" \
+						"worktree and reported already_done" \
+						"— accepting as a genuine no-op"
+				else
+					log_error "Task $tid reported success but" \
+						"produced no commits — marking failed" \
+						"(silent no-op guard)"
+					failed+=("$tid")
+					cleanup_worktree "$wp" "$wb" \
+						"$ISSUE_NUMBER" "$tid" "$feature_branch"
+					continue
+				fi
 			fi
 		fi
 
@@ -8004,7 +8161,9 @@ Commit your changes with a descriptive message."
 			# dodge the guard.
 			local task_head_after
 			task_head_after=$(git rev-parse HEAD 2>/dev/null)
+			local task_made_commit=true
 			if [[ "$task_head_after" == "$task_head_before" ]]; then
+				task_made_commit=false
 				local tid_deliverable
 				tid_deliverable=$(_task_deliverable_by_id \
 					"$serial_tasks" "$tid")
@@ -8015,40 +8174,91 @@ Commit your changes with a descriptive message."
 						"declared deliverable ($tid_deliverable)" \
 						"verified — accepting as a non-commit" \
 						"deliverable"
+				elif [[ -n "$tid_deliverable" ]]; then
+					log_error "Task $tid declared deliverable" \
+						"($tid_deliverable) but it could not" \
+						"be verified — marking failed" \
+						"(silent no-op guard)"
+					failed+=("$tid")
+					continue
 				else
-					if [[ -n "$tid_deliverable" ]]; then
-						log_error "Task $tid declared deliverable" \
-							"($tid_deliverable) but it could not" \
-							"be verified — marking failed" \
-							"(silent no-op guard)"
+					# No deliverable declared and HEAD never moved.
+					# Mirror verify_fix_stage_commit's dirty-vs-clean
+					# distinction (issue #796): only a DIRTY tree with
+					# no commit is a lost fix. A clean tree is either a
+					# genuine idempotent no-op — the change already
+					# landed via an earlier task on this branch — or the
+					# silent no-op of issue #790, and the tree alone
+					# cannot tell them apart, so the accept requires the
+					# stage's own already_done claim.
+					local serial_dirty
+					serial_dirty=$(git status --porcelain \
+						2>/dev/null || printf '')
+					if [[ -n "$serial_dirty" ]]; then
+						log_error "Task $tid reported success but" \
+							"produced no commit while leaving" \
+							"changes in the working tree — marking" \
+							"failed (silent no-op guard)." \
+							"Uncommitted paths:" \
+							"$(_porcelain_dirty_paths "$serial_dirty")"
+						failed+=("$tid")
+						continue
+					fi
+					if _task_noop_is_genuine "$impl_result"; then
+						log "Task $tid produced no commit, left a" \
+							"clean tree and reported already_done" \
+							"— accepting as a genuine no-op"
 					else
 						log_error "Task $tid reported success" \
 							"but produced no commits — marking" \
 							"failed (silent no-op guard)"
+						failed+=("$tid")
+						continue
 					fi
-					failed+=("$tid")
-					continue
 				fi
 			fi
 
-			# Write result file for main loop
+			# Write result file for main loop.
+			#
+			# Issue #794: when HEAD never moved, `git diff HEAD~1 HEAD`
+			# describes the PREVIOUS task's commit, and .output.commit is
+			# whatever the subagent claimed. Recording either would credit
+			# this task with files it never touched. A task accepted with
+			# no commit — a verified non-commit deliverable, or a genuine
+			# no-op — is recorded honestly as commit "none" with an empty
+			# file list, which is also the signal the already-done check
+			# downstream reads.
 			local commit_sha
-			commit_sha=$(printf '%s' "$impl_result" \
-				| jq -r '.output.commit')
+			local files_changed_json
+			if [[ "$task_made_commit" == "true" ]]; then
+				commit_sha=$(printf '%s' "$impl_result" \
+					| jq -r '.output.commit')
+				files_changed_json=$(git diff --name-only HEAD~1 HEAD \
+					2>/dev/null | jq -R -s \
+					'split("\n") | map(select(length>0))')
+			else
+				commit_sha="none"
+				files_changed_json="[]"
+			fi
 			local impl_summary
 			impl_summary=$(printf '%s' "$impl_result" \
 				| jq -r \
 				'.output.summary // "Implementation completed"')
-			local files_changed_json
-			files_changed_json=$(git diff --name-only HEAD~1 HEAD \
-				2>/dev/null | jq -R -s \
-				'split("\n") | map(select(length>0))')
+			# Same field the worktree writer emits, so the downstream
+			# already-done check reads one schema for both paths.
+			local impl_already_done
+			impl_already_done=$(printf '%s' "$impl_result" \
+				| jq -r '(.output.already_done // false) | tostring' \
+				2>/dev/null)
+			[[ "$impl_already_done" == "true" ]] \
+				|| impl_already_done="false"
 			local rf
 			rf="${LOG_BASE}/stages/task-${tid}-serial.log"
 			printf '%s' "{
 \"status\":\"success\",
 \"review_attempts\":$review_attempts,
 \"commit\":\"$commit_sha\",
+\"already_done\":${impl_already_done},
 \"summary\":$(printf '%s' "$impl_summary" | jq -Rs .),
 \"files_changed\":${files_changed_json:-[]}
 }" > "$rf"
@@ -10679,18 +10889,10 @@ verify_fix_stage_commit() {
 		return 0
 	fi
 
-	# Porcelain v1 lines are "XY <path>"; renames read "R  old -> new".
-	local -a dirty_paths=()
-	local line
-	while IFS= read -r line; do
-		[[ -z "$line" ]] && continue
-		dirty_paths+=("${line:3}")
-	done <<< "$dirty"
-
 	log_error "$stage_label reported success but produced no commit" \
 		"while leaving changes in the working tree" \
 		"— marking failed (silent no-op guard)." \
-		"Uncommitted paths: ${dirty_paths[*]}"
+		"Uncommitted paths: $(_porcelain_dirty_paths "$dirty")"
 	return 1
 }
 
