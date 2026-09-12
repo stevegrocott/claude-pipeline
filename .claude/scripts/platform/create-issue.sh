@@ -39,9 +39,28 @@ if [[ "$BODY" == *"<!-- pipeline-autocreated -->"* ]] || \
   # first) would then see every valid path rejected as unresolved. Resolve
   # the repo root from this script's own location instead, unless the caller
   # already set an explicit override.
+  # Resolve against the CALLER's repo, not this script's location. Under a
+  # plugin install SCRIPT_DIR is the marketplace cache, which is not a git
+  # checkout — the git lookup failed and the old $SCRIPT_DIR/../../.. fallback
+  # landed inside the cache, so every real repo path was rejected as
+  # "unresolved" (issue #815, hit independently from two consumers as #885).
+  #
+  # `rev-parse --show-toplevel` already returns the repo ROOT from anywhere
+  # inside the checkout, so it handles the subdirectory case the old comment
+  # was worried about — a caller invoked from a test suite's own directory
+  # still resolves to the repo root.
+  #
+  # No depth guess: outside a git checkout with no override there is nothing
+  # honest to resolve to, so fail and name the variable that fixes it rather
+  # than validating against a guess.
   if [[ -z "${ISSUE_BODY_REPO_ROOT:-}" ]]; then
-    ISSUE_BODY_REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
-    ISSUE_BODY_REPO_ROOT="${ISSUE_BODY_REPO_ROOT:-$SCRIPT_DIR/../../..}"
+    ISSUE_BODY_REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -z "$ISSUE_BODY_REPO_ROOT" ]]; then
+      echo "ERROR: not inside a git repository and ISSUE_BODY_REPO_ROOT is unset." >&2
+      echo "       Task-line paths are validated against the repo root; set" >&2
+      echo "       ISSUE_BODY_REPO_ROOT to the repo you are filing against." >&2
+      exit 1
+    fi
     export ISSUE_BODY_REPO_ROOT
   fi
   if ! assert_issue_valid "$BODY"; then

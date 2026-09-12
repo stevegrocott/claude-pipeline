@@ -119,6 +119,63 @@ GH_EOF
     [ ! -s "$GH_API_ARGS" ]
 }
 
+# ---------------------------------------------------------------------------
+# Issue #815: the repo root must come from the CALLER's checkout, not the
+# script's own location. Under a plugin install SCRIPT_DIR is the marketplace
+# cache — not a git checkout — so the old $SCRIPT_DIR/../../.. fallback landed
+# inside the cache and rejected every real repo path as unresolved.
+#
+# This suite has no `fail` helper, so failures echo and `return 1` explicitly.
+# ---------------------------------------------------------------------------
+
+@test "#815 AC5: the ../../.. depth guess is gone from executable code" {
+    local code
+    code=$(grep -vE '^[[:space:]]*#' "$TEST_TMP/scripts/platform/create-issue.sh")
+    if [[ "$code" == *'SCRIPT_DIR/../../..'* ]]; then
+        echo "FAIL: the depth guess is still in executable code" >&2
+        return 1
+    fi
+}
+
+@test "#815 AC1/AC2: the root is derived from the caller, not the script dir" {
+    local code
+    code=$(grep -vE '^[[:space:]]*#' "$TEST_TMP/scripts/platform/create-issue.sh")
+    if [[ "$code" != *'git rev-parse --show-toplevel'* ]]; then
+        echo "FAIL: does not resolve the root from the caller's checkout" >&2
+        return 1
+    fi
+    if [[ "$code" == *'git -C "$SCRIPT_DIR" rev-parse'* ]]; then
+        echo "FAIL: still anchors the lookup to the script's own directory" >&2
+        return 1
+    fi
+}
+
+@test "#815 AC3: derivation is guarded by the explicit override" {
+    local code
+    code=$(cat "$TEST_TMP/scripts/platform/create-issue.sh")
+    if [[ "$code" != *'if [[ -z "${ISSUE_BODY_REPO_ROOT:-}" ]]; then'* ]]; then
+        echo "FAIL: derivation is not guarded by the override check" >&2
+        return 1
+    fi
+}
+
+@test "#815 AC4: outside a git repo with no override it fails, naming the variable" {
+    local code branch
+    code=$(cat "$TEST_TMP/scripts/platform/create-issue.sh")
+    if [[ "$code" != *'not inside a git repository and ISSUE_BODY_REPO_ROOT is unset'* ]]; then
+        echo "FAIL: no explicit failure for the no-root case" >&2
+        return 1
+    fi
+    # Bound the window after the message rather than splitting on "fi" —
+    # that matches inside "filing" and cuts the branch short.
+    branch=${code#*not inside a git repository}
+    branch=${branch:0:400}
+    if [[ "$branch" != *'exit 1'* ]]; then
+        echo "FAIL: the no-root branch does not exit; it would validate against a guess" >&2
+        return 1
+    fi
+}
+
 @test "create-issue github: gh api IS invoked with --parent (inverted control)" {
     # Inverted control: proves the callable stub records calls when gh api
     # fires.  This makes the 'not called' assertion in the previous test

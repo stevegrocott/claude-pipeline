@@ -830,7 +830,10 @@ assert_issue_valid() {
 			[[ -z "$path" ]] && continue
 			_issue_body_is_repo_path "$path" "$repo_root" || continue
 			if ! _issue_body_path_resolves "$path" "$repo_root"; then
-				errors+=("unresolved path: $path")
+				# Name the root the path was resolved against (#815): the
+				# failure is usually a wrong root, not a wrong path, and
+				# without this the author cannot tell the two apart.
+				errors+=("unresolved path: $path (resolved against ${ISSUE_BODY_REPO_ROOT:-\$PWD})")
 			fi
 		done < <(_issue_body_extract_paths "$desc")
 
