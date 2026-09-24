@@ -17,9 +17,28 @@ GIT_CLI="${GIT_CLI:-gh}"                  # gh | glab
 # Merge strategy
 MERGE_STYLE="${MERGE_STYLE:-squash}"      # squash | merge | rebase
 # AUTO_MERGE: set to 1 to automatically merge the PR after all checks pass.
-# Set to 0 to leave the PR open for manual review and merging.
 # MERGE_STYLE (above) controls the merge method used when AUTO_MERGE=1.
+#
+# AUTO_MERGE=0 does NOT hold a PR open under implement-issue or handle-issues.
+# Those run merge_pr as an unconditional pipeline stage, so a PR can merge
+# with AUTO_MERGE=0 set. Use REQUIRE_MANUAL_MERGE below to require review.
 AUTO_MERGE="${AUTO_MERGE:-0}"             # 0 = manual merge | 1 = auto-merge when checks pass
+
+# REQUIRE_MANUAL_MERGE: set to 1 to hold every PR open for a human.
+# The merge_pr stage then reports merge_blocked, comments on the PR and the
+# issue saying why, and exits 0 — a held PR is not counted as a failure.
+# Use it where unreviewed code reaching the base branch is unacceptable,
+# for example a repository whose code writes to a production system.
+REQUIRE_MANUAL_MERGE="${REQUIRE_MANUAL_MERGE:-0}"   # 0 = pipeline may merge | 1 = human merges
+
+# PR_REVIEW_MODEL: model for the PR review stage. Defaults to sonnet at every
+# diff-size tier. Set to opus for a stronger reviewer.
+# This is the only lever: the value used to be hard-coded in
+# get_pr_review_config(), and model-config.sh does not govern this stage.
+# Note the review also runs under an --agent, and that agent's own `model:`
+# frontmatter (.claude/agents/code-reviewer.md) takes precedence, so change
+# both if you want the review on opus.
+PR_REVIEW_MODEL="${PR_REVIEW_MODEL:-sonnet}"        # sonnet | opus | haiku
 # MERGE_MR_NON_BLOCKING_CHECKS: comma-separated CI check names whose failure must
 # NOT block the merge (informational jobs — `continue-on-error`, a known-red
 # baseline being burned down). GitHub reports such a PR as UNSTABLE; without

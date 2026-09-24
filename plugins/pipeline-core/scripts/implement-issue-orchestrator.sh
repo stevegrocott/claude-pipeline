@@ -4832,25 +4832,32 @@ all_tasks_s_complexity() {
 # Get PR review configuration based on diff size.
 # Returns JSON: { "model": "...", "timeout": N, "max_iterations": N }
 #
-# All tiers use sonnet. Haiku was tried for tiny/small diffs but in practice
-# it burns through max turns exploring the codebase (4.7M tokens for an
-# 11-line diff) then escalates to sonnet anyway — wasting ~$0.85 and ~5 min.
+# All tiers default to sonnet. Haiku was tried for tiny/small diffs but in
+# practice it burns through max turns exploring the codebase (4.7M tokens for
+# an 11-line diff) then escalates to sonnet anyway — wasting ~$0.85 and ~5 min.
 # Sonnet with the diff included in the prompt finishes in 2-3 turns.
 #
+# PR_REVIEW_MODEL (consumer platform.sh) overrides the model for every tier.
+# The model was hard-coded here before, so an operator who wanted a stronger
+# reviewer had no lever: setting it in model-config.sh does nothing, because
+# this function's value is passed to the stage directly. Timeouts and
+# iteration counts stay diff-size driven.
+#
 # Three tiers by diff line count:
-#   <50  lines  → sonnet, 180s timeout, 1 iteration  (small)
-#   <200 lines  → sonnet, 600s timeout, MAX_PR_REVIEW_ITERATIONS (medium)
-#   200+ lines  → sonnet, 1200s timeout, MAX_PR_REVIEW_ITERATIONS (large)
+#   <50  lines  → 360s timeout, 1 iteration  (small)
+#   <200 lines  → 600s timeout, MAX_PR_REVIEW_ITERATIONS (medium)
+#   200+ lines  → 1200s timeout, MAX_PR_REVIEW_ITERATIONS (large)
 get_pr_review_config() {
-    local diff_lines
+    local diff_lines model
     diff_lines=$(get_diff_line_count "$BASE_BRANCH")
+    model="${PR_REVIEW_MODEL:-sonnet}"
 
     if (( diff_lines < 50 )); then
-        printf '{"model":"sonnet","timeout":360,"max_iterations":1}'
+        printf '{"model":"%s","timeout":360,"max_iterations":1}' "$model"
     elif (( diff_lines < 200 )); then
-        printf '{"model":"sonnet","timeout":600,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
+        printf '{"model":"%s","timeout":600,"max_iterations":%d}' "$model" "$MAX_PR_REVIEW_ITERATIONS"
     else
-        printf '{"model":"sonnet","timeout":1200,"max_iterations":%d}' "$MAX_PR_REVIEW_ITERATIONS"
+        printf '{"model":"%s","timeout":1200,"max_iterations":%d}' "$model" "$MAX_PR_REVIEW_ITERATIONS"
     fi
 }
 
@@ -13171,7 +13178,20 @@ $complete_summary
         # DEGRADED_STAGES array.  Override with BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0.
         # ---------------------------------------------------------------------
         local merge_blocked_reason=""
-        local merge_block_kind=""   # "convergence" | "partial"
+        local merge_block_kind=""   # "convergence" | "partial" | "e2e" | "manual"
+
+        # Operator gate. REQUIRE_MANUAL_MERGE=1 in the consumer's platform.sh
+        # holds every PR open for a human instead of merging it.
+        #
+        # AUTO_MERGE does not reach this stage: it governs other paths, while
+        # merge_pr ran unconditionally, so a consumer who wanted review before
+        # merge had no configuration that could express it. Reuses the
+        # merge_blocked path below, which leaves the PR open and exits 0, so a
+        # held PR is not counted as a failure.
+        if [[ "${REQUIRE_MANUAL_MERGE:-0}" == "1" ]]; then
+            merge_blocked_reason="REQUIRE_MANUAL_MERGE=1 is set in the consumer configuration, so this PR was left open for human review rather than merged automatically."
+            merge_block_kind="manual"
+        fi
 
         # Read the persisted merge_blocked_reason once; nothing mutates
         # status.json between the two gates, so both share this value.
@@ -13258,6 +13278,33 @@ $complete_summary
             # is left open for a human — but with its own comment naming the
             # stage and its own override, so the operator is told which gate
             # fired and how to bypass exactly that one.
+            if [[ "$merge_block_kind" == "manual" ]]; then
+                log "Merge held for PR #$pr_number: REQUIRE_MANUAL_MERGE=1"
+                comment_pr "$pr_number" "Merge Held — Manual Review Required" \
+                    "✋ Auto-merge is disabled for this repository (\`REQUIRE_MANUAL_MERGE=1\`). This PR has been left **open** for a human to review and merge.
+
+$merge_blocked_reason${_task_summary_line:+
+
+$_task_summary_line}
+
+To allow the pipeline to merge automatically, unset \`REQUIRE_MANUAL_MERGE\` in \`.claude/config/platform.sh\`." \
+                    "default"
+                comment_issue "Merge: Held for Manual Review" \
+                    "✋ PR #$pr_number is ready and was **not** merged: \`REQUIRE_MANUAL_MERGE=1\` is set, so it is left open for human review." \
+                    "default"
+                set_final_state "merge_blocked"
+                cp "$STATUS_FILE" "$LOG_BASE/status.json"
+
+                log "=========================================="
+                log "Implement Issue Complete (merge held — manual review)"
+                log "=========================================="
+                log "Issue: #$ISSUE_NUMBER"
+                log "PR: #$pr_number"
+                log "Branch: $branch"
+                log "Status: merge_blocked"
+                exit 0
+            fi
+
             if [[ "$merge_block_kind" == "e2e" ]]; then
                 log_warn "Merge blocked for PR #$pr_number: e2e_verify never executed this branch's spec"
                 comment_pr "$pr_number" "Merge Blocked — E2E Verification Did Not Run" \
