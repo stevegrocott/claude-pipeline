@@ -302,6 +302,89 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# Issue #888: adding the label fires `pull_request: labeled`, starting a second
+# run; a PR-keyed concurrency group with cancel-in-progress then cancels the
+# run already in flight for the same head. That cancelled run's check is
+# created AFTER the label, so it satisfies "newer than baseline" — and was
+# read as the full run's verdict, declining a green PR on first real use.
+# ---------------------------------------------------------------------------
+
+# Serves a scripted sequence of check-run payloads, one per poll.
+_stub_check_runs_seq() {
+    mkdir -p "$TEST_TMP/bin"
+    printf '%s\n' "$@" > "$TEST_TMP/run-seq"
+    : > "$TEST_TMP/gh-run-calls.log"
+    cat > "$TEST_TMP/bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_TMP/gh-run-calls.log"
+case "\$*" in
+  *check-runs*)
+    line=\$(head -1 "$TEST_TMP/run-seq" 2>/dev/null)
+    tail -n +2 "$TEST_TMP/run-seq" > "$TEST_TMP/run-seq.next" 2>/dev/null
+    mv "$TEST_TMP/run-seq.next" "$TEST_TMP/run-seq" 2>/dev/null
+    [[ -n "\$line" ]] || line='{"check_runs":[]}'
+    printf '%s\n' "\$line" ;;
+  *headRefOid*) printf '%s\n' 'abc1234' ;;
+  *) printf '%s\n' '{}' ;;
+esac
+exit 0
+STUB
+    chmod +x "$TEST_TMP/bin/gh"
+    PATH="$TEST_TMP/bin:$PATH"
+}
+
+@test "#888: a cancelled post-label run is not a verdict — the wait continues to success" {
+    _load_merge_mr_functions
+    # poll 1: the cancelled in-flight run.  poll 2: the real labelled run.
+    # first payload is consumed by the pre-label baseline lookup
+    _stub_check_runs_seq \
+        '{"check_runs":[]}' \
+        '{"check_runs":[{"id":11,"name":"e2e","status":"completed","conclusion":"cancelled"}]}' \
+        '{"check_runs":[{"id":11,"name":"e2e","status":"completed","conclusion":"cancelled"},{"id":12,"name":"e2e","status":"completed","conclusion":"success"}]}'
+
+    MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_CHECK=e2e
+    MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=30
+    export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_CHECK MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+    run wait_for_full_run 6067
+    [[ "$status" -eq 0 ]] \
+        || fail "a cancelled run was treated as the verdict — #888 regression: $output"
+    assert_contains "$output" "not a verdict"
+}
+
+@test "#888: a genuinely failed post-label run is still refused" {
+    _load_merge_mr_functions
+    _stub_check_runs_seq \
+        '{"check_runs":[]}' \
+        '{"check_runs":[{"id":12,"name":"e2e","status":"completed","conclusion":"failure"}]}'
+
+    MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_CHECK=e2e
+    MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+    export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_CHECK MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+    run wait_for_full_run 6067
+    [[ "$status" -ne 0 ]] \
+        || fail "merged despite a failed full run"
+    assert_contains "$output" "refusing to merge"
+}
+
+@test "#888: only cancelled runs then timeout — refuses rather than merging" {
+    _load_merge_mr_functions
+    _stub_check_runs_seq \
+        '{"check_runs":[]}' \
+        '{"check_runs":[{"id":11,"name":"e2e","status":"completed","conclusion":"cancelled"}]}'
+
+    MERGE_MR_FULL_RUN_LABEL=full-e2e MERGE_MR_FULL_RUN_CHECK=e2e
+    MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=3
+    export MERGE_MR_FULL_RUN_LABEL MERGE_MR_FULL_RUN_CHECK MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+    run wait_for_full_run 6067
+    [[ "$status" -ne 0 ]] \
+        || fail "a PR whose only post-label run was cancelled must not merge"
+    assert_contains "$output" "Timed out"
+}
+
+# ---------------------------------------------------------------------------
 # Issue #876: a MERGED or CLOSED PR reports mergeStateStatus UNKNOWN forever.
 # Polling one wastes MERGE_MR_POLL_MAX and reports a false decline, which the
 # batch counts as a failed issue.
