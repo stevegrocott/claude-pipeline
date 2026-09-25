@@ -188,7 +188,7 @@ teardown() {
     echo '{"result":"no structured output"}' > "$MOCK_CLAUDE_RESPONSE"
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ]
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
     # Envelope reports error_kind="no_structured_output" (snake_case enum).
     [[ "$output" == *"no_structured_output"* ]]
 }
@@ -307,7 +307,7 @@ teardown() {
     export -f timeout
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ]
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
     [[ "$output" == *"timeout"* ]] \
         || fail "Expected output to contain 'timeout'; got: $output"
 }
@@ -372,7 +372,7 @@ teardown() {
 
     # Pass 1s as timeout_override (arg 6) so the test completes quickly
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
-    [ "$status" -eq 1 ]
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
     [[ "$output" == *"timeout"* ]] \
         || fail "Expected output to contain 'timeout'; got: $output"
 }
@@ -402,7 +402,7 @@ teardown() {
     # 1s timeout_override keeps wall-time short (~2 s total: 1 s initial +
     # 1 s retry) while exercising both the initial and retry watchdogs.
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
-    [ "$status" -eq 1 ] \
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ] \
         || fail "Expected run_stage to fail (childless subshell wedge); status=$status output=$output"
     [[ "$output" == *"timeout"* ]] \
         || fail "Expected 'timeout' in output (childless subshell wedge); got: $output"
@@ -959,13 +959,14 @@ teardown() {
 	export calls_file
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
-	# Both initial attempt and retry must have been called (fallback skipped)
+	# Initial attempt, timeout retry, and double_timeout escalation must all
+	# have been called (fallback skipped)
 	local call_count
 	call_count=$(wc -l < "$calls_file")
-	(( call_count == 2 )) || \
-		fail "Expected 2 timeout calls (fallback skipped, retry made), got $call_count"
+	(( call_count == 3 )) || \
+		fail "Expected 3 timeout calls (fallback skipped, retry + escalation made), got $call_count"
 }
 
 # =============================================================================
@@ -982,7 +983,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "Diagnostic fallback failure — Output byte count:" "$LOG_FILE" || \
 		fail "Expected diagnostic byte count in log. Log: $(cat "$LOG_FILE")"
@@ -996,7 +997,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "Diagnostic fallback failure — First 500 characters:" "$LOG_FILE" || \
 		fail "Expected diagnostic preview in log. Log: $(cat "$LOG_FILE")"
@@ -1012,7 +1013,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "recognizable-debug-marker-abc123" "$LOG_FILE" || \
 		fail "Diagnostic log must include actual output content. Log: $(cat "$LOG_FILE")"
@@ -2880,7 +2881,7 @@ EOF
     printf '%s\n' 'just a warning, no JSON anywhere' > "$MOCK_CLAUDE_RESPONSE"
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ] || {
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ] || {
         printf 'FAIL: a stream with no envelope must still fail\n' >&2
         return 1
     }
