@@ -265,7 +265,23 @@ wait_for_full_run() {
 
       if [ "$run_status" = "completed" ]; then
         case "$run_conclusion" in
-          success|neutral|skipped)
+          # Not a verdict. Adding the label fires `pull_request: labeled`,
+          # which starts a second run; a PR-keyed concurrency group with
+          # cancel-in-progress then cancels the run that was already in
+          # flight for the same head. That cancelled run's check is created
+          # AFTER the label, so it satisfies "newer than baseline" and was
+          # read as the full run's result — declining a green PR on the
+          # first real use of this flow (issue #888). A cancelled or skipped
+          # run verified nothing, so keep waiting for one that did.
+          cancelled|skipped)
+            echo "Full run $MERGE_MR_FULL_RUN_CHECK (run $run_id) was" \
+              "$run_conclusion on $sha — not a verdict; still waiting" \
+              "(${elapsed}s elapsed)..." >&2
+            ;;
+          # neutral is retained as a pass, unchanged from before #888: it
+          # means the check ran and declined to judge, which is not the same
+          # as never having run.
+          success|neutral)
             echo "Full run $MERGE_MR_FULL_RUN_CHECK (run $run_id) concluded" \
               "$run_conclusion on $sha; proceeding" >&2
             return 0
@@ -276,10 +292,11 @@ wait_for_full_run() {
             return 1
             ;;
         esac
-      fi
+      else
 
-      echo "Waiting for $MERGE_MR_FULL_RUN_CHECK run $run_id on $sha" \
-        "(status: $run_status, ${elapsed}s elapsed)..." >&2
+        echo "Waiting for $MERGE_MR_FULL_RUN_CHECK run $run_id on $sha" \
+          "(status: $run_status, ${elapsed}s elapsed)..." >&2
+      fi
     else
       echo "Waiting for a $MERGE_MR_FULL_RUN_CHECK run newer than id" \
         "$baseline on $sha (${elapsed}s elapsed)..." >&2
