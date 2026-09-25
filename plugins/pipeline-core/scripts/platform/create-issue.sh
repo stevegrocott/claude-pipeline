@@ -38,9 +38,7 @@ done
 # stated intent, not a side effect of what the body happens to contain.
 if [[ "$SKIP_VALIDATION" == true ]]; then
   echo "WARNING: --skip-validation set; body validation deliberately bypassed" >&2
-# Validate bodies with <!-- pipeline-autocreated --> or ## Implementation Tasks.
-elif [[ "$BODY" == *"<!-- pipeline-autocreated -->"* ]] || \
-  [[ "$BODY" == *"## Implementation Tasks"* ]]; then
+else
   # shellcheck source=../issue-body-lib.sh
   source "$SCRIPT_DIR/../issue-body-lib.sh"
   # assert_issue_valid resolves task file paths against ISSUE_BODY_REPO_ROOT,
