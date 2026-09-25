@@ -3732,19 +3732,59 @@ for m in re.finditer(r'\[\s*\{', t):
             # the stage log.  Flow control is handled via structured output
             # extraction below, not via this value.
             local _esc_exit_code=0
-            # Temp-file capture (see run_stage's primary launch) — avoids the
-            # command-substitution pipe-wedge when the CLI leaves a lingering child.
+            # Same background-subshell + temp-file + polling-watchdog pattern
+            # as run_stage's primary launch (see 3218-3285): a plain
+            # `timeout ... > file` still blocks run_stage indefinitely if
+            # timeout(1) is killed or the escalated CLI ignores SIGTERM —
+            # this is the hottest retry path (issue #910), so it gets its
+            # own parent-side enforcement of stage_timeout rather than
+            # relying on the inner wrapper alone.
             local _esc_raw; _esc_raw=$(mktemp)
-            timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
-                -p "$prompt" \
-                ${agent_args[@]+"${agent_args[@]}"} \
-                --model "$_esc_model" \
-                ${_esc_fallback_args[@]+"${_esc_fallback_args[@]}"} \
-                ${_esc_turns_args[@]+"${_esc_turns_args[@]}"} \
-                --dangerously-skip-permissions \
-                --output-format json \
-                --json-schema "$schema" \
-                > "$_esc_raw" 2>&1 || _esc_exit_code=$?
+            (
+                trap - TERM
+                timeout "$stage_timeout" env -u CLAUDECODE "$CLAUDE_CLI" \
+                    -p "$prompt" \
+                    ${agent_args[@]+"${agent_args[@]}"} \
+                    --model "$_esc_model" \
+                    ${_esc_fallback_args[@]+"${_esc_fallback_args[@]}"} \
+                    ${_esc_turns_args[@]+"${_esc_turns_args[@]}"} \
+                    --dangerously-skip-permissions \
+                    --output-format json \
+                    --json-schema "$schema" \
+                    2>&1
+            ) > "$_esc_raw" 3>&- &
+            local _esc_pid=$!
+
+            # Poll in 1s steps rather than one long `sleep $stage_timeout` —
+            # see the primary launch's watchdog for why (a cancelled long
+            # sleep strands a multi-minute orphan; polling strands at most a
+            # sub-second one).  All std fds are redirected/closed so neither
+            # the watchdog nor its sleep child inherits run_stage's stdout or
+            # BATS's fd 3, either of which would stall the caller.
+            (
+                local _waited=0
+                while (( _waited < stage_timeout )); do
+                    kill -0 "$_esc_pid" 2>/dev/null || exit 0
+                    sleep 1
+                    _waited=$(( _waited + 1 ))
+                done
+                kill "$_esc_pid" 2>/dev/null
+            ) </dev/null >/dev/null 2>&1 3>&- &
+            local _esc_watchdog_pid=$!
+
+            wait "$_esc_pid" 2>/dev/null || _esc_exit_code=$?
+
+            # Cancel the watchdog; a no-op if it already fired or self-exited.
+            kill "$_esc_watchdog_pid" 2>/dev/null || true
+            wait "$_esc_watchdog_pid" 2>/dev/null || true
+
+            # The watchdog kills with SIGTERM (exit 143 = 128 + 15); map to
+            # the standard timeout exit code (124) so downstream handling
+            # (the warn log below) treats both paths identically.
+            if (( _esc_exit_code == 143 )); then
+                _esc_exit_code=124
+            fi
+
             output=$(cat "$_esc_raw"); rm -f "$_esc_raw"
 
             # Re-extract usage — output now reflects the escalated (pricier)
