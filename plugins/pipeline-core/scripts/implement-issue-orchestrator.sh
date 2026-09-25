@@ -333,8 +333,26 @@ E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 # suites (issue #926: an intermittent hang stalled a real run for 32 minutes
 # with no recovery). Defaults to 45 minutes — generous headroom above the
 # suite's normal 20-35 minute range — and is overridable for repos with a
-# slower suite.
-BATS_FULL_SUITE_TIMEOUT="${BATS_FULL_SUITE_TIMEOUT:-2700}"
+# slower suite. On timeout this is recorded under a degraded-stage marker
+# distinct from a confirmed-red run (test:bats_full_suite_timeout vs.
+# test:bats_full_suite_red) — a suite that never finished is not the same
+# fact as one that ran and failed — and the check always returns control to
+# main() rather than blocking it (issue #926 AC3).
+FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"
+
+# Wall-clock cap (seconds) on the informational full-suite npm/test-runner
+# check (`eval "${TEST_UNIT_CMD:-npm test}"`) that runs unconditionally in
+# main() right before its BATS sibling above. That check is already
+# non-blocking — a red run only records a degraded-stage signal — but
+# nothing previously bounded its OWN runtime, so the same class of hang
+# that stalled the BATS arm (issue #926) could stall this arm too, and the
+# issue calls this arm out as the one more likely to matter for downstream
+# consumers since TEST_UNIT_CMD is typically a real test runner, not bats.
+# Defaults to 45 minutes, matching FULL_SUITE_BATS_TIMEOUT above, and is
+# overridable for repos with a slower suite. Same timeout-vs-red marker
+# distinction as the BATS arm applies here (test:full_suite_timeout vs.
+# test:full_suite_red).
+FULL_SUITE_NPM_TIMEOUT="${FULL_SUITE_NPM_TIMEOUT:-2700}"
 
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
@@ -12405,10 +12423,22 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
             # `set -uo pipefail` at the top), so nothing needs suppressing.
             # Matches the BATS sibling block below, which always did this
             # correctly.
-            full_scope_output=$(eval "${TEST_UNIT_CMD:-npm test}" 2>&1)
+            # Wrapped in `timeout` (FULL_SUITE_NPM_TIMEOUT, overridable) so a
+            # wedged suite cannot stall the orchestrator indefinitely — the
+            # check is informational and must always return control (#926).
+            # `eval` is a shell builtin, not an executable, so it cannot be
+            # exec'd by `timeout` directly; `bash -c` runs $TEST_UNIT_CMD
+            # through a subprocess `timeout` can bound the same way it
+            # bounds the BATS arm below.
+            full_scope_output=$(timeout "${FULL_SUITE_NPM_TIMEOUT:-2700}" bash -c "${TEST_UNIT_CMD:-npm test}" 2>&1)
             full_scope_rc=$?
 
-            if (( full_scope_rc != 0 )); then
+            if (( full_scope_rc == 124 )); then
+                log_warn "Full-suite check timed out after" \
+                    "${FULL_SUITE_NPM_TIMEOUT:-2700}s — treating as" \
+                    "unmeasured, not red (non-blocking)"
+                DEGRADED_STAGES+=("test:full_suite_timeout")
+            elif (( full_scope_rc != 0 )); then
                 local full_scope_failures
                 full_scope_failures=$(printf '%s' "$full_scope_output" | tail -40)
                 DEGRADED_STAGES+=("test:full_suite_red")
@@ -12453,28 +12483,36 @@ $full_scope_failures
             # reconciliation via the tests_green gate (issue #905). The other
             # two excluded suites are owned by bundle-parity.yml and
             # orchestrator-guards.yml, so skipping them here loses no coverage.
-            # Wrapped in `timeout` (BATS_FULL_SUITE_TIMEOUT, overridable) so a
+            # Wrapped in `timeout` (FULL_SUITE_BATS_TIMEOUT, overridable) so a
             # wedged suite cannot stall the orchestrator indefinitely — the
-            # check is informational and must always return control.
-            bats_full_output=$(timeout "$BATS_FULL_SUITE_TIMEOUT" \
-                bash "$bats_runner" --ci 2>&1)
+            # check is informational and must always return control (#926).
+            bats_full_output=$(timeout "${FULL_SUITE_BATS_TIMEOUT:-2700}" bash "$bats_runner" --ci 2>&1)
             bats_full_rc=$?
-            if (( bats_full_rc == 124 )); then
-                log_warn "Full-suite BATS check timed out after" \
-                    "${BATS_FULL_SUITE_TIMEOUT}s — treating as red" \
-                    "(non-blocking)"
-            fi
 
             # Persist the complete output as a stage log — like every other
-            # stage — instead of discarding it. Written unconditionally (both
-            # red and green runs) so the full evidence is always recoverable
+            # stage — instead of discarding it. Written unconditionally (red,
+            # green, AND timeout) so the full evidence is always recoverable
             # without re-running the ~20-35 minute suite (#799).
             local bats_full_log="$LOG_BASE/stages/$(next_stage_log "bats_full_suite")"
             printf '%s\n' "$bats_full_output" >> "$bats_full_log"
             printf '%s\n' "=== exit code: $bats_full_rc ===" >> "$bats_full_log"
             log "  Log: $bats_full_log"
 
-            if (( bats_full_rc != 0 )); then
+            if (( bats_full_rc == 124 )); then
+                # A timeout (rc 124) is neither a real failure nor a pass —
+                # the suite never reached a verdict, so it must not be
+                # recorded under the same test:bats_full_suite_red marker a
+                # confirmed-red run gets (#926 AC3): that would make
+                # reconcile_failed_tasks_with_branch_evidence() treat an
+                # unmeasured suite as proof of a real regression. Record a
+                # distinct marker, log the budget that was exceeded, and fall
+                # through — this check is informational and must always
+                # return control to main() rather than blocking it.
+                log_warn "Full-suite BATS check timed out after" \
+                    "${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
+                    "unmeasured, not red (non-blocking)"
+                DEGRADED_STAGES+=("test:bats_full_suite_timeout")
+            elif (( bats_full_rc != 0 )); then
                 # Build the comment from the extracted failing test names
                 # rather than an arbitrary tail. A tail only shows whatever
                 # happens to be last — on #785 the real (bundle-parity)
