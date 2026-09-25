@@ -1072,6 +1072,9 @@ revalidate_issue_after_enrich() {
 # Opt-in override: SKIP_ON_MERGED_PR=1 (any non-empty value) restores the
 # pre-#771 skip-on-merged-PR-alone behavior, for operators who rely on it.
 #
+# stateReason is fetched too (informational here) so a reopened issue
+# (GitHub: stateReason=REOPENED) is named in the merged-PR log below.
+#
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the orchestrator's own
 # already_implemented detection remains the safety net.
@@ -1088,9 +1091,15 @@ check_issue_resolved_upstream() {
 
 	[[ "${GIT_HOST:-github}" == "github" ]] || return 1
 
-	local issue_state=""
-	issue_state=$(gh issue view "$issue_num" --json state \
-		--jq '.state' 2>/dev/null) || true
+	# state,stateReason fetched together; tab-joined output.
+	local issue_meta=""
+	issue_meta=$(gh issue view "$issue_num" --json state,stateReason \
+		--jq '(.state // "") + "\t" + (.stateReason // "")' \
+		2>/dev/null) || true
+
+	local issue_state="" issue_state_reason=""
+	IFS=$'\t' read -r issue_state issue_state_reason <<< "$issue_meta"
+
 	if [[ "$issue_state" == "CLOSED" ]]; then
 		_UPFRONT_SKIP_REASON="already closed on GitHub"
 		return 0
@@ -1110,9 +1119,16 @@ check_issue_resolved_upstream() {
 			_UPFRONT_SKIP_PR="$merged_pr"
 			return 0
 		fi
-		log "Issue #$issue_num is open but PR #$merged_pr" \
-			"already merged on feature/issue-$issue_num" \
-			"— processing anyway instead of skipping (#771)"
+		if [[ "$issue_state_reason" == "REOPENED" ]]; then
+			log "Issue #$issue_num is open (stateReason:" \
+				"REOPENED) with merged PR #$merged_pr on" \
+				"feature/issue-$issue_num — processing" \
+				"anyway instead of skipping (#771)"
+		else
+			log "Issue #$issue_num is open but PR #$merged_pr" \
+				"already merged on feature/issue-$issue_num" \
+				"— processing anyway instead of skipping (#771)"
+		fi
 	fi
 
 	return 1

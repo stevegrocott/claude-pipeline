@@ -863,7 +863,7 @@ _simulate_cost_rollup() {
 	# || true (or equivalent) to suppress non-zero exit codes.
 	local block
 	block=$(awk '/Up-front skip gate/,/fi.*#.*end.*GIT_HOST|^\s+fi$/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" | head -40)
+		"$BATCH_ORCHESTRATOR_SCRIPT" | head -50)
 	[[ "$block" == *'|| true'* ]]
 }
 
@@ -1611,6 +1611,39 @@ GHEOF
 	[[ "$rc" -eq 1 ]]
 	[[ -z "$_UPFRONT_SKIP_REASON" ]]
 	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q '123' "$TEST_TMP/log.out"
+}
+
+@test "functional: check_issue_resolved_upstream (reopened issue, merged PR) names REOPENED in the log" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-reopened"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\tREOPENED\n' ;;
+	pr) printf '123\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# The issue's stateReason (REOPENED) is fetched alongside state and
+	# named in the merged-PR gate log, so an operator scanning logs can
+	# tell a reopened issue apart from one that was simply never closed.
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q 'REOPENED' "$TEST_TMP/log.out"
 	grep -q '123' "$TEST_TMP/log.out"
 }
 
