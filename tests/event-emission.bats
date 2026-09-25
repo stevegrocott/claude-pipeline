@@ -18,11 +18,38 @@
 #       status=error in events.jsonl  [RED until task 2 is implemented]
 #
 
+# Test cases (4)-(9) below cover issue #809: batch-orchestrator.sh's
+# issue_end event hardcodes outcome=success for every process_issue() return
+# of 0, which conflates three non-success terminal states (merge_blocked,
+# budget_exceeded, already_done) with a genuine success. Tasks 1 and 2 of
+# issue #809 make process_issue() record which terminal state it hit (a
+# generalisation of the existing _PREFLIGHT_SKIPPED out-of-band flag) and
+# make the emit site at the bottom of the main issue loop branch on it
+# instead of hardcoding outcome=success. These tests assert only on the
+# resulting events.jsonl content, not on the name of whatever internal
+# variable carries the state, so they hold regardless of the exact
+# mechanism tasks 1/2 land with.
+#
+#   (4) merge_blocked terminal state -> issue_end outcome=merge_blocked
+#       [RED until tasks 1/2 are implemented]
+#   (5) budget_exceeded terminal state -> issue_end outcome=budget_exceeded
+#       [RED until tasks 1/2 are implemented]
+#   (6) already_implemented terminal state -> issue_end outcome=already_done
+#       [RED until tasks 1/2 are implemented]
+#   (7) a generic processing error -> issue_end outcome=failed
+#       [GREEN today — regression guard, unrelated arm of the case statement]
+#   (8) a genuinely merged issue -> issue_end outcome=success
+#       [GREEN today — regression guard, unrelated arm of the case statement]
+#   (9) two issues in one batch, one merge_blocked then one budget_exceeded,
+#       each get their own correct outcome with no leakage between calls
+#       [RED until tasks 1/2 are implemented]
+
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
 ORCHESTRATOR="$REPO_ROOT/.claude/scripts/implement-issue-orchestrator.sh"
 EVENT_EMIT="$REPO_ROOT/.claude/scripts/event-emit.sh"
+BATCH_ORCHESTRATOR="$REPO_ROOT/.claude/scripts/batch-orchestrator.sh"
 
 # ---------------------------------------------------------------------------
 # Per-test setup / teardown
@@ -212,4 +239,287 @@ _assert_stage_end_error_in_events() {
 	_apply_stage_action "$stage_result" "completely_unknown_action" "test" || true
 
 	_assert_stage_end_error_in_events
+}
+
+# ===========================================================================
+# Helpers for tests (4)-(9): batch-orchestrator.sh issue_end outcome (#809)
+# ===========================================================================
+
+# Extract process_issue(), emit_event(), and the main per-issue loop from
+# batch-orchestrator.sh, with every external dependency they touch stubbed
+# out first. git/setsid/gh-backed helpers must never touch this worktree or
+# the network; dispatch_composition/perform_scripted_merge stand in for the
+# process-pr agent call and the merge step so test (8) can drive
+# process_issue() through its real completed -> approved -> merged path.
+#
+# The main loop (`for issue in "${ISSUE_ARRAY[@]}"; do ... done`) is not a
+# function in the source file, so it is captured by anchoring on its literal
+# start/end text (not line numbers) and wrapped in a function here. This
+# survives tasks 1/2 adding lines inside process_issue() above it, since the
+# anchors are outside the part of the file those tasks touch.
+_source_batch_orchestrator_functions() {
+	local func_file="$TEST_TMP/batch_orch_funcs.bash"
+
+	export BRANCH="main"
+	export MAX_CONSECUTIVE_FAILURES=5
+	export PLATFORM_DIR="$TEST_TMP/platform"
+	mkdir -p "$PLATFORM_DIR"
+	printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$PLATFORM_DIR/transition-issue.sh"
+	chmod +x "$PLATFORM_DIR/transition-issue.sh"
+
+	cat > "$func_file" <<'STUBS'
+git() { return 0; }
+setsid() { return 0; }
+validate_issue_for_processing() { return 0; }
+update_issue_field() { :; }
+update_progress() { :; }
+set_current_issue() { :; }
+set_state() { :; }
+log() { :; }
+log_warn() { :; }
+log_error() { :; }
+check_issue_pr_merged() { return 1; }
+check_issue_resolved_upstream() { return 1; }
+wait_for_pr_merged() { return 0; }
+check_batch_budget() { return 0; }
+detect_rate_limit() { return 1; }
+dispatch_composition() { printf '%s\n' '{"structured_output":{"status":"approved","follow_up_issues":[]}}'; }
+perform_scripted_merge() { return 0; }
+STUBS
+
+	awk '
+		/^process_issue\(\) \{$/,/^\}$/ { print; next }
+		/^emit_event\(\) \{$/,/^\}$/    { print; next }
+	' "$BATCH_ORCHESTRATOR" >> "$func_file"
+
+	{
+		printf '%s\n' '_run_issue_loop() {'
+		awk '
+			/^for issue in "\$\{ISSUE_ARRAY\[@\]\}"; do$/ { found=1 }
+			found { print }
+			found && /^done$/ { exit }
+		' "$BATCH_ORCHESTRATOR"
+		printf '%s\n' '}'
+	} >> "$func_file"
+
+	consecutive_failures=0
+	exit_code=0
+
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+# Writes $STATUS_FILE with a .issues[] entry (status "pending", so the
+# up-front `current_status == completed` skip gate does not fire) for each
+# issue number passed.
+_write_batch_status_file() {
+	local issues_json="[]" n
+	for n in "$@"; do
+		issues_json=$(jq -c --arg num "$n" \
+			'. + [{number: $num, status: "pending"}]' <<< "$issues_json")
+	done
+	jq -n --argjson issues "$issues_json" '{issues: $issues}' > "$STATUS_FILE"
+}
+
+# Writes the per-issue status file process_issue() reads via
+# $LOG_BASE/issue-<num>-status.json. $3, if given, becomes
+# .stages.pr.pr_number (mirrors what implement-issue-orchestrator.sh records
+# for merge_blocked/budget_exceeded/completed states).
+_write_issue_status_file() {
+	local num="$1" state="$2" pr="${3:-}"
+	if [[ -n "$pr" ]]; then
+		jq -n --arg state "$state" --argjson pr "$pr" \
+			'{state: $state, stages: {pr: {pr_number: $pr}}}' \
+			> "$LOG_BASE/issue-$num-status.json"
+	else
+		jq -n --arg state "$state" '{state: $state}' \
+			> "$LOG_BASE/issue-$num-status.json"
+	fi
+}
+
+# Asserts the most recent issue_end event for issue $1 has outcome $2.
+_assert_issue_end_outcome() {
+	local num="$1" expected="$2"
+	local events_file="$LOG_BASE/events.jsonl"
+
+	if [[ ! -f "$events_file" ]]; then
+		printf 'FAIL: events.jsonl was not created for issue #%s\n' "$num" >&2
+		return 1
+	fi
+
+	local found
+	found=$(jq -r --arg num "$num" \
+		'select(.event == "issue_end" and .issue_num == $num) | .outcome' \
+		"$events_file" 2>/dev/null | tail -1)
+
+	if [[ "$found" != "$expected" ]]; then
+		printf 'FAIL: issue #%s issue_end outcome=%s, expected %s\n' \
+			"$num" "${found:-<none>}" "$expected" >&2
+		printf 'events.jsonl contents:\n' >&2
+		cat "$events_file" >&2 || printf '(empty or unreadable)\n' >&2
+		return 1
+	fi
+}
+
+# ===========================================================================
+# (4) merge_blocked terminal state -> issue_end outcome=merge_blocked
+# ===========================================================================
+
+@test "(4) process_issue merge_blocked state produces issue_end outcome=merge_blocked" {
+	[[ -f "$BATCH_ORCHESTRATOR" ]] \
+		|| fail "batch-orchestrator.sh not present"
+
+	_source_batch_orchestrator_functions
+
+	ISSUE_ARRAY=("501")
+	_write_batch_status_file "501"
+	_write_issue_status_file "501" "merge_blocked" "42"
+
+	_run_issue_loop
+
+	_assert_issue_end_outcome "501" "merge_blocked"
+
+	# AC4: a quality-gate hold must not trip the circuit breaker.
+	[[ "$consecutive_failures" -eq 0 ]] || {
+		printf \
+			'FAIL: merge_blocked incremented consecutive_failures to %s\n' \
+			"$consecutive_failures" >&2
+		return 1
+	}
+}
+
+# ===========================================================================
+# (5) budget_exceeded terminal state -> issue_end outcome=budget_exceeded
+# ===========================================================================
+
+@test "(5) process_issue budget_exceeded state produces issue_end outcome=budget_exceeded" {
+	[[ -f "$BATCH_ORCHESTRATOR" ]] \
+		|| fail "batch-orchestrator.sh not present"
+
+	_source_batch_orchestrator_functions
+
+	ISSUE_ARRAY=("502")
+	_write_batch_status_file "502"
+	_write_issue_status_file "502" "budget_exceeded"
+
+	_run_issue_loop
+
+	_assert_issue_end_outcome "502" "budget_exceeded"
+
+	# AC4: a per-run spend halt must not trip the circuit breaker.
+	[[ "$consecutive_failures" -eq 0 ]] || {
+		printf \
+			'FAIL: budget_exceeded incremented consecutive_failures to %s\n' \
+			"$consecutive_failures" >&2
+		return 1
+	}
+}
+
+# ===========================================================================
+# (6) already_implemented terminal state -> issue_end outcome=already_done
+# ===========================================================================
+
+@test "(6) process_issue already_implemented state produces issue_end outcome=already_done" {
+	[[ -f "$BATCH_ORCHESTRATOR" ]] \
+		|| fail "batch-orchestrator.sh not present"
+
+	_source_batch_orchestrator_functions
+
+	ISSUE_ARRAY=("503")
+	_write_batch_status_file "503"
+	_write_issue_status_file "503" "already_implemented"
+
+	_run_issue_loop
+
+	_assert_issue_end_outcome "503" "already_done"
+
+	[[ "$consecutive_failures" -eq 0 ]] || {
+		printf \
+			'FAIL: already_implemented incremented consecutive_failures to %s\n' \
+			"$consecutive_failures" >&2
+		return 1
+	}
+}
+
+# ===========================================================================
+# (7) generic processing error -> issue_end outcome=failed (regression)
+# ===========================================================================
+
+@test "(7) process_issue generic error state still produces issue_end outcome=failed" {
+	[[ -f "$BATCH_ORCHESTRATOR" ]] \
+		|| fail "batch-orchestrator.sh not present"
+
+	_source_batch_orchestrator_functions
+
+	ISSUE_ARRAY=("504")
+	_write_batch_status_file "504"
+	_write_issue_status_file "504" "error"
+
+	_run_issue_loop
+
+	_assert_issue_end_outcome "504" "failed"
+
+	# A genuine failure must still trip the circuit breaker path.
+	[[ "$consecutive_failures" -eq 1 ]] || {
+		printf \
+			'FAIL: expected consecutive_failures=1 after a real failure, got %s\n' \
+			"$consecutive_failures" >&2
+		return 1
+	}
+}
+
+# ===========================================================================
+# (8) genuinely merged issue -> issue_end outcome=success (regression)
+# ===========================================================================
+
+@test "(8) process_issue completed+merged state still produces issue_end outcome=success" {
+	[[ -f "$BATCH_ORCHESTRATOR" ]] \
+		|| fail "batch-orchestrator.sh not present"
+
+	_source_batch_orchestrator_functions
+
+	ISSUE_ARRAY=("505")
+	_write_batch_status_file "505"
+	_write_issue_status_file "505" "completed" "77"
+
+	_run_issue_loop
+
+	_assert_issue_end_outcome "505" "success"
+
+	[[ "$consecutive_failures" -eq 0 ]] || {
+		printf \
+			'FAIL: a genuine success incremented consecutive_failures to %s\n' \
+			"$consecutive_failures" >&2
+		return 1
+	}
+}
+
+# ===========================================================================
+# (9) two issues, one batch: no outcome leakage between process_issue calls
+# ===========================================================================
+
+@test "(9) merge_blocked then budget_exceeded in one batch each emit their own outcome" {
+	[[ -f "$BATCH_ORCHESTRATOR" ]] \
+		|| fail "batch-orchestrator.sh not present"
+
+	_source_batch_orchestrator_functions
+
+	ISSUE_ARRAY=("506" "507")
+	_write_batch_status_file "506" "507"
+	_write_issue_status_file "506" "merge_blocked" "10"
+	_write_issue_status_file "507" "budget_exceeded"
+
+	_run_issue_loop
+
+	# The risk this guards against (per issue #809's evaluation): a stale
+	# module-level variable leaking issue #506's outcome into #507's event.
+	_assert_issue_end_outcome "506" "merge_blocked"
+	_assert_issue_end_outcome "507" "budget_exceeded"
+
+	[[ "$consecutive_failures" -eq 0 ]] || {
+		printf \
+			'FAIL: two non-failure terminal states incremented consecutive_failures to %s\n' \
+			"$consecutive_failures" >&2
+		return 1
+	}
 }
