@@ -1,16 +1,23 @@
 #!/usr/bin/env bats
 #
 # test-create-issue-parent.bats
-# Tests for create-issue.sh --parent behaviour on the github tracker.
+# Tests for create-issue.sh --parent behaviour and body validation on the
+# github tracker.
 #
 # Covers:
 #   1. --parent <numeric>  → sub_issues POST is issued with the child numeric id
 #   2. --parent ""         → no sub_issues POST, exits 0
 #   3. --parent <non-numeric> (e.g. a Jira key) → no sub_issues POST, exits 0
+#   4. body validation runs unconditionally (issue #906), with
+#      --skip-validation as the single explicit opt-out
 #
 
 # Stream separation on `run` (--separate-stderr) requires bats >= 1.5.0
 bats_require_minimum_version 1.5.0
+
+# refute/fail (issue #854) — `! cmd` is errexit-exempt and only bites as a
+# test body's LAST command; refute reports the failure wherever it appears.
+load 'helpers/test-helper.bash'
 
 # Absolute path to the real script under test
 # BATS_TEST_FILENAME is .claude/scripts/implement-issue-test/test-*.bats
@@ -79,6 +86,12 @@ teardown() {
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+#
+# The --parent tests below exercise gh api sub_issues linking, not body
+# validation, so they pass --skip-validation and keep their deliberately thin
+# fixture bodies. Padding those bodies with task lines purely to clear the
+# validation gate (unconditional since issue #906) would disguise what they
+# actually assert.
 
 _run_create_issue() {
     # --separate-stderr keeps WARNING lines (emitted to stderr on linkage
@@ -92,7 +105,7 @@ _run_create_issue() {
 # =============================================================================
 
 @test "--parent 42: gh api sub_issues is called" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "42"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "42"
 
     [ "$status" -eq 0 ]
     [ -f "$GH_API_ARGS" ] || {
@@ -103,7 +116,7 @@ _run_create_issue() {
 }
 
 @test "--parent 42: sub_issues POST uses HTTP POST method" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "42"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "42"
 
     [ "$status" -eq 0 ]
     [ -f "$GH_API_ARGS" ]
@@ -111,7 +124,7 @@ _run_create_issue() {
 }
 
 @test "--parent 42: sub_issues POST includes sub_issue_id field" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "42"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "42"
 
     [ "$status" -eq 0 ]
     [ -f "$GH_API_ARGS" ]
@@ -119,7 +132,7 @@ _run_create_issue() {
 }
 
 @test "--parent 42: sub_issues endpoint references parent issue number" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "42"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "42"
 
     [ "$status" -eq 0 ]
     [ -f "$GH_API_ARGS" ]
@@ -128,7 +141,7 @@ _run_create_issue() {
 }
 
 @test "--parent 42: script prints only the new issue number on stdout" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "42"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "42"
 
     [ "$status" -eq 0 ]
     # stdout must be exactly the issue number extracted from the URL
@@ -136,7 +149,7 @@ _run_create_issue() {
 }
 
 @test "--parent #42 (with leading hash): sub_issues POST is still issued" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "#42"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "#42"
 
     [ "$status" -eq 0 ]
     [ -f "$GH_API_ARGS" ]
@@ -148,20 +161,20 @@ _run_create_issue() {
 # =============================================================================
 
 @test "--parent '' (empty): script exits 0" {
-    _run_create_issue --title "Test Issue" --body "body" --parent ""
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent ""
 
     [ "$status" -eq 0 ]
 }
 
 @test "--parent '' (empty): no sub_issues POST is made" {
-    _run_create_issue --title "Test Issue" --body "body" --parent ""
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent ""
 
     [ "$status" -eq 0 ]
     [ ! -f "$GH_API_ARGS" ] || ! grep -q 'sub_issues' "$GH_API_ARGS"
 }
 
 @test "no --parent flag: no sub_issues POST is made" {
-    _run_create_issue --title "Test Issue" --body "body"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation
 
     [ "$status" -eq 0 ]
     [ ! -f "$GH_API_ARGS" ] || ! grep -q 'sub_issues' "$GH_API_ARGS"
@@ -172,27 +185,27 @@ _run_create_issue() {
 # =============================================================================
 
 @test "--parent KIKS-410 (non-numeric): script exits 0" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "KIKS-410"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "KIKS-410"
 
     [ "$status" -eq 0 ]
 }
 
 @test "--parent KIKS-410 (non-numeric): no sub_issues POST is made" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "KIKS-410"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "KIKS-410"
 
     [ "$status" -eq 0 ]
     [ ! -f "$GH_API_ARGS" ] || ! grep -q 'sub_issues' "$GH_API_ARGS"
 }
 
 @test "--parent KIKS-410 (non-numeric): issue is still created on stdout" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "KIKS-410"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "KIKS-410"
 
     [ "$status" -eq 0 ]
     [[ "$output" == "99" ]]
 }
 
 @test "--parent EPIC (non-numeric word): no sub_issues POST is made" {
-    _run_create_issue --title "Test Issue" --body "body" --parent "EPIC"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "EPIC"
 
     [ "$status" -eq 0 ]
     [ ! -f "$GH_API_ARGS" ] || ! grep -q 'sub_issues' "$GH_API_ARGS"
@@ -227,7 +240,7 @@ esac
 MOCK
     chmod +x "$TEST_TMP/bin/gh"
 
-    _run_create_issue --title "Test Issue" --body "body" --parent "42"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "42"
 
     [ "$status" -eq 0 ]
     [[ "$output" == "99" ]]
@@ -247,7 +260,7 @@ esac
 MOCK
     chmod +x "$TEST_TMP/bin/gh"
 
-    _run_create_issue --title "Test Issue" --body "body" --parent "42"
+    _run_create_issue --title "Test Issue" --body "body" --skip-validation --parent "42"
 
     [[ "$output" == "99" ]]
 }
@@ -299,7 +312,7 @@ MOCK
     chmod +x "$TEST_TMP/bin/gh"
 
     run --separate-stderr bash "$scripts_dir/create-issue.sh" \
-        --title "Test" --body "body" --parent "42"
+        --title "Test" --body "body" --skip-validation --parent "42"
 
     [ "$status" -eq 0 ]
     [[ "$stderr" == *"WARNING"*"not numeric"* ]]
@@ -331,7 +344,7 @@ MOCK
     chmod +x "$TEST_TMP/bin/gh"
 
     run --separate-stderr bash "$scripts_dir/create-issue.sh" \
-        --title "Test" --body "body" --parent "42"
+        --title "Test" --body "body" --skip-validation --parent "42"
 
     [ "$status" -eq 0 ]
     [[ "$stderr" == *"WARNING"*"github.com"* ]]
@@ -339,28 +352,44 @@ MOCK
 }
 
 # =============================================================================
-# Body validation: ## Implementation Tasks trigger widening (issue #437 task 1)
+# Body validation is unconditional (issue #906)
 # =============================================================================
 #
-# The validation trigger in create-issue.sh must fire for any body that
-# contains ## Implementation Tasks — not only bodies marked with
-# <!-- pipeline-autocreated -->.  Regression: the original
-# <!-- pipeline-autocreated --> trigger must continue to work.
+# create-issue.sh used to run assert_issue_valid only when the body ALREADY
+# contained "## Implementation Tasks" or "<!-- pipeline-autocreated -->".
+# That condition was circular — a body was checked for task lines only if it
+# already had them — so empty and unmarked bodies were created unchecked.
+# Issue #905 was filed in this repo with a zero-length body as a result.
 #
-# Static analysis tests will fail until the if-condition is widened;
-# functional tests will fail until assert_issue_valid is called for
-# ## Implementation Tasks bodies.
+# The contract now: validation runs for EVERY body, whatever it contains, and
+# --skip-validation passed explicitly on the command line is the only way past
+# it. The two tests below pin both halves of that contract; they replace the
+# pair that asserted the marker condition still existed, which had become a
+# test for the bug.
 
-@test "validation trigger includes '## Implementation Tasks' in the if-condition" {
-	# The BODY comparison inside the if must reference ## Implementation Tasks
-	# so bodies with that section are validated before gh issue create is called.
-	grep -qE '\[\[.*"## Implementation Tasks"' "$CREATE_ISSUE_SH"
+@test "validation runs regardless of body content: empty body is refused" {
+	# The worst case the marker condition let through was nothing at all — an
+	# empty body has no marker, so it was never checked.
+	unset DEPLOY_VERIFY_CMD
+	_run_create_issue --title "Test" --body ""
+
+	[ "$status" -eq 1 ]
+	[[ "$stderr" == *"no parseable task lines"* ]]
+	[[ "$stderr" == *"issue not created"* ]]
+	[ ! -f "$GH_CALLS" ] || refute grep -q 'issue create' "$GH_CALLS"
 }
 
-@test "validation trigger still includes 'pipeline-autocreated' in the if-condition" {
-	# Original trigger must be preserved — widening must not drop the existing
-	# pipeline-autocreated check.
-	grep -qE '\[\[.*pipeline-autocreated' "$CREATE_ISSUE_SH"
+@test "--skip-validation is the only bypass: it creates the issue and logs the bypass" {
+	# The opt-out is a command-line flag, never inferred from body content, and
+	# it must announce itself so a skipped validation is visible in the log
+	# rather than silent.
+	unset DEPLOY_VERIFY_CMD
+	_run_create_issue --title "Test" --body "" --skip-validation
+
+	[ "$status" -eq 0 ]
+	[[ "$output" == "99" ]]
+	[[ "$stderr" == *"--skip-validation"* ]]
+	[[ "$stderr" == *"bypassed"* ]]
 }
 
 @test "body with ## Implementation Tasks but invalid structure: exit 1 (issue not created)" {
@@ -393,14 +422,20 @@ MOCK
 	[ "$status" -eq 0 ]
 }
 
-@test "body without trigger sections: validation skipped, issue created (exit 0)" {
-	# Bodies that carry neither <!-- pipeline-autocreated --> nor
-	# ## Implementation Tasks must bypass assert_issue_valid entirely —
-	# they may use prose task formats the validator does not understand.
+@test "body with no marker sections: refused, and the error names what is missing" {
+	# Inverted by issue #906. A body carrying neither <!-- pipeline-autocreated -->
+	# nor ## Implementation Tasks used to skip assert_issue_valid entirely, on
+	# the theory that it might use a prose task format the validator cannot
+	# read. That is exactly how an unusable body reaches the tracker, so such a
+	# body is now validated like any other and rejected for what it lacks.
 	local body="Just a plain description with no special sections."
 	unset DEPLOY_VERIFY_CMD
 	_run_create_issue --title "Test" --body "$body"
-	[ "$status" -eq 0 ]
+
+	[ "$status" -eq 1 ]
+	[[ "$stderr" == *"no parseable task lines"* ]]
+	[[ "$stderr" == *"missing 'Acceptance Criteria' section"* ]]
+	[ ! -f "$GH_CALLS" ] || refute grep -q 'issue create' "$GH_CALLS"
 }
 
 @test "body with pipeline-autocreated but invalid structure: exit 1 (regression guard)" {
@@ -414,13 +449,12 @@ MOCK
 }
 
 # =============================================================================
-# DEPLOY_VERIFY_CMD interaction with ## Implementation Tasks (issue #437 task 3)
+# DEPLOY_VERIFY_CMD interaction (issue #437 task 3, inverted by issue #906)
 #
 # When DEPLOY_VERIFY_CMD is set, assert_issue_valid requires a
-# ## Deploy Verification section (criterion 5).  Bodies that carry
-# ## Implementation Tasks trigger validation; bodies that do not carry
-# ## Implementation Tasks bypass it entirely — including its
-# DEPLOY_VERIFY_CMD check.
+# ## Deploy Verification section (criterion 5).  Validation is now
+# unconditional, so an unmarked body no longer escapes that check by escaping
+# validation altogether — it is refused on the structural criteria it fails.
 # =============================================================================
 
 @test "body with '## Implementation Tasks' but no '## Deploy Verification': exit 1 when DEPLOY_VERIFY_CMD set" {
@@ -443,21 +477,28 @@ MOCK
 	[ ! -f "$GH_CALLS" ] || ! grep -q 'issue create' "$GH_CALLS"
 }
 
-@test "body without '## Implementation Tasks': accepted unchanged when DEPLOY_VERIFY_CMD set" {
-	# Without the trigger section, assert_issue_valid is never called, so
-	# DEPLOY_VERIFY_CMD criterion 5 is not reached — the body passes through
-	# unmodified and the issue is created regardless.
+@test "body without '## Implementation Tasks': refused when DEPLOY_VERIFY_CMD set" {
+	# Inverted by issue #906. Skipping validation for an unmarked body also
+	# skipped criterion 5, so a deploy-gated repo could file an issue with no
+	# ## Deploy Verification section at all. Validation now runs, and this body
+	# is rejected before criterion 5 is even the binding failure.
 	local body="Plain description with no trigger sections."
 	export DEPLOY_VERIFY_CMD="./scripts/verify.sh"
 	_run_create_issue --title "Test" --body "$body"
-	[ "$status" -eq 0 ]
+
+	[ "$status" -eq 1 ]
+	[[ "$stderr" == *"issue not created"* ]]
+	[ ! -f "$GH_CALLS" ] || refute grep -q 'issue create' "$GH_CALLS"
 }
 
-@test "body without '## Implementation Tasks': issue number printed to stdout when DEPLOY_VERIFY_CMD set" {
-	# Confirm the gh issue create call succeeds and the issue number is
-	# written to stdout — validation bypass must not silently swallow output.
+@test "body without '## Implementation Tasks': nothing on stdout when DEPLOY_VERIFY_CMD set" {
+	# Stdout twin of the test above, inverted with it. The refusal is total:
+	# no issue exists, so nothing must be printed for a caller to capture and
+	# mistake for an issue number.
 	local body="Plain description with no trigger sections."
 	export DEPLOY_VERIFY_CMD="./scripts/verify.sh"
 	_run_create_issue --title "Test" --body "$body"
-	[[ "$output" == "99" ]]
+
+	[ "$status" -eq 1 ]
+	[[ -z "$output" ]]
 }
