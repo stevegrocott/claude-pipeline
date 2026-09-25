@@ -302,6 +302,71 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
+# Issue #907: a `case` that matches no arm is a successful no-op under
+# `set -euo pipefail`. Before the fix, an unrecognised GIT_HOST or
+# MERGE_STYLE fell through both dispatch case statements untouched, merged
+# nothing, and still exited 0 — the orchestrator then recorded a completed
+# merge that never happened. These drive the real script end-to-end (not an
+# extracted function, like the #876 regression test above) so a regression
+# that removes either fail-loud default arm is caught here.
+# ---------------------------------------------------------------------------
+
+@test "#907 AC2: an unrecognised GIT_HOST exits non-zero and never merges" {
+	mkdir -p "$TEST_TMP/bin"
+	: > "$TEST_TMP/gh-badhost.log"
+	cat > "$TEST_TMP/bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_TMP/gh-badhost.log"
+printf '{}\n'
+exit 0
+STUB
+	chmod +x "$TEST_TMP/bin/gh"
+
+	GIT_HOST=bitbucket MERGE_STYLE=squash PATH="$TEST_TMP/bin:$PATH" run "$MERGE_MR" 5979
+	[[ "$status" -ne 0 ]] \
+		|| fail "script exited 0 with an unrecognised GIT_HOST — silent no-op merge (#907)"
+	assert_contains "$output" "GIT_HOST"
+	assert_contains "$output" "bitbucket"
+	if grep -q "pr merge" "$TEST_TMP/gh-badhost.log" 2>/dev/null; then
+		fail "script invoked pr merge despite an unrecognised GIT_HOST"
+	fi
+}
+
+@test "#907 AC1: an unrecognised MERGE_STYLE exits non-zero and never merges" {
+	mkdir -p "$TEST_TMP/bin"
+	: > "$TEST_TMP/gh-badstyle.log"
+	cat > "$TEST_TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "GHLOG"
+for a in "$@"; do
+  case "$a" in
+    state) printf 'OPEN\n'; exit 0 ;;
+    mergeStateStatus,statusCheckRollup)
+      printf '%s\n' '{"mergeStateStatus":"CLEAN","statusCheckRollup":[]}'; exit 0 ;;
+  esac
+done
+case "$1 $2" in
+  "pr merge") printf 'merged\n'; exit 0 ;;
+esac
+printf '{}\n'; exit 0
+STUB
+	sed -i.bak "s|GHLOG|$TEST_TMP/gh-badstyle.log|" "$TEST_TMP/bin/gh"
+	chmod +x "$TEST_TMP/bin/gh"
+
+	# GIT_HOST is valid here so the script reaches the poll (and would call
+	# gh pr view along the way) — the assertion that matters is that the
+	# invalid MERGE_STYLE never reaches an actual `pr merge` invocation.
+	GIT_HOST=github MERGE_STYLE=bogus PATH="$TEST_TMP/bin:$PATH" run "$MERGE_MR" 5979
+	[[ "$status" -ne 0 ]] \
+		|| fail "script exited 0 with an unrecognised MERGE_STYLE — silent no-op merge (#907)"
+	assert_contains "$output" "MERGE_STYLE"
+	assert_contains "$output" "bogus"
+	if grep -q "pr merge" "$TEST_TMP/gh-badstyle.log" 2>/dev/null; then
+		fail "script invoked pr merge despite an unrecognised MERGE_STYLE"
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # Issue #888: adding the label fires `pull_request: labeled`, starting a second
 # run; a PR-keyed concurrency group with cancel-in-progress then cancels the
 # run already in flight for the same head. That cancelled run's check is
