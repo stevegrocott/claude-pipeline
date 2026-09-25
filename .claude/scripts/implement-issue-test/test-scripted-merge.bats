@@ -63,10 +63,14 @@ _load_merge_mr_functions() {
 	# more helpers and four module-level assignments; load them the same way so
 	# the extracted functions run exactly as in production.
 	local helper
+	# _report_mergeable_timeout is on wait_for_mergeable's timeout path
+	# (issue #931); without it the extracted function aborts with
+	# "command not found" instead of reporting why it gave up.
 	for helper in _non_blocking_checks_json _ignored_failed_checks \
 		_pending_ignored_checks _has_pending_check _pr_terminal_state \
 		_pr_head_sha _check_runs_json _latest_full_run_id \
-		_post_label_run_state wait_for_full_run; do
+		_post_label_run_state wait_for_full_run \
+		_report_mergeable_timeout; do
 		local body
 		body=$(_extract_function_body "$helper" "$MERGE_MR")
 		[[ -n "$body" ]] || fail "$helper() not defined in merge-mr.sh"
@@ -571,7 +575,12 @@ STUB
 	run wait_for_mergeable 6051
 	[[ "$status" -ne 0 ]] \
 		|| fail "merged while a BLOCKING check was still running"
-	assert_contains "$output" "Timed out waiting"
+	# The timeout message now names WHAT it was waiting on (issue #931): the
+	# old wording claimed GitHub had failed to compute mergeability, which is
+	# not what happens when a check is simply still running.
+	assert_contains "$output" "Timed out after"
+	assert_contains "$output" "still pending"
+	assert_contains "$output" "UNSTABLE"
 }
 
 @test "#877 AC2: an allowlisted pending check with a real FAILURE is still refused" {
@@ -946,4 +955,96 @@ STUB
 @test "AC5: surgical fast path still guards its direct merge" {
 	[[ -f "$FAST_PATH" ]] || fail "surgical-fast-path.sh not found"
 	assert_file_contains "$FAST_PATH" "_fast_path_check_concluded_failure"
+}
+
+# =============================================================================
+# wait_for_mergeable() DEFAULT BUDGET (issue #931)
+# =============================================================================
+#
+# The default was 90s with a 10s interval. A PR is UNSTABLE for the whole CI
+# run — ~9 minutes here — so any merge attempt arriving before CI finished
+# expired and was reported as a merge FAILURE on a PR that was merely
+# unfinished. Issue #926's PR #930 went green eleven minutes after the gate
+# gave up, and the batch paused for a manual merge that was never needed.
+#
+# These pin the DEFAULTS, which no existing test covered: every other case
+# overrides MERGE_MR_POLL_MAX to keep itself fast, so the shipped value was
+# never exercised.
+
+@test "#931: the default poll budget outlasts a realistic CI run" {
+	_load_merge_mr_functions
+
+	# Deliberately NOT overriding MERGE_MR_POLL_MAX — the default is the
+	# subject. Unset both so the `${VAR:-default}` expansions are what runs.
+	unset MERGE_MR_POLL_MAX MERGE_MR_POLL_INTERVAL
+
+	local body
+	body=$(_extract_function_body wait_for_mergeable "$MERGE_MR")
+
+	# 2700s matches MERGE_MR_FULL_RUN_POLL_MAX, the existing precedent in this
+	# file for how long waiting on CI costs. Anything under ~600s cannot
+	# outlast this repo's own CI and reintroduces the #926 false failure.
+	local default_max
+	default_max=$(printf '%s' "$body" \
+		| sed -n 's/.*MERGE_MR_POLL_MAX:-\([0-9]*\)}.*/\1/p' | head -1)
+	[[ -n "$default_max" ]] \
+		|| fail "could not read the MERGE_MR_POLL_MAX default from the function"
+	(( default_max >= 600 )) \
+		|| fail "default budget ${default_max}s cannot outlast a CI run (#931)"
+}
+
+@test "#931: a concluded check FAILURE still returns immediately, not after the long budget" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE","name":"e2e"}]}'
+
+	# The long default is only safe because a genuinely doomed PR fails fast.
+	# Leave the budget at its default: if the failure path regressed into the
+	# polling path, this test would hang rather than fail, which is itself the
+	# signal.
+	unset MERGE_MR_POLL_MAX MERGE_MR_POLL_INTERVAL
+	MERGE_MR_MERGE_STATE_GATE=1
+	export MERGE_MR_MERGE_STATE_GATE
+
+	run wait_for_mergeable 6931
+	[[ "$status" -ne 0 ]] || fail "merged despite a concluded FAILURE"
+	assert_contains "$output" "refusing to wait"
+	# Must NOT have gone through the timeout path.
+	if printf '%s' "$output" | grep -q "Timed out after"; then
+		fail "a concluded failure must fail fast, not wait out the budget"
+	fi
+}
+
+@test "#931: a DIRTY PR still returns immediately under the long budget" {
+	_load_merge_mr_functions
+	_stub_gh_pr_view '{"mergeStateStatus":"DIRTY","statusCheckRollup":[]}'
+
+	unset MERGE_MR_POLL_MAX MERGE_MR_POLL_INTERVAL
+	MERGE_MR_MERGE_STATE_GATE=1
+	export MERGE_MR_MERGE_STATE_GATE
+
+	run wait_for_mergeable 6932
+	[[ "$status" -ne 0 ]] || fail "merged a PR with conflicts"
+	assert_contains "$output" "conflicts"
+	if printf '%s' "$output" | grep -q "Timed out after"; then
+		fail "a conflicting PR must fail fast, not wait out the budget"
+	fi
+}
+
+@test "#931: the timeout message distinguishes pending checks from an uncomputed state" {
+	_load_merge_mr_functions
+
+	# UNKNOWN is what gh reports when it has no mergeability answer at all —
+	# a genuinely different situation from checks still running, and the old
+	# single message conflated them.
+	_stub_gh_pr_view '{"mergeStateStatus":"UNKNOWN","statusCheckRollup":[]}'
+	MERGE_MR_MERGE_STATE_GATE=1 MERGE_MR_POLL_INTERVAL=1 MERGE_MR_POLL_MAX=1
+	export MERGE_MR_MERGE_STATE_GATE MERGE_MR_POLL_INTERVAL MERGE_MR_POLL_MAX
+
+	run wait_for_mergeable 6933
+	[[ "$status" -ne 0 ]] || fail "expected a timeout"
+	assert_contains "$output" "never"
+	# Must not blame pending checks when none were pending.
+	if printf '%s' "$output" | grep -q "still pending"; then
+		fail "an UNKNOWN state must not be reported as pending checks"
+	fi
 }
