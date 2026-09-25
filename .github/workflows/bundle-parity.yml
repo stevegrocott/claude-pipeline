@@ -54,9 +54,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install bats
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y bats
+        uses: ./.github/actions/install-bats
 
       - name: Run bundle parity + bash -n guard
         run: bats .claude/scripts/implement-issue-test/test-bundle-parity.bats

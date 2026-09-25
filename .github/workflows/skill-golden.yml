@@ -152,9 +152,9 @@ jobs:
 
       - name: Install bats and jq
         if: steps.scope.outputs.run == 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y bats jq
+        uses: ./.github/actions/install-bats
+        with:
+          jq: 'true'
 
       - name: Run bats tests (API key present — all tests including live)
         if: steps.scope.outputs.run == 'true' && steps.scope.outputs.has_api_key == 'true'
