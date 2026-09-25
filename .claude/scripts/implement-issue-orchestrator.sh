@@ -336,6 +336,18 @@ E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 # slower suite.
 BATS_FULL_SUITE_TIMEOUT="${BATS_FULL_SUITE_TIMEOUT:-2700}"
 
+# Wall-clock cap (seconds) on the informational full-suite npm/test-runner
+# check (`eval "${TEST_UNIT_CMD:-npm test}"`) that runs unconditionally in
+# main() right before its BATS sibling above. That check is already
+# non-blocking — a red run only records a degraded-stage signal — but
+# nothing previously bounded its OWN runtime, so the same class of hang
+# that stalled the BATS arm (issue #926) could stall this arm too, and the
+# issue calls this arm out as the one more likely to matter for downstream
+# consumers since TEST_UNIT_CMD is typically a real test runner, not bats.
+# Defaults to 45 minutes, matching BATS_FULL_SUITE_TIMEOUT above, and is
+# overridable for repos with a slower suite.
+FULL_SUITE_NPM_TIMEOUT="${FULL_SUITE_NPM_TIMEOUT:-2700}"
+
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
 # The run-budget soft-threshold warning is emitted at most once per run
@@ -12405,10 +12417,22 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
             # `set -uo pipefail` at the top), so nothing needs suppressing.
             # Matches the BATS sibling block below, which always did this
             # correctly.
-            full_scope_output=$(eval "${TEST_UNIT_CMD:-npm test}" 2>&1)
+            # Wrapped in `timeout` (FULL_SUITE_NPM_TIMEOUT, overridable) so a
+            # wedged suite cannot stall the orchestrator indefinitely — the
+            # check is informational and must always return control (#926).
+            # `eval` is a shell builtin, not an executable, so it cannot be
+            # exec'd by `timeout` directly; `bash -c` runs $TEST_UNIT_CMD
+            # through a subprocess `timeout` can bound the same way it
+            # bounds the BATS arm below.
+            full_scope_output=$(timeout "${FULL_SUITE_NPM_TIMEOUT:-2700}" bash -c "${TEST_UNIT_CMD:-npm test}" 2>&1)
             full_scope_rc=$?
 
-            if (( full_scope_rc != 0 )); then
+            if (( full_scope_rc == 124 )); then
+                log_warn "Full-suite check timed out after" \
+                    "${FULL_SUITE_NPM_TIMEOUT:-2700}s — treating as red" \
+                    "(non-blocking)"
+                DEGRADED_STAGES+=("test:full_suite_timeout")
+            elif (( full_scope_rc != 0 )); then
                 local full_scope_failures
                 full_scope_failures=$(printf '%s' "$full_scope_output" | tail -40)
                 DEGRADED_STAGES+=("test:full_suite_red")
