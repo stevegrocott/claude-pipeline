@@ -620,3 +620,60 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 	expect_ok "the logged narrowed command must target the changed suite" \
 		grep -q "Narrowed BATS command:.*tests/new-suite.bats" "$LOG_FILE"
 }
+
+# =============================================================================
+# FULL-SUITE CHECK: RUNNER SCOPE AND EXIT-STATUS CAPTURE (#905, #908)
+# =============================================================================
+#
+# Two defects in the informational full-suite block, which lives inline in
+# main() and is therefore unreachable by any function-level test (the seam
+# tracked in #891). These are static assertions on the invocation lines:
+# adequate for the defects in question — both are "is this token present" —
+# but they do NOT exercise runtime behaviour. A functional test requires the
+# block to be extracted into a named function first; that belongs to #891.
+#
+#   #905 — the BATS runner ran with no --ci, so it executed the four
+#          CI_EXCLUDED_SUITES that CI deliberately skips. Two of them
+#          (test-stage-runner.bats, cost-accounting.bats) are red on main,
+#          so this check reported red on every run, which silently disabled
+#          failed-task reconciliation through the tests_green gate.
+#
+#   #908 — the npm arm captured $? after an `|| true`. That makes the command
+#          list succeed, so $? reads true's status and is always 0; the
+#          failure branch was dead code and test:full_suite_red could never
+#          be recorded. errexit is off in this script, so nothing needed
+#          suppressing in the first place.
+
+@test "#905: the full-suite BATS check invokes the runner with --ci" {
+	local line
+	line=$(grep -n 'bats_full_output=' "$ORCHESTRATOR_SCRIPT")
+
+	expect_ok "the full-suite BATS invocation must still exist" \
+		test -n "$line"
+	expect_ok "the runner must be passed --ci so CI_EXCLUDED_SUITES are skipped" \
+		grep -q 'bash "\$bats_runner" --ci' "$ORCHESTRATOR_SCRIPT"
+}
+
+@test "#908: the full-suite npm check captures \$? without an intervening || true" {
+	local line
+	line=$(grep 'full_scope_output=' "$ORCHESTRATOR_SCRIPT")
+
+	expect_ok "the full-suite npm invocation must still exist" \
+		test -n "$line"
+	# `|| true` makes the list succeed, so the `full_scope_rc=$?` on the next
+	# line would always read 0 and the failure branch would be unreachable.
+	expect_not_ok "the npm invocation must not end in || true" \
+		grep -q 'full_scope_output=.*|| true' "$ORCHESTRATOR_SCRIPT"
+}
+
+@test "#908: the npm and BATS arms capture exit status the same way" {
+	# Both arms must assign the command substitution and read $? on the very
+	# next line. The BATS arm was always correct; this pins them together so
+	# they cannot drift apart again.
+	expect_ok "npm arm must capture into full_scope_rc" \
+		grep -A1 'full_scope_output=' "$ORCHESTRATOR_SCRIPT" \
+		| grep -q 'full_scope_rc=\$?'
+	expect_ok "BATS arm must capture into bats_full_rc" \
+		grep -A1 'bats_full_output=' "$ORCHESTRATOR_SCRIPT" \
+		| grep -q 'bats_full_rc=\$?'
+}
