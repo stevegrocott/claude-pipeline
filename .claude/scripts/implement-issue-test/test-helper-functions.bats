@@ -1178,3 +1178,79 @@ WRAPPER
     run _timeout_perl_fallback 1 sleep 5
     [ "$status" -eq 124 ]
 }
+
+# =============================================================================
+# guard_commit_path_allowlist() — intake/guard agreement (issue #928)
+# =============================================================================
+#
+# assert_issue_valid accepts a task's declared paths at intake; this guard
+# decides whether the resulting commit may land. When they disagree, an issue
+# is filed, validated, scheduled and worked, and then its commit is rejected —
+# the task is recorded `failed` despite reporting success, and because a failed
+# task's worktree commit is never merged back, the branch-evidence
+# reconciliation finds no diff and leaves it failed. Issue #909 lost two of
+# three tasks exactly this way.
+
+_guard_wrapper() {
+    local wrapper="$TEST_TMP/guard_928_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+unset EXTRA_COMMIT_PATHS
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+    printf '%s' "$wrapper"
+}
+
+@test "guard_commit_path_allowlist allows a .bash test helper (issue #928)" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-928-bash
+    mkdir -p .claude/scripts/implement-issue-test/helpers
+    printf 'true\n' > .claude/scripts/implement-issue-test/helpers/test-helper.bash
+    git add .claude/scripts/implement-issue-test/helpers/test-helper.bash
+    git commit -q -m "edit the bats helper library"
+
+    run "$(_guard_wrapper)"
+    [ "$status" -eq 0 ] || \
+        fail "a .bash shell source must be committable like .sh. Got: $output"
+}
+
+@test "guard_commit_path_allowlist still denies .github/workflows (issue #928)" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-928-workflows
+    mkdir -p .github/workflows
+    printf 'name: x\n' > .github/workflows/bats-suite.yml
+    git add .github/workflows/bats-suite.yml
+    git commit -q -m "edit CI workflow"
+
+    run "$(_guard_wrapper)"
+    # Deliberate and documented as non-overridable: a pipeline that can
+    # rewrite the CI gating it is a hazard. This pins that it stays denied,
+    # so the #928 .bash fix cannot be widened into the workflows arm.
+    [ "$status" -eq 1 ] || \
+        fail "workflows must stay denied. Got status=$status output=$output"
+    [[ "$output" == *".github/workflows/bats-suite.yml"* ]] || \
+        fail "the denial must name the offending path. Got: $output"
+}
+
+@test "guard_commit_path_allowlist agrees with assert_issue_valid on shell sources (issue #928)" {
+    # Every extension the guard treats as a shell source must be one a task
+    # can legitimately declare. This is the cross-gate check whose absence
+    # let .bash diverge: each gate had tests, nothing compared them.
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-928-agree
+
+    local ext
+    for ext in sh bash bats; do
+        printf 'true\n' > "sample.${ext}"
+        git add "sample.${ext}"
+        git commit -q -m "add sample.${ext}"
+
+        run "$(_guard_wrapper)"
+        [ "$status" -eq 0 ] || \
+            fail "guard rejected .${ext}, which intake accepts. Got: $output"
+    done
+}
