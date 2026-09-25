@@ -491,6 +491,225 @@ _simulate_state_routing() {
 	[[ "$body" == *'merge_blocked'* ]]
 }
 
+# =============================================================================
+# ISSUE #781: batch fingerprint on init_status resume preservation
+# =============================================================================
+#
+# init_status()'s resume path preserves completed/already_implemented status
+# for any matching issue number in a prior status.json, with no check that
+# the prior file came from the same batch launch. Running issue #42 in batch
+# A (completed), then again in batch B because it was reopened, silently
+# preserves "completed" and skips it. #781 scopes preservation to a batch
+# fingerprint (base branch + sorted issue set) written into status.json:
+# AC4 requires init_status to write the fingerprint, AC5 requires a mismatch
+# to contribute no preserved terminal state (every issue starts pending,
+# logged), and AC6 requires a matching fingerprint to keep today's resume
+# behaviour unchanged.
+#
+# init_status() doesn't compute or check a fingerprint yet, so these tests
+# are expected to fail (RED) until that scoping is added — the same
+# "source the real function" harness exercises the real code the moment it
+# exists.
+
+# Sources the real init_status() out of batch-orchestrator.sh so these tests
+# exercise production logic rather than a hand-copied re-implementation.
+source_init_status() {
+	local func_file="$TEST_TMP/init_status.bash"
+	_extract_function_body init_status "$BATCH_ORCHESTRATOR_SCRIPT" \
+		> "$func_file"
+	grep -q 'init_status' "$func_file" 2>/dev/null || return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+@test "functional: init_status writes a batch_fingerprint field to status.json (AC4, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2 3)
+	rm -f "$STATUS_FILE"
+
+	init_status
+
+	local fp
+	fp=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+	[[ -n "$fp" ]] || fail "init_status did not write a batch_fingerprint"
+}
+
+@test "functional: init_status batch_fingerprint changes when the issue set changes (AC4, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2 3)
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_a
+	fp_a=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	ISSUE_ARRAY=(1 2 4)
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_b
+	fp_b=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	[[ -n "$fp_a" && -n "$fp_b" ]] || fail "batch_fingerprint missing"
+	[[ "$fp_a" != "$fp_b" ]] \
+		|| fail "batch_fingerprint did not change with a different issue set"
+}
+
+@test "functional: init_status batch_fingerprint changes when the base branch changes (AC4, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	ISSUE_ARRAY=(1 2 3)
+	BRANCH="main"
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_a
+	fp_a=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	BRANCH="develop"
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_b
+	fp_b=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	[[ -n "$fp_a" && -n "$fp_b" ]] || fail "batch_fingerprint missing"
+	[[ "$fp_a" != "$fp_b" ]] \
+		|| fail "batch_fingerprint did not change with a different base branch"
+}
+
+@test "functional: init_status batch_fingerprint is stable regardless of issue array order (AC4, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(3 1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_a
+	fp_a=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	ISSUE_ARRAY=(1 2 3)
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_b
+	fp_b=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	[[ -n "$fp_a" && -n "$fp_b" ]] || fail "batch_fingerprint missing"
+	[[ "$fp_a" == "$fp_b" ]] \
+		|| fail "batch_fingerprint depends on issue array order (should be sorted)"
+}
+
+@test "functional: init_status preserves completed status when the batch_fingerprint matches the prior status.json (AC6, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+
+	jq '(.issues[] | select(.number == "1")).status = "completed"' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	# Re-launch with the SAME base branch and issue set.
+	init_status
+
+	local status
+	status=$(jq -r '.issues[] | select(.number == "1") | .status' \
+		"$STATUS_FILE")
+	[[ "$status" == "completed" ]] \
+		|| fail "matching-fingerprint resume did not preserve completed status (got: $status)"
+}
+
+@test "functional: init_status resets a completed issue to pending when the prior status.json fingerprint does not match (AC5, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+
+	jq '(.issues[] | select(.number == "1")).status = "completed"' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	# Re-launch as a DIFFERENT batch: same branch, different issue set.
+	ISSUE_ARRAY=(1 3)
+	init_status
+
+	local status
+	status=$(jq -r '.issues[] | select(.number == "1") | .status' \
+		"$STATUS_FILE")
+	[[ "$status" == "pending" ]] \
+		|| fail "mismatched-fingerprint resume preserved completed status (got: $status)"
+}
+
+@test "functional: init_status logs a fingerprint mismatch instead of silently resetting resume state (AC5, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+
+	jq '(.issues[] | select(.number == "1")).status = "completed"' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	: > "$TEST_TMP/log.out"
+	ISSUE_ARRAY=(1 3)
+	init_status
+
+	grep -qi 'fingerprint' "$TEST_TMP/log.out" \
+		|| fail "log did not mention the fingerprint mismatch"
+}
+
+@test "functional: init_status treats a pre-#781 status.json with no batch_fingerprint as a mismatch (AC5, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+
+	# A status.json in the shape init_status produced before #781 — no
+	# batch_fingerprint field at all.
+	jq -n '{
+		state: "running",
+		issues: [
+			{number: "1", status: "completed"},
+			{number: "2", status: "pending"}
+		]
+	}' > "$STATUS_FILE"
+
+	init_status
+
+	local status
+	status=$(jq -r '.issues[] | select(.number == "1") | .status' \
+		"$STATUS_FILE")
+	[[ "$status" == "pending" ]] \
+		|| fail "a pre-#781 status.json with no fingerprint was treated as a match (got: $status)"
+}
+
 # --- Functional simulation ---
 #
 # Build a mock status.json with mixed issue statuses and verify that the
@@ -861,10 +1080,10 @@ _simulate_cost_rollup() {
 @test "up-front skip gate: gh failures are non-fatal (|| true pattern)" {
 	# Network errors from gh must not abort the batch; the gate must use
 	# || true (or equivalent) to suppress non-zero exit codes.
-	local block
-	block=$(awk '/Up-front skip gate/,/fi.*#.*end.*GIT_HOST|^\s+fi$/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" | head -40)
-	[[ "$block" == *'|| true'* ]]
+	local body
+	body=$(_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'|| true'* ]]
 }
 
 @test "up-front skip gate: appears before process_issue call in the loop" {
@@ -1526,8 +1745,16 @@ _extract_process_pr_changes_requested_block() {
 # implementation rather than a hand-copied block.
 source_check_issue_resolved_upstream() {
 	local func_file="$TEST_TMP/check_issue_resolved_upstream.bash"
-	_extract_function_body check_issue_resolved_upstream \
-		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	{
+		_extract_function_body check_issue_resolved_upstream \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		# #781: the grace window compares a PR's mergedAt against "now",
+		# which needs the same GNU-then-BSD epoch parsing check_issue_pr_merged
+		# already relies on (#817) — source it so the gate can reuse it
+		# instead of a hand-rolled second implementation.
+		_extract_function_body _iso_to_epoch \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+	} > "$func_file"
 	grep -q 'check_issue_resolved_upstream' "$func_file" 2>/dev/null \
 		|| return 1
 	# shellcheck disable=SC1090
@@ -1611,6 +1838,39 @@ GHEOF
 	[[ "$rc" -eq 1 ]]
 	[[ -z "$_UPFRONT_SKIP_REASON" ]]
 	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q '123' "$TEST_TMP/log.out"
+}
+
+@test "functional: check_issue_resolved_upstream (reopened issue, merged PR) names REOPENED in the log" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-reopened"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\tREOPENED\n' ;;
+	pr) printf '123\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# The issue's stateReason (REOPENED) is fetched alongside state and
+	# named in the merged-PR gate log, so an operator scanning logs can
+	# tell a reopened issue apart from one that was simply never closed.
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q 'REOPENED' "$TEST_TMP/log.out"
 	grep -q '123' "$TEST_TMP/log.out"
 }
 
@@ -1703,6 +1963,181 @@ GHEOF
 
 	[[ "$rc" -eq 1 ]]
 	[[ -z "$_UPFRONT_SKIP_PR" ]]
+}
+
+# =============================================================================
+# ISSUE #781: close-propagation grace window and REOPENED on the up-front gate
+# =============================================================================
+#
+# #771 made check_issue_resolved_upstream process an open issue with a merged
+# branch PR instead of skipping it — correct for a stale merge, but it also
+# reprocesses an issue whose PR merged moments ago and simply hasn't had the
+# close webhook land yet. #781 narrows that: a merge younger than
+# MERGED_PR_GRACE_SECONDS (default 120) still skips (AC2), a merge older than
+# the window still processes exactly as #771 established (AC1), and an issue
+# GitHub reports as `stateReason: REOPENED` always processes regardless of
+# merge age, because that reason means someone deliberately reopened partial
+# work rather than a propagation lag (AC3).
+#
+# check_issue_resolved_upstream() isn't written yet for any of this, so these
+# tests are expected to fail (RED) until that gate is extended — the same
+# "source the real function, skip if absent" harness already used above will
+# start exercising the real code the moment it exists.
+
+# Smart `gh` stub for the gate tests below. Real `gh ... --json F --jq E`
+# resolves E against GitHub's live JSON; this stub builds the same shape from
+# MOCK_ISSUE_STATE / MOCK_STATE_REASON / MOCK_PR_NUMBER / MOCK_PR_MERGED_AT
+# and pipes it through the real `jq` binary using whatever --jq expression
+# the caller passed. That keeps these tests bound only to the GitHub fields
+# the gate reads, not to the exact jq filter the implementation writes.
+_stub_gh_gate() {
+	local mock_bin="$TEST_TMP/mock-bin-gate-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+subcmd="$1"
+shift
+jq_expr="."
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--jq) jq_expr="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+
+payload="null"
+case "$subcmd" in
+	issue)
+		reason="null"
+		[[ -n "${MOCK_STATE_REASON:-}" ]] && reason="\"$MOCK_STATE_REASON\""
+		payload="{\"state\":\"${MOCK_ISSUE_STATE:-OPEN}\",\"stateReason\":$reason}"
+		;;
+	pr)
+		if [[ -n "${MOCK_PR_NUMBER:-}" ]]; then
+			merged="null"
+			[[ -n "${MOCK_PR_MERGED_AT:-}" ]] \
+				&& merged="\"$MOCK_PR_MERGED_AT\""
+			payload="[{\"number\":${MOCK_PR_NUMBER},\"mergedAt\":$merged}]"
+		else
+			payload="[]"
+		fi
+		;;
+esac
+
+printf '%s' "$payload" | jq -r "$jq_expr"
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+# Prints an ISO-8601 UTC timestamp <offset> seconds before "now" — GNU-then-
+# BSD fallback, mirroring _iso_to_epoch's own portability shim so a merge
+# timestamp built here round-trips through the real function under test.
+_iso_seconds_ago() {
+	local offset="$1"
+	local epoch=$((EPOCHSECONDS - offset))
+	date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+		|| date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ
+}
+
+@test "functional: check_issue_resolved_upstream skips a PR merged inside the grace window (AC2, #781)" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	export MOCK_ISSUE_STATE=OPEN
+	export MOCK_PR_NUMBER=123
+	export MOCK_PR_MERGED_AT=$(_iso_seconds_ago 10)
+	_stub_gh_gate
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a PR merged 10s ago was not skipped (rc=$rc)"
+	[[ "$_UPFRONT_SKIP_PR" == "123" ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'123'* ]]
+}
+
+@test "functional: check_issue_resolved_upstream processes an issue whose merged PR predates the grace window (AC1, #781)" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	export MOCK_ISSUE_STATE=OPEN
+	export MOCK_PR_NUMBER=123
+	export MOCK_PR_MERGED_AT=$(_iso_seconds_ago $((10 * 24 * 60 * 60)))
+	_stub_gh_gate
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# #771 preserved: an old merge is stale evidence, not resolution.
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a 10-day-old merged PR was skipped instead of processed"
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q '123' "$TEST_TMP/log.out"
+}
+
+@test "functional: check_issue_resolved_upstream honors a custom MERGED_PR_GRACE_SECONDS window (#781)" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	export MOCK_ISSUE_STATE=OPEN
+	export MOCK_PR_NUMBER=123
+	export MOCK_PR_MERGED_AT=$(_iso_seconds_ago 30)
+	_stub_gh_gate
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+	MERGED_PR_GRACE_SECONDS=5
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# A merge 30s old falls outside a 5s window even though it would have
+	# been inside the 120s default — the override must actually narrow it.
+	[[ "$rc" -eq 1 ]] \
+		|| fail "MERGED_PR_GRACE_SECONDS=5 did not shrink the window (rc=$rc)"
+}
+
+@test "functional: check_issue_resolved_upstream never skips a REOPENED issue inside the grace window (AC3, #781)" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	export MOCK_ISSUE_STATE=OPEN
+	export MOCK_STATE_REASON=REOPENED
+	export MOCK_PR_NUMBER=123
+	export MOCK_PR_MERGED_AT=$(_iso_seconds_ago 10)
+	_stub_gh_gate
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# A merge this fresh would otherwise skip (see the grace-window test
+	# above) — REOPENED must override the window, not merely widen it.
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a REOPENED issue was skipped despite a fresh merge (rc=$rc)"
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -qi 'reopen' "$TEST_TMP/log.out" \
+		|| fail "log did not name REOPENED as the reason to proceed"
 }
 
 @test "functional: check_issue_pr_merged reconciles a merged PR on a still-open issue (#740)" {

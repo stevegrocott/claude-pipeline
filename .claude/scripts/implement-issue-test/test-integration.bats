@@ -1505,8 +1505,13 @@ _simulate_resume_merge() {
     # plain assignment keeps intent obvious.
     ISSUE_ARRAY=(100 101)
 
-    # Simulate a prior launch: 100 finished, 101 never ran.
+    # Simulate a prior launch of THIS batch: 100 finished, 101 never ran.
+    # The fingerprint is what init_status would itself have written on that
+    # launch (issue #781): "<base branch>:<sorted issue numbers>". Without it
+    # the file looks like it came from an older pipeline-core and resume is
+    # declined — covered separately by the legacy-file test below.
     jq -n '{
+        batch_fingerprint: "main:100,101,",
         issues: [
             {number: "100", status: "completed"},
             {number: "101", status: "pending"}
@@ -1651,4 +1656,56 @@ BATCH_STUB
             && fail "orchestrator pgid $orch_pgid respawned after teardown"
     done
     return 0
+}
+
+# A status.json written before #781 carries no batch_fingerprint. That is not
+# evidence of a different batch — it is evidence of an older pipeline-core —
+# so it must not be reported as a "mismatch". It still declines to resume,
+# deliberately: resetting reprocesses an already-done issue (wasteful, safe),
+# whereas preserving on unverifiable provenance is the #781 defect itself
+# (silently skipping work that should run). Costs one non-resumed batch per
+# consumer, once, on the upgrade that introduces fingerprints.
+@test "resume functional: a pre-#781 status.json with no fingerprint declines to resume and says why" {
+    source_batch_function init_status
+
+    # source_batch_function installs `log() { :; }`, so log lines are dropped.
+    # Capture them: the distinction between "absent fingerprint" and
+    # "fingerprint mismatch" IS the behaviour under test.
+    LOG_CAPTURE="$TEST_TMP/log_capture"
+    log() { printf '%s\n' "$*" >> "$LOG_CAPTURE"; }
+    : > "$LOG_CAPTURE"
+
+    export BRANCH="main"
+    export STATUS_FILE="$TEST_TMP/resume-legacy-status.json"
+    ISSUE_ARRAY=(100 101)
+
+    # No batch_fingerprint key at all — exactly what an older version wrote.
+    jq -n '{
+        issues: [
+            {number: "100", status: "completed"},
+            {number: "101", status: "pending"}
+        ]
+    }' > "$STATUS_FILE"
+
+    init_status
+
+    local st100
+    st100=$(jq -r '.issues[] | select(.number=="100") | .status' "$STATUS_FILE")
+    [ "$st100" = "pending" ] \
+        || fail "unverifiable provenance must reset, not preserve; got: $st100"
+
+    # The log must name the real reason. Calling this a fingerprint "mismatch"
+    # would assert something unknowable about a file that recorded nothing.
+    grep -q "no batch fingerprint" "$LOG_CAPTURE" \
+        || fail "must report the absent fingerprint; log: $(< "$LOG_CAPTURE")"
+    # `grep -q ... && fail` would be wrong here: when grep does NOT match —
+    # the outcome we want — the && list returns 1 and errexit fails the test.
+    if grep -q "fingerprint mismatch" "$LOG_CAPTURE"; then
+        fail "must NOT call an absent fingerprint a mismatch"
+    fi
+
+    # The new fingerprint is written, so the NEXT relaunch can resume.
+    local written
+    written=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+    [ -n "$written" ] || fail "init_status must record a fingerprint for next time"
 }
