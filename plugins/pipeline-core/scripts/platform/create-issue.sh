@@ -1,6 +1,9 @@
 #!/bin/bash
-# Usage: create-issue.sh --title "Title" --body "Body" [--labels "bug,critical"] [--parent "EPIC-KEY"]
+# Usage: create-issue.sh --title "Title" --body "Body" [--labels "bug,critical"]
+#          [--parent "EPIC-KEY"] [--skip-validation]
 # Returns: issue number or key on stdout (e.g., "42" or "KIN-123")
+# --skip-validation bypasses assert_issue_valid for deliberate free-form
+# issues (docs, questions) that are not pipeline task lists.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../resolve-pipeline-root.sh
@@ -14,22 +17,28 @@ PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
 # shellcheck disable=SC1090
 source "$PLATFORM_SH_FILE"
 
-TITLE="" BODY="" LABELS="" PARENT=""
+TITLE="" BODY="" LABELS="" PARENT="" SKIP_VALIDATION=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --title) TITLE="$2"; shift 2 ;;
     --body) BODY="$2"; shift 2 ;;
     --labels) LABELS="$2"; shift 2 ;;
     --parent) PARENT="$2"; shift 2 ;;
+    --skip-validation) SKIP_VALIDATION=true; shift ;;
     *) shift ;;
   esac
 done
 
 [[ -z "$TITLE" ]] && { echo "ERROR: --title is required" >&2; exit 3; }
 
-# Validate bodies with <!-- pipeline-autocreated --> or ## Implementation Tasks.
-if [[ "$BODY" == *"<!-- pipeline-autocreated -->"* ]] || \
-  [[ "$BODY" == *"## Implementation Tasks"* ]]; then
+# --skip-validation is a deliberate opt-out for hand-written, free-form
+# issues that are not shaped like pipeline task lists (docs, questions,
+# one-off notes). It must be requested explicitly on the command line —
+# never inferred from body content — so bypassing assert_issue_valid is a
+# stated intent, not a side effect of what the body happens to contain.
+if [[ "$SKIP_VALIDATION" == true ]]; then
+  echo "WARNING: --skip-validation set; body validation deliberately bypassed" >&2
+else
   # shellcheck source=../issue-body-lib.sh
   source "$SCRIPT_DIR/../issue-body-lib.sh"
   # assert_issue_valid resolves task file paths against ISSUE_BODY_REPO_ROOT,

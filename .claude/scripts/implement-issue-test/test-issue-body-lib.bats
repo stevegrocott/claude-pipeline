@@ -1486,3 +1486,91 @@ Task 2: test the thing
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"task has no file path"* ]]
 }
+
+# =============================================================================
+# Issue #906 — create-issue.sh end-to-end: the marker pre-filter is fail-open
+#
+# assert_issue_valid is proven correct above, but create-issue.sh only calls
+# it when the body ALREADY contains "<!-- pipeline-autocreated -->" or
+# "## Implementation Tasks" — a circular condition ("checked for having the
+# marker only if it already has the marker") that lets an empty or unmarked
+# body skip validation entirely and get created unchecked. Issue #905 was
+# filed with a zero-length body through exactly this path. These cases drive
+# the real create-issue.sh binary (not just the sourced library) with a
+# mocked `gh`, so they exercise the caller's control flow the function-level
+# tests above cannot reach.
+# =============================================================================
+
+CREATE_ISSUE_SH="$(dirname "$LIB_PATH")/platform/create-issue.sh"
+
+# Installs a callable `gh` stub ahead of PATH and points GH_CALLS at a log
+# file the stub appends every invocation to — an empty/absent log after a run
+# proves `gh issue create` was never reached.
+_mock_gh_create_issue() {
+	mkdir -p "$TEST_TMP/bin"
+	GH_CALLS="$TEST_TMP/gh-calls.log"
+	export GH_CALLS
+	cat > "$TEST_TMP/bin/gh" <<-'GH_EOF'
+	#!/usr/bin/env bash
+	printf '%s\n' "$*" >> "${GH_CALLS:-/dev/null}"
+	case "$1" in
+	    issue)
+	        [[ "$2" == "create" ]] && echo "https://github.com/test-owner/test-repo/issues/99"
+	        ;;
+	esac
+	exit 0
+	GH_EOF
+	chmod +x "$TEST_TMP/bin/gh"
+	export PATH="$TEST_TMP/bin:$PATH"
+	export TRACKER=github
+}
+
+_run_create_issue_906() {
+	run --separate-stderr bash "$CREATE_ISSUE_SH" "$@"
+}
+
+@test "#906 AC1: an empty body is refused with a non-zero exit and no issue is created" {
+	_mock_gh_create_issue
+	_run_create_issue_906 --title "Empty body test" --body ""
+	[ "$status" -ne 0 ]
+	[ ! -s "$GH_CALLS" ]
+}
+
+@test "#906 AC2: an unmarked body with no parseable task lines is refused, naming what's missing" {
+	_mock_gh_create_issue
+	_run_create_issue_906 --title "Unmarked body test" \
+		--body "Just a plain description with no tasks or headings."
+	[ "$status" -ne 0 ]
+	[ ! -s "$GH_CALLS" ]
+	[[ "$stderr" == *"task"* ]]
+}
+
+# AC6: the same empty-body scenario as AC1 doubles as the regression guard —
+# restoring the marker-gated conditional makes the body skip assert_issue_valid
+# again, `gh` gets invoked unvalidated, and both assertions below fail.
+@test "#906 AC6: fails if the marker pre-filter is restored (empty body must never reach gh)" {
+	_mock_gh_create_issue
+	_run_create_issue_906 --title "Regression guard" --body ""
+	[ "$status" -ne 0 ]
+	if [ -s "$GH_CALLS" ]; then
+		echo "FAIL: gh was invoked with an unvalidated empty body — marker pre-filter regressed" >&2
+		return 1
+	fi
+}
+
+@test "#906 AC5: --skip-validation creates an unvalidated issue and logs the bypass" {
+	_mock_gh_create_issue
+	_run_create_issue_906 --title "Free-form note" --body "" --skip-validation
+	[ "$status" -eq 0 ]
+	[ -s "$GH_CALLS" ]
+	[[ "$stderr" == *"--skip-validation"* ]]
+	[[ "$stderr" == *"deliberately bypassed"* ]]
+}
+
+@test "#906 AC5: --skip-validation bypasses even a body with markers" {
+	_mock_gh_create_issue
+	_run_create_issue_906 --title "Free-form doc note" \
+		--body "## Implementation Tasks" --skip-validation
+	[ "$status" -eq 0 ]
+	[ -s "$GH_CALLS" ]
+}
