@@ -72,3 +72,13 @@ teardown() {
     run run_platform_script create-mr.sh --source "x" --target "main" --title "T" --body "B"
     [ "$status" -ne 0 ]
 }
+
+@test "create-mr: fails loudly on an unrecognised GIT_HOST instead of no-op" {
+    export GIT_HOST="bitbucket"
+    run run_platform_script create-mr.sh --source "x" --target "main" --title "T" --body "B"
+    [ "$status" -ne 0 ]
+    assert_output_contains "unrecognised GIT_HOST"
+    assert_output_contains "bitbucket"
+    ! assert_mock_called_with "gh pr create"
+    ! assert_mock_called_with "glab mr create"
+}
