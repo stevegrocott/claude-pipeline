@@ -531,6 +531,19 @@ emit_event() {
 # =============================================================================
 
 init_status() {
+    # Batch fingerprint (issue #781): scope resume preservation to the exact
+    # batch that produced the prior status.json — same base branch and same
+    # issue set. Without this, terminal state (completed/already_implemented)
+    # was preserved for ANY matching issue number in a prior status.json, so
+    # e.g. issue #42 completed in one batch and reopened into a later,
+    # unrelated batch would silently inherit "completed" and get skipped.
+    # Sorting the issue numbers makes the fingerprint independent of launch
+    # order, so relaunching the same set in a different order still matches.
+    local sorted_issues
+    sorted_issues=$(printf '%s\n' "${ISSUE_ARRAY[@]}" \
+        | sort -n -u | tr '\n' ',')
+    local batch_fingerprint="${BRANCH}:${sorted_issues}"
+
     # Resume-awareness: when a status.json from a prior launch of this batch
     # exists, preserve per-issue terminal state (completed/already_implemented)
     # instead of resetting every issue to pending. Without this the
@@ -538,17 +551,26 @@ init_status() {
     # would reset status to pending and re-run already-finished issues.
     local prior_status="{}"
     if [[ -f "$STATUS_FILE" ]]; then
-        # Build a {number: status} map of issues whose prior status was
-        # terminal. Non-terminal (pending/failed/in_progress) issues are
-        # intentionally omitted so they re-run on resume.
-        prior_status=$(jq -c '
-            [.issues[]?
-             | select(.status == "completed"
-                      or .status == "already_implemented")]
-            | map({(.number): .status})
-            | add // {}' "$STATUS_FILE" 2>/dev/null) || prior_status="{}"
-        if [[ -z "$prior_status" ]]; then
-            prior_status="{}"
+        local prior_fingerprint
+        prior_fingerprint=$(jq -r '.batch_fingerprint // empty' \
+            "$STATUS_FILE" 2>/dev/null)
+        if [[ "$prior_fingerprint" == "$batch_fingerprint" ]]; then
+            # Build a {number: status} map of issues whose prior status was
+            # terminal. Non-terminal (pending/failed/in_progress) issues are
+            # intentionally omitted so they re-run on resume.
+            prior_status=$(jq -c '
+                [.issues[]?
+                 | select(.status == "completed"
+                          or .status == "already_implemented")]
+                | map({(.number): .status})
+                | add // {}' "$STATUS_FILE" 2>/dev/null) || prior_status="{}"
+            if [[ -z "$prior_status" ]]; then
+                prior_status="{}"
+            fi
+        else
+            log "Batch fingerprint mismatch: prior status.json is from a" \
+                "different batch (base branch or issue set changed);" \
+                "resetting all issues to pending instead of resuming"
         fi
     fi
 
@@ -596,9 +618,11 @@ init_status() {
         --argjson completed "$completed_count" \
         --argjson issues "$issues_json" \
         --arg log_dir "$LOG_BASE" \
+        --arg fingerprint "$batch_fingerprint" \
         '{
             state: $state,
             base_branch: $branch,
+            batch_fingerprint: $fingerprint,
             current_issue: null,
             progress: {
                 total: $total,
@@ -1060,17 +1084,24 @@ revalidate_issue_after_enrich() {
 # any other host is treated as "not resolved" (returns 1).
 #
 # A merged PR on "feature/issue-<num>" is NOT, by itself, treated as
-# resolution while the issue is still open. The pipeline closes an issue
-# when its PR merges, so an open issue with a merged PR on its branch is
-# evidence the merge did *not* resolve it — reopened, partially
-# implemented, reverted, or the branch name reused. Skipping on that
-# evidence silently drops open work with no supported way to re-run it
-# (see #771). Instead, a warning is logged and the issue proceeds to
-# normal processing, where the orchestrator's own checks act as the
-# safety net.
+# resolution while the issue is still open — reopened, partially
+# implemented, reverted, or the branch name reused are all possible.
+# Skipping on that evidence alone would silently drop open work with no
+# supported way to re-run it (see #771), so a warning is logged and the
+# issue proceeds to normal processing instead.
 #
 # Opt-in override: SKIP_ON_MERGED_PR=1 (any non-empty value) restores the
 # pre-#771 skip-on-merged-PR-alone behavior, for operators who rely on it.
+#
+# stateReason is fetched too: a REOPENED issue bypasses the grace window
+# below entirely — a deliberate reopen means partial work, not a
+# propagation lag, regardless of merge recency (#781).
+#
+# #781: a merged PR younger than MERGED_PR_GRACE_SECONDS (default 120s)
+# still skips, since the pipeline closes an issue on PR merge and a very
+# recent merge is likely just awaiting that close webhook. An older merge
+# is stale evidence per #771 and the issue proceeds; a missing or
+# unparseable mergedAt also proceeds — unknown age is never fresh.
 #
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the orchestrator's own
@@ -1079,7 +1110,8 @@ revalidate_issue_after_enrich() {
 # Returns:
 #   0 — issue is already resolved; caller should skip processing. Sets
 #       _UPFRONT_SKIP_REASON. _UPFRONT_SKIP_PR is set to the merged PR
-#       number under SKIP_ON_MERGED_PR, otherwise empty.
+#       number under SKIP_ON_MERGED_PR or the grace window, otherwise
+#       empty.
 #   1 — not resolved upstream; proceed with processing.
 check_issue_resolved_upstream() {
 	local issue_num="$1"
@@ -1088,19 +1120,31 @@ check_issue_resolved_upstream() {
 
 	[[ "${GIT_HOST:-github}" == "github" ]] || return 1
 
-	local issue_state=""
-	issue_state=$(gh issue view "$issue_num" --json state \
-		--jq '.state' 2>/dev/null) || true
+	local issue_meta=""
+	issue_meta=$(gh issue view "$issue_num" --json state,stateReason \
+		--jq '(.state // "") + "\t" + (.stateReason // "")' \
+		2>/dev/null) || true
+
+	local issue_state="" issue_state_reason=""
+	IFS=$'\t' read -r issue_state issue_state_reason <<< "$issue_meta"
+
 	if [[ "$issue_state" == "CLOSED" ]]; then
 		_UPFRONT_SKIP_REASON="already closed on GitHub"
 		return 0
 	fi
 
-	local merged_pr=""
-	merged_pr=$(gh pr list --state merged \
+	# number,mergedAt fetched together; tab-joined output, same pattern
+	# as issue_meta above.
+	local pr_meta=""
+	pr_meta=$(gh pr list --state merged \
 		--head "feature/issue-$issue_num" \
-		--json number --jq '.[0].number // empty' \
+		--json number,mergedAt \
+		--jq '(.[0].number // "" | tostring) + "\t" + (.[0].mergedAt // "")' \
 		2>/dev/null) || true
+
+	local merged_pr="" merged_at=""
+	IFS=$'\t' read -r merged_pr merged_at <<< "$pr_meta"
+
 	if [[ -n "$merged_pr" ]]; then
 		if [[ -n "${SKIP_ON_MERGED_PR:-}" ]]; then
 			log "Issue #$issue_num: SKIP_ON_MERGED_PR is set" \
@@ -1110,6 +1154,39 @@ check_issue_resolved_upstream() {
 			_UPFRONT_SKIP_PR="$merged_pr"
 			return 0
 		fi
+
+		if [[ "$issue_state_reason" == "REOPENED" ]]; then
+			log "Issue #$issue_num is open (stateReason:" \
+				"REOPENED) with merged PR #$merged_pr on" \
+				"feature/issue-$issue_num — processing" \
+				"anyway instead of skipping (#771)"
+			return 1
+		fi
+
+		local grace_seconds="${MERGED_PR_GRACE_SECONDS:-120}"
+		local merged_epoch="" merge_age="" now_epoch=""
+		merged_epoch=$(_iso_to_epoch "$merged_at") || merged_epoch=""
+		if [[ -n "$merged_epoch" ]]; then
+			# EPOCHSECONDS (bash 5+) preferred; date +%s covers
+			# macOS system bash 3.2, matching _epoch_ms's fallback
+			# pattern elsewhere in the pipeline.
+			now_epoch="${EPOCHSECONDS:-$(date +%s)}"
+			merge_age=$((now_epoch - merged_epoch))
+		fi
+
+		if [[ -n "$merge_age" ]] \
+			&& ((merge_age >= 0 && merge_age < grace_seconds)); then
+			log "Issue #$issue_num is open but PR #$merged_pr" \
+				"merged ${merge_age}s ago on" \
+				"feature/issue-$issue_num — within the" \
+				"${grace_seconds}s grace window, skipping" \
+				"pending close propagation (#781)"
+			_UPFRONT_SKIP_REASON="PR #$merged_pr merged"
+			_UPFRONT_SKIP_REASON+=" ${merge_age}s ago, pending close"
+			_UPFRONT_SKIP_PR="$merged_pr"
+			return 0
+		fi
+
 		log "Issue #$issue_num is open but PR #$merged_pr" \
 			"already merged on feature/issue-$issue_num" \
 			"— processing anyway instead of skipping (#771)"
