@@ -1072,8 +1072,21 @@ revalidate_issue_after_enrich() {
 # Opt-in override: SKIP_ON_MERGED_PR=1 (any non-empty value) restores the
 # pre-#771 skip-on-merged-PR-alone behavior, for operators who rely on it.
 #
-# stateReason is fetched too (informational here) so a reopened issue
-# (GitHub: stateReason=REOPENED) is named in the merged-PR log below.
+# stateReason is fetched too so a reopened issue (GitHub:
+# stateReason=REOPENED) is named in the merged-PR log below, and — #781 —
+# so it can bypass the grace window entirely: a deliberate reopen means
+# partial work, not a propagation lag, regardless of how recently the PR
+# merged.
+#
+# #781: a merged PR younger than MERGED_PR_GRACE_SECONDS (default 120) still
+# skips. The pipeline closes an issue when its PR merges, so a PR that
+# merged moments ago is most likely still waiting on that close webhook to
+# land, and reprocessing the issue wastes a full orchestrator run on work
+# that is about to be marked resolved anyway. A merge older than the window
+# is treated exactly as #771 established: stale evidence, so the issue
+# proceeds. mergedAt is unavailable (empty or unparseable) falls through to
+# the same "proceed" behavior — an unknown age must never be treated as
+# fresh.
 #
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the orchestrator's own
@@ -1082,7 +1095,8 @@ revalidate_issue_after_enrich() {
 # Returns:
 #   0 — issue is already resolved; caller should skip processing. Sets
 #       _UPFRONT_SKIP_REASON. _UPFRONT_SKIP_PR is set to the merged PR
-#       number under SKIP_ON_MERGED_PR, otherwise empty.
+#       number under SKIP_ON_MERGED_PR or the grace window, otherwise
+#       empty.
 #   1 — not resolved upstream; proceed with processing.
 check_issue_resolved_upstream() {
 	local issue_num="$1"
@@ -1105,11 +1119,18 @@ check_issue_resolved_upstream() {
 		return 0
 	fi
 
-	local merged_pr=""
-	merged_pr=$(gh pr list --state merged \
+	# number,mergedAt fetched together; tab-joined output, same pattern
+	# as issue_meta above.
+	local pr_meta=""
+	pr_meta=$(gh pr list --state merged \
 		--head "feature/issue-$issue_num" \
-		--json number --jq '.[0].number // empty' \
+		--json number,mergedAt \
+		--jq '(.[0].number // "" | tostring) + "\t" + (.[0].mergedAt // "")' \
 		2>/dev/null) || true
+
+	local merged_pr="" merged_at=""
+	IFS=$'\t' read -r merged_pr merged_at <<< "$pr_meta"
+
 	if [[ -n "$merged_pr" ]]; then
 		if [[ -n "${SKIP_ON_MERGED_PR:-}" ]]; then
 			log "Issue #$issue_num: SKIP_ON_MERGED_PR is set" \
@@ -1119,16 +1140,42 @@ check_issue_resolved_upstream() {
 			_UPFRONT_SKIP_PR="$merged_pr"
 			return 0
 		fi
+
 		if [[ "$issue_state_reason" == "REOPENED" ]]; then
 			log "Issue #$issue_num is open (stateReason:" \
 				"REOPENED) with merged PR #$merged_pr on" \
 				"feature/issue-$issue_num — processing" \
 				"anyway instead of skipping (#771)"
-		else
-			log "Issue #$issue_num is open but PR #$merged_pr" \
-				"already merged on feature/issue-$issue_num" \
-				"— processing anyway instead of skipping (#771)"
+			return 1
 		fi
+
+		local grace_seconds="${MERGED_PR_GRACE_SECONDS:-120}"
+		local merged_epoch="" merge_age="" now_epoch=""
+		merged_epoch=$(_iso_to_epoch "$merged_at") || merged_epoch=""
+		if [[ -n "$merged_epoch" ]]; then
+			# EPOCHSECONDS (bash 5+) preferred; date +%s covers
+			# macOS system bash 3.2, matching _epoch_ms's fallback
+			# pattern elsewhere in the pipeline.
+			now_epoch="${EPOCHSECONDS:-$(date +%s)}"
+			merge_age=$((now_epoch - merged_epoch))
+		fi
+
+		if [[ -n "$merge_age" ]] \
+			&& ((merge_age >= 0 && merge_age < grace_seconds)); then
+			log "Issue #$issue_num is open but PR #$merged_pr" \
+				"merged ${merge_age}s ago on" \
+				"feature/issue-$issue_num — within the" \
+				"${grace_seconds}s grace window, skipping" \
+				"pending close propagation (#781)"
+			_UPFRONT_SKIP_REASON="PR #$merged_pr merged"
+			_UPFRONT_SKIP_REASON+=" ${merge_age}s ago, pending close"
+			_UPFRONT_SKIP_PR="$merged_pr"
+			return 0
+		fi
+
+		log "Issue #$issue_num is open but PR #$merged_pr" \
+			"already merged on feature/issue-$issue_num" \
+			"— processing anyway instead of skipping (#771)"
 	fi
 
 	return 1
