@@ -677,3 +677,86 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 		grep -A1 'bats_full_output=' "$ORCHESTRATOR_SCRIPT" \
 		| grep -q 'bats_full_rc=\$?'
 }
+
+# =============================================================================
+# FULL-SUITE CHECK: BOUNDED WALL TIME AND TIMEOUT MARKER (#926)
+# =============================================================================
+#
+# Both informational full-suite arms (npm and BATS) run an unbounded
+# subprocess: a hang in either one stalls the whole orchestrator run
+# indefinitely, since this block sits ahead of the PR/merge stages. #926 wraps
+# each arm in `timeout` with its own overridable budget, and — because a
+# timeout (rc 124) is neither a real failure nor a pass — records it under a
+# marker distinct from the existing `*_red` degraded-stage entries so the
+# pipeline summary can tell "the suite failed" apart from "the suite never
+# finished". Like the #905/#908 tests above, these are static assertions on
+# the invocation lines: the block is inline in main() (the #891 seam), so it
+# is not reachable by a function-level test.
+
+@test "#926: the npm full-suite invocation is wrapped in timeout with an overridable budget" {
+	expect_ok "full_scope_output must be wrapped in timeout with an overridable FULL_SUITE_NPM_TIMEOUT" \
+		grep -qE 'full_scope_output=\$\(timeout "\$\{FULL_SUITE_NPM_TIMEOUT:-[0-9]+\}"' \
+			"$ORCHESTRATOR_SCRIPT"
+}
+
+@test "#926: the BATS full-suite invocation is wrapped in timeout with an overridable budget" {
+	expect_ok "bats_full_output must be wrapped in timeout with an overridable FULL_SUITE_BATS_TIMEOUT" \
+		grep -qE 'bats_full_output=\$\(timeout "\$\{FULL_SUITE_BATS_TIMEOUT:-[0-9]+\}" bash "\$bats_runner" --ci' \
+			"$ORCHESTRATOR_SCRIPT"
+}
+
+@test "#926: a timed-out npm full-suite check is recorded under a marker distinct from a real failure" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	expect_ok "a timeout-specific degraded-stage marker must exist for the npm arm" \
+		grep -qF 'DEGRADED_STAGES+=("test:full_suite_timeout")' "$ORCHESTRATOR_SCRIPT"
+	expect_ok "the npm arm must branch on the timeout exit code (124) to reach that marker" \
+		grep -qE 'full_scope_rc.*==.*124' "$ORCHESTRATOR_SCRIPT"
+
+	# The pre-existing red marker must still exist and remain a different
+	# string, so a real failure and a timeout stay distinguishable downstream.
+	[[ "$script_content" == *'DEGRADED_STAGES+=("test:full_suite_red")'* ]]
+}
+
+@test "#926: a timed-out BATS full-suite check is recorded under a marker distinct from a real failure" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	expect_ok "a timeout-specific degraded-stage marker must exist for the BATS arm" \
+		grep -qF 'DEGRADED_STAGES+=("test:bats_full_suite_timeout")' "$ORCHESTRATOR_SCRIPT"
+	expect_ok "the BATS arm must branch on the timeout exit code (124) to reach that marker" \
+		grep -qE 'bats_full_rc.*==.*124' "$ORCHESTRATOR_SCRIPT"
+
+	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_full_suite_red")'* ]]
+}
+
+@test "#926: a timed-out npm full-suite check does not exit or return before the BATS check runs" {
+	local marker_pos bound_pos window
+	marker_pos=$(grep -n 'DEGRADED_STAGES+=("test:full_suite_timeout")' "$ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	expect_ok "the npm timeout marker must exist" test -n "$marker_pos"
+
+	bound_pos=$(grep -n 'NON-BLOCKING FULL-SUITE BATS CHECK' "$ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	expect_ok "the following BATS full-suite check block must still exist" test -n "$bound_pos"
+
+	window=$(sed -n "${marker_pos},${bound_pos}p" "$ORCHESTRATOR_SCRIPT")
+	expect_not_ok "no exit/return may sit between the npm timeout marker and the BATS check" \
+		grep -qE '^[[:space:]]*(exit|return)\b' <<< "$window"
+}
+
+@test "#926: a timed-out BATS full-suite check does not exit or return before the E2E guard runs" {
+	local marker_pos bound_pos window
+	marker_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_timeout")' "$ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	expect_ok "the BATS timeout marker must exist" test -n "$marker_pos"
+
+	bound_pos=$(grep -n 'E2E-UNVALIDATED GUARD' "$ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	expect_ok "the following E2E-unvalidated guard block must still exist" test -n "$bound_pos"
+
+	window=$(sed -n "${marker_pos},${bound_pos}p" "$ORCHESTRATOR_SCRIPT")
+	expect_not_ok "no exit/return may sit between the BATS timeout marker and the E2E guard" \
+		grep -qE '^[[:space:]]*(exit|return)\b' <<< "$window"
+}
