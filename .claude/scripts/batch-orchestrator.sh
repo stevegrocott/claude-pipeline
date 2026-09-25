@@ -531,6 +531,19 @@ emit_event() {
 # =============================================================================
 
 init_status() {
+    # Batch fingerprint (issue #781): scope resume preservation to the exact
+    # batch that produced the prior status.json — same base branch and same
+    # issue set. Without this, terminal state (completed/already_implemented)
+    # was preserved for ANY matching issue number in a prior status.json, so
+    # e.g. issue #42 completed in one batch and reopened into a later,
+    # unrelated batch would silently inherit "completed" and get skipped.
+    # Sorting the issue numbers makes the fingerprint independent of launch
+    # order, so relaunching the same set in a different order still matches.
+    local sorted_issues
+    sorted_issues=$(printf '%s\n' "${ISSUE_ARRAY[@]}" \
+        | sort -n -u | tr '\n' ',')
+    local batch_fingerprint="${BRANCH}:${sorted_issues}"
+
     # Resume-awareness: when a status.json from a prior launch of this batch
     # exists, preserve per-issue terminal state (completed/already_implemented)
     # instead of resetting every issue to pending. Without this the
@@ -538,17 +551,26 @@ init_status() {
     # would reset status to pending and re-run already-finished issues.
     local prior_status="{}"
     if [[ -f "$STATUS_FILE" ]]; then
-        # Build a {number: status} map of issues whose prior status was
-        # terminal. Non-terminal (pending/failed/in_progress) issues are
-        # intentionally omitted so they re-run on resume.
-        prior_status=$(jq -c '
-            [.issues[]?
-             | select(.status == "completed"
-                      or .status == "already_implemented")]
-            | map({(.number): .status})
-            | add // {}' "$STATUS_FILE" 2>/dev/null) || prior_status="{}"
-        if [[ -z "$prior_status" ]]; then
-            prior_status="{}"
+        local prior_fingerprint
+        prior_fingerprint=$(jq -r '.batch_fingerprint // empty' \
+            "$STATUS_FILE" 2>/dev/null)
+        if [[ "$prior_fingerprint" == "$batch_fingerprint" ]]; then
+            # Build a {number: status} map of issues whose prior status was
+            # terminal. Non-terminal (pending/failed/in_progress) issues are
+            # intentionally omitted so they re-run on resume.
+            prior_status=$(jq -c '
+                [.issues[]?
+                 | select(.status == "completed"
+                          or .status == "already_implemented")]
+                | map({(.number): .status})
+                | add // {}' "$STATUS_FILE" 2>/dev/null) || prior_status="{}"
+            if [[ -z "$prior_status" ]]; then
+                prior_status="{}"
+            fi
+        else
+            log "Batch fingerprint mismatch: prior status.json is from a" \
+                "different batch (base branch or issue set changed);" \
+                "resetting all issues to pending instead of resuming"
         fi
     fi
 
@@ -596,9 +618,11 @@ init_status() {
         --argjson completed "$completed_count" \
         --argjson issues "$issues_json" \
         --arg log_dir "$LOG_BASE" \
+        --arg fingerprint "$batch_fingerprint" \
         '{
             state: $state,
             base_branch: $branch,
+            batch_fingerprint: $fingerprint,
             current_issue: null,
             progress: {
                 total: $total,
