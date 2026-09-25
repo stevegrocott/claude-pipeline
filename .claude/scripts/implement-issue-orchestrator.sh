@@ -13193,6 +13193,22 @@ $complete_skill
         local complete_summary
         complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
 
+        # Append the reconciled-task tally to the completion summary when
+        # non-zero (issue #810 task 2). reconcile_failed_tasks_with_branch_
+        # evidence() persists .reconciled_count in $STATUS_FILE (task 1) but
+        # that tally is otherwise invisible to a human reviewer reading only
+        # the PR comment — surface it here so a reader can see that some
+        # "completed" tasks were promoted from a stage-reported "failed" via
+        # branch evidence rather than trust status.json blindly.
+        local _reconciled_total
+        _reconciled_total=$(jq -r '.reconciled_count // 0' "$STATUS_FILE" 2>/dev/null)
+        [[ "$_reconciled_total" =~ ^[0-9]+$ ]] || _reconciled_total=0
+        if (( _reconciled_total > 0 )); then
+            complete_summary="${complete_summary}
+
+**Reconciled:** ${_reconciled_total} task(s) promoted from failed to completed via branch-evidence reconciliation."
+        fi
+
         # Add degradation warning to completion comment if any stages soft-failed
         local degraded_warning=""
         if (( ${#DEGRADED_STAGES[@]} > 0 )); then
