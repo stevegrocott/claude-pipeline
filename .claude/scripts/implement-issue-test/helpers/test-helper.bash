@@ -530,20 +530,27 @@ assert_not_empty() {
 # =============================================================================
 # HARD ASSERTIONS (expect_*)
 #
-# BATS does not abort a test body on a bare failing command — only the FINAL
-# command's exit status decides pass/fail.  Verified with bats 1.13:
+# A bare failing `[[ ... ]]` mid-body is NOT inert — bats runs test bodies
+# under `set -e`, so a failing `[[ ... ]]` statement aborts the test via
+# errexit the same as any other failing command. Measured on bats 1.13.0:
 #
 #     @test "intermediate failing assertion" {
-#         [[ "abc" == "xyz" ]]   # <- returns 1, silently ignored
+#         [[ "abc" == "xyz" ]]   # <- aborts the test here via errexit
 #         [[ "abc" == "abc" ]]
-#     }                          # -> reported "ok"
+#     }                          # -> reported "not ok"
 #
-# So every assertion except the last is inert when written as a bare
-# `[[ ... ]]`, and the `return 1`-style assert_* helpers above have the same
-# problem for the same reason.  The expect_* helpers below `exit 1` instead,
-# which terminates the test's subshell and is reported as a failure, so a test
-# can assert as many times as it needs without any of them being dropped.
-# Prefer these over bare `[[ ... ]]` in any test that asserts more than once.
+# errexit IS suppressed, and a failing `[[ ... ]]` there IS genuinely inert,
+# inside a function invoked via `run`, or inside an `if`/`&&`/`||` condition —
+# those contexts intentionally swallow the exit status. A negated command
+# (`! cmd`) mid-body is also genuinely inert for the same reason and is
+# caught separately by the `bats-negated-assertion` lint rule.
+#
+# The real advantage of the expect_* helpers below is not inertness — it's
+# that they print a diagnostic message on failure (actual vs. expected),
+# where a bare `[[ ... ]]` failure just reports "not ok" with no context.
+# Prefer these over bare `[[ ... ]]` when a diagnostic would help debug a
+# failure, and always inside `run`/conditional contexts where a bare
+# `[[ ... ]]` would be silently swallowed.
 # =============================================================================
 
 # expect_glob <actual> <pattern> [label]
