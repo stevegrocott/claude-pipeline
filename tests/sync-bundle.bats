@@ -166,6 +166,56 @@ teardown() {
 	}
 }
 
+# The plugin manifests (.claude-plugin/marketplace.json and
+# plugins/pipeline-core/.claude-plugin/plugin.json) determine what every
+# consumer installs on a version bump, but no workflow's trigger paths
+# matched them — a manifest-only PR ran zero checks and merged CLEAN with a
+# stale bundle (0.8.7, 0.8.8, issue #893). Pin the two manifest tree globs
+# directly in this suite so removing them from bundle-parity.yml fails here
+# instead of going unnoticed until the next release.
+@test "(#893) bundle-parity workflow triggers on manifest-only changes" {
+	local wf
+	wf="$REPO_ROOT/.github/workflows/bundle-parity.yml"
+
+	[[ -f "$wf" ]] || {
+		printf 'FAIL: workflow not found: %s\n' "$wf" >&2
+		return 1
+	}
+
+	local -a manifest_trees=(
+		'.claude-plugin'
+		'plugins/pipeline-core/.claude-plugin'
+	)
+
+	# The trigger lists are duplicated between push: and pull_request: (the
+	# workflow notes Actions does not reliably support YAML anchors), so both
+	# are checked — updating only one leaves half the triggers blind.
+	local section body tree
+	local -a missing=()
+	for section in push pull_request; do
+		body=$(awk -v s="  $section:" '
+			$0 == s { inside = 1; next }
+			inside && (/^  [a-z_]+:/ || /^[a-z_]+:/) { inside = 0 }
+			inside { print }
+		' "$wf")
+
+		[[ -n "$body" ]] || {
+			printf 'FAIL: no %s: trigger block in %s\n' "$section" "$wf" >&2
+			return 1
+		}
+
+		for tree in "${manifest_trees[@]}"; do
+			grep -qF -- "- '$tree/**'" <<<"$body" || missing+=("$section: $tree")
+		done
+	done
+
+	(( ${#missing[@]} == 0 )) || {
+		printf 'FAIL: bundle-parity workflow does not trigger on the plugin manifest trees:\n' >&2
+		printf '  %s\n' "${missing[@]}" >&2
+		return 1
+	}
+}
+
 # =============================================================================
 # Integration — run `sync.sh bundle` against a fake repo.
 # =============================================================================
