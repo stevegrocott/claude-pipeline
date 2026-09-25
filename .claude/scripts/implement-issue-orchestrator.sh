@@ -323,6 +323,19 @@ E2E_DIRECT_EXEC_TIMEOUT="${E2E_DIRECT_EXEC_TIMEOUT:-900}"
 # behaviour.
 E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 
+# Wall-clock cap (seconds) on the informational full-suite BATS check
+# (`bash "$bats_runner" --ci`) that runs unconditionally in main() after
+# run_test_loop (issue #799 notes the suite takes ~20-35 minutes). That check
+# is already non-blocking — a red run only records a degraded-stage signal —
+# but nothing previously bounded its OWN runtime, so a hang there (e.g. a
+# wedged suite per test-stage-runner.bats) stalled the orchestrator
+# indefinitely even though the check exists purely to surface unrelated red
+# suites (issue #926: an intermittent hang stalled a real run for 32 minutes
+# with no recovery). Defaults to 45 minutes — generous headroom above the
+# suite's normal 20-35 minute range — and is overridable for repos with a
+# slower suite.
+BATS_FULL_SUITE_TIMEOUT="${BATS_FULL_SUITE_TIMEOUT:-2700}"
+
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
 # The run-budget soft-threshold warning is emitted at most once per run
@@ -12440,8 +12453,17 @@ $full_scope_failures
             # reconciliation via the tests_green gate (issue #905). The other
             # two excluded suites are owned by bundle-parity.yml and
             # orchestrator-guards.yml, so skipping them here loses no coverage.
-            bats_full_output=$(bash "$bats_runner" --ci 2>&1)
+            # Wrapped in `timeout` (BATS_FULL_SUITE_TIMEOUT, overridable) so a
+            # wedged suite cannot stall the orchestrator indefinitely — the
+            # check is informational and must always return control.
+            bats_full_output=$(timeout "$BATS_FULL_SUITE_TIMEOUT" \
+                bash "$bats_runner" --ci 2>&1)
             bats_full_rc=$?
+            if (( bats_full_rc == 124 )); then
+                log_warn "Full-suite BATS check timed out after" \
+                    "${BATS_FULL_SUITE_TIMEOUT}s — treating as red" \
+                    "(non-blocking)"
+            fi
 
             # Persist the complete output as a stage log — like every other
             # stage — instead of discarding it. Written unconditionally (both
