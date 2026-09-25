@@ -19,4 +19,9 @@ MR="$1"
 case "$GIT_HOST" in
   github) gh pr view "$MR" --json comments --jq '[.comments[].body]' ;;
   gitlab) glab mr note list "$MR" --output json 2>/dev/null | jq '[.[].body]' ;;
+  *)
+    echo "ERROR: unrecognised GIT_HOST '$GIT_HOST'" \
+      "(accepted: github, gitlab)" >&2
+    exit 1
+    ;;
 esac
