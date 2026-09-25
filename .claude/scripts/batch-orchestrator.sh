@@ -2675,6 +2675,12 @@ for issue in "${ISSUE_ARRAY[@]}"; do
         if [[ "$_PREFLIGHT_SKIPPED" == true ]]; then
             log "Issue #$issue skipped (preflight): ${_SKIP_REASON:-unknown reason}"
             emit_event "issue_end" "issue_num=$issue" "outcome=skipped"
+        elif [[ -n "$_TERMINAL_STATUS" ]]; then
+            # already_done, merge_blocked, budget_exceeded (#809) — process_issue
+            # returns 0 for these to keep them out of consecutive_failures, but
+            # they are not a genuine success and must not be reported as one.
+            log "Issue #$issue ended: $_TERMINAL_STATUS"
+            emit_event "issue_end" "issue_num=$issue" "outcome=$_TERMINAL_STATUS"
         else
             log "Issue #$issue processed successfully"
             emit_event "issue_end" "issue_num=$issue" "outcome=success"
