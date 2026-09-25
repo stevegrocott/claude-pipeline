@@ -656,25 +656,25 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 
 @test "#908: the full-suite npm check captures \$? without an intervening || true" {
 	local line
-	line=$(grep 'full_scope_output=' "$ORCHESTRATOR_SCRIPT")
+	line=$(grep 'bash -c "${TEST_UNIT_CMD:-npm test}"' "$ORCHESTRATOR_SCRIPT")
 
 	expect_ok "the full-suite npm invocation must still exist" \
 		test -n "$line"
 	# `|| true` makes the list succeed, so the `full_scope_rc=$?` on the next
 	# line would always read 0 and the failure branch would be unreachable.
 	expect_not_ok "the npm invocation must not end in || true" \
-		grep -q 'full_scope_output=.*|| true' "$ORCHESTRATOR_SCRIPT"
+		grep -q 'bash -c "${TEST_UNIT_CMD:-npm test}".*|| true' "$ORCHESTRATOR_SCRIPT"
 }
 
 @test "#908: the npm and BATS arms capture exit status the same way" {
-	# Both arms must assign the command substitution and read $? on the very
-	# next line. The BATS arm was always correct; this pins them together so
+	# Both arms must end the bounded invocation and read $? on the very next
+	# line. The BATS arm was always correct; this pins them together so
 	# they cannot drift apart again.
 	expect_ok "npm arm must capture into full_scope_rc" \
-		grep -A1 'full_scope_output=' "$ORCHESTRATOR_SCRIPT" \
+		grep -A1 'bash -c "${TEST_UNIT_CMD:-npm test}"$' "$ORCHESTRATOR_SCRIPT" \
 		| grep -q 'full_scope_rc=\$?'
 	expect_ok "BATS arm must capture into bats_full_rc" \
-		grep -A1 'bats_full_output=' "$ORCHESTRATOR_SCRIPT" \
+		grep -A1 'bash "\$bats_runner" --ci$' "$ORCHESTRATOR_SCRIPT" \
 		| grep -q 'bats_full_rc=\$?'
 }
 
@@ -684,25 +684,93 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 #
 # Both informational full-suite arms (npm and BATS) run an unbounded
 # subprocess: a hang in either one stalls the whole orchestrator run
-# indefinitely, since this block sits ahead of the PR/merge stages. #926 wraps
-# each arm in `timeout` with its own overridable budget, and — because a
+# indefinitely, since this block sits ahead of the PR/merge stages. #926 runs
+# each arm through _run_bounded_process_group with its own overridable budget,
+# killing the whole process group on overrun (AC5), and — because a
 # timeout (rc 124) is neither a real failure nor a pass — records it under a
 # marker distinct from the existing `*_red` degraded-stage entries so the
 # pipeline summary can tell "the suite failed" apart from "the suite never
-# finished". Like the #905/#908 tests above, these are static assertions on
+# finished". Like the #905/#908 tests above, most are static assertions on
 # the invocation lines: the block is inline in main() (the #891 seam), so it
-# is not reachable by a function-level test.
+# is not reachable by a function-level test. The shared helper itself is
+# exercised functionally below through the npm arm's exact invocation.
 
-@test "#926: the npm full-suite invocation is wrapped in timeout with an overridable budget" {
-	expect_ok "full_scope_output must be wrapped in timeout with an overridable FULL_SUITE_NPM_TIMEOUT" \
-		grep -qE 'full_scope_output=\$\(timeout "\$\{FULL_SUITE_NPM_TIMEOUT:-[0-9]+\}"' \
-			"$ORCHESTRATOR_SCRIPT"
+@test "#926: the npm full-suite invocation is bounded with an overridable budget" {
+	expect_ok "the npm arm must be bounded by an overridable FULL_SUITE_NPM_TIMEOUT" \
+		grep -A2 -E '_run_bounded_process_group "\$\{FULL_SUITE_NPM_TIMEOUT:-[0-9]+\}"' \
+			"$ORCHESTRATOR_SCRIPT" \
+		| grep -qF 'bash -c "${TEST_UNIT_CMD:-npm test}"'
 }
 
-@test "#926: the BATS full-suite invocation is wrapped in timeout with an overridable budget" {
-	expect_ok "bats_full_output must be wrapped in timeout with an overridable FULL_SUITE_BATS_TIMEOUT" \
-		grep -qE 'bats_full_output=\$\(timeout "\$\{FULL_SUITE_BATS_TIMEOUT:-[0-9]+\}" bash "\$bats_runner" --ci' \
-			"$ORCHESTRATOR_SCRIPT"
+@test "#926: the BATS full-suite invocation is bounded with an overridable budget" {
+	expect_ok "the BATS arm must be bounded by an overridable FULL_SUITE_BATS_TIMEOUT" \
+		grep -A2 -E '_run_bounded_process_group "\$\{FULL_SUITE_BATS_TIMEOUT:-[0-9]+\}"' \
+			"$ORCHESTRATOR_SCRIPT" \
+		| grep -qF 'bash "$bats_runner" --ci'
+}
+
+# Faithful reproduction of main()'s npm full-suite arm: the same helper call,
+# rc capture, and marker branch, with TEST_UNIT_CMD standing in for npm.
+_repro_full_suite_npm_check() {
+	local full_scope_output full_scope_rc=0 full_scope_tmp
+	full_scope_tmp=$(mktemp)
+	_run_bounded_process_group "${FULL_SUITE_NPM_TIMEOUT:-2700}" \
+		"${FULL_SUITE_KILL_GRACE:-10}" "$full_scope_tmp" \
+		bash -c "${TEST_UNIT_CMD:-npm test}" || full_scope_rc=$?
+	full_scope_output=$(< "$full_scope_tmp")
+	rm -f "$full_scope_tmp"
+	FULL_SCOPE_OUTPUT="$full_scope_output"
+
+	if (( full_scope_rc == 124 )); then
+		DEGRADED_STAGES+=("test:full_suite_timeout")
+	elif (( full_scope_rc != 0 )); then
+		DEGRADED_STAGES+=("test:full_suite_red")
+	fi
+	return 0
+}
+
+@test "#926: a hung npm full-suite tree is killed, recorded as a timeout, and returns promptly" {
+	local pid_file="$TEST_TMP/npm-descendants.pid"
+	export FULL_SUITE_NPM_TIMEOUT=1
+	export FULL_SUITE_KILL_GRACE=1
+	# A test-runner shape: a TERM-ignoring parent with a worker and a
+	# `sleep` descendant, all inheriting the output fd.
+	export TEST_UNIT_CMD="trap '' TERM; sleep 300 & echo \$! > '$pid_file'; while :; do :; done"
+	DEGRADED_STAGES=()
+
+	local start_epoch elapsed
+	start_epoch=$(date +%s)
+	_repro_full_suite_npm_check
+	elapsed=$(( $(date +%s) - start_epoch ))
+
+	expect_ok "the check must return promptly despite surviving-descendant risk (took ${elapsed}s)" \
+		test "$elapsed" -lt 8
+	expect_ok "a timeout must record test:full_suite_timeout" \
+		test "${DEGRADED_STAGES[*]}" = "test:full_suite_timeout"
+
+	local sleep_pid waited=0
+	sleep_pid=$(< "$pid_file")
+	while kill -0 "$sleep_pid" 2>/dev/null && (( waited < 3 )); do
+		sleep 1
+		waited=$(( waited + 1 ))
+	done
+	if kill -0 "$sleep_pid" 2>/dev/null; then
+		kill -KILL "$sleep_pid" 2>/dev/null
+		fail "sleep descendant $sleep_pid survived the timeout kill (#926 AC5)"
+	fi
+}
+
+@test "#926: npm full-suite arm passes the real exit status and output through" {
+	export FULL_SUITE_NPM_TIMEOUT=10
+	export TEST_UNIT_CMD="echo suite-ran; exit 3"
+	DEGRADED_STAGES=()
+
+	_repro_full_suite_npm_check
+
+	expect_ok "a non-timeout failure must record test:full_suite_red" \
+		test "${DEGRADED_STAGES[*]}" = "test:full_suite_red"
+	expect_ok "the command's output must be captured" \
+		test "$FULL_SCOPE_OUTPUT" = "suite-ran"
 }
 
 @test "#926: a timed-out npm full-suite check is recorded under a marker distinct from a real failure" {

@@ -2719,48 +2719,45 @@ _repro_full_suite_bats_check() {
 		fail "Expected FULL_SUITE_BATS_TIMEOUT default-with-override assignment (default 2700s / 45min)"
 }
 
-@test "full-suite BATS check invocation is wrapped in timeout" {
+@test "full-suite BATS check invocation is bounded by a process-group kill" {
 	# Static: the actual bats_runner --ci invocation (not the run-tests.sh
-	# repro above) must be wrapped in `timeout "${FULL_SUITE_BATS_TIMEOUT:-...}"`
-	# so a wedged suite cannot stall the orchestrator indefinitely. Anchored
-	# on the unique timeout-wrapped assignment line rather than
+	# repro below) must go through _run_bounded_process_group with the
+	# FULL_SUITE_BATS_TIMEOUT budget — a bare `timeout CMD` only signals its
+	# direct child and cannot reap surviving bats-exec-* descendants (#926
+	# AC5). Anchored on the unique invocation line rather than
 	# `bash "$bats_runner" --ci`, which also appears verbatim in the
-	# FULL_SUITE_BATS_TIMEOUT declaration comment further up the file.
+	# CI_EXCLUDED_SUITES comment further up the file.
 	local marker_line window start_line end_line
-	marker_line=$(awk '/timeout "\$\{FULL_SUITE_BATS_TIMEOUT:-[0-9]+\}"/{print NR; exit}' \
+	marker_line=$(awk '/_run_bounded_process_group "\$\{FULL_SUITE_BATS_TIMEOUT:-[0-9]+\}"/{print NR; exit}' \
 		"$ORCHESTRATOR_SCRIPT")
 	[ -n "$marker_line" ] || \
-		fail 'Could not locate the timeout "${FULL_SUITE_BATS_TIMEOUT:-...}" wrap'
-	start_line=$(( marker_line > 2 ? marker_line - 2 : 1 ))
+		fail 'Could not locate the _run_bounded_process_group "${FULL_SUITE_BATS_TIMEOUT:-...}" call'
+	start_line=$marker_line
 	end_line=$(( marker_line + 3 ))
 	window=$(awk -v s="$start_line" -v e="$end_line" \
 		'NR >= s && NR <= e' "$ORCHESTRATOR_SCRIPT")
 	[[ "$window" == *'bash "$bats_runner" --ci'* ]] || \
-		fail 'timeout "${FULL_SUITE_BATS_TIMEOUT:-...}" must wrap the' \
-			"bash \"\$bats_runner\" --ci invocation. Window: $window"
+		fail "The bounded call must run bash \"\$bats_runner\" --ci. Window: $window"
 }
 
-# Faithful reproduction of main()'s timeout-wrapped full-suite BATS check
-# (post-timeout-wrap, #926 AC3). Mirrors _repro_full_suite_bats_check above
-# but adds the timeout wrapper and the rc==124 branch, which records a
-# degraded-stage marker distinct from a confirmed-red run
-# (test:bats_full_suite_timeout, not test:bats_full_suite_red) — a suite
-# that never finished is not proof it would have failed.
+# Faithful reproduction of main()'s bounded full-suite BATS check
+# (post-#926-AC5 fix). Mirrors _repro_full_suite_bats_check above but runs
+# the suite through the real _run_bounded_process_group helper and adds the
+# rc==124 branch, which records a degraded-stage marker distinct from a
+# confirmed-red run (test:bats_full_suite_timeout, not
+# test:bats_full_suite_red) — a suite that never finished is not proof it
+# would have failed.
 _repro_full_suite_bats_check_with_timeout() {
 	local run_tests_cmd="$1"
-	local bats_full_output bats_full_rc
-	# The assignment is split across an if/else, not chained with `|| rc=$?`,
-	# because Bats runs test bodies under `set -e`: a bare
-	# `bats_full_output=$(failing_cmd)` statement trips errexit immediately
-	# on a non-zero (e.g. 124) exit, before $? can even be read. Placing the
-	# assignment as an `if` condition suppresses errexit for it, exactly as
-	# production main() gets for free from `set -uo pipefail` (no -e).
-	if bats_full_output=$(timeout "${FULL_SUITE_BATS_TIMEOUT:-2700}" \
-		bash -c "$run_tests_cmd" 2>&1); then
-		bats_full_rc=0
-	else
-		bats_full_rc=$?
-	fi
+	local bats_full_output bats_full_rc=0
+	local bats_full_tmp
+	bats_full_tmp=$(mktemp)
+	_run_bounded_process_group "${FULL_SUITE_BATS_TIMEOUT:-2700}" \
+		"${FULL_SUITE_KILL_GRACE:-10}" "$bats_full_tmp" \
+		bash -c "$run_tests_cmd" || bats_full_rc=$?
+	bats_full_output=$(< "$bats_full_tmp")
+	rm -f "$bats_full_tmp"
+
 	if (( bats_full_rc == 124 )); then
 		log_warn "Full-suite BATS check timed out after" \
 			"${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
@@ -2779,14 +2776,7 @@ _repro_full_suite_bats_check_with_timeout() {
 	# actually ran and failed gets (#926 AC3).
 	local -a DEGRADED_STAGES=()
 	export FULL_SUITE_BATS_TIMEOUT=1
-	# A self-contained busy loop, not `sleep` — `sleep` runs as a forked
-	# grandchild of the `bash -c` process the timeout kills, and that
-	# grandchild keeps the command-substitution pipe's write end open after
-	# its parent dies, which stalls $(...) until the orphan exits on its
-	# own (an OS/fd-inheritance quirk of the perl timeout fallback, not
-	# something this test is meant to pin). A loop with no exec/fork lets
-	# `kill` land on the exact process the alarm targets, so the timeout
-	# bound below is deterministic.
+	export FULL_SUITE_KILL_GRACE=1
 	local hung_suite="$TEST_TMP/run-tests-hung.sh"
 	printf '#!/usr/bin/env bash\nwhile :; do :; done\n' > "$hung_suite"
 	chmod +x "$hung_suite"
@@ -2814,6 +2804,70 @@ _repro_full_suite_bats_check_with_timeout() {
 		| grep -qx 'test:bats_full_suite_red'; then
 		fail "A timeout must not also record the red marker; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 	fi
+}
+
+@test "full-suite BATS check kills a grandchild that outlives the direct child (#926 AC5)" {
+	# Functional: reproduces the real #926 incident shape — a supervisor
+	# process that forks both a busy-loop child and a `sleep` grandchild,
+	# mirroring bats' formatter/bats-exec-* children. A bare `timeout CMD`
+	# only signals the direct child, so these would keep running (and keep
+	# any inherited fd held open) after the "timeout". This asserts every
+	# descendant is actually dead afterward, not just that the check
+	# returned — and that it returned promptly despite them (#926 AC5).
+	local -a DEGRADED_STAGES=()
+	export FULL_SUITE_BATS_TIMEOUT=1
+	export FULL_SUITE_KILL_GRACE=1
+	local grandchild_pid_file="$TEST_TMP/grandchild.pid"
+	local hung_tree="$TEST_TMP/run-tests-hung-tree.sh"
+	# The supervisor ignores TERM, so only the KILL escalation can end it.
+	cat > "$hung_tree" <<EOF
+#!/usr/bin/env bash
+trap '' TERM
+( while :; do :; done ) &
+echo \$! > "$grandchild_pid_file"
+sleep 300 &
+echo \$! >> "$grandchild_pid_file"
+while :; do :; done
+EOF
+	chmod +x "$hung_tree"
+
+	local start_epoch elapsed rc=0
+	start_epoch=$(date +%s)
+	_repro_full_suite_bats_check_with_timeout "'$hung_tree'" || rc=$?
+	elapsed=$(( $(date +%s) - start_epoch ))
+
+	[ "$rc" -eq 0 ] || \
+		fail "Timeout must be non-blocking to the caller; got rc=$rc"
+	(( elapsed < 8 )) || \
+		fail "Descendants held the check open; took ${elapsed}s"
+
+	local -a descendant_pids=()
+	[ -s "$grandchild_pid_file" ] || \
+		fail "Descendants never recorded their PIDs; hung_tree.sh did not run as expected"
+	while IFS= read -r pid; do
+		descendant_pids+=("$pid")
+	done < "$grandchild_pid_file"
+	[ "${#descendant_pids[@]}" -eq 2 ] || \
+		fail "Expected 2 descendant PIDs; got: ${descendant_pids[*]}"
+
+	# KILL is delivered asynchronously; allow a brief window before calling
+	# a still-running PID a true survivor rather than a delivery race.
+	local pid waited
+	for pid in "${descendant_pids[@]}"; do
+		waited=0
+		while kill -0 "$pid" 2>/dev/null && (( waited < 3 )); do
+			sleep 1
+			waited=$(( waited + 1 ))
+		done
+		if kill -0 "$pid" 2>/dev/null; then
+			kill -KILL "$pid" 2>/dev/null
+			fail "Descendant PID $pid survived the timeout kill (#926 AC5 violated)"
+		fi
+	done
+
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_full_suite_timeout' || \
+		fail "Expected test:bats_full_suite_timeout after a timeout; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
 @test "full-suite BATS check respects an overridden FULL_SUITE_BATS_TIMEOUT budget" {

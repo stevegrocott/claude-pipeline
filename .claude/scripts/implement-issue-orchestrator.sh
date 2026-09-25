@@ -341,7 +341,7 @@ E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"
 
 # Wall-clock cap (seconds) on the informational full-suite npm/test-runner
-# check (`eval "${TEST_UNIT_CMD:-npm test}"`) that runs unconditionally in
+# check (`bash -c "${TEST_UNIT_CMD:-npm test}"`) that runs unconditionally in
 # main() right before its BATS sibling above. That check is already
 # non-blocking — a red run only records a degraded-stage signal — but
 # nothing previously bounded its OWN runtime, so the same class of hang
@@ -353,6 +353,11 @@ FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"
 # distinction as the BATS arm applies here (test:full_suite_timeout vs.
 # test:full_suite_red).
 FULL_SUITE_NPM_TIMEOUT="${FULL_SUITE_NPM_TIMEOUT:-2700}"
+
+# Seconds either full-suite arm's process group gets to exit after the TERM
+# sent on a budget overrun before it is escalated to KILL (issue #926 AC5).
+# See _run_bounded_process_group.
+FULL_SUITE_KILL_GRACE="${FULL_SUITE_KILL_GRACE:-10}"
 
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
@@ -448,6 +453,60 @@ else
     # No timeout binary — perl fallback with identical exit-124 semantics
     timeout() { _timeout_perl_fallback "$@"; }
 fi
+
+# =============================================================================
+# BOUNDED PROCESS-GROUP RUNNER (issue #926 AC5)
+# =============================================================================
+#
+# _run_bounded_process_group BUDGET GRACE OUTFILE CMD [ARGS...]
+#
+# Runs CMD in its own process group with stdout+stderr sent to OUTFILE and
+# returns CMD's exit status — or 124 if it was still running after BUDGET
+# seconds (integer). On overrun the WHOLE group is sent TERM, then KILL once
+# it has had up to GRACE seconds to exit. A bare `timeout CMD` only signals
+# its direct child: descendants it forked (bats' supervisor, formatter and
+# bats-exec-* children, or a test runner's workers) survive the kill, and
+# since they inherit the caller's output fd they hold a `$(...)` capture
+# pipe open after `timeout` itself has exited — the exact hang the #926
+# incident needed a manual `kill -9` to clear. Writing to OUTFILE instead of
+# a pipe means even a survivor could not block the caller's read.
+_run_bounded_process_group() {
+    local budget="$1" grace="$2" outfile="$3"
+    shift 3
+    local pid rc=0 waited=0 monitor_was_off=0
+    [[ $- == *m* ]] || monitor_was_off=1
+
+    # Job control makes the background job a process-group leader
+    # (pgid == pid), so "-$pid" below addresses every descendant.
+    set -m
+    "$@" > "$outfile" 2>&1 &
+    pid=$!
+    if (( monitor_was_off )); then
+        set +m
+    fi
+
+    while kill -0 "$pid" 2>/dev/null && (( waited < budget )); do
+        sleep 1
+        waited=$(( waited + 1 ))
+    done
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" || rc=$?
+        return "$rc"
+    fi
+
+    kill -TERM -- "-$pid" 2>/dev/null
+    waited=0
+    while kill -0 -- "-$pid" 2>/dev/null && (( waited < grace )); do
+        sleep 1
+        waited=$(( waited + 1 ))
+    done
+    # Unconditional: a descendant that ignored TERM must not survive even
+    # if the group leader itself already exited.
+    kill -KILL -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 124
+}
 
 # =============================================================================
 # STAGE-TYPE-BASED TIMEOUTS
@@ -12423,15 +12482,23 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
             # `set -uo pipefail` at the top), so nothing needs suppressing.
             # Matches the BATS sibling block below, which always did this
             # correctly.
-            # Wrapped in `timeout` (FULL_SUITE_NPM_TIMEOUT, overridable) so a
-            # wedged suite cannot stall the orchestrator indefinitely — the
-            # check is informational and must always return control (#926).
-            # `eval` is a shell builtin, not an executable, so it cannot be
-            # exec'd by `timeout` directly; `bash -c` runs $TEST_UNIT_CMD
-            # through a subprocess `timeout` can bound the same way it
-            # bounds the BATS arm below.
-            full_scope_output=$(timeout "${FULL_SUITE_NPM_TIMEOUT:-2700}" bash -c "${TEST_UNIT_CMD:-npm test}" 2>&1)
+            # Bounded by FULL_SUITE_NPM_TIMEOUT (overridable) so a wedged
+            # suite cannot stall the orchestrator indefinitely — the check
+            # is informational and must always return control (#926). The
+            # whole process group is killed on overrun, so no test-runner
+            # worker survives to hold the run open (#926 AC5).
+            # $TEST_UNIT_CMD runs via `bash -c`, not `eval`: a builtin cannot
+            # be bounded as a subprocess. Behavior change for consumers: the
+            # command no longer sees this script's shell functions/aliases —
+            # only exported env vars — so it must be a self-contained command.
+            local full_scope_tmp
+            full_scope_tmp=$(mktemp)
+            _run_bounded_process_group "${FULL_SUITE_NPM_TIMEOUT:-2700}" \
+                "${FULL_SUITE_KILL_GRACE:-10}" "$full_scope_tmp" \
+                bash -c "${TEST_UNIT_CMD:-npm test}"
             full_scope_rc=$?
+            full_scope_output=$(< "$full_scope_tmp")
+            rm -f "$full_scope_tmp"
 
             if (( full_scope_rc == 124 )); then
                 log_warn "Full-suite check timed out after" \
@@ -12483,11 +12550,19 @@ $full_scope_failures
             # reconciliation via the tests_green gate (issue #905). The other
             # two excluded suites are owned by bundle-parity.yml and
             # orchestrator-guards.yml, so skipping them here loses no coverage.
-            # Wrapped in `timeout` (FULL_SUITE_BATS_TIMEOUT, overridable) so a
-            # wedged suite cannot stall the orchestrator indefinitely — the
-            # check is informational and must always return control (#926).
-            bats_full_output=$(timeout "${FULL_SUITE_BATS_TIMEOUT:-2700}" bash "$bats_runner" --ci 2>&1)
+            # Bounded by FULL_SUITE_BATS_TIMEOUT (overridable) so a wedged
+            # suite cannot stall the orchestrator indefinitely — the check
+            # is informational and must always return control (#926). The
+            # whole process group is killed on overrun, so no bats-exec-*
+            # or sleep descendant survives the kill (#926 AC5).
+            local bats_full_tmp
+            bats_full_tmp=$(mktemp)
+            _run_bounded_process_group "${FULL_SUITE_BATS_TIMEOUT:-2700}" \
+                "${FULL_SUITE_KILL_GRACE:-10}" "$bats_full_tmp" \
+                bash "$bats_runner" --ci
             bats_full_rc=$?
+            bats_full_output=$(< "$bats_full_tmp")
+            rm -f "$bats_full_tmp"
 
             # Persist the complete output as a stage log — like every other
             # stage — instead of discarding it. Written unconditionally (red,
