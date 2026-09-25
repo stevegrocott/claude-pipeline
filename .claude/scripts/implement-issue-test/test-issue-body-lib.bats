@@ -1557,3 +1557,20 @@ _run_create_issue_906() {
 		return 1
 	fi
 }
+
+@test "#906 AC5: --skip-validation creates an unvalidated issue and logs the bypass" {
+	_mock_gh_create_issue
+	_run_create_issue_906 --title "Free-form note" --body "" --skip-validation
+	[ "$status" -eq 0 ]
+	[ -s "$GH_CALLS" ]
+	[[ "$stderr" == *"--skip-validation"* ]]
+	[[ "$stderr" == *"deliberately bypassed"* ]]
+}
+
+@test "#906 AC5: --skip-validation bypasses even a body with markers" {
+	_mock_gh_create_issue
+	_run_create_issue_906 --title "Free-form doc note" \
+		--body "## Implementation Tasks" --skip-validation
+	[ "$status" -eq 0 ]
+	[ -s "$GH_CALLS" ]
+}
