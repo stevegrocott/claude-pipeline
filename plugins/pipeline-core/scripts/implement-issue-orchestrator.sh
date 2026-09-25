@@ -11263,6 +11263,73 @@ regenerate_bundle_if_needed() {
 # MAIN FLOW
 # =============================================================================
 
+# Checks out (or creates) the feature branch, failing loudly when git refuses.
+#
+# Both checkouts previously discarded stderr and ignored the exit status, so a
+# refused `git checkout -b` left the stage "complete" with NO branch. Every
+# parallel task worktree then failed with `not a valid object name`, the batch
+# fell back to serial, and the real cause was never logged (issue #890). The
+# observed trigger: the checkout was still on the PREVIOUS issue's branch with
+# a dirty tree, and git refuses when local modifications would be overwritten.
+#
+# Arguments:
+#   $1 - branch name
+# Returns:
+#   0 when the branch is checked out and the ref verifiably exists, 1 otherwise
+setup_feature_branch() {
+    local branch="$1"
+    local git_err=""
+
+    if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        log "Branch $branch already exists, checking out"
+        if ! git_err=$(git checkout "$branch" 2>&1); then
+            log_error "Failed to check out existing branch $branch: $git_err"
+            _log_blocking_worktree_state
+            return 1
+        fi
+    else
+        log "Creating branch $branch from $BASE_BRANCH"
+        if ! git_err=$(git checkout -b "$branch" "$BASE_BRANCH" 2>&1); then
+            log_error "Failed to create branch $branch from $BASE_BRANCH: $git_err"
+            _log_blocking_worktree_state
+            return 1
+        fi
+    fi
+
+    # Verify rather than trust: a checkout can report success and still leave
+    # HEAD elsewhere (detached, or a same-named ref in another worktree). The
+    # parallel executor resolves "$branch" as a commit-ish, so a missing ref
+    # here becomes an unexplained worktree failure 40 seconds later.
+    if ! git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+        log_error "Branch $branch does not exist after checkout reported success"
+        return 1
+    fi
+    local head_now
+    head_now=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '')
+    if [[ "$head_now" != "$branch" ]]; then
+        log_error "Expected HEAD on $branch after checkout, but HEAD is '$head_now'"
+        return 1
+    fi
+    return 0
+}
+
+# Names what is blocking a checkout, so the operator sees the cause rather
+# than only the refusal (issue #890).
+_log_blocking_worktree_state() {
+    local cur dirty
+    cur=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')
+    log_error "  current branch: $cur"
+    dirty=$(git status --porcelain 2>/dev/null | head -20 || printf '')
+    if [[ -n "$dirty" ]]; then
+        log_error "  uncommitted changes that may block the checkout:"
+        while IFS= read -r _l; do
+            [[ -n "$_l" ]] && log_error "    $_l"
+        done <<< "$dirty"
+    else
+        log_error "  working tree is clean"
+    fi
+}
+
 main() {
     # Declare local variables used throughout main
     local branch tasks_json task_count completed_tasks max_task_size="" pipeline_profile=""
@@ -11454,12 +11521,9 @@ $excerpt
         branch="feature/issue-${ISSUE_NUMBER}"
         log "Setting up feature branch: $branch"
 
-        if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
-            log "Branch $branch already exists, checking out"
-            git checkout "$branch" 2>/dev/null
-        else
-            log "Creating branch $branch from $BASE_BRANCH"
-            git checkout -b "$branch" "$BASE_BRANCH" 2>/dev/null
+        if ! setup_feature_branch "$branch"; then
+            set_final_state "error"
+            exit 1
         fi
 
         set_branch_info "$branch"
