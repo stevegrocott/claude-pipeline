@@ -333,11 +333,11 @@ E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 # suites (issue #926: an intermittent hang stalled a real run for 32 minutes
 # with no recovery). Defaults to 45 minutes — generous headroom above the
 # suite's normal 20-35 minute range — and is overridable for repos with a
-# slower suite. On timeout this is recorded under a degraded-stage marker
-# distinct from a confirmed-red run (test:bats_full_suite_timeout vs.
-# test:bats_full_suite_red) — a suite that never finished is not the same
-# fact as one that ran and failed — and the check always returns control to
-# main() rather than blocking it (issue #926 AC3).
+# slower suite. On timeout this is recorded under its own degraded-stage
+# marker (test:bats_full_suite_timeout), distinct from the confirmed-red
+# marker appended further below — a suite that never finished is not the
+# same fact as one that ran and failed — and the check always returns
+# control to main() rather than blocking it (issue #926 AC3).
 FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"
 
 # Wall-clock cap (seconds) on the informational full-suite npm/test-runner
