@@ -567,6 +567,21 @@ init_status() {
             if [[ -z "$prior_status" ]]; then
                 prior_status="{}"
             fi
+        elif [[ -z "$prior_fingerprint" ]]; then
+            # An ABSENT fingerprint is not evidence of a different batch — it
+            # is a status.json written by a pipeline-core older than #781,
+            # which recorded none. Reporting it as a "mismatch" would state
+            # something unknowable, so it gets its own line.
+            #
+            # It still resets rather than preserving, and deliberately so: the
+            # failure modes are asymmetric. Resetting reprocesses an issue that
+            # was already done (wasteful, safe). Preserving on unverifiable
+            # provenance is exactly the #781 defect — silently skipping work
+            # that should run. This costs one non-resumed batch per consumer,
+            # once, on the upgrade that introduces fingerprints.
+            log "Prior status.json carries no batch fingerprint (written" \
+                "before #781); cannot verify it belongs to this batch, so" \
+                "resetting all issues to pending instead of resuming"
         else
             log "Batch fingerprint mismatch: prior status.json is from a" \
                 "different batch (base branch or issue set changed);" \
