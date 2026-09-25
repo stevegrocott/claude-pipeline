@@ -188,7 +188,7 @@ teardown() {
     echo '{"result":"no structured output"}' > "$MOCK_CLAUDE_RESPONSE"
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ]
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
     # Envelope reports error_kind="no_structured_output" (snake_case enum).
     [[ "$output" == *"no_structured_output"* ]]
 }
@@ -307,7 +307,7 @@ teardown() {
     export -f timeout
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ]
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
     [[ "$output" == *"timeout"* ]] \
         || fail "Expected output to contain 'timeout'; got: $output"
 }
@@ -372,7 +372,7 @@ teardown() {
 
     # Pass 1s as timeout_override (arg 6) so the test completes quickly
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
-    [ "$status" -eq 1 ]
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
     [[ "$output" == *"timeout"* ]] \
         || fail "Expected output to contain 'timeout'; got: $output"
 }
@@ -402,10 +402,113 @@ teardown() {
     # 1s timeout_override keeps wall-time short (~2 s total: 1 s initial +
     # 1 s retry) while exercising both the initial and retry watchdogs.
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
-    [ "$status" -eq 1 ] \
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ] \
         || fail "Expected run_stage to fail (childless subshell wedge); status=$status output=$output"
     [[ "$output" == *"timeout"* ]] \
         || fail "Expected 'timeout' in output (childless subshell wedge); got: $output"
+}
+
+# =============================================================================
+# RE-RUN WATCHDOG COVERAGE (issue #910)
+#
+# Unlike the primary and timeout-retry launches above, the escalation re-run
+# (~line 3738) and retry_same re-run (~line 3864) dispatch the CLI in the
+# foreground with no parent-side watchdog. These tests drive a hung CLI
+# through each re-run path with a FIFO-blocked `timeout` mock, exactly like
+# the childless-hang test above, so each one hangs (mirroring the bug) if its
+# watchdog is missing or removed and completes within the wall-clock bound
+# once the watchdog is in place.
+# =============================================================================
+
+@test "escalation re-run watchdog fires when stage subshell is childless and hung" {
+    # First call drives decide-action.sh to `escalate` via error_max_turns
+    # (same trigger as "run_stage escalates model when output subtype is
+    # error_max_turns" above). Second call is the escalation re-run itself —
+    # block childlessly on a FIFO with no writer; only a parent-side
+    # watchdog's SIGTERM can free it.
+    local hang_fifo="$TEST_TMP/escalation-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+    local counter_file="$TEST_TMP/esc-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
+
+    timeout() {
+        shift; shift; shift; shift  # timeout value, env, -u, CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        fi
+    }
+    export -f timeout
+
+    # 1s timeout_override keeps the wall-clock bound tight; without a
+    # watchdog guarding the escalation re-run this call never returns.
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "1"
+
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] \
+        || fail "Expected run_stage to return a stage_result envelope (escalation re-run wedge); status=$status output=$output"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind=no_structured_output once the wedged escalation call was terminated; got: $error_kind"
+}
+
+@test "retry_same re-run watchdog fires when stage subshell is childless and hung" {
+    # First call drives decide-action.sh to `retry_same` via rate_limit with
+    # no prior attempt at this model. Second call is the retry_same re-run
+    # itself — block childlessly on a FIFO with no writer; only a
+    # parent-side watchdog's SIGTERM can free it.
+    local hang_fifo="$TEST_TMP/retry-same-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+    local counter_file="$TEST_TMP/retry-same-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
+
+    timeout() {
+        shift; shift; shift; shift  # timeout value, env, -u, CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"rate limit exceeded, please retry"}'
+        else
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        fi
+    }
+    export -f timeout
+
+    # detect_rate_limit(true) on the first call makes run_stage call
+    # handle_rate_limit(), which sleeps for the parsed backoff (defaulting to
+    # RATE_LIMIT_DEFAULT_WAIT=3600s when unparseable) before ever reaching
+    # decide-action.sh. That backoff is orthogonal to the re-run watchdog
+    # this test targets, so stub it out.
+    sleep() { :; }
+    export -f sleep
+
+    # 1s timeout_override keeps the wall-clock bound tight; without a
+    # watchdog guarding the retry_same re-run this call never returns.
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "1"
+
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] \
+        || fail "Expected run_stage to return a stage_result envelope (retry_same re-run wedge); status=$status output=$output"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind=no_structured_output once the wedged retry_same call was terminated; got: $error_kind"
 }
 
 # =============================================================================
@@ -856,13 +959,14 @@ teardown() {
 	export calls_file
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
-	# Both initial attempt and retry must have been called (fallback skipped)
+	# Initial attempt, timeout retry, and double_timeout escalation must all
+	# have been called (fallback skipped)
 	local call_count
 	call_count=$(wc -l < "$calls_file")
-	(( call_count == 2 )) || \
-		fail "Expected 2 timeout calls (fallback skipped, retry made), got $call_count"
+	(( call_count == 3 )) || \
+		fail "Expected 3 timeout calls (fallback skipped, retry + escalation made), got $call_count"
 }
 
 # =============================================================================
@@ -879,7 +983,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "Diagnostic fallback failure — Output byte count:" "$LOG_FILE" || \
 		fail "Expected diagnostic byte count in log. Log: $(cat "$LOG_FILE")"
@@ -893,7 +997,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "Diagnostic fallback failure — First 500 characters:" "$LOG_FILE" || \
 		fail "Expected diagnostic preview in log. Log: $(cat "$LOG_FILE")"
@@ -909,7 +1013,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "recognizable-debug-marker-abc123" "$LOG_FILE" || \
 		fail "Diagnostic log must include actual output content. Log: $(cat "$LOG_FILE")"
@@ -2777,7 +2881,7 @@ EOF
     printf '%s\n' 'just a warning, no JSON anywhere' > "$MOCK_CLAUDE_RESPONSE"
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ] || {
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ] || {
         printf 'FAIL: a stream with no envelope must still fail\n' >&2
         return 1
     }
