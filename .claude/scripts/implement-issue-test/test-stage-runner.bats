@@ -409,6 +409,109 @@ teardown() {
 }
 
 # =============================================================================
+# RE-RUN WATCHDOG COVERAGE (issue #910)
+#
+# Unlike the primary and timeout-retry launches above, the escalation re-run
+# (~line 3738) and retry_same re-run (~line 3864) dispatch the CLI in the
+# foreground with no parent-side watchdog. These tests drive a hung CLI
+# through each re-run path with a FIFO-blocked `timeout` mock, exactly like
+# the childless-hang test above, so each one hangs (mirroring the bug) if its
+# watchdog is missing or removed and completes within the wall-clock bound
+# once the watchdog is in place.
+# =============================================================================
+
+@test "escalation re-run watchdog fires when stage subshell is childless and hung" {
+    # First call drives decide-action.sh to `escalate` via error_max_turns
+    # (same trigger as "run_stage escalates model when output subtype is
+    # error_max_turns" above). Second call is the escalation re-run itself —
+    # block childlessly on a FIFO with no writer; only a parent-side
+    # watchdog's SIGTERM can free it.
+    local hang_fifo="$TEST_TMP/escalation-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+    local counter_file="$TEST_TMP/esc-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
+
+    timeout() {
+        shift; shift; shift; shift  # timeout value, env, -u, CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        fi
+    }
+    export -f timeout
+
+    # 1s timeout_override keeps the wall-clock bound tight; without a
+    # watchdog guarding the escalation re-run this call never returns.
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "1"
+
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] \
+        || fail "Expected run_stage to return a stage_result envelope (escalation re-run wedge); status=$status output=$output"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind=no_structured_output once the wedged escalation call was terminated; got: $error_kind"
+}
+
+@test "retry_same re-run watchdog fires when stage subshell is childless and hung" {
+    # First call drives decide-action.sh to `retry_same` via rate_limit with
+    # no prior attempt at this model. Second call is the retry_same re-run
+    # itself — block childlessly on a FIFO with no writer; only a
+    # parent-side watchdog's SIGTERM can free it.
+    local hang_fifo="$TEST_TMP/retry-same-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+    local counter_file="$TEST_TMP/retry-same-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
+
+    timeout() {
+        shift; shift; shift; shift  # timeout value, env, -u, CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"rate limit exceeded, please retry"}'
+        else
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        fi
+    }
+    export -f timeout
+
+    # detect_rate_limit(true) on the first call makes run_stage call
+    # handle_rate_limit(), which sleeps for the parsed backoff (defaulting to
+    # RATE_LIMIT_DEFAULT_WAIT=3600s when unparseable) before ever reaching
+    # decide-action.sh. That backoff is orthogonal to the re-run watchdog
+    # this test targets, so stub it out.
+    sleep() { :; }
+    export -f sleep
+
+    # 1s timeout_override keeps the wall-clock bound tight; without a
+    # watchdog guarding the retry_same re-run this call never returns.
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "1"
+
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] \
+        || fail "Expected run_stage to return a stage_result envelope (retry_same re-run wedge); status=$status output=$output"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind=no_structured_output once the wedged retry_same call was terminated; got: $error_kind"
+}
+
+# =============================================================================
 # CASCADE TIMEOUT DETECTION
 # =============================================================================
 
