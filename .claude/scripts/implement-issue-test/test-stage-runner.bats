@@ -2693,7 +2693,7 @@ _repro_full_suite_bats_check() {
 }
 
 # =============================================================================
-# FULL-SUITE BATS CHECK — WALL-CLOCK TIMEOUT (BATS_FULL_SUITE_TIMEOUT)
+# FULL-SUITE BATS CHECK — WALL-CLOCK TIMEOUT (FULL_SUITE_BATS_TIMEOUT)
 #
 # The informational full-suite check above (`bash "$bats_runner" --ci`) takes
 # ~20-35 minutes on a healthy run (#799) and nothing previously bounded its
@@ -2701,47 +2701,51 @@ _repro_full_suite_bats_check() {
 # deadlock this file documents at test 22) stalled the orchestrator
 # indefinitely even though the check exists purely to surface unrelated red
 # suites non-blockingly. It is now wrapped in `timeout` with an overridable
-# budget (BATS_FULL_SUITE_TIMEOUT, default 2700s / 45 minutes — issue #926's
+# budget (FULL_SUITE_BATS_TIMEOUT, default 2700s / 45 minutes — issue #926's
 # evaluation section: generous headroom above the suite's normal 20-35
-# minute range); on exit 124 it is treated exactly like any other red run
-# (degraded signal, non-blocking) plus an explicit log_warn calling out the
-# timeout specifically.
+# minute range); on exit 124 it records a degraded-stage marker distinct
+# from a confirmed-red run (test:bats_full_suite_timeout, not
+# test:bats_full_suite_red — issue #926 AC3, since a suite that never
+# finished is not proof it would have failed) plus an explicit log_warn
+# naming the budget it exceeded, and always falls through non-blockingly.
 # =============================================================================
 
-@test "BATS_FULL_SUITE_TIMEOUT defaults to 2700 and is overridable" {
+@test "FULL_SUITE_BATS_TIMEOUT defaults to 2700 and is overridable" {
 	# Static: pins the default-with-override idiom so a future edit cannot
 	# hard-code the budget and silently drop the override hook.
 	local script_content
 	script_content=$(< "$ORCHESTRATOR_SCRIPT")
-	[[ "$script_content" == *'BATS_FULL_SUITE_TIMEOUT="${BATS_FULL_SUITE_TIMEOUT:-2700}"'* ]] || \
-		fail "Expected BATS_FULL_SUITE_TIMEOUT default-with-override assignment (default 2700s / 45min)"
+	[[ "$script_content" == *'FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"'* ]] || \
+		fail "Expected FULL_SUITE_BATS_TIMEOUT default-with-override assignment (default 2700s / 45min)"
 }
 
 @test "full-suite BATS check invocation is wrapped in timeout" {
 	# Static: the actual bats_runner --ci invocation (not the run-tests.sh
-	# repro above) must be wrapped in `timeout "$BATS_FULL_SUITE_TIMEOUT"` so
-	# a wedged suite cannot stall the orchestrator indefinitely. Anchored on
-	# the unique `timeout "$BATS_FULL_SUITE_TIMEOUT"` assignment line rather
-	# than `bash "$bats_runner" --ci`, which also appears verbatim in the
-	# BATS_FULL_SUITE_TIMEOUT declaration comment further up the file.
+	# repro above) must be wrapped in `timeout "${FULL_SUITE_BATS_TIMEOUT:-...}"`
+	# so a wedged suite cannot stall the orchestrator indefinitely. Anchored
+	# on the unique timeout-wrapped assignment line rather than
+	# `bash "$bats_runner" --ci`, which also appears verbatim in the
+	# FULL_SUITE_BATS_TIMEOUT declaration comment further up the file.
 	local marker_line window start_line end_line
-	marker_line=$(awk '/timeout "\$BATS_FULL_SUITE_TIMEOUT"/{print NR; exit}' \
+	marker_line=$(awk '/timeout "\$\{FULL_SUITE_BATS_TIMEOUT:-[0-9]+\}"/{print NR; exit}' \
 		"$ORCHESTRATOR_SCRIPT")
 	[ -n "$marker_line" ] || \
-		fail "Could not locate the timeout \"\$BATS_FULL_SUITE_TIMEOUT\" wrap"
+		fail 'Could not locate the timeout "${FULL_SUITE_BATS_TIMEOUT:-...}" wrap'
 	start_line=$(( marker_line > 2 ? marker_line - 2 : 1 ))
 	end_line=$(( marker_line + 3 ))
 	window=$(awk -v s="$start_line" -v e="$end_line" \
 		'NR >= s && NR <= e' "$ORCHESTRATOR_SCRIPT")
 	[[ "$window" == *'bash "$bats_runner" --ci'* ]] || \
-		fail "timeout \"\$BATS_FULL_SUITE_TIMEOUT\" must wrap the" \
+		fail 'timeout "${FULL_SUITE_BATS_TIMEOUT:-...}" must wrap the' \
 			"bash \"\$bats_runner\" --ci invocation. Window: $window"
 }
 
 # Faithful reproduction of main()'s timeout-wrapped full-suite BATS check
-# (post-timeout-wrap). Mirrors _repro_full_suite_bats_check above but adds
-# the timeout wrapper and the rc==124 warn branch so the timeout contract is
-# pinned functionally, not just statically.
+# (post-timeout-wrap, #926 AC3). Mirrors _repro_full_suite_bats_check above
+# but adds the timeout wrapper and the rc==124 branch, which records a
+# degraded-stage marker distinct from a confirmed-red run
+# (test:bats_full_suite_timeout, not test:bats_full_suite_red) — a suite
+# that never finished is not proof it would have failed.
 _repro_full_suite_bats_check_with_timeout() {
 	local run_tests_cmd="$1"
 	local bats_full_output bats_full_rc
@@ -2751,7 +2755,7 @@ _repro_full_suite_bats_check_with_timeout() {
 	# on a non-zero (e.g. 124) exit, before $? can even be read. Placing the
 	# assignment as an `if` condition suppresses errexit for it, exactly as
 	# production main() gets for free from `set -uo pipefail` (no -e).
-	if bats_full_output=$(timeout "$BATS_FULL_SUITE_TIMEOUT" \
+	if bats_full_output=$(timeout "${FULL_SUITE_BATS_TIMEOUT:-2700}" \
 		bash -c "$run_tests_cmd" 2>&1); then
 		bats_full_rc=0
 	else
@@ -2759,19 +2763,22 @@ _repro_full_suite_bats_check_with_timeout() {
 	fi
 	if (( bats_full_rc == 124 )); then
 		log_warn "Full-suite BATS check timed out after" \
-			"${BATS_FULL_SUITE_TIMEOUT}s — treating as red" \
-			"(non-blocking)"
+			"${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
+			"unmeasured, not red (non-blocking)"
+		DEGRADED_STAGES+=("test:bats_full_suite_timeout")
+	elif (( bats_full_rc != 0 )); then
+		DEGRADED_STAGES+=("test:bats_full_suite_red")
 	fi
-	(( bats_full_rc != 0 )) && DEGRADED_STAGES+=("test:bats_full_suite_red")
 	return 0
 }
 
-@test "full-suite BATS check treats a timeout as red without hanging the orchestrator" {
-	# Functional: a suite that runs past BATS_FULL_SUITE_TIMEOUT must be
-	# killed at the budget, exit 124, and be recorded as a non-blocking
-	# degraded signal exactly like any other red run.
+@test "full-suite BATS check records a distinct timeout marker without hanging the orchestrator" {
+	# Functional: a suite that runs past FULL_SUITE_BATS_TIMEOUT must be
+	# killed at the budget, exit 124, and be recorded under its own
+	# degraded-stage marker — not the confirmed-red marker a suite that
+	# actually ran and failed gets (#926 AC3).
 	local -a DEGRADED_STAGES=()
-	export BATS_FULL_SUITE_TIMEOUT=1
+	export FULL_SUITE_BATS_TIMEOUT=1
 	# A self-contained busy loop, not `sleep` — `sleep` runs as a forked
 	# grandchild of the `bash -c` process the timeout kills, and that
 	# grandchild keeps the command-substitution pipe's write end open after
@@ -2797,20 +2804,24 @@ _repro_full_suite_bats_check_with_timeout() {
 
 	# (b) Must be bounded near the 1s budget, not run away unbounded.
 	(( elapsed < 5 )) || \
-		fail "Check did not respect BATS_FULL_SUITE_TIMEOUT=1; took ${elapsed}s"
+		fail "Check did not respect FULL_SUITE_BATS_TIMEOUT=1; took ${elapsed}s"
 
-	# (c) The degraded-stage signal must be recorded, same as any red run.
+	# (c) A distinct timeout marker must be recorded, not the red marker.
 	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
-		| grep -qx 'test:bats_full_suite_red' || \
-		fail "Expected test:bats_full_suite_red after a timeout; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+		| grep -qx 'test:bats_full_suite_timeout' || \
+		fail "Expected test:bats_full_suite_timeout after a timeout; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+	if printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_full_suite_red'; then
+		fail "A timeout must not also record the red marker; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+	fi
 }
 
-@test "full-suite BATS check respects an overridden BATS_FULL_SUITE_TIMEOUT budget" {
-	# Functional: BATS_FULL_SUITE_TIMEOUT must be overridable per-run, not
+@test "full-suite BATS check respects an overridden FULL_SUITE_BATS_TIMEOUT budget" {
+	# Functional: FULL_SUITE_BATS_TIMEOUT must be overridable per-run, not
 	# hard-coded — a suite that would time out at a low budget must pass
 	# once the caller raises the budget above its true runtime.
 	local -a DEGRADED_STAGES=()
-	export BATS_FULL_SUITE_TIMEOUT=10
+	export FULL_SUITE_BATS_TIMEOUT=10
 	local quick_suite="$TEST_TMP/run-tests-quick.sh"
 	printf '#!/usr/bin/env bash\nsleep 1\nexit 0\n' > "$quick_suite"
 	chmod +x "$quick_suite"
@@ -2819,7 +2830,7 @@ _repro_full_suite_bats_check_with_timeout() {
 
 	[ "${#DEGRADED_STAGES[@]}" -eq 0 ] || \
 		fail "A suite finishing within the overridden budget must not be" \
-			"treated as red; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+			"treated as degraded; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
 }
 
 # =============================================================================
