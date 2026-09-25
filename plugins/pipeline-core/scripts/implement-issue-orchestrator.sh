@@ -7371,7 +7371,16 @@ guard_commit_path_allowlist() {
 			plugins/pipeline-core/skills/**) continue ;;
 			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs)
 				continue ;;
-			*.sh | *.bats | *.py | *.go | *.rb | *.java | *.rs)
+			# *.bash belongs here for the same reason as *.sh: both are
+			# shell sources. Its absence was an arbitrary omission, not a
+			# policy — the only two .bash files in the repo are the bats
+			# helper libraries (implement-issue-test/helpers/ and
+			# platform-test/helpers/), so any task editing a test helper
+			# had its commit rejected and was recorded `failed` despite
+			# reporting success. Issue #909 task 1 lost this way while
+			# assert_issue_valid had accepted the same path at intake
+			# (issue #928).
+			*.sh | *.bash | *.bats | *.py | *.go | *.rb | *.java | *.rs)
 				continue ;;
 			*.c | *.cpp | *.h | *.hpp) continue ;;
 			*)
