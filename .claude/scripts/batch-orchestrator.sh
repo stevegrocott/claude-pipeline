@@ -1084,33 +1084,24 @@ revalidate_issue_after_enrich() {
 # any other host is treated as "not resolved" (returns 1).
 #
 # A merged PR on "feature/issue-<num>" is NOT, by itself, treated as
-# resolution while the issue is still open. The pipeline closes an issue
-# when its PR merges, so an open issue with a merged PR on its branch is
-# evidence the merge did *not* resolve it — reopened, partially
-# implemented, reverted, or the branch name reused. Skipping on that
-# evidence silently drops open work with no supported way to re-run it
-# (see #771). Instead, a warning is logged and the issue proceeds to
-# normal processing, where the orchestrator's own checks act as the
-# safety net.
+# resolution while the issue is still open — reopened, partially
+# implemented, reverted, or the branch name reused are all possible.
+# Skipping on that evidence alone would silently drop open work with no
+# supported way to re-run it (see #771), so a warning is logged and the
+# issue proceeds to normal processing instead.
 #
 # Opt-in override: SKIP_ON_MERGED_PR=1 (any non-empty value) restores the
 # pre-#771 skip-on-merged-PR-alone behavior, for operators who rely on it.
 #
-# stateReason is fetched too so a reopened issue (GitHub:
-# stateReason=REOPENED) is named in the merged-PR log below, and — #781 —
-# so it can bypass the grace window entirely: a deliberate reopen means
-# partial work, not a propagation lag, regardless of how recently the PR
-# merged.
+# stateReason is fetched too: a REOPENED issue bypasses the grace window
+# below entirely — a deliberate reopen means partial work, not a
+# propagation lag, regardless of merge recency (#781).
 #
-# #781: a merged PR younger than MERGED_PR_GRACE_SECONDS (default 120) still
-# skips. The pipeline closes an issue when its PR merges, so a PR that
-# merged moments ago is most likely still waiting on that close webhook to
-# land, and reprocessing the issue wastes a full orchestrator run on work
-# that is about to be marked resolved anyway. A merge older than the window
-# is treated exactly as #771 established: stale evidence, so the issue
-# proceeds. mergedAt is unavailable (empty or unparseable) falls through to
-# the same "proceed" behavior — an unknown age must never be treated as
-# fresh.
+# #781: a merged PR younger than MERGED_PR_GRACE_SECONDS (default 120s)
+# still skips, since the pipeline closes an issue on PR merge and a very
+# recent merge is likely just awaiting that close webhook. An older merge
+# is stale evidence per #771 and the issue proceeds; a missing or
+# unparseable mergedAt also proceeds — unknown age is never fresh.
 #
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the orchestrator's own
@@ -1129,7 +1120,6 @@ check_issue_resolved_upstream() {
 
 	[[ "${GIT_HOST:-github}" == "github" ]] || return 1
 
-	# state,stateReason fetched together; tab-joined output.
 	local issue_meta=""
 	issue_meta=$(gh issue view "$issue_num" --json state,stateReason \
 		--jq '(.state // "") + "\t" + (.stateReason // "")' \

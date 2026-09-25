@@ -1080,10 +1080,10 @@ _simulate_cost_rollup() {
 @test "up-front skip gate: gh failures are non-fatal (|| true pattern)" {
 	# Network errors from gh must not abort the batch; the gate must use
 	# || true (or equivalent) to suppress non-zero exit codes.
-	local block
-	block=$(awk '/Up-front skip gate/,/fi.*#.*end.*GIT_HOST|^\s+fi$/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" | head -50)
-	[[ "$block" == *'|| true'* ]]
+	local body
+	body=$(_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'|| true'* ]]
 }
 
 @test "up-front skip gate: appears before process_issue call in the loop" {
