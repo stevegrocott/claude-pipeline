@@ -489,6 +489,11 @@ case "$GIT_HOST" in
       squash) gh pr merge "$MR" --squash --delete-branch ;;
       merge) gh pr merge "$MR" --merge --delete-branch ;;
       rebase) gh pr merge "$MR" --rebase --delete-branch ;;
+      *)
+        echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised" \
+            "merge style. Accepted values: squash, merge, rebase." >&2
+        exit 1
+        ;;
     esac
     ;;
   gitlab)
@@ -496,6 +501,11 @@ case "$GIT_HOST" in
       squash) glab mr merge "$MR" --squash --remove-source-branch --yes ;;
       merge) glab mr merge "$MR" --remove-source-branch --yes ;;
       rebase) glab mr merge "$MR" --rebase --remove-source-branch --yes ;;
+      *)
+        echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised" \
+            "merge style. Accepted values: squash, merge, rebase." >&2
+        exit 1
+        ;;
     esac
     ;;
 esac
