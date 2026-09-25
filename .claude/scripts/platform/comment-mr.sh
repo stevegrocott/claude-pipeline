@@ -25,4 +25,9 @@ case "${GIT_HOST:-github}" in
     fi
     ;;
   gitlab) glab mr note "$MR" --message "$COMMENT" ;;
+  *)
+    echo "ERROR: unrecognised GIT_HOST '${GIT_HOST:-github}'" \
+      "(accepted: github, gitlab)" >&2
+    exit 1
+    ;;
 esac

@@ -83,3 +83,13 @@ teardown() {
     run run_platform_script find-mr.sh --branch "feature-branch"
     [ "$status" -ne 0 ]
 }
+
+@test "find-mr: fails loudly on an unrecognised GIT_HOST instead of no-op" {
+    export GIT_HOST="bitbucket"
+    run run_platform_script find-mr.sh --branch "feature-branch"
+    [ "$status" -ne 0 ]
+    assert_output_contains "unrecognised GIT_HOST"
+    assert_output_contains "bitbucket"
+    assert_mock_not_called_with "gh pr list"
+    assert_mock_not_called_with "glab mr list"
+}

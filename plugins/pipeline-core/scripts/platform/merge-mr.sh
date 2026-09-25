@@ -13,6 +13,32 @@ PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
 # shellcheck disable=SC1090
 source "$PLATFORM_SH_FILE"
 
+# Fail loudly on an unrecognised GIT_HOST/MERGE_STYLE instead of letting the
+# dispatch case below match nothing and fall through as a silent no-op that
+# still exits 0 (issue #907). Both variables are consumer-supplied
+# (config/platform.sh) and otherwise unvalidated anywhere in the platform
+# wrappers, so a typo there merges nothing while the caller reads exit 0 as
+# a completed merge. Validated here, at entry, before any API calls or
+# polling — a bad value is refused immediately instead of surfacing as a
+# phantom successful merge later.
+case "$GIT_HOST" in
+    github | gitlab) ;;
+    *)
+        echo "FATAL: GIT_HOST=\"$GIT_HOST\" is not a recognised git host." \
+            "Accepted values: github, gitlab." >&2
+        exit 1
+        ;;
+esac
+
+case "$MERGE_STYLE" in
+    squash | merge | rebase) ;;
+    *)
+        echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised merge" \
+            "style. Accepted values: squash, merge, rebase." >&2
+        exit 1
+        ;;
+esac
+
 MR="$1"
 
 # Gate wait_for_mergeable on GitHub's richer `mergeStateStatus` field rather
@@ -463,6 +489,11 @@ case "$GIT_HOST" in
       squash) gh pr merge "$MR" --squash --delete-branch ;;
       merge) gh pr merge "$MR" --merge --delete-branch ;;
       rebase) gh pr merge "$MR" --rebase --delete-branch ;;
+      *)
+        echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised" \
+            "merge style. Accepted values: squash, merge, rebase." >&2
+        exit 1
+        ;;
     esac
     ;;
   gitlab)
@@ -470,6 +501,11 @@ case "$GIT_HOST" in
       squash) glab mr merge "$MR" --squash --remove-source-branch --yes ;;
       merge) glab mr merge "$MR" --remove-source-branch --yes ;;
       rebase) glab mr merge "$MR" --rebase --remove-source-branch --yes ;;
+      *)
+        echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised" \
+            "merge style. Accepted values: squash, merge, rebase." >&2
+        exit 1
+        ;;
     esac
     ;;
 esac
