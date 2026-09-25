@@ -1998,7 +1998,10 @@ write_task_summary_to_status() {
 #   "iteration_summary": {
 #     "quality_iterations":    number,
 #     "test_iterations":       number,
-#     "pr_review_iterations":  number
+#     "pr_review_iterations":  number,
+#     "reconciled_count":      number  -- tasks promoted failed->completed
+#                                         via branch-evidence reconciliation
+#                                         (issue #810)
 #   },
 #   "escalations": [
 #     { "stage": string, "from_model": string, "to_model": string, "reason": string }, ...
@@ -2094,7 +2097,13 @@ export_metrics() {
             iteration_summary: {
                 quality_iterations:   ($status.quality_iterations // 0),
                 test_iterations:      ($status.test_iterations // 0),
-                pr_review_iterations: ($status.pr_review_iterations // 0)
+                pr_review_iterations: ($status.pr_review_iterations // 0),
+                # reconciled_count is the run-wide tally that
+                # reconcile_failed_tasks_with_branch_evidence() persists in
+                # $STATUS_FILE (issue #810 task 1). `// 0` covers status
+                # files predating that field, matching the fallback the
+                # COMPLETE-stage completion summary uses (task 2).
+                reconciled_count:     ($status.reconciled_count // 0)
             },
             escalations: ($status.escalations // []),
             # Roll per-stage tokens/estimated_cost up into the run-level
