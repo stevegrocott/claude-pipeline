@@ -12305,7 +12305,14 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
         if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" || "$branch_scope" == "ts-frontend" ]]; then
             log "Running informational full-suite check (non-blocking)..."
             local full_scope_output full_scope_rc
-            full_scope_output=$(eval "${TEST_UNIT_CMD:-npm test}" 2>&1) || true
+            # No `|| true` here: it makes the command list succeed, so the
+            # `$?` below reads `true`'s status and is ALWAYS 0 — the failure
+            # branch became dead code and test:full_suite_red was never
+            # recorded (issue #908). errexit is off in this script (see the
+            # `set -uo pipefail` at the top), so nothing needs suppressing.
+            # Matches the BATS sibling block below, which always did this
+            # correctly.
+            full_scope_output=$(eval "${TEST_UNIT_CMD:-npm test}" 2>&1)
             full_scope_rc=$?
 
             if (( full_scope_rc != 0 )); then
@@ -12345,7 +12352,15 @@ $full_scope_failures
         if [[ -f "$bats_runner" ]]; then
             log "Running informational full-suite BATS check (non-blocking)..."
             local bats_full_output bats_full_rc
-            bats_full_output=$(bash "$bats_runner" 2>&1)
+            # --ci restricts the run to the same suites CI gates. Without it
+            # run-tests.sh runs EVERY test-*.bats, including the four in
+            # CI_EXCLUDED_SUITES — test-stage-runner.bats and
+            # cost-accounting.bats are red on main (#897), so this check
+            # reported red on every run and silently disabled failed-task
+            # reconciliation via the tests_green gate (issue #905). The other
+            # two excluded suites are owned by bundle-parity.yml and
+            # orchestrator-guards.yml, so skipping them here loses no coverage.
+            bats_full_output=$(bash "$bats_runner" --ci 2>&1)
             bats_full_rc=$?
 
             # Persist the complete output as a stage log — like every other
