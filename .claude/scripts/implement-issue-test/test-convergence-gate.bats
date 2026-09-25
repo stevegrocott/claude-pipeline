@@ -419,6 +419,89 @@ teardown() {
 	expect_glob "$status2" 'pending' "a pending task is left untouched"
 }
 
+@test "reconcile: promoting a task increments the persisted .reconciled_count tally" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["src/one.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	mkdir -p src
+	echo "one" > src/one.sh
+	git add src
+	git commit -q -m "implement task one"
+
+	local before
+	before=$(jq -r '.reconciled_count // 0' "$STATUS_FILE")
+	expect_glob "$before" '0' "reconciled_count starts at 0"
+
+	reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" > /dev/null
+
+	local after
+	after=$(jq -r '.reconciled_count' "$STATUS_FILE")
+	expect_glob "$after" '1' \
+		"reconciled_count is incremented in status.json alongside the promotion"
+}
+
+@test "reconcile: .reconciled_count accumulates across multiple calls in the same run" {
+	# reconcile_failed_tasks_with_branch_evidence() runs twice per implement
+	# stage in production — once at the end of the task loop, once again from
+	# revalidate_partial_block_against_branch() at gate time. The tally must
+	# be a run-wide sum, not reset on the second call.
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["src/one.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	mkdir -p src
+	echo "one" > src/one.sh
+	git add src
+	git commit -q -m "implement task one"
+
+	reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" > /dev/null
+
+	# A second failed task lands after the first reconciliation pass, as if
+	# a later stage shipped it before the gate-time re-check runs. set_tasks()
+	# only rewrites .tasks, so task 1's already-persisted .reconciled_count
+	# tally is untouched.
+	local tasks_json2
+	tasks_json2=$(jq -n '[
+		{id: 1, description: "task one", status: "completed", affected_files: ["src/one.sh"]},
+		{id: 2, description: "task two", status: "failed", affected_files: ["src/two.sh"]}
+	]')
+	set_tasks "$tasks_json2"
+	echo "two" > src/two.sh
+	git add src
+	git commit -q -m "implement task two"
+
+	reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" > /dev/null
+
+	local final_count
+	final_count=$(jq -r '.reconciled_count' "$STATUS_FILE")
+	expect_glob "$final_count" '2' \
+		"reconciled_count sums reconciliations across both calls this run"
+}
+
+@test "reconcile: .reconciled_count is left at 0 when no task reconciles" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["docs/missing.md"]}
+	]')
+	set_tasks "$tasks_json"
+
+	echo "unrelated" > unrelated.txt
+	git add unrelated.txt
+	git commit -q -m "unrelated change"
+
+	reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" > /dev/null
+
+	local final_count
+	final_count=$(jq -r '.reconciled_count // 0' "$STATUS_FILE")
+	expect_glob "$final_count" '0' \
+		"reconciled_count stays 0 when nothing is promoted"
+}
+
 @test "reconcile: #616 scenario end-to-end — two failed tasks with branch evidence both reconcile to completed" {
 	# Same PR #616 (issue #614) task/stage state as the gate-mirror regression
 	# below, but driven straight through the shipped

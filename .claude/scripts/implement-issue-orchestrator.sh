@@ -1212,6 +1212,7 @@ init_status() {
             quality_iterations: 0,
             test_iterations: 0,
             pr_review_iterations: 0,
+            reconciled_count: 0,
             stage_started_at: null,
             last_update: (now | todate),
             log_dir: $log_dir,
@@ -5893,7 +5894,11 @@ _file_set_contained() {
 # Arguments:
 #   $1 - base branch name to diff against (e.g. "main")
 # Globals:
-#   STATUS_FILE      - read tasks from and write reconciled statuses to
+#   STATUS_FILE      - read tasks from and write reconciled statuses to;
+#                       each promotion also increments the top-level
+#                       .reconciled_count field (issue #810), a run-wide
+#                       tally that survives across this function's multiple
+#                       call sites within a run
 #   DEGRADED_STAGES  - consulted for this run's test-suite verdict
 # Outputs:
 #   The number of tasks reconciled (promoted from "failed" to "completed")
@@ -5995,9 +6000,19 @@ reconcile_failed_tasks_with_branch_evidence() {
 			# rewrites fields this filter names, so omitting it already
 			# preserves the recorded history without a read-back-and-
 			# reassign round trip.
+			# .reconciled_count is a run-level tally (issue #810 task 1),
+			# incremented alongside the per-task write so it stays atomic
+			# with the promotion it counts. It persists in $STATUS_FILE
+			# rather than a local variable because this function runs twice
+			# per implement stage (the task-loop call and the gate-time
+			# revalidate_partial_block_against_branch() re-check) and
+			# downstream consumers — the completion summary and
+			# export_metrics() — read $STATUS_FILE directly rather than
+			# sharing this function's call stack.
 			if status_json_write --argjson id "$recon_id" \
 			   '(.tasks[] | select(.id == $id)).status = "completed" |
 			    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
+			    .reconciled_count = ((.reconciled_count // 0) + 1) |
 			    .last_update = (now | todate)'; then
 				sync_status_to_log
 				reconciled=$((reconciled + 1))
