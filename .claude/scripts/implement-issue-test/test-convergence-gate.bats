@@ -419,6 +419,89 @@ teardown() {
 	expect_glob "$status2" 'pending' "a pending task is left untouched"
 }
 
+@test "reconcile: promoting a task increments the persisted .reconciled_count tally" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["src/one.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	mkdir -p src
+	echo "one" > src/one.sh
+	git add src
+	git commit -q -m "implement task one"
+
+	local before
+	before=$(jq -r '.reconciled_count // 0' "$STATUS_FILE")
+	expect_glob "$before" '0' "reconciled_count starts at 0"
+
+	reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" > /dev/null
+
+	local after
+	after=$(jq -r '.reconciled_count' "$STATUS_FILE")
+	expect_glob "$after" '1' \
+		"reconciled_count is incremented in status.json alongside the promotion"
+}
+
+@test "reconcile: .reconciled_count accumulates across multiple calls in the same run" {
+	# reconcile_failed_tasks_with_branch_evidence() runs twice per implement
+	# stage in production — once at the end of the task loop, once again from
+	# revalidate_partial_block_against_branch() at gate time. The tally must
+	# be a run-wide sum, not reset on the second call.
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["src/one.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	mkdir -p src
+	echo "one" > src/one.sh
+	git add src
+	git commit -q -m "implement task one"
+
+	reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" > /dev/null
+
+	# A second failed task lands after the first reconciliation pass, as if
+	# a later stage shipped it before the gate-time re-check runs. set_tasks()
+	# only rewrites .tasks, so task 1's already-persisted .reconciled_count
+	# tally is untouched.
+	local tasks_json2
+	tasks_json2=$(jq -n '[
+		{id: 1, description: "task one", status: "completed", affected_files: ["src/one.sh"]},
+		{id: 2, description: "task two", status: "failed", affected_files: ["src/two.sh"]}
+	]')
+	set_tasks "$tasks_json2"
+	echo "two" > src/two.sh
+	git add src
+	git commit -q -m "implement task two"
+
+	reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" > /dev/null
+
+	local final_count
+	final_count=$(jq -r '.reconciled_count' "$STATUS_FILE")
+	expect_glob "$final_count" '2' \
+		"reconciled_count sums reconciliations across both calls this run"
+}
+
+@test "reconcile: .reconciled_count is left at 0 when no task reconciles" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["docs/missing.md"]}
+	]')
+	set_tasks "$tasks_json"
+
+	echo "unrelated" > unrelated.txt
+	git add unrelated.txt
+	git commit -q -m "unrelated change"
+
+	reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" > /dev/null
+
+	local final_count
+	final_count=$(jq -r '.reconciled_count // 0' "$STATUS_FILE")
+	expect_glob "$final_count" '0' \
+		"reconciled_count stays 0 when nothing is promoted"
+}
+
 @test "reconcile: #616 scenario end-to-end — two failed tasks with branch evidence both reconcile to completed" {
 	# Same PR #616 (issue #614) task/stage state as the gate-mirror regression
 	# below, but driven straight through the shipped
@@ -937,4 +1020,85 @@ _run_merge_gate() {
 	# and the lacking-evidence list (#620 AC3) — not just a bare count.
 	expect_ok "persisted reason must carry the raw verdict, branch-verified verdict, and lacking-evidence list" \
 		grep -qF '_reason="Partial implementation: ${completed_tasks}/${task_count} tasks completed (implement:partial:${completed_tasks}/${task_count}); stage-reported ${_raw_completed_tasks}/${task_count}${_lacking_evidence:+; lacking file evidence: ${_lacking_evidence}}."' "$ORCHESTRATOR_SCRIPT"
+}
+
+# =============================================================================
+# UNIT TESTS: completion-summary reconciled-count appendix (issue #810 task 2)
+# task 1 persists .reconciled_count in $STATUS_FILE; these cover the COMPLETE
+# stage's appending of that tally to the PR comment a human actually reads.
+# The COMPLETE stage lives inline in main(), so — as with _run_merge_gate()
+# above — this mirrors the real logic verbatim and a drift-guard test below
+# pins the mirror to the orchestrator source.
+# =============================================================================
+
+_append_reconciled_summary() {
+	local complete_summary="$1"
+
+	local _reconciled_total
+	_reconciled_total=$(jq -r '.reconciled_count // 0' "$STATUS_FILE" 2>/dev/null)
+	[[ "$_reconciled_total" =~ ^[0-9]+$ ]] || _reconciled_total=0
+	if (( _reconciled_total > 0 )); then
+		complete_summary="${complete_summary}
+
+**Reconciled:** ${_reconciled_total} task(s) promoted from failed to completed via branch-evidence reconciliation."
+	fi
+
+	printf '%s' "$complete_summary"
+}
+
+@test "completion summary: reconciled_count of 0 leaves the summary unchanged" {
+	status_json_write '.reconciled_count = 0'
+
+	local result
+	result=$(_append_reconciled_summary "Implementation completed successfully")
+
+	expect_glob "$result" "Implementation completed successfully" \
+		"summary must be untouched when nothing was reconciled"
+}
+
+@test "completion summary: a missing .reconciled_count field leaves the summary unchanged" {
+	# init_status()'s default shape predates issue #810 task 1's field, so a
+	# freshly-initialised status.json (or one from an old run) has no
+	# reconciled_count key at all — the // 0 fallback must cover it.
+	local result
+	result=$(_append_reconciled_summary "Implementation completed successfully")
+
+	expect_glob "$result" "Implementation completed successfully" \
+		"summary must be untouched when the field is absent"
+}
+
+@test "completion summary: a non-zero reconciled_count is appended" {
+	status_json_write '.reconciled_count = 3'
+
+	local result
+	result=$(_append_reconciled_summary "Implementation completed successfully")
+
+	expect_glob "$result" \
+		"Implementation completed successfully*Reconciled:** 3 task(s) promoted from failed to completed via branch-evidence reconciliation." \
+		"summary must gain a reconciled-count line naming the tally"
+}
+
+@test "completion summary: a missing status.json is treated as zero reconciled" {
+	rm -f "$STATUS_FILE"
+
+	local result
+	result=$(_append_reconciled_summary "Implementation completed successfully")
+
+	expect_glob "$result" "Implementation completed successfully" \
+		"summary must be untouched when status.json cannot be read"
+}
+
+@test "drift guard: the COMPLETE stage's reconciled-count appendix is unchanged in the orchestrator" {
+	expect_ok "reconciled_count must be read from STATUS_FILE" \
+		grep -qF "_reconciled_total=\$(jq -r '.reconciled_count // 0' \"\$STATUS_FILE\" 2>/dev/null)" \
+		"$ORCHESTRATOR_SCRIPT"
+	expect_ok "non-numeric captures must degrade to zero, not abort the expansion" \
+		grep -qF '[[ "$_reconciled_total" =~ ^[0-9]+$ ]] || _reconciled_total=0' \
+		"$ORCHESTRATOR_SCRIPT"
+	expect_ok "the appendix must only fire when the tally is non-zero" \
+		grep -qF 'if (( _reconciled_total > 0 )); then' \
+		"$ORCHESTRATOR_SCRIPT"
+	expect_ok "the appended line must name the tally and its provenance" \
+		grep -qF '**Reconciled:** ${_reconciled_total} task(s) promoted from failed to completed via branch-evidence reconciliation.' \
+		"$ORCHESTRATOR_SCRIPT"
 }

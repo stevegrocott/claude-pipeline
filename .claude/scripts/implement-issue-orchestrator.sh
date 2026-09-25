@@ -1212,6 +1212,7 @@ init_status() {
             quality_iterations: 0,
             test_iterations: 0,
             pr_review_iterations: 0,
+            reconciled_count: 0,
             stage_started_at: null,
             last_update: (now | todate),
             log_dir: $log_dir,
@@ -1997,7 +1998,10 @@ write_task_summary_to_status() {
 #   "iteration_summary": {
 #     "quality_iterations":    number,
 #     "test_iterations":       number,
-#     "pr_review_iterations":  number
+#     "pr_review_iterations":  number,
+#     "reconciled_count":      number  -- tasks promoted failed->completed
+#                                         via branch-evidence reconciliation
+#                                         (issue #810)
 #   },
 #   "escalations": [
 #     { "stage": string, "from_model": string, "to_model": string, "reason": string }, ...
@@ -2093,7 +2097,13 @@ export_metrics() {
             iteration_summary: {
                 quality_iterations:   ($status.quality_iterations // 0),
                 test_iterations:      ($status.test_iterations // 0),
-                pr_review_iterations: ($status.pr_review_iterations // 0)
+                pr_review_iterations: ($status.pr_review_iterations // 0),
+                # reconciled_count is the run-wide tally that
+                # reconcile_failed_tasks_with_branch_evidence() persists in
+                # $STATUS_FILE (issue #810 task 1). `// 0` covers status
+                # files predating that field, matching the fallback the
+                # COMPLETE-stage completion summary uses (task 2).
+                reconciled_count:     ($status.reconciled_count // 0)
             },
             escalations: ($status.escalations // []),
             # Roll per-stage tokens/estimated_cost up into the run-level
@@ -5893,7 +5903,11 @@ _file_set_contained() {
 # Arguments:
 #   $1 - base branch name to diff against (e.g. "main")
 # Globals:
-#   STATUS_FILE      - read tasks from and write reconciled statuses to
+#   STATUS_FILE      - read tasks from and write reconciled statuses to;
+#                       each promotion also increments the top-level
+#                       .reconciled_count field (issue #810), a run-wide
+#                       tally that survives across this function's multiple
+#                       call sites within a run
 #   DEGRADED_STAGES  - consulted for this run's test-suite verdict
 # Outputs:
 #   The number of tasks reconciled (promoted from "failed" to "completed")
@@ -5995,9 +6009,19 @@ reconcile_failed_tasks_with_branch_evidence() {
 			# rewrites fields this filter names, so omitting it already
 			# preserves the recorded history without a read-back-and-
 			# reassign round trip.
+			# .reconciled_count is a run-level tally (issue #810 task 1),
+			# incremented alongside the per-task write so it stays atomic
+			# with the promotion it counts. It persists in $STATUS_FILE
+			# rather than a local variable because this function runs twice
+			# per implement stage (the task-loop call and the gate-time
+			# revalidate_partial_block_against_branch() re-check) and
+			# downstream consumers — the completion summary and
+			# export_metrics() — read $STATUS_FILE directly rather than
+			# sharing this function's call stack.
 			if status_json_write --argjson id "$recon_id" \
 			   '(.tasks[] | select(.id == $id)).status = "completed" |
 			    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
+			    .reconciled_count = ((.reconciled_count // 0) + 1) |
 			    .last_update = (now | todate)'; then
 				sync_status_to_log
 				reconciled=$((reconciled + 1))
@@ -13177,6 +13201,22 @@ $complete_skill
 
         local complete_summary
         complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
+
+        # Append the reconciled-task tally to the completion summary when
+        # non-zero (issue #810 task 2). reconcile_failed_tasks_with_branch_
+        # evidence() persists .reconciled_count in $STATUS_FILE (task 1) but
+        # that tally is otherwise invisible to a human reviewer reading only
+        # the PR comment — surface it here so a reader can see that some
+        # "completed" tasks were promoted from a stage-reported "failed" via
+        # branch evidence rather than trust status.json blindly.
+        local _reconciled_total
+        _reconciled_total=$(jq -r '.reconciled_count // 0' "$STATUS_FILE" 2>/dev/null)
+        [[ "$_reconciled_total" =~ ^[0-9]+$ ]] || _reconciled_total=0
+        if (( _reconciled_total > 0 )); then
+            complete_summary="${complete_summary}
+
+**Reconciled:** ${_reconciled_total} task(s) promoted from failed to completed via branch-evidence reconciliation."
+        fi
 
         # Add degradation warning to completion comment if any stages soft-failed
         local degraded_warning=""
