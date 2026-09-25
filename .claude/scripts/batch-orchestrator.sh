@@ -177,6 +177,17 @@ _PREFLIGHT_SKIPPED=false
 # rather than implemented in a single expensive pass. Empty when not epic.
 _EPIC_SCOPE=""
 
+# Out-of-band terminal-status signal set by process_issue() (issue #809),
+# mirroring the _PREFLIGHT_SKIPPED pattern above. process_issue() returns 0
+# for several non-success terminal states (already_implemented,
+# merge_blocked, budget_exceeded) so they stay out of consecutive_failures
+# / the circuit breaker, but callers still need to tell those apart from a
+# genuine success when emitting telemetry. Reset to "" at the top of every
+# process_issue() call, set at each non-success return, and read by the
+# caller immediately after process_issue() returns — before any other
+# process_issue() invocation overwrites it.
+_TERMINAL_STATUS=""
+
 # Skip reason + merged-PR number set by check_issue_resolved_upstream();
 # read by the batch loop immediately after the call. Kept separate from
 # _SKIP_REASON (owned by validate_issue_for_processing()) so the two
@@ -1576,6 +1587,12 @@ process_issue() {
     # returns, before any other process_issue() invocation overwrites it.
     _PREFLIGHT_SKIPPED=false
 
+    # Reset the out-of-band terminal-status signal for this call (issue
+    # #809). Callers must read _TERMINAL_STATUS immediately after
+    # process_issue() returns, before any other process_issue()
+    # invocation overwrites it.
+    _TERMINAL_STATUS=""
+
     log "=========================================="
     log "Starting issue #$issue_num"
     log "=========================================="
@@ -1877,6 +1894,7 @@ process_issue() {
         update_issue_field "$issue_num" "status" "already_done"
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
+        _TERMINAL_STATUS="already_done"
         return 0
     fi
 
@@ -1888,6 +1906,7 @@ process_issue() {
         fi
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
+        _TERMINAL_STATUS="merge_blocked"
         return 0
     fi
 
@@ -1905,6 +1924,7 @@ process_issue() {
         fi
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
+        _TERMINAL_STATUS="budget_exceeded"
         return 0
     fi
 
