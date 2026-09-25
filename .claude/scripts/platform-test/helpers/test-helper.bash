@@ -298,6 +298,23 @@ assert_mock_called_with() {
     return 0
 }
 
+# Check that a specific command was NOT called (substring match in call log).
+# Do not call this via `! assert_mock_called_with ...` — bash exempts `!`-negated
+# commands from `set -e`, so a real invocation would silently pass under bats.
+assert_mock_not_called_with() {
+    local pattern="$1"
+    local msg="${2:-Mock should NOT have been called with: $pattern}"
+    local log
+    log=$(mock_calls)
+    if [[ "$log" == *"$pattern"* ]]; then
+        echo "FAIL: $msg"
+        echo "  Call log:"
+        echo "  $log"
+        return 1
+    fi
+    return 0
+}
+
 # Assert output contains string
 assert_output_contains() {
     local needle="$1"

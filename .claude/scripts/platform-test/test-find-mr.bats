@@ -90,6 +90,6 @@ teardown() {
     [ "$status" -ne 0 ]
     assert_output_contains "unrecognised GIT_HOST"
     assert_output_contains "bitbucket"
-    ! assert_mock_called_with "gh pr list"
-    ! assert_mock_called_with "glab mr list"
+    assert_mock_not_called_with "gh pr list"
+    assert_mock_not_called_with "glab mr list"
 }
