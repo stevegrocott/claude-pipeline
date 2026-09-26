@@ -7491,7 +7491,9 @@ guard_commit_path_allowlist() {
 	if (( ${#bad[@]} > 0 )); then
 		log_error \
 			"commit $ref touches paths outside the" \
-			"code/tests allowlist: ${bad[*]}"
+			"code/tests allowlist: ${bad[*]}" \
+			"— set EXTRA_COMMIT_PATHS to a pipe-separated list of" \
+			"glob patterns to allow additional paths"
 		return 1
 	fi
 	return 0

@@ -726,6 +726,21 @@ WRAPPER
     [ "$status" -eq 0 ]
 }
 
+@test "guard_commit_path_allowlist rejection message names EXTRA_COMMIT_PATHS as the remedy" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-835-remedy
+    echo "some,csv,data" > notes.csv
+    git add notes.csv
+    git commit -q -m "add notes.csv"
+
+    make_guard_wrapper "$TEST_TMP/guard_remedy_wrapper.sh"
+
+    run "$TEST_TMP/guard_remedy_wrapper.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"EXTRA_COMMIT_PATHS"* ]] || \
+        fail "Expected rejection message to name EXTRA_COMMIT_PATHS as the remedy. Got: $output"
+}
+
 # =============================================================================
 # E2E_CONTAINER_REBUILD gating + the repaired e2e_verify skip guard (issue #801)
 # =============================================================================
