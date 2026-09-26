@@ -453,6 +453,40 @@ _make_fake_consumer() {
 	}
 }
 
+@test "(#812 AC1) guard catches a hook shadowed by the bundle's nested hooks/scripts/ path" {
+	_make_fake_pipeline
+	_make_fake_consumer
+
+	# The bundle nests hooks one level deeper than planned_sync_paths() emits
+	# (plugins/pipeline-core/hooks/scripts/<file> vs the .claude/hooks/<file>
+	# it compares against), so an exact-path shadow check never matches even
+	# though block-gh-issue-create.sh is byte-identical in both trees.
+	mkdir -p "$TEST_TMP/plugins/pipeline-core/hooks/scripts"
+	cp "$TEST_TMP/.claude/hooks/block-gh-issue-create.sh" \
+		"$TEST_TMP/plugins/pipeline-core/hooks/scripts/block-gh-issue-create.sh"
+
+	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
+
+	[ "$status" -ne 0 ] || {
+		printf 'FAIL: sync succeeded despite a bundle-nested hook shadow:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ "$output" == *"pipeline-core"* ]] || {
+		printf 'FAIL: failure does not name the plugin:\n%s\n' "$output" >&2
+		return 1
+	}
+	[[ "$output" == *"block-gh-issue-create.sh"* ]] || {
+		printf 'FAIL: failure does not name the shadowed hook:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ ! -f "$CONSUMER/.claude/hooks/block-gh-issue-create.sh" ]] || {
+		printf 'FAIL: guard fired but the file was written anyway\n' >&2
+		return 1
+	}
+}
+
 @test "(#632 AC4) consumer config still syncs" {
 	_make_fake_pipeline
 	_make_fake_consumer
