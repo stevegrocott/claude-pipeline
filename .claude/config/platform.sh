@@ -127,11 +127,15 @@ E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 # e.g., "migrations/*|db/migrate/*|prisma/migrations/*"
 MIGRATION_PATH_PATTERNS="${MIGRATION_PATH_PATTERNS:-}"
 
-# Extra commit paths — pipe-separated globs of additional files that agents
-# should stage and commit beyond the files a task explicitly modifies (e.g.,
-# generated lockfiles, build manifests, or config snapshots that must travel
-# with the change).  Empty by default so nothing extra is staged.
-# e.g., "package-lock.json|dist/manifest.json|.claude/config/*.lock"
+# Extra commit paths — pipe-separated globs of additional files that
+# guard_commit_path_allowlist() (implement-issue-orchestrator.sh) admits
+# beyond its built-in allowlist (tests/, docs/**, recognised source-code
+# extensions, root-level markdown). Nested markdown outside docs/ — e.g. a
+# project that keeps documentation in context/ or adr/ — falls through to
+# the default arm and is rejected unless listed here, as are generated
+# lockfiles, build manifests, or config snapshots that must travel with
+# the change. Empty by default so nothing extra is staged.
+# e.g., "context/**|package-lock.json|.claude/config/*.lock"
 EXTRA_COMMIT_PATHS="${EXTRA_COMMIT_PATHS:-}"
 
 # Change-aware deploy tiers — _select_deploy_cmd() selects the deploy command
