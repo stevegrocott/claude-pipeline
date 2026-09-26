@@ -11,6 +11,8 @@
 #                              plus a non-failing non-S task-mix warning
 #   _issue_body_task_complexity(desc)  — S/M/L hint extraction (default M)
 #   _issue_body_task_path_count(desc)  — distinct path count (:Lnn-tolerant)
+#   _issue_body_task_demoted_tokens(desc) — separator-less tokens demoted to
+#                              prose by _issue_body_is_repo_path
 #
 
 bats_require_minimum_version 1.5.0
@@ -712,6 +714,56 @@ Some prose but no task checkboxes.
 		"Strip suffix in \`_infer_agent_from_path\` before extension lookup"
 	[ "$status" -eq 0 ]
 	[ -z "$output" ]
+}
+
+# =============================================================================
+# _issue_body_task_demoted_tokens()
+# =============================================================================
+
+@test "_issue_body_task_demoted_tokens: collects a bare extension-bearing token" {
+	run _issue_body_task_demoted_tokens "Do NOT re-source \`sync.sh\` here"
+	[ "$status" -eq 0 ]
+	[ "$output" = "sync.sh" ]
+}
+
+@test "_issue_body_task_demoted_tokens: excludes slash-bearing paths" {
+	run _issue_body_task_demoted_tokens \
+		"Update \`.claude/scripts/issue-body-lib.sh\`"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "_issue_body_task_demoted_tokens: mixed desc keeps only the bare token" {
+	run _issue_body_task_demoted_tokens \
+		"See \`.claude/scripts/handler.sh\` and rename \`README.md\`"
+	[ "$status" -eq 0 ]
+	[ "$output" = "README.md" ]
+}
+
+@test "_issue_body_task_demoted_tokens: returns empty for desc with no file reference" {
+	run _issue_body_task_demoted_tokens "Add retry logic to improve reliability"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "_issue_body_task_demoted_tokens: output is sorted and unique" {
+	# Same bare token twice → only one entry in output.
+	run _issue_body_task_demoted_tokens \
+		"Mentions \`sync.sh\` twice: \`sync.sh\` again"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c '.' || true)
+	[ "$line_count" -eq 1 ]
+	[ "$output" = "sync.sh" ]
+}
+
+@test "_issue_body_task_demoted_tokens: multiple distinct bare tokens sorted" {
+	run _issue_body_task_demoted_tokens \
+		"Rename \`sync.sh\` and update \`README.md\`"
+	[ "$status" -eq 0 ]
+	local expected
+	expected=$(printf '%s\n' "README.md" "sync.sh")
+	[ "$output" = "$expected" ]
 }
 
 # =============================================================================
