@@ -1970,10 +1970,16 @@ compute_task_summary() {
 # appending "(<n> failed)" when any task failed.  Prints nothing when there is
 # no task roster (e.g. surgical fast-path runs) so callers can splice the
 # result unconditionally.  Data-returning function: no log() to stdout.
+#
+# Also appends "<n> reconciled via branch evidence" when .reconciled_count is
+# positive (issue #912).  The merge-blocked comments splice this line after
+# revalidate_partial_block_against_branch() has run its merge-gate
+# reconciliation pass, so a task promoted only by that pass is reported
+# there too, not just in metrics.json.
 _format_task_summary_line() {
     [[ -f "$STATUS_FILE" ]] || { printf ''; return 0; }
 
-    local total done_count failed_count
+    local total done_count failed_count reconciled_count reconciled_note=""
     total=$(jq -r '(.tasks // []) | length' "$STATUS_FILE" 2>/dev/null || printf '0')
     [[ "$total" =~ ^[0-9]+$ ]] || total=0
     (( total > 0 )) || { printf ''; return 0; }
@@ -1984,12 +1990,19 @@ _format_task_summary_line() {
         "$STATUS_FILE" 2>/dev/null || printf '0')
     [[ "$done_count" =~ ^[0-9]+$ ]] || done_count=0
     [[ "$failed_count" =~ ^[0-9]+$ ]] || failed_count=0
+    reconciled_count=$(jq -r '.reconciled_count // 0' \
+        "$STATUS_FILE" 2>/dev/null || printf '0')
+    [[ "$reconciled_count" =~ ^[0-9]+$ ]] || reconciled_count=0
+    if (( reconciled_count > 0 )); then
+        reconciled_note=" ${reconciled_count} reconciled via branch evidence."
+    fi
 
     if (( failed_count > 0 )); then
-        printf '**Task summary:** %s/%s tasks completed (%s failed).' \
-            "$done_count" "$total" "$failed_count"
+        printf '**Task summary:** %s/%s tasks completed (%s failed).%s' \
+            "$done_count" "$total" "$failed_count" "$reconciled_note"
     else
-        printf '**Task summary:** %s/%s tasks completed.' "$done_count" "$total"
+        printf '**Task summary:** %s/%s tasks completed.%s' \
+            "$done_count" "$total" "$reconciled_note"
     fi
 }
 
@@ -6193,12 +6206,14 @@ reconcile_failed_tasks_with_branch_evidence() {
 			# .reconciled_count is a run-level tally (issue #810 task 1),
 			# incremented alongside the per-task write so it stays atomic
 			# with the promotion it counts. It persists in $STATUS_FILE
-			# rather than a local variable because this function runs twice
-			# per implement stage (the task-loop call and the gate-time
-			# revalidate_partial_block_against_branch() re-check) and
-			# downstream consumers — the completion summary and
-			# export_metrics() — read $STATUS_FILE directly rather than
-			# sharing this function's call stack.
+			# rather than a local variable because this function runs up to
+			# three times per run (the implement stage's own task-loop call,
+			# plus revalidate_partial_block_against_branch()'s gate-time
+			# re-check called once at the top of the "complete" stage and
+			# again at the merge gate — issue #912) and downstream consumers
+			# — the completion comment and export_metrics() — read
+			# $STATUS_FILE directly rather than sharing this function's call
+			# stack.
 			if status_json_write --argjson id "$recon_id" \
 			   '(.tasks[] | select(.id == $id)).status = "completed" |
 			    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
@@ -6294,6 +6309,13 @@ _lacking_evidence_summary() {
 #     evidenced on the branch.
 # A persisted *convergence* reason is never touched — only a partial one — so
 # Gate A keeps precedence over Gate B exactly as before.
+#
+# Called twice (issue #912): once at the top of the "complete" stage, so the
+# completion comment's reconciled-task tally and degraded-stage warning are
+# never stale, and again at the merge gate below to catch any further drift
+# on a resumed run. Both calls are cheap once nothing new has landed, since
+# reconcile_failed_tasks_with_branch_evidence() only re-examines tasks still
+# recorded "failed".
 #
 # Arguments:
 #   $1 - base branch name to diff against (e.g. "main")
@@ -13444,6 +13466,22 @@ Fix the issues and commit. Output a summary of fixes applied."
     else
         set_stage_started "complete"
 
+        # Re-run the gate-time branch-evidence recheck (issue #912) before
+        # this comment is built, not just at the merge_pr gate below. Without
+        # this, a task the implement stage's own task-loop reconciliation
+        # missed — but that a later fix-pr-review-iterN stage's commit
+        # already evidences on the branch — is invisible here: .reconciled_
+        # count and DEGRADED_STAGES would still reflect only the earlier,
+        # task-loop-time reconciliation, so this comment under-reports the
+        # tally that metrics.json (exported at orchestrator exit, after both
+        # this call and the merge_pr-stage one below) ends up with.
+        # revalidate_partial_block_against_branch() is safe to call twice —
+        # reconcile_failed_tasks_with_branch_evidence() only promotes tasks
+        # still recorded "failed", so a repeat call is a cheap no-op once
+        # nothing new has landed — and the merge_pr-stage call still stands
+        # to catch a resumed run where the branch gained evidence in between.
+        revalidate_partial_block_against_branch "$BASE_BRANCH"
+
         local complete_skill
         complete_skill=$(load_skill "complete-summary")
 
@@ -13470,7 +13508,10 @@ $complete_skill
         # that tally is otherwise invisible to a human reviewer reading only
         # the PR comment — surface it here so a reader can see that some
         # "completed" tasks were promoted from a stage-reported "failed" via
-        # branch evidence rather than trust status.json blindly.
+        # branch evidence rather than trust status.json blindly. The
+        # revalidate_partial_block_against_branch() call just above (issue
+        # #912) means this count already includes any gate-time-only
+        # reconciliation, not just the task loop's own earlier pass.
         local _reconciled_total
         _reconciled_total=$(jq -r '.reconciled_count // 0' "$STATUS_FILE" 2>/dev/null)
         [[ "$_reconciled_total" =~ ^[0-9]+$ ]] || _reconciled_total=0
@@ -13532,6 +13573,11 @@ $complete_summary
         # "Partial implementation:" reason reflect branch content at merge time
         # rather than stale per-stage bookkeeping. A convergence reason is left
         # untouched, so Gate A keeps precedence over Gate B.
+        #
+        # This is the second call this run (issue #912) — the "complete"
+        # stage above already ran the same recheck so its comment isn't
+        # stale — kept here too in case a resumed run lets the branch gain
+        # evidence between that stage and this gate.
         # ---------------------------------------------------------------------
         revalidate_partial_block_against_branch "$BASE_BRANCH"
 
@@ -13685,7 +13731,9 @@ To override this gate and merge anyway, re-run with \`E2E_VERIFY_BLOCKING=0\`." 
                 comment_issue "Merge: Blocked (E2E Verification)" \
                     "🚫 Merge of PR #$pr_number blocked — the \`e2e_verify\` stage never executed this branch's E2E spec. PR left open for human review.
 
-$merge_blocked_reason" \
+$merge_blocked_reason${_task_summary_line:+
+
+$_task_summary_line}" \
                     "default"
                 set_final_state "merge_blocked"
                 cp "$STATUS_FILE" "$LOG_BASE/status.json"
@@ -13740,7 +13788,9 @@ $_task_summary_line}" \
             comment_pr "$pr_number" "Merge Blocked — Unresolved Quality Feedback" \
                 "🚫 Auto-merge was blocked because the internal quality loop could not resolve recurring review feedback. This PR has been left **open** for a human to review and merge (or push further fixes).
 
-$merge_blocked_reason
+$merge_blocked_reason${_task_summary_line:+
+
+$_task_summary_line}
 
 To override this gate and merge anyway, re-run with \`BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0\`." \
                 "default"

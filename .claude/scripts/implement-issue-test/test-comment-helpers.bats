@@ -331,6 +331,19 @@ EOF
     [[ "$main_def" == *'comment_pr "$pr_number" "Implementation Complete"'* ]]
 }
 
+@test "main flow re-validates partial-block reconciliation before the completion comment" {
+    # revalidate_partial_block_against_branch() re-runs branch-evidence
+    # reconciliation and rewrites .reconciled_count/DEGRADED_STAGES. It must
+    # run before the "Implementation Complete" comment reads those fields, or
+    # a task promoted only by this gate-time recheck never appears there —
+    # only in metrics.json, exported later at orchestrator exit.
+    local main_def
+    main_def=$(declare -f main)
+
+    local before_complete="${main_def%%'comment_pr "$pr_number" "Implementation Complete"'*}"
+    [[ "$before_complete" == *'revalidate_partial_block_against_branch "$BASE_BRANCH"'* ]]
+}
+
 @test "quality loop does not call comment_issue for intermediate stages" {
     # Intermediate quality loop comments were removed in #561 to reduce noise.
     # Only the convergence failure (error termination condition) comment remains.

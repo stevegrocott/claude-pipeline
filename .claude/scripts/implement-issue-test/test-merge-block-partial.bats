@@ -186,6 +186,60 @@ teardown() {
 	[[ "$line" == *'2 failed'* ]]
 }
 
+@test "_format_task_summary_line reports the reconciled count (issue #912)" {
+	# .reconciled_count is written by the merge-gate reconciliation pass;
+	# merge-blocked comments splice this line, so the count must appear.
+	jq '.tasks = [
+		{"id":1,"description":"A","status":"completed"},
+		{"id":2,"description":"B","status":"completed",
+		 "reconciled_from":"failed"},
+		{"id":3,"description":"C","status":"failed"}
+	] | .reconciled_count = 1' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	local line
+	line=$(_format_task_summary_line)
+
+	[[ "$line" == *'2/3 tasks completed (1 failed).'* ]]
+	[[ "$line" == *'1 reconciled via branch evidence.'* ]]
+}
+
+@test "_format_task_summary_line omits reconciled note when count is zero" {
+	jq '.tasks = [
+		{"id":1,"description":"A","status":"completed"}
+	] | .reconciled_count = 0' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	local line
+	line=$(_format_task_summary_line)
+
+	[[ "$line" == '**Task summary:** 1/1 tasks completed.' ]]
+}
+
+@test "every merge-blocked comment is built after the merge-gate recheck" {
+	# The summary line must be computed after
+	# revalidate_partial_block_against_branch() at the merge gate so its
+	# reconciled count includes that pass; and each blocked PR comment
+	# (manual, e2e, partial, convergence) must splice it.
+	local main_def after_gate
+	main_def=$(declare -f main)
+	after_gate="${main_def#*'local merge_blocked_reason'}"
+	local before_gate="${main_def%%'local merge_blocked_reason'*}"
+	[[ "$before_gate" == *'revalidate_partial_block_against_branch'* ]]
+	[[ "$after_gate" == *'_task_summary_line=$(_format_task_summary_line)'* ]]
+
+	local title rest
+	for title in 'Merge Held — Manual Review Required' \
+		'Merge Blocked — E2E Verification Did Not Run' \
+		'Merge Blocked — Partial Delivery' \
+		'Merge Blocked — Unresolved Quality Feedback'; do
+		rest="${after_gate#*"$title"}"
+		[[ "$rest" != "$after_gate" ]]
+		rest="${rest%%comment_issue*}"
+		[[ "$rest" == *'$_task_summary_line'* ]]
+	done
+}
+
 @test "_format_task_summary_line is empty when there are no tasks" {
 	# init_status leaves .tasks absent/empty
 	local line
