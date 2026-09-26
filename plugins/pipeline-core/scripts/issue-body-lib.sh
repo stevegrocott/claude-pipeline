@@ -836,6 +836,7 @@ assert_issue_valid() {
 	# Criteria 2, 3, 6 & 7: agents resolve, path suffixes resolve, granularity,
 	# and every open task carries at least one file path.
 	local agent desc remapped path complexity path_count
+	local demoted_tokens demoted_token suggestion message
 	local -i s_count=0 nons_count=0
 	while IFS=$'\t' read -r agent desc; do
 		[[ -z "$agent" ]] && continue
@@ -893,7 +894,36 @@ assert_issue_valid() {
 		# no annotation is gated exactly as before.
 		if (( path_count == 0 )) \
 			&& [[ -z "$(_issue_body_task_deliverable "$desc")" ]]; then
-			errors+=("task has no file path: ${desc}")
+			# Naming the cause (#816): a task can reach path_count 0 either
+			# because it names no path token at all, or because every token
+			# it names was demoted to prose by _issue_body_is_repo_path
+			# (#689) — most commonly a separator-less repo-root file like
+			# `sync.sh` that can never resolve in that bare form. Telling
+			# the author only "no file path" sends them hunting for a path
+			# that already exists; naming the demoted token(s) and their
+			# resolving `./` form (e.g. `./sync.sh`) points straight at the
+			# one-character fix.
+			#
+			# Only tokens that actually resolve at the repo root are worth
+			# suggesting: a demoted token can also be a genuine prose mention
+			# of a file that does not exist (e.g. `model-config.sh` in "do
+			# NOT re-source `model-config.sh`"), and `./model-config.sh`
+			# would not resolve either — suggesting it would just replace one
+			# wrong guess with another.
+			suggestion=""
+			demoted_tokens=$(_issue_body_task_demoted_tokens "$desc")
+			while IFS= read -r demoted_token; do
+				[[ -z "$demoted_token" ]] && continue
+				_issue_body_path_resolves "$demoted_token" "$repo_root" \
+					|| continue
+				suggestion+="${suggestion:+, }$demoted_token -> ./$demoted_token"
+			done <<< "$demoted_tokens"
+			message="task has no file path: ${desc}"
+			if [[ -n "$suggestion" ]]; then
+				message+=" (repo-root file cited without a path prefix:"
+				message+=" ${suggestion})"
+			fi
+			errors+=("$message")
 		fi
 
 		# Criterion 6: task granularity.  Tally the S/non-S mix for the
