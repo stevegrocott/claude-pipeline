@@ -1131,7 +1131,10 @@ WRAPPER
 @test "extractor carries the other dropped config defaults" {
     [ "$MERGE_GIT_TIMEOUT" = "60" ]
     [ "$MERGE_COMMENT_TIMEOUT" = "60" ]
-    [ "$MERGE_MR_STEP_TIMEOUT" = "120" ]
+    # 3000 since #931: this wrapper must stay above merge-mr.sh's own
+    # MERGE_MR_POLL_MAX (2700), or the outer timeout kills the script
+    # mid-wait. test-scripted-merge.bats asserts that ordering directly.
+    [ "$MERGE_MR_STEP_TIMEOUT" = "3000" ]
     [ "$VALIDATE_PLAN_GIT_TIMEOUT" = "30" ]
     [ "$IMPLEMENT_GIT_TIMEOUT" = "30" ]
     [ "$TEST_ITER_WALL_TIME_SLACK" = "120" ]
