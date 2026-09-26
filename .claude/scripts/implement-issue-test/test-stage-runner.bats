@@ -72,10 +72,25 @@ teardown() {
 
 @test "run_stage fails with missing schema file" {
     run run_stage "test-stage" "test prompt" "nonexistent.json"
-    [ "$status" -eq 1 ]
+
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
+
     # New stage_result envelope reports error_kind="schema_not_found"
     # (snake_case; see schemas/stage-result.json enum).
-    [[ "$output" == *"schema_not_found"* ]]
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "schema_not_found" ] || \
+        fail "Expected error_kind=schema_not_found, got: $error_kind"
 }
 
 @test "run_stage uses correct schema file" {
@@ -742,13 +757,23 @@ teardown() {
 
     run run_stage "stage-1" "prompt" "test-schema.json" "bad-agent"
 
-    # run_stage must bail (non-zero exit)
-    [ "$status" -ne 0 ] || \
-        fail "Expected non-zero exit when agent not found, got: status=$status"
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
 
     # Stage result envelope must report error_kind=agent_not_found
-    [[ "$output" == *'"agent_not_found"'* ]] || \
-        fail "Expected agent_not_found in stage result, got: $output"
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "agent_not_found" ] || \
+        fail "Expected error_kind=agent_not_found, got: $error_kind"
 
     # Must not retry — exactly one invocation of the claude CLI
     local call_count=0
@@ -1093,9 +1118,23 @@ teardown() {
     # implement + L complexity resolves to opus, the ceiling model that
     # cannot escalate further on error_max_turns.
     run run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"max_turns_exhausted_at_ceiling"* ]] || \
-        fail "Expected ceiling error in output. Got: $output"
+
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "max_turns_exhausted_at_ceiling" ] || \
+        fail "Expected error_kind=max_turns_exhausted_at_ceiling, got: $error_kind"
 }
 
 @test "run_stage does not include max-turns cap on error_max_turns escalation retry" {
@@ -1196,8 +1235,8 @@ teardown() {
     export counter_file
 
     run run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
-    [ "$status" -eq 1 ] || \
-        fail "Second exhaustion must be terminal, got status $status. Out: $output"
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # terminality is asserted below via the envelope's status/error_kind.
 
     local final_count
     final_count=$(cat "$counter_file")
