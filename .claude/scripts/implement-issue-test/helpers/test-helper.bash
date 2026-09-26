@@ -598,6 +598,15 @@ expect_not_ok() {
 
 # Source only the functions from the orchestrator (not main execution)
 source_orchestrator_functions() {
+    # The real orchestrator exports _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR
+    # when it re-execs from a private copy (issue #778). If a developer ran
+    # it directly in this shell before invoking bats, the value leaks in via
+    # inherited environment and the extracted SCRIPT_DIR= line below resolves
+    # to that stale path instead of falling back to TEST_TMP, which every
+    # test in this file that reads $SCRIPT_DIR depends on. Unset it so this
+    # harness's SCRIPT_DIR is deterministic regardless of ambient shell state.
+    unset _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR
+
     # Extract just the functions, not the main execution or argument parsing
     local func_file="$TEST_TMP/orchestrator_functions.bash"
 
