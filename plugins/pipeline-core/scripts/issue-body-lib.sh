@@ -416,6 +416,33 @@ _issue_body_is_repo_path() {
 }
 
 #
+# Collects the separator-less tokens extracted from a task description that
+# _issue_body_is_repo_path always demotes to prose (#816).  A separator-less
+# token — e.g. a repo-root file cited bare as `` `sync.sh` `` or
+# `` `README.md` ``, or a genuine prose mention like `` `model-config.sh` ``
+# — can never satisfy _issue_body_path_resolves (it only walks ancestor
+# directories when the token contains a `/`), so it is rejected before
+# resolution is even attempted. Collecting these lets a caller distinguish
+# "this task named no path at all" from "this task named a path in a form
+# that cannot resolve", and — for the former — suggest the `./` form that
+# does resolve.
+#
+# Arguments:
+#   $1 - task description string
+# Outputs:
+#   Newline-separated, sorted-unique separator-less tokens (empty if none)
+#
+_issue_body_task_demoted_tokens() {
+	local desc="$1"
+	local token
+	while IFS= read -r token; do
+		[[ -z "$token" ]] && continue
+		[[ "$token" == */* ]] && continue
+		printf '%s\n' "$token"
+	done < <(_issue_body_extract_paths "$desc") | sort -u
+}
+
+#
 # Extracts the S/M/L complexity hint from a task description.  The hint is the
 # first `**(S)**` / `**(M)**` / `**(L)**` marker (case-insensitive) in the
 # description.  A description with no marker defaults to "M" — mirroring the
@@ -809,6 +836,7 @@ assert_issue_valid() {
 	# Criteria 2, 3, 6 & 7: agents resolve, path suffixes resolve, granularity,
 	# and every open task carries at least one file path.
 	local agent desc remapped path complexity path_count
+	local demoted_tokens demoted_token suggestion message
 	local -i s_count=0 nons_count=0
 	while IFS=$'\t' read -r agent desc; do
 		[[ -z "$agent" ]] && continue
@@ -866,7 +894,36 @@ assert_issue_valid() {
 		# no annotation is gated exactly as before.
 		if (( path_count == 0 )) \
 			&& [[ -z "$(_issue_body_task_deliverable "$desc")" ]]; then
-			errors+=("task has no file path: ${desc}")
+			# Naming the cause (#816): a task can reach path_count 0 either
+			# because it names no path token at all, or because every token
+			# it names was demoted to prose by _issue_body_is_repo_path
+			# (#689) — most commonly a separator-less repo-root file like
+			# `sync.sh` that can never resolve in that bare form. Telling
+			# the author only "no file path" sends them hunting for a path
+			# that already exists; naming the demoted token(s) and their
+			# resolving `./` form (e.g. `./sync.sh`) points straight at the
+			# one-character fix.
+			#
+			# Only tokens that actually resolve at the repo root are worth
+			# suggesting: a demoted token can also be a genuine prose mention
+			# of a file that does not exist (e.g. `model-config.sh` in "do
+			# NOT re-source `model-config.sh`"), and `./model-config.sh`
+			# would not resolve either — suggesting it would just replace one
+			# wrong guess with another.
+			suggestion=""
+			demoted_tokens=$(_issue_body_task_demoted_tokens "$desc")
+			while IFS= read -r demoted_token; do
+				[[ -z "$demoted_token" ]] && continue
+				_issue_body_path_resolves "$demoted_token" "$repo_root" \
+					|| continue
+				suggestion+="${suggestion:+, }$demoted_token -> ./$demoted_token"
+			done <<< "$demoted_tokens"
+			message="task has no file path: ${desc}"
+			if [[ -n "$suggestion" ]]; then
+				message+=" (repo-root file cited without a path prefix:"
+				message+=" ${suggestion})"
+			fi
+			errors+=("$message")
 		fi
 
 		# Criterion 6: task granularity.  Tally the S/non-S mix for the

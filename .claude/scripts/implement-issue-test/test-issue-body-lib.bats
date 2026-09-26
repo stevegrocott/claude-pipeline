@@ -11,6 +11,8 @@
 #                              plus a non-failing non-S task-mix warning
 #   _issue_body_task_complexity(desc)  — S/M/L hint extraction (default M)
 #   _issue_body_task_path_count(desc)  — distinct path count (:Lnn-tolerant)
+#   _issue_body_task_demoted_tokens(desc) — separator-less tokens demoted to
+#                              prose by _issue_body_is_repo_path
 #
 
 bats_require_minimum_version 1.5.0
@@ -244,6 +246,65 @@ valid_body() {
 	run assert_issue_valid "$body"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"task has no file path"* ]]
+}
+
+# --- Issue #816: the #689 demotion rule is correct but the zero-path
+# diagnostic misattributes the cause when the demoted token is a real
+# repo-root file (`sync.sh`, `README.md`) rather than a prose mention — the
+# author is told "no file path" when the fix is `./sync.sh`. ---
+
+@test "assert_issue_valid: zero-path error names a demoted repo-root token and suggests its ./ form" {
+	# AC1 — `sync.sh` is separator-less so _issue_body_is_repo_path demotes it
+	# to prose (#689) even though the file exists at the repo root; the
+	# zero-path diagnostic must name the demoted token and suggest the ./
+	# form that actually resolves, not just say "no file path".
+	touch "$ISSUE_BODY_REPO_ROOT/sync.sh"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Update the sync entrypoint — \`sync.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"sync.sh"* ]]
+	[[ "$output" == *"./sync.sh"* ]]
+}
+
+@test "assert_issue_valid: a repo-root file cited with the ./ form validates" {
+	# AC2 — the ./ form is the one bare-repo-root citation that always
+	# resolves, so the form the diagnostic teaches must actually pass.
+	touch "$ISSUE_BODY_REPO_ROOT/sync.sh"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Update the sync entrypoint — \`./sync.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: a demoted token adds no ./ suggestion noise when the task already has a real path" {
+	# Risk mitigation — demoted-token suggestions are only decision-relevant
+	# when the task has zero real paths; a task that already names a real
+	# path must validate without the ./sync.sh noise leaking in.
+	touch "$ISSUE_BODY_REPO_ROOT/sync.sh"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** See \`sync.sh\` and edit — \`.claude/scripts/issue-body-lib.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"./sync.sh"* ]]
 }
 
 # --- Issue #689 AC2: regression fixtures replaying the #679 and #678 bodies
@@ -712,6 +773,56 @@ Some prose but no task checkboxes.
 		"Strip suffix in \`_infer_agent_from_path\` before extension lookup"
 	[ "$status" -eq 0 ]
 	[ -z "$output" ]
+}
+
+# =============================================================================
+# _issue_body_task_demoted_tokens()
+# =============================================================================
+
+@test "_issue_body_task_demoted_tokens: collects a bare extension-bearing token" {
+	run _issue_body_task_demoted_tokens "Do NOT re-source \`sync.sh\` here"
+	[ "$status" -eq 0 ]
+	[ "$output" = "sync.sh" ]
+}
+
+@test "_issue_body_task_demoted_tokens: excludes slash-bearing paths" {
+	run _issue_body_task_demoted_tokens \
+		"Update \`.claude/scripts/issue-body-lib.sh\`"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "_issue_body_task_demoted_tokens: mixed desc keeps only the bare token" {
+	run _issue_body_task_demoted_tokens \
+		"See \`.claude/scripts/handler.sh\` and rename \`README.md\`"
+	[ "$status" -eq 0 ]
+	[ "$output" = "README.md" ]
+}
+
+@test "_issue_body_task_demoted_tokens: returns empty for desc with no file reference" {
+	run _issue_body_task_demoted_tokens "Add retry logic to improve reliability"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "_issue_body_task_demoted_tokens: output is sorted and unique" {
+	# Same bare token twice → only one entry in output.
+	run _issue_body_task_demoted_tokens \
+		"Mentions \`sync.sh\` twice: \`sync.sh\` again"
+	[ "$status" -eq 0 ]
+	local line_count
+	line_count=$(printf '%s\n' "$output" | grep -c '.' || true)
+	[ "$line_count" -eq 1 ]
+	[ "$output" = "sync.sh" ]
+}
+
+@test "_issue_body_task_demoted_tokens: multiple distinct bare tokens sorted" {
+	run _issue_body_task_demoted_tokens \
+		"Rename \`sync.sh\` and update \`README.md\`"
+	[ "$status" -eq 0 ]
+	local expected
+	expected=$(printf '%s\n' "README.md" "sync.sh")
+	[ "$output" = "$expected" ]
 }
 
 # =============================================================================
