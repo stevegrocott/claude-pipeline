@@ -337,11 +337,53 @@ wait_for_full_run() {
   return 1
 }
 
+# _report_mergeable_timeout <pr> <last_state> <elapsed> <max>
+#
+# The old message said "Timed out waiting for GitHub to compute mergeability"
+# for every exit, which misdescribed the common case: GitHub computes that
+# field in seconds, and what the loop was really waiting on was a CI run.
+# Reporting the last observed state makes the difference diagnosable from the
+# one log line an operator sees (issue #931).
+_report_mergeable_timeout() {
+  local pr="$1" last_state="$2" elapsed="$3" max="$4"
+
+  case "$last_state" in
+    UNSTABLE|BLOCKED|PENDING)
+      echo "Timed out after ${elapsed}s (limit ${max}s): PR #$pr checks were" \
+        "still pending (last state: $last_state). Raise MERGE_MR_POLL_MAX if" \
+        "this CI run legitimately takes longer." >&2
+      ;;
+    UNKNOWN|"")
+      echo "Timed out after ${elapsed}s (limit ${max}s): GitHub never" \
+        "reported a mergeability state for PR #$pr." >&2
+      ;;
+    *)
+      echo "Timed out after ${elapsed}s (limit ${max}s): PR #$pr never became" \
+        "mergeable (last state: $last_state)." >&2
+      ;;
+  esac
+}
+
 wait_for_mergeable() {
   local pr="$1"
-  local interval="${MERGE_MR_POLL_INTERVAL:-10}"
-  local max="${MERGE_MR_POLL_MAX:-90}"
+  # 90s was far too short for what this loop actually waits on. A PR is
+  # UNSTABLE for the whole CI run — ~9 minutes on this repo — so any merge
+  # attempt that arrived before CI finished expired here and was reported as
+  # a merge FAILURE on a PR that was merely unfinished. Issue #926's PR #930
+  # went green eleven minutes after this gave up (issue #931).
+  #
+  # 2700 matches MERGE_MR_FULL_RUN_POLL_MAX above, which is the existing
+  # precedent in this file for how long waiting on CI costs. The long budget
+  # is only reachable while checks are legitimately pending: a check that has
+  # concluded in failure returns 1 immediately via
+  # _has_concluded_check_failure, and DIRTY returns 1 at once, so a genuinely
+  # doomed PR still fails fast.
+  local interval="${MERGE_MR_POLL_INTERVAL:-15}"
+  local max="${MERGE_MR_POLL_MAX:-2700}"
   local elapsed=0
+  # Remembered so the timeout message can say what it was waiting FOR —
+  # pending checks read very differently from an uncomputed field.
+  local last_state="UNKNOWN"
 
   if [ "$MERGE_MR_MERGE_STATE_GATE" != "1" ]; then
     while [ "$elapsed" -lt "$max" ]; do
@@ -371,6 +413,7 @@ wait_for_mergeable() {
           return 1
           ;;
         *)
+          last_state="$state"
           echo "Waiting for PR #$pr to become mergeable (state: $state, ${elapsed}s elapsed)..." >&2
           sleep "$interval"
           elapsed=$((elapsed + interval))
@@ -378,7 +421,7 @@ wait_for_mergeable() {
       esac
     done
 
-    echo "Timed out waiting for GitHub to compute mergeability" >&2
+    _report_mergeable_timeout "$pr" "$last_state" "$elapsed" "$max"
     return 1
   fi
 
@@ -429,6 +472,7 @@ wait_for_mergeable() {
           fi
         fi
 
+        last_state="$merge_state"
         echo "Waiting for PR #$pr to become mergeable (mergeStateStatus: $merge_state, ${elapsed}s elapsed)..." >&2
         sleep "$interval"
         elapsed=$((elapsed + interval))
@@ -436,7 +480,7 @@ wait_for_mergeable() {
     esac
   done
 
-  echo "Timed out waiting for GitHub to compute mergeability" >&2
+  _report_mergeable_timeout "$pr" "$last_state" "$elapsed" "$max"
   return 1
 }
 
