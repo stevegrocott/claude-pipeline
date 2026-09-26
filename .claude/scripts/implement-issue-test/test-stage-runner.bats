@@ -389,13 +389,32 @@ teardown() {
     local hang_fifo="$TEST_TMP/childless-hang.fifo"
     mkfifo "$hang_fifo"
     export hang_fifo
+    local counter_file="$TEST_TMP/childless-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
 
     timeout() {
         # bash function: no child processes exist — the stage subshell is
         # childless.  Block on a FIFO with no writer; only the parent
         # watchdog's SIGTERM can interrupt this read.  No output is emitted
         # so run_stage cannot recover structured data from either attempt.
-        read -r _ < "$hang_fifo" 2>/dev/null || true
+        #
+        # Scoped to the two dispatches this test names (initial + retry):
+        # a double timeout drives decide-action.sh to `escalate` (model
+        # isn't at the opus ceiling), which fires a THIRD, unnamed dispatch
+        # here. Blocking that one too relies on the escalation watchdog
+        # alone to ever return — any hiccup there wedges the whole suite.
+        # Fail it immediately instead so only the two watchdogs this test
+        # is about are actually exercised.
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n <= 2 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 124
+        fi
     }
     export -f timeout
 
