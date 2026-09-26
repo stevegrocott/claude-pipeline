@@ -407,6 +407,7 @@ GIT_CLI="gh"             # gh | glab
 JIRA_PROJECT="PROJ"      # Jira project key
 MERGE_STYLE="squash"     # squash | merge | rebase
 MERGE_MR_NON_BLOCKING_CHECKS=""   # CI check names whose failure must not block the merge, e.g. "frontend-unit-tests" (#861)
+EXTRA_COMMIT_PATHS=""     # Extra glob patterns admitted by the commit allowlist beyond docs/**, tests/, etc., e.g. "context/**" (#835)
 ```
 
 **Jira users:** Install [ACLI](https://bobswift.atlassian.net/wiki/spaces/ACLI) and configure authentication before using the pipeline.
