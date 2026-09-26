@@ -6235,6 +6235,40 @@ reconcile_failed_tasks_with_branch_evidence() {
 	printf '%s\n' "$reconciled"
 }
 
+# append_reconciled_tally() — appends the reconciled-task tally to the
+# COMPLETE-stage PR comment when non-zero (issue #810 task 2).
+# reconcile_failed_tasks_with_branch_evidence() persists .reconciled_count in
+# $STATUS_FILE (task 1) but that tally is otherwise invisible to a human
+# reviewer reading only the PR comment — surface it here so a reader can see
+# that some "completed" tasks were promoted from a stage-reported "failed"
+# via branch evidence rather than trust status.json blindly.
+#
+# Extracted into this named helper (issue #914 task 1) so tests can call the
+# real logic directly instead of maintaining a copied inline reimplementation
+# pinned to the orchestrator source via a drift-guard test.
+#
+# Arguments:
+#   $1 - the completion summary text to (maybe) append the tally to
+# Globals:
+#   STATUS_FILE - read .reconciled_count from
+# Outputs:
+#   The completion summary on stdout, with the reconciled-tally paragraph
+#   appended when .reconciled_count is positive
+append_reconciled_tally() {
+	local complete_summary="$1"
+
+	local _reconciled_total
+	_reconciled_total=$(jq -r '.reconciled_count // 0' "$STATUS_FILE" 2>/dev/null)
+	[[ "$_reconciled_total" =~ ^[0-9]+$ ]] || _reconciled_total=0
+	if (( _reconciled_total > 0 )); then
+		complete_summary="${complete_summary}
+
+**Reconciled:** ${_reconciled_total} task(s) promoted from failed to completed via branch-evidence reconciliation."
+	fi
+
+	printf '%s' "$complete_summary"
+}
+
 # _lacking_evidence_summary() — formats every task still marked "failed" in
 # $STATUS_FILE into a human-readable list for merge_blocked_reason (#620
 # task 3), so a block names the specific tasks lacking file evidence rather
@@ -13502,24 +13536,13 @@ $complete_skill
         local complete_summary
         complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
 
-        # Append the reconciled-task tally to the completion summary when
-        # non-zero (issue #810 task 2). reconcile_failed_tasks_with_branch_
-        # evidence() persists .reconciled_count in $STATUS_FILE (task 1) but
-        # that tally is otherwise invisible to a human reviewer reading only
-        # the PR comment — surface it here so a reader can see that some
-        # "completed" tasks were promoted from a stage-reported "failed" via
-        # branch evidence rather than trust status.json blindly. The
+        # Append the reconciled-task tally via the shared helper (issue #810
+        # task 2; extracted to append_reconciled_tally() for issue #914 task
+        # 1 — see its doc comment for the full rationale). The
         # revalidate_partial_block_against_branch() call just above (issue
         # #912) means this count already includes any gate-time-only
         # reconciliation, not just the task loop's own earlier pass.
-        local _reconciled_total
-        _reconciled_total=$(jq -r '.reconciled_count // 0' "$STATUS_FILE" 2>/dev/null)
-        [[ "$_reconciled_total" =~ ^[0-9]+$ ]] || _reconciled_total=0
-        if (( _reconciled_total > 0 )); then
-            complete_summary="${complete_summary}
-
-**Reconciled:** ${_reconciled_total} task(s) promoted from failed to completed via branch-evidence reconciliation."
-        fi
+        complete_summary=$(append_reconciled_tally "$complete_summary")
 
         # Add degradation warning to completion comment if any stages soft-failed
         local degraded_warning=""
