@@ -1971,15 +1971,16 @@ compute_task_summary() {
 # no task roster (e.g. surgical fast-path runs) so callers can splice the
 # result unconditionally.  Data-returning function: no log() to stdout.
 #
-# Also appends "<n> reconciled via branch evidence" when .reconciled_count is
-# positive (issue #912).  The merge-blocked comments splice this line after
+# Also appends "(<n> reconciled)" when .reconciled_count is positive
+# (issue #913), mirroring the "(<n> failed)" suffix logic below.  The
+# merge-blocked comments splice this line after
 # revalidate_partial_block_against_branch() has run its merge-gate
 # reconciliation pass, so a task promoted only by that pass is reported
 # there too, not just in metrics.json.
 _format_task_summary_line() {
     [[ -f "$STATUS_FILE" ]] || { printf ''; return 0; }
 
-    local total done_count failed_count reconciled_count reconciled_note=""
+    local total done_count failed_count reconciled_count suffix=""
     total=$(jq -r '(.tasks // []) | length' "$STATUS_FILE" 2>/dev/null || printf '0')
     [[ "$total" =~ ^[0-9]+$ ]] || total=0
     (( total > 0 )) || { printf ''; return 0; }
@@ -1993,17 +1994,16 @@ _format_task_summary_line() {
     reconciled_count=$(jq -r '.reconciled_count // 0' \
         "$STATUS_FILE" 2>/dev/null || printf '0')
     [[ "$reconciled_count" =~ ^[0-9]+$ ]] || reconciled_count=0
-    if (( reconciled_count > 0 )); then
-        reconciled_note=" ${reconciled_count} reconciled via branch evidence."
-    fi
 
     if (( failed_count > 0 )); then
-        printf '**Task summary:** %s/%s tasks completed (%s failed).%s' \
-            "$done_count" "$total" "$failed_count" "$reconciled_note"
-    else
-        printf '**Task summary:** %s/%s tasks completed.%s' \
-            "$done_count" "$total" "$reconciled_note"
+        suffix=" (${failed_count} failed)"
     fi
+    if (( reconciled_count > 0 )); then
+        suffix="${suffix} (${reconciled_count} reconciled)"
+    fi
+
+    printf '**Task summary:** %s/%s tasks completed%s.' \
+        "$done_count" "$total" "$suffix"
 }
 
 # _rewrite_running_to_interrupted() — called from the EXIT trap to surface
