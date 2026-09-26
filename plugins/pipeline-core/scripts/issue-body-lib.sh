@@ -416,6 +416,33 @@ _issue_body_is_repo_path() {
 }
 
 #
+# Collects the separator-less tokens extracted from a task description that
+# _issue_body_is_repo_path always demotes to prose (#816).  A separator-less
+# token — e.g. a repo-root file cited bare as `` `sync.sh` `` or
+# `` `README.md` ``, or a genuine prose mention like `` `model-config.sh` ``
+# — can never satisfy _issue_body_path_resolves (it only walks ancestor
+# directories when the token contains a `/`), so it is rejected before
+# resolution is even attempted. Collecting these lets a caller distinguish
+# "this task named no path at all" from "this task named a path in a form
+# that cannot resolve", and — for the former — suggest the `./` form that
+# does resolve.
+#
+# Arguments:
+#   $1 - task description string
+# Outputs:
+#   Newline-separated, sorted-unique separator-less tokens (empty if none)
+#
+_issue_body_task_demoted_tokens() {
+	local desc="$1"
+	local token
+	while IFS= read -r token; do
+		[[ -z "$token" ]] && continue
+		[[ "$token" == */* ]] && continue
+		printf '%s\n' "$token"
+	done < <(_issue_body_extract_paths "$desc") | sort -u
+}
+
+#
 # Extracts the S/M/L complexity hint from a task description.  The hint is the
 # first `**(S)**` / `**(M)**` / `**(L)**` marker (case-insensitive) in the
 # description.  A description with no marker defaults to "M" — mirroring the
