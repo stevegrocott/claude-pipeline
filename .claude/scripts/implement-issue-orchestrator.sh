@@ -10029,17 +10029,19 @@ rebuild_and_health_check() {
 
 	while true; do
 		if curl -sf "$health_url" >/dev/null 2>&1; then
+			local poll_elapsed=$(( $(date +%s) - poll_start_ts ))
 			local elapsed=$(( $(date +%s) - start_ts ))
-			log "Health check passed in ${elapsed}s"
+			log "Health check passed in ${poll_elapsed}s"
 			printf '{"rebuild":"%s","health":"healthy","elapsed_secs":%d}' \
 				"$rebuild_status" "$elapsed"
 			return 0
 		fi
 
 		if (( $(date +%s) >= deadline )); then
+			local poll_elapsed=$(( $(date +%s) - poll_start_ts ))
 			local elapsed=$(( $(date +%s) - start_ts ))
 			log_error \
-				"Health check timed out after ${timeout_secs}s"
+				"Health check timed out after ${poll_elapsed}s"
 			printf '{"rebuild":"%s","health":"timeout","elapsed_secs":%d}' \
 				"$rebuild_status" "$elapsed"
 			return 1
