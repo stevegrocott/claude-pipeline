@@ -34,6 +34,11 @@ PLUGIN_ROOT="$SCRIPT_DIR/plugins/pipeline-core"
 # is how it drifts from .claude/scripts/ (issue #623); `bundle` regenerates
 # it instead.
 BUNDLE_SCRIPTS_DIR="$PLUGIN_ROOT/scripts"
+# Bundled plugin hooks tree. The bundle nests hooks one level deeper than
+# .claude/hooks/ does (hooks/scripts/<file> vs hooks/<file>), which is why
+# assert_no_plugin_shadow() cannot rely on an exact relative-path match for
+# them (issue #812).
+BUNDLE_HOOKS_DIR="$PLUGIN_ROOT/hooks/scripts"
 
 # ---------------------------------------------------------------------------
 # Core files — synced between pipeline and projects.
@@ -253,6 +258,14 @@ planned_sync_paths() {
 #
 # The check is per-FILE, not per-directory: .claude/hooks/ legitimately syncs
 # because the plugin's hooks/ provides different files.
+#
+# hooks/ gets a second, basename-only comparison against BUNDLE_HOOKS_DIR
+# because the bundle nests its hooks one level deeper than .claude/hooks/
+# does (hooks/scripts/<file> vs hooks/<file>); an exact relative-path
+# comparison never matches them, so four bundle-provided hooks passed this
+# guard undetected (issue #812). The basename search is scoped to hooks/
+# specifically — not the whole bundle root — so an unrelated bundle file
+# that happens to share a name elsewhere cannot produce a false positive.
 assert_no_plugin_shadow() {
     [[ -d "$PLUGIN_ROOT" ]] || return 0
 
@@ -260,6 +273,9 @@ assert_no_plugin_shadow() {
     while IFS= read -r rel; do
         [[ -n "$rel" ]] || continue
         if [[ -e "$PLUGIN_ROOT/$rel" ]]; then
+            shadowed+="  .claude/$rel"$'\n'
+        elif [[ "$rel" == hooks/* && -d "$BUNDLE_HOOKS_DIR" ]] \
+            && [[ -e "$BUNDLE_HOOKS_DIR/${rel##*/}" ]]; then
             shadowed+="  .claude/$rel"$'\n'
         fi
     done < <(planned_sync_paths)
