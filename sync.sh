@@ -728,6 +728,40 @@ print_marketplace_deprecation() {
 NOTICE
 }
 
+# BUNDLE_HOOKS are no longer sync candidates (issue #812): CORE_FILES only
+# carries PROJECT_LOCAL_HOOKS now, so `to` neither writes nor removes them.
+# A consumer synced before that change can still be holding one of the four
+# stale copies, and the plugin's hooks/hooks.json already auto-registers the
+# same hook — a leftover .claude/hooks/ copy risks running twice per matching
+# tool call if the project's own settings.json also references it. Nothing
+# here deletes it: that's the operator's call to make deliberately, once
+# they've confirmed the plugin's copy is registered. This only reports it
+# rather than leaving it silently in place.
+report_unsynced_hooks() {
+    local project_dir="$1"
+    local hook found=""
+
+    for hook in "${BUNDLE_HOOKS[@]}"; do
+        [[ -f "$project_dir/hooks/$hook" ]] || continue
+        found+="  .claude/hooks/$hook"$'\n'
+    done
+
+    [[ -n "$found" ]] || return 0
+
+    {
+        echo ""
+        echo "NOTE: found hook copies this script no longer syncs (issue #812):"
+        echo ""
+        printf '%s' "$found"
+        echo ""
+        echo "plugins/pipeline-core/ already provides these, and its"
+        echo "hooks.json auto-registers them — a leftover copy here risks"
+        echo "double-registration if the project's settings.json also"
+        echo "references it. Remove the copy once you've confirmed the"
+        echo "plugin's is registered."
+    } >&2
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -769,6 +803,8 @@ case "$COMMAND" in
         echo ""
         echo "Patching consumer agents:"
         patch_agents "$PROJECT_DIR"
+
+        report_unsynced_hooks "$PROJECT_DIR"
 
         echo ""
         echo "Done. Project-specific files (agents, prompts, existing config)"

@@ -541,6 +541,51 @@ _make_fake_consumer() {
 		}
 	done < <(awk '/^PROJECT_LOCAL_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
 		"$TEST_TMP/sync.sh")
+
+	# Negative case for the #812 AC5 report below: a consumer with no stale
+	# bundle-hook copy must not trigger the warning — otherwise it would fire
+	# on every ordinary sync, not just the ones that need it.
+	[[ "$output" != *"no longer syncs"* ]] || {
+		printf 'FAIL: stale-hook report fired with no stale hook present:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(#812 AC5) sync reports a consumer's stale bundle-hook copy" {
+	_make_fake_pipeline
+	_make_fake_consumer
+
+	# Simulate a consumer synced before #812 narrowed hook scope: it still
+	# carries a bundle-provided hook under .claude/hooks/ that `to` no longer
+	# touches at all (BUNDLE_HOOKS dropped out of CORE_FILES). Silence here
+	# would leave that copy — possibly double-registered alongside the
+	# plugin's own hooks.json entry — undiscovered.
+	local stale_hook
+	stale_hook=$(awk '/^BUNDLE_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$TEST_TMP/sync.sh" | head -1)
+	mkdir -p "$CONSUMER/.claude/hooks"
+	printf '#!/usr/bin/env bash\necho stale\n' \
+		> "$CONSUMER/.claude/hooks/$stale_hook"
+
+	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
+
+	# Reported, not fatal: an operator decides when to delete a stale copy,
+	# so the sync itself must still complete.
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: sync to exited %d instead of reporting and continuing:\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+	[[ "$output" == *"$stale_hook"* ]] || {
+		printf 'FAIL: output does not name the stale hook %s:\n%s\n' \
+			"$stale_hook" "$output" >&2
+		return 1
+	}
+	[[ -f "$CONSUMER/.claude/hooks/$stale_hook" ]] || {
+		printf 'FAIL: sync deleted the stale hook instead of just reporting it\n' >&2
+		return 1
+	}
 }
 
 @test "(#632 AC4) consumer config still syncs" {
