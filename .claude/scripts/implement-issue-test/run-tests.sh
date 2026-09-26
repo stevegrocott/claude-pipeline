@@ -118,12 +118,6 @@ CI_EXCLUDED_SUITES=(
     # bats @test IS a function. Most of the eleven were failing on macOS too
     # — only Linux/bash 5 reported it. Local green proves very little here;
     # verify against a real Linux run.
-
-    # HANGS rather than fails: stalls at "parent watchdog fires when inner
-    # timeout wrapper hangs" and burns the whole job timeout. A hang is worse
-    # than a failure — it produces a `cancelled` run, which reads like neither
-    # pass nor fail. Out of scope for #859's failure fixes; still open.
-    test-stage-runner.bats
 )
 
 # Prints the CI-safe suite list, one per line.
