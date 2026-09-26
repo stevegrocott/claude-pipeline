@@ -10000,7 +10000,7 @@ rebuild_and_health_check() {
 		log_error "Container rebuild failed"
 		rebuild_status="failed"
 		local elapsed=$(( $(date +%s) - start_ts ))
-		printf '{"rebuild":"%s","health":"skipped","elapsed_secs":%d}' \
+		printf '{"rebuild":"%s","health":"skipped","elapsed_secs":%d,"poll_secs":0}' \
 			"$rebuild_status" "$elapsed"
 		return 1
 	fi
@@ -10011,7 +10011,7 @@ rebuild_and_health_check() {
 		log_error "Container start failed"
 		rebuild_status="failed"
 		local elapsed=$(( $(date +%s) - start_ts ))
-		printf '{"rebuild":"%s","health":"skipped","elapsed_secs":%d}' \
+		printf '{"rebuild":"%s","health":"skipped","elapsed_secs":%d,"poll_secs":0}' \
 			"$rebuild_status" "$elapsed"
 		return 1
 	fi
@@ -10032,8 +10032,9 @@ rebuild_and_health_check() {
 			local poll_elapsed=$(( $(date +%s) - poll_start_ts ))
 			local elapsed=$(( $(date +%s) - start_ts ))
 			log "Health check passed in ${poll_elapsed}s"
-			printf '{"rebuild":"%s","health":"healthy","elapsed_secs":%d}' \
-				"$rebuild_status" "$elapsed"
+			printf '{"rebuild":"%s","health":"healthy",'\
+'"elapsed_secs":%d,"poll_secs":%d}' \
+				"$rebuild_status" "$elapsed" "$poll_elapsed"
 			return 0
 		fi
 
@@ -10042,8 +10043,9 @@ rebuild_and_health_check() {
 			local elapsed=$(( $(date +%s) - start_ts ))
 			log_error \
 				"Health check timed out after ${poll_elapsed}s"
-			printf '{"rebuild":"%s","health":"timeout","elapsed_secs":%d}' \
-				"$rebuild_status" "$elapsed"
+			printf '{"rebuild":"%s","health":"timeout",'\
+'"elapsed_secs":%d,"poll_secs":%d}' \
+				"$rebuild_status" "$elapsed" "$poll_elapsed"
 			return 1
 		fi
 
