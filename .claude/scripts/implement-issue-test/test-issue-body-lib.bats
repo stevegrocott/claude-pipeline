@@ -246,6 +246,65 @@ valid_body() {
 	[[ "$output" == *"task has no file path"* ]]
 }
 
+# --- Issue #816: the #689 demotion rule is correct but the zero-path
+# diagnostic misattributes the cause when the demoted token is a real
+# repo-root file (`sync.sh`, `README.md`) rather than a prose mention — the
+# author is told "no file path" when the fix is `./sync.sh`. ---
+
+@test "assert_issue_valid: zero-path error names a demoted repo-root token and suggests its ./ form" {
+	# AC1 — `sync.sh` is separator-less so _issue_body_is_repo_path demotes it
+	# to prose (#689) even though the file exists at the repo root; the
+	# zero-path diagnostic must name the demoted token and suggest the ./
+	# form that actually resolves, not just say "no file path".
+	touch "$ISSUE_BODY_REPO_ROOT/sync.sh"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Update the sync entrypoint — \`sync.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"sync.sh"* ]]
+	[[ "$output" == *"./sync.sh"* ]]
+}
+
+@test "assert_issue_valid: a repo-root file cited with the ./ form validates" {
+	# AC2 — the ./ form is the one bare-repo-root citation that always
+	# resolves, so the form the diagnostic teaches must actually pass.
+	touch "$ISSUE_BODY_REPO_ROOT/sync.sh"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Update the sync entrypoint — \`./sync.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: a demoted token adds no ./ suggestion noise when the task already has a real path" {
+	# Risk mitigation — demoted-token suggestions are only decision-relevant
+	# when the task has zero real paths; a task that already names a real
+	# path must validate without the ./sync.sh noise leaking in.
+	touch "$ISSUE_BODY_REPO_ROOT/sync.sh"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** See \`sync.sh\` and edit — \`.claude/scripts/issue-body-lib.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"./sync.sh"* ]]
+}
+
 # --- Issue #689 AC2: regression fixtures replaying the #679 and #678 bodies
 # verbatim as they stood at rejection time (batch-20260730-212750,
 # 2026-07-30T21:28 local / 2026-07-30T11:28:01Z-11:28:08Z UTC). Recovered via
