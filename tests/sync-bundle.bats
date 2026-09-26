@@ -357,6 +357,17 @@ _make_fake_pipeline() {
 			> "$TEST_TMP/.claude/hooks/$_hook"
 	done < <(awk '/^BUNDLE_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
 		"$SYNC_SH")
+	# Every hook on sync.sh's PROJECT_LOCAL_HOOKS allowlist must also exist
+	# (issue #812): these are the genuinely consumer-side hooks sync.sh syncs
+	# as individual CORE_FILES entries now that "hooks" is no longer a
+	# whole-directory CORE_DIRS entry. Read from sync.sh rather than
+	# hardcoding, so adding a hook there cannot silently rot this fixture.
+	while IFS= read -r _hook; do
+		[[ -n "$_hook" ]] || continue
+		printf '#!/usr/bin/env bash\necho hook\n' \
+			> "$TEST_TMP/.claude/hooks/$_hook"
+	done < <(awk '/^PROJECT_LOCAL_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$SYNC_SH")
 	printf 'TRACKER=github\n' > "$TEST_TMP/.claude/config/platform.sh"
 	printf '# pipeline context\n' > "$TEST_TMP/.claude/config/context.md"
 
@@ -457,13 +468,18 @@ _make_fake_consumer() {
 	_make_fake_pipeline
 	_make_fake_consumer
 
-	# The bundle nests hooks one level deeper than planned_sync_paths() emits
+	# The four BUNDLE_HOOKS are no longer sync candidates at all (issue #812
+	# narrowed CORE_FILES to PROJECT_LOCAL_HOOKS only), so this test proves
+	# the guard's basename match against a nested bundle path still works for
+	# a hook that IS still a sync candidate: session-start.sh, a genuinely
+	# consumer-side hook, made to collide with a same-named bundle file. The
+	# bundle nests hooks one level deeper than planned_sync_paths() emits
 	# (plugins/pipeline-core/hooks/scripts/<file> vs the .claude/hooks/<file>
 	# it compares against), so an exact-path shadow check never matches even
-	# though block-gh-issue-create.sh is byte-identical in both trees.
+	# though the two copies here are byte-identical.
 	mkdir -p "$TEST_TMP/plugins/pipeline-core/hooks/scripts"
-	cp "$TEST_TMP/.claude/hooks/block-gh-issue-create.sh" \
-		"$TEST_TMP/plugins/pipeline-core/hooks/scripts/block-gh-issue-create.sh"
+	cp "$TEST_TMP/.claude/hooks/session-start.sh" \
+		"$TEST_TMP/plugins/pipeline-core/hooks/scripts/session-start.sh"
 
 	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
 
@@ -476,15 +492,55 @@ _make_fake_consumer() {
 		printf 'FAIL: failure does not name the plugin:\n%s\n' "$output" >&2
 		return 1
 	}
-	[[ "$output" == *"block-gh-issue-create.sh"* ]] || {
+	[[ "$output" == *"session-start.sh"* ]] || {
 		printf 'FAIL: failure does not name the shadowed hook:\n%s\n' \
 			"$output" >&2
 		return 1
 	}
-	[[ ! -f "$CONSUMER/.claude/hooks/block-gh-issue-create.sh" ]] || {
+	[[ ! -f "$CONSUMER/.claude/hooks/session-start.sh" ]] || {
 		printf 'FAIL: guard fired but the file was written anyway\n' >&2
 		return 1
 	}
+}
+
+@test "(#812 AC2/AC3/AC4) sync narrows hooks to the project-local set" {
+	_make_fake_pipeline
+	_make_fake_consumer
+
+	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
+
+	# AC2: the narrowed scope means the guard finds nothing left to flag —
+	# a plain `to` sync against an unmodified fixture succeeds.
+	[ "$status" -eq 0 ] || {
+		printf 'sync to exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# AC3: none of the four bundle-provided hooks are copied — they are the
+	# plugin's job via hooks/hooks.json, and a synced copy alongside it is
+	# exactly the double-registration issue #812 describes.
+	local bundle_hook
+	while IFS= read -r bundle_hook; do
+		[[ -n "$bundle_hook" ]] || continue
+		[[ ! -f "$CONSUMER/.claude/hooks/$bundle_hook" ]] || {
+			printf 'FAIL: bundle-provided hook %s was synced anyway\n' \
+				"$bundle_hook" >&2
+			return 1
+		}
+	done < <(awk '/^BUNDLE_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$TEST_TMP/sync.sh")
+
+	# AC4: every genuinely consumer-side hook still lands in the consumer.
+	local local_hook
+	while IFS= read -r local_hook; do
+		[[ -n "$local_hook" ]] || continue
+		[[ -f "$CONSUMER/.claude/hooks/$local_hook" ]] || {
+			printf 'FAIL: project-local hook %s was not synced\n' \
+				"$local_hook" >&2
+			return 1
+		}
+	done < <(awk '/^PROJECT_LOCAL_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$TEST_TMP/sync.sh")
 }
 
 @test "(#632 AC4) consumer config still syncs" {

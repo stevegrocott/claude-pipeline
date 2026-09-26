@@ -63,8 +63,18 @@ BUNDLE_HOOKS_DIR="$PLUGIN_ROOT/hooks/scripts"
 #
 # 132 such files were left orphaned in stevegrocott/beegee-farm-3.
 # assert_no_plugin_shadow() below is the guard that stops this recurring.
+#
+# "hooks" is likewise ABSENT as a whole-directory entry (issue #812). A
+# directory sync would carry BUNDLE_HOOKS wholesale — the hooks the
+# pipeline-core plugin already ships from plugins/pipeline-core/hooks/scripts/
+# — into a consumer's .claude/hooks/, which is exactly the dead-duplicate
+# shadow assert_no_plugin_shadow() exists to catch, and a live one: the
+# plugin's hooks.json auto-registers its copies, so a consumer that also
+# registers the synced .claude/hooks/ copy in its own settings.json runs the
+# same hook twice per matching tool call. Only PROJECT_LOCAL_HOOKS — hooks
+# with no bundle equivalent — are sync candidates; they are appended to
+# CORE_FILES below, once that list is defined in the hook-bundling section.
 CORE_DIRS=(
-    "hooks"
 )
 
 # Files within .claude/ that are core (synced individually, wholesale-copied).
@@ -75,6 +85,10 @@ CORE_DIRS=(
 # required detect-core-edit.sh hook into the project's own settings.json,
 # leaving everything else untouched. Add a file here only if it is truly
 # identical across all projects.
+#
+# Gets "hooks/<file>" entries appended for each PROJECT_LOCAL_HOOKS hook
+# further down (issue #812) rather than listing them here directly, so the
+# hook allowlist has exactly one source of truth.
 CORE_FILES=()
 
 # Genuinely consumer-side config (issue #632). The plugin provides no
@@ -195,6 +209,7 @@ sync_file() {
         return
     fi
 
+    mkdir -p "$(dirname "$dst/$file")"
     cp "$src/$file" "$dst/$file"
     echo "  SYNC $file"
 }
@@ -377,6 +392,16 @@ PROJECT_LOCAL_HOOKS=(
     session-start.sh
     sync-reminder.sh
 )
+
+# Sync scope for hooks (issue #812): each project-local hook is a sync
+# candidate, added as an individual file rather than the whole hooks/
+# directory. BUNDLE_HOOKS are deliberately excluded — see the CORE_DIRS
+# comment above for why syncing them would be a dead, double-registered
+# duplicate of the plugin's own copies.
+for _project_local_hook in "${PROJECT_LOCAL_HOOKS[@]}"; do
+    CORE_FILES+=("hooks/$_project_local_hook")
+done
+unset _project_local_hook
 
 # Hooks that live only in the bundle and have no .claude/hooks/ counterpart by
 # design. The regenerator must not delete these.
