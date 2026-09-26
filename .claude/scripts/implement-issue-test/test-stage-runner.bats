@@ -72,10 +72,25 @@ teardown() {
 
 @test "run_stage fails with missing schema file" {
     run run_stage "test-stage" "test prompt" "nonexistent.json"
-    [ "$status" -eq 1 ]
+
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
+
     # New stage_result envelope reports error_kind="schema_not_found"
     # (snake_case; see schemas/stage-result.json enum).
-    [[ "$output" == *"schema_not_found"* ]]
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "schema_not_found" ] || \
+        fail "Expected error_kind=schema_not_found, got: $error_kind"
 }
 
 @test "run_stage uses correct schema file" {
@@ -307,9 +322,17 @@ teardown() {
     export -f timeout
 
     run run_stage "test" "prompt" "test-schema.json"
+    local error_kind
+    error_kind=$(printf "%s" "$output" | grep "^{" | tail -1 \
+        | jq -r ".error_kind // empty")
     [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
-    [[ "$output" == *"timeout"* ]] \
-        || fail "Expected output to contain 'timeout'; got: $output"
+    # Double timeout escalates to the fallback model, which also times out
+    # with no output to extract — error_kind lands on no_structured_output,
+    # not "timeout". Asserting the exact value catches drift that a bare
+    # `[[ "$output" == *"timeout"* ]]` substring check would miss: that check
+    # passed on nothing but an incidental "timed out after ...s" log line.
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind 'no_structured_output'; got: $error_kind"
 }
 
 @test "run_stage retries with 20% longer timeout after initial timeout" {
@@ -372,9 +395,16 @@ teardown() {
 
     # Pass 1s as timeout_override (arg 6) so the test completes quickly
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    local error_kind
+    error_kind=$(printf "%s" "$output" | grep "^{" | tail -1 \
+        | jq -r ".error_kind // empty")
     [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
-    [[ "$output" == *"timeout"* ]] \
-        || fail "Expected output to contain 'timeout'; got: $output"
+    # Same double-timeout-then-failed-escalation outcome as the exit-124
+    # case above: error_kind is no_structured_output, not "timeout". A bare
+    # substring check on $output would pass on nothing but an incidental
+    # "timed out after ...s" log line, so assert the exact value instead.
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind 'no_structured_output'; got: $error_kind"
 }
 
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
@@ -389,13 +419,32 @@ teardown() {
     local hang_fifo="$TEST_TMP/childless-hang.fifo"
     mkfifo "$hang_fifo"
     export hang_fifo
+    local counter_file="$TEST_TMP/childless-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
 
     timeout() {
         # bash function: no child processes exist — the stage subshell is
         # childless.  Block on a FIFO with no writer; only the parent
         # watchdog's SIGTERM can interrupt this read.  No output is emitted
         # so run_stage cannot recover structured data from either attempt.
-        read -r _ < "$hang_fifo" 2>/dev/null || true
+        #
+        # Scoped to the two dispatches this test names (initial + retry):
+        # a double timeout drives decide-action.sh to `escalate` (model
+        # isn't at the opus ceiling), which fires a THIRD, unnamed dispatch
+        # here. Blocking that one too relies on the escalation watchdog
+        # alone to ever return — any hiccup there wedges the whole suite.
+        # Fail it immediately instead so only the two watchdogs this test
+        # is about are actually exercised.
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n <= 2 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 124
+        fi
     }
     export -f timeout
 
@@ -723,13 +772,23 @@ teardown() {
 
     run run_stage "stage-1" "prompt" "test-schema.json" "bad-agent"
 
-    # run_stage must bail (non-zero exit)
-    [ "$status" -ne 0 ] || \
-        fail "Expected non-zero exit when agent not found, got: status=$status"
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
 
     # Stage result envelope must report error_kind=agent_not_found
-    [[ "$output" == *'"agent_not_found"'* ]] || \
-        fail "Expected agent_not_found in stage result, got: $output"
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "agent_not_found" ] || \
+        fail "Expected error_kind=agent_not_found, got: $error_kind"
 
     # Must not retry — exactly one invocation of the claude CLI
     local call_count=0
@@ -1074,9 +1133,23 @@ teardown() {
     # implement + L complexity resolves to opus, the ceiling model that
     # cannot escalate further on error_max_turns.
     run run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"max_turns_exhausted_at_ceiling"* ]] || \
-        fail "Expected ceiling error in output. Got: $output"
+
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "max_turns_exhausted_at_ceiling" ] || \
+        fail "Expected error_kind=max_turns_exhausted_at_ceiling, got: $error_kind"
 }
 
 @test "run_stage does not include max-turns cap on error_max_turns escalation retry" {
@@ -1177,8 +1250,8 @@ teardown() {
     export counter_file
 
     run run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
-    [ "$status" -eq 1 ] || \
-        fail "Second exhaustion must be terminal, got status $status. Out: $output"
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # terminality is asserted below via the envelope's status/error_kind.
 
     local final_count
     final_count=$(cat "$counter_file")
