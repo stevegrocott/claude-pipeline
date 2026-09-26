@@ -322,9 +322,17 @@ teardown() {
     export -f timeout
 
     run run_stage "test" "prompt" "test-schema.json"
+    local error_kind
+    error_kind=$(printf "%s" "$output" | grep "^{" | tail -1 \
+        | jq -r ".error_kind // empty")
     [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
-    [[ "$output" == *"timeout"* ]] \
-        || fail "Expected output to contain 'timeout'; got: $output"
+    # Double timeout escalates to the fallback model, which also times out
+    # with no output to extract — error_kind lands on no_structured_output,
+    # not "timeout". Asserting the exact value catches drift that a bare
+    # `[[ "$output" == *"timeout"* ]]` substring check would miss: that check
+    # passed on nothing but an incidental "timed out after ...s" log line.
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind 'no_structured_output'; got: $error_kind"
 }
 
 @test "run_stage retries with 20% longer timeout after initial timeout" {
@@ -387,9 +395,16 @@ teardown() {
 
     # Pass 1s as timeout_override (arg 6) so the test completes quickly
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    local error_kind
+    error_kind=$(printf "%s" "$output" | grep "^{" | tail -1 \
+        | jq -r ".error_kind // empty")
     [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
-    [[ "$output" == *"timeout"* ]] \
-        || fail "Expected output to contain 'timeout'; got: $output"
+    # Same double-timeout-then-failed-escalation outcome as the exit-124
+    # case above: error_kind is no_structured_output, not "timeout". A bare
+    # substring check on $output would pass on nothing but an incidental
+    # "timed out after ...s" log line, so assert the exact value instead.
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind 'no_structured_output'; got: $error_kind"
 }
 
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
