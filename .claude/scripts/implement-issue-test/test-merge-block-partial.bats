@@ -186,9 +186,10 @@ teardown() {
 	[[ "$line" == *'2 failed'* ]]
 }
 
-@test "_format_task_summary_line reports the reconciled count (issue #912)" {
+@test "_format_task_summary_line reports the reconciled count (issue #913)" {
 	# .reconciled_count is written by the merge-gate reconciliation pass;
-	# merge-blocked comments splice this line, so the count must appear.
+	# merge-blocked comments splice this line, so the count must appear as
+	# a "(K reconciled)" suffix, mirroring the "(N failed)" suffix.
 	jq '.tasks = [
 		{"id":1,"description":"A","status":"completed"},
 		{"id":2,"description":"B","status":"completed",
@@ -200,8 +201,21 @@ teardown() {
 	local line
 	line=$(_format_task_summary_line)
 
-	[[ "$line" == *'2/3 tasks completed (1 failed).'* ]]
-	[[ "$line" == *'1 reconciled via branch evidence.'* ]]
+	[[ "$line" == '**Task summary:** 2/3 tasks completed (1 failed) (1 reconciled).' ]]
+}
+
+@test "_format_task_summary_line appends reconciled suffix with no failures" {
+	jq '.tasks = [
+		{"id":1,"description":"A","status":"completed",
+		 "reconciled_from":"failed"},
+		{"id":2,"description":"B","status":"completed"}
+	] | .reconciled_count = 1' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	local line
+	line=$(_format_task_summary_line)
+
+	[[ "$line" == '**Task summary:** 2/2 tasks completed (1 reconciled).' ]]
 }
 
 @test "_format_task_summary_line omits reconciled note when count is zero" {
