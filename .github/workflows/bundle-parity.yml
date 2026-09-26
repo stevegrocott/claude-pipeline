@@ -21,6 +21,15 @@ name: Bundle Parity
 # must stay in lockstep with the guard's PARITY_SUBDIRS, so a change to
 # either side has to re-run both suites.
 #
+# The plugin manifests (.claude-plugin/marketplace.json and
+# plugins/pipeline-core/.claude-plugin/plugin.json) are in the trigger set
+# too (issue #893): a version-bump PR that only touches these files is
+# exactly the commit a release depends on, and with no workflow matching
+# manifest paths it merged CLEAN with zero checks run (0.8.7, 0.8.8). This
+# job already owns the property a release needs — the shipped bundle
+# matching the canonical tree — so widening its triggers here means a bump
+# runs it with no new job to maintain.
+#
 # (Paths are duplicated rather than shared via a YAML anchor — the Actions
 # workflow parser does not reliably support anchors/aliases.)
 on:
@@ -30,6 +39,8 @@ on:
       - 'plugins/pipeline-core/scripts/**'
       - '.claude/hooks/**'
       - 'plugins/pipeline-core/hooks/scripts/**'
+      - '.claude-plugin/**'
+      - 'plugins/pipeline-core/.claude-plugin/**'
       - 'sync.sh'
       - 'tests/sync-bundle.bats'
       - '.github/workflows/bundle-parity.yml'
@@ -39,6 +50,8 @@ on:
       - 'plugins/pipeline-core/scripts/**'
       - '.claude/hooks/**'
       - 'plugins/pipeline-core/hooks/scripts/**'
+      - '.claude-plugin/**'
+      - 'plugins/pipeline-core/.claude-plugin/**'
       - 'sync.sh'
       - 'tests/sync-bundle.bats'
       - '.github/workflows/bundle-parity.yml'
