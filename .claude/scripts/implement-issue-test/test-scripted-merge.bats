@@ -1048,3 +1048,33 @@ STUB
 		fail "an UNKNOWN state must not be reported as pending checks"
 	fi
 }
+
+@test "#931: MERGE_MR_STEP_TIMEOUT outlives merge-mr.sh's own poll budget" {
+	# These two budgets are coupled and nothing previously said so.
+	# merge-mr.sh waits out a CI run internally (MERGE_MR_POLL_MAX); the
+	# orchestrator wraps the whole script in `timeout MERGE_MR_STEP_TIMEOUT`.
+	# If the outer wrapper is the shorter of the two it kills the script
+	# mid-wait with exit 124, producing merge_pr_timeout — a harder failure
+	# than the clean refusal merge-mr.sh would have produced, and one that
+	# discards the message explaining what it was waiting for.
+	#
+	# Observed live: raising MERGE_MR_POLL_MAX to 900 while STEP_TIMEOUT sat
+	# at 120 turned every pending-checks wait into "merge-mr.sh timed out
+	# after 120s" (issue #893's PR #934).
+	local step_default poll_default
+
+	step_default=$(sed -n \
+		's/^MERGE_MR_STEP_TIMEOUT="\${MERGE_MR_STEP_TIMEOUT:-\([0-9]*\)}"$/\1/p' \
+		"$ORCHESTRATOR_SCRIPT" | head -1)
+	[[ -n "$step_default" ]] \
+		|| fail "could not read MERGE_MR_STEP_TIMEOUT default from the orchestrator"
+
+	poll_default=$(sed -n \
+		's/.*MERGE_MR_POLL_MAX:-\([0-9]*\)}.*/\1/p' \
+		"$MERGE_MR" | head -1)
+	[[ -n "$poll_default" ]] \
+		|| fail "could not read MERGE_MR_POLL_MAX default from merge-mr.sh"
+
+	(( step_default > poll_default )) \
+		|| fail "MERGE_MR_STEP_TIMEOUT (${step_default}s) must exceed MERGE_MR_POLL_MAX (${poll_default}s), or the outer timeout kills merge-mr.sh mid-wait (#931)"
+}

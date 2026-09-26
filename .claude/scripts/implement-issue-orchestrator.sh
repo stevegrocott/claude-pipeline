@@ -260,7 +260,18 @@ RUN_BUDGET_SOFT_PCT="${RUN_BUDGET_SOFT_PCT:-80}"
 #   MERGE_GIT_TIMEOUT     : git fetch / checkout / pull
 #   MERGE_COMMENT_TIMEOUT : post-merge completion comment
 # Override any of these via env to tune for slow remotes.
-MERGE_MR_STEP_TIMEOUT="${MERGE_MR_STEP_TIMEOUT:-120}"
+# MUST stay above merge-mr.sh's own MERGE_MR_POLL_MAX (2700s, issue #931).
+# merge-mr.sh legitimately waits out a CI run before merging; if this outer
+# wrapper is the shorter of the two, it kills the script mid-wait with exit
+# 124 and the stage becomes merge_pr_timeout — a harder failure than the
+# clean refusal merge-mr.sh would have produced itself, and one that loses
+# the diagnostic explaining what it was waiting for.
+#
+# Observed while fixing #931: raising MERGE_MR_POLL_MAX to 900 while this sat
+# at 120 turned every pending-checks wait into `merge-mr.sh timed out after
+# 120s` (issue #893's PR #934). The two budgets are coupled and must be
+# changed together.
+MERGE_MR_STEP_TIMEOUT="${MERGE_MR_STEP_TIMEOUT:-3000}"
 MERGE_GIT_TIMEOUT="${MERGE_GIT_TIMEOUT:-60}"
 MERGE_COMMENT_TIMEOUT="${MERGE_COMMENT_TIMEOUT:-60}"
 
