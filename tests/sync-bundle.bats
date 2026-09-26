@@ -357,6 +357,17 @@ _make_fake_pipeline() {
 			> "$TEST_TMP/.claude/hooks/$_hook"
 	done < <(awk '/^BUNDLE_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
 		"$SYNC_SH")
+	# Every hook on sync.sh's PROJECT_LOCAL_HOOKS allowlist must also exist
+	# (issue #812): these are the genuinely consumer-side hooks sync.sh syncs
+	# as individual CORE_FILES entries now that "hooks" is no longer a
+	# whole-directory CORE_DIRS entry. Read from sync.sh rather than
+	# hardcoding, so adding a hook there cannot silently rot this fixture.
+	while IFS= read -r _hook; do
+		[[ -n "$_hook" ]] || continue
+		printf '#!/usr/bin/env bash\necho hook\n' \
+			> "$TEST_TMP/.claude/hooks/$_hook"
+	done < <(awk '/^PROJECT_LOCAL_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$SYNC_SH")
 	printf 'TRACKER=github\n' > "$TEST_TMP/.claude/config/platform.sh"
 	printf '# pipeline context\n' > "$TEST_TMP/.claude/config/context.md"
 
@@ -449,6 +460,130 @@ _make_fake_consumer() {
 	}
 	[[ ! -f "$CONSUMER/.claude/scripts/implement-issue-orchestrator.sh" ]] || {
 		printf 'FAIL: guard fired but the file was written anyway\n' >&2
+		return 1
+	}
+}
+
+@test "(#812 AC1) guard catches a hook shadowed by the bundle's nested hooks/scripts/ path" {
+	_make_fake_pipeline
+	_make_fake_consumer
+
+	# The four BUNDLE_HOOKS are no longer sync candidates at all (issue #812
+	# narrowed CORE_FILES to PROJECT_LOCAL_HOOKS only), so this test proves
+	# the guard's basename match against a nested bundle path still works for
+	# a hook that IS still a sync candidate: session-start.sh, a genuinely
+	# consumer-side hook, made to collide with a same-named bundle file. The
+	# bundle nests hooks one level deeper than planned_sync_paths() emits
+	# (plugins/pipeline-core/hooks/scripts/<file> vs the .claude/hooks/<file>
+	# it compares against), so an exact-path shadow check never matches even
+	# though the two copies here are byte-identical.
+	mkdir -p "$TEST_TMP/plugins/pipeline-core/hooks/scripts"
+	cp "$TEST_TMP/.claude/hooks/session-start.sh" \
+		"$TEST_TMP/plugins/pipeline-core/hooks/scripts/session-start.sh"
+
+	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
+
+	[ "$status" -ne 0 ] || {
+		printf 'FAIL: sync succeeded despite a bundle-nested hook shadow:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ "$output" == *"pipeline-core"* ]] || {
+		printf 'FAIL: failure does not name the plugin:\n%s\n' "$output" >&2
+		return 1
+	}
+	[[ "$output" == *"session-start.sh"* ]] || {
+		printf 'FAIL: failure does not name the shadowed hook:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+	[[ ! -f "$CONSUMER/.claude/hooks/session-start.sh" ]] || {
+		printf 'FAIL: guard fired but the file was written anyway\n' >&2
+		return 1
+	}
+}
+
+@test "(#812 AC2/AC3/AC4) sync narrows hooks to the project-local set" {
+	_make_fake_pipeline
+	_make_fake_consumer
+
+	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
+
+	# AC2: the narrowed scope means the guard finds nothing left to flag —
+	# a plain `to` sync against an unmodified fixture succeeds.
+	[ "$status" -eq 0 ] || {
+		printf 'sync to exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+
+	# AC3: none of the four bundle-provided hooks are copied — they are the
+	# plugin's job via hooks/hooks.json, and a synced copy alongside it is
+	# exactly the double-registration issue #812 describes.
+	local bundle_hook
+	while IFS= read -r bundle_hook; do
+		[[ -n "$bundle_hook" ]] || continue
+		[[ ! -f "$CONSUMER/.claude/hooks/$bundle_hook" ]] || {
+			printf 'FAIL: bundle-provided hook %s was synced anyway\n' \
+				"$bundle_hook" >&2
+			return 1
+		}
+	done < <(awk '/^BUNDLE_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$TEST_TMP/sync.sh")
+
+	# AC4: every genuinely consumer-side hook still lands in the consumer.
+	local local_hook
+	while IFS= read -r local_hook; do
+		[[ -n "$local_hook" ]] || continue
+		[[ -f "$CONSUMER/.claude/hooks/$local_hook" ]] || {
+			printf 'FAIL: project-local hook %s was not synced\n' \
+				"$local_hook" >&2
+			return 1
+		}
+	done < <(awk '/^PROJECT_LOCAL_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$TEST_TMP/sync.sh")
+
+	# Negative case for the #812 AC5 report below: a consumer with no stale
+	# bundle-hook copy must not trigger the warning — otherwise it would fire
+	# on every ordinary sync, not just the ones that need it.
+	[[ "$output" != *"no longer syncs"* ]] || {
+		printf 'FAIL: stale-hook report fired with no stale hook present:\n%s\n' \
+			"$output" >&2
+		return 1
+	}
+}
+
+@test "(#812 AC5) sync reports a consumer's stale bundle-hook copy" {
+	_make_fake_pipeline
+	_make_fake_consumer
+
+	# Simulate a consumer synced before #812 narrowed hook scope: it still
+	# carries a bundle-provided hook under .claude/hooks/ that `to` no longer
+	# touches at all (BUNDLE_HOOKS dropped out of CORE_FILES). Silence here
+	# would leave that copy — possibly double-registered alongside the
+	# plugin's own hooks.json entry — undiscovered.
+	local stale_hook
+	stale_hook=$(awk '/^BUNDLE_HOOKS=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/[[:space:]]/,"");print}' \
+		"$TEST_TMP/sync.sh" | head -1)
+	mkdir -p "$CONSUMER/.claude/hooks"
+	printf '#!/usr/bin/env bash\necho stale\n' \
+		> "$CONSUMER/.claude/hooks/$stale_hook"
+
+	run bash "$TEST_TMP/sync.sh" to "$CONSUMER"
+
+	# Reported, not fatal: an operator decides when to delete a stale copy,
+	# so the sync itself must still complete.
+	[ "$status" -eq 0 ] || {
+		printf 'FAIL: sync to exited %d instead of reporting and continuing:\n%s\n' \
+			"$status" "$output" >&2
+		return 1
+	}
+	[[ "$output" == *"$stale_hook"* ]] || {
+		printf 'FAIL: output does not name the stale hook %s:\n%s\n' \
+			"$stale_hook" "$output" >&2
+		return 1
+	}
+	[[ -f "$CONSUMER/.claude/hooks/$stale_hook" ]] || {
+		printf 'FAIL: sync deleted the stale hook instead of just reporting it\n' >&2
 		return 1
 	}
 }

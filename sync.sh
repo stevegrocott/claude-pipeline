@@ -34,6 +34,11 @@ PLUGIN_ROOT="$SCRIPT_DIR/plugins/pipeline-core"
 # is how it drifts from .claude/scripts/ (issue #623); `bundle` regenerates
 # it instead.
 BUNDLE_SCRIPTS_DIR="$PLUGIN_ROOT/scripts"
+# Bundled plugin hooks tree. The bundle nests hooks one level deeper than
+# .claude/hooks/ does (hooks/scripts/<file> vs hooks/<file>), which is why
+# assert_no_plugin_shadow() cannot rely on an exact relative-path match for
+# them (issue #812).
+BUNDLE_HOOKS_DIR="$PLUGIN_ROOT/hooks/scripts"
 
 # ---------------------------------------------------------------------------
 # Core files — synced between pipeline and projects.
@@ -58,8 +63,18 @@ BUNDLE_SCRIPTS_DIR="$PLUGIN_ROOT/scripts"
 #
 # 132 such files were left orphaned in stevegrocott/beegee-farm-3.
 # assert_no_plugin_shadow() below is the guard that stops this recurring.
+#
+# "hooks" is likewise ABSENT as a whole-directory entry (issue #812). A
+# directory sync would carry BUNDLE_HOOKS wholesale — the hooks the
+# pipeline-core plugin already ships from plugins/pipeline-core/hooks/scripts/
+# — into a consumer's .claude/hooks/, which is exactly the dead-duplicate
+# shadow assert_no_plugin_shadow() exists to catch, and a live one: the
+# plugin's hooks.json auto-registers its copies, so a consumer that also
+# registers the synced .claude/hooks/ copy in its own settings.json runs the
+# same hook twice per matching tool call. Only PROJECT_LOCAL_HOOKS — hooks
+# with no bundle equivalent — are sync candidates; they are appended to
+# CORE_FILES below, once that list is defined in the hook-bundling section.
 CORE_DIRS=(
-    "hooks"
 )
 
 # Files within .claude/ that are core (synced individually, wholesale-copied).
@@ -70,6 +85,10 @@ CORE_DIRS=(
 # required detect-core-edit.sh hook into the project's own settings.json,
 # leaving everything else untouched. Add a file here only if it is truly
 # identical across all projects.
+#
+# Gets "hooks/<file>" entries appended for each PROJECT_LOCAL_HOOKS hook
+# further down (issue #812) rather than listing them here directly, so the
+# hook allowlist has exactly one source of truth.
 CORE_FILES=()
 
 # Genuinely consumer-side config (issue #632). The plugin provides no
@@ -190,6 +209,7 @@ sync_file() {
         return
     fi
 
+    mkdir -p "$(dirname "$dst/$file")"
     cp "$src/$file" "$dst/$file"
     echo "  SYNC $file"
 }
@@ -253,6 +273,14 @@ planned_sync_paths() {
 #
 # The check is per-FILE, not per-directory: .claude/hooks/ legitimately syncs
 # because the plugin's hooks/ provides different files.
+#
+# hooks/ gets a second, basename-only comparison against BUNDLE_HOOKS_DIR
+# because the bundle nests its hooks one level deeper than .claude/hooks/
+# does (hooks/scripts/<file> vs hooks/<file>); an exact relative-path
+# comparison never matches them, so four bundle-provided hooks passed this
+# guard undetected (issue #812). The basename search is scoped to hooks/
+# specifically — not the whole bundle root — so an unrelated bundle file
+# that happens to share a name elsewhere cannot produce a false positive.
 assert_no_plugin_shadow() {
     [[ -d "$PLUGIN_ROOT" ]] || return 0
 
@@ -260,6 +288,9 @@ assert_no_plugin_shadow() {
     while IFS= read -r rel; do
         [[ -n "$rel" ]] || continue
         if [[ -e "$PLUGIN_ROOT/$rel" ]]; then
+            shadowed+="  .claude/$rel"$'\n'
+        elif [[ "$rel" == hooks/* && -d "$BUNDLE_HOOKS_DIR" ]] \
+            && [[ -e "$BUNDLE_HOOKS_DIR/${rel##*/}" ]]; then
             shadowed+="  .claude/$rel"$'\n'
         fi
     done < <(planned_sync_paths)
@@ -361,6 +392,16 @@ PROJECT_LOCAL_HOOKS=(
     session-start.sh
     sync-reminder.sh
 )
+
+# Sync scope for hooks (issue #812): each project-local hook is a sync
+# candidate, added as an individual file rather than the whole hooks/
+# directory. BUNDLE_HOOKS are deliberately excluded — see the CORE_DIRS
+# comment above for why syncing them would be a dead, double-registered
+# duplicate of the plugin's own copies.
+for _project_local_hook in "${PROJECT_LOCAL_HOOKS[@]}"; do
+    CORE_FILES+=("hooks/$_project_local_hook")
+done
+unset _project_local_hook
 
 # Hooks that live only in the bundle and have no .claude/hooks/ counterpart by
 # design. The regenerator must not delete these.
@@ -687,6 +728,40 @@ print_marketplace_deprecation() {
 NOTICE
 }
 
+# BUNDLE_HOOKS are no longer sync candidates (issue #812): CORE_FILES only
+# carries PROJECT_LOCAL_HOOKS now, so `to` neither writes nor removes them.
+# A consumer synced before that change can still be holding one of the four
+# stale copies, and the plugin's hooks/hooks.json already auto-registers the
+# same hook — a leftover .claude/hooks/ copy risks running twice per matching
+# tool call if the project's own settings.json also references it. Nothing
+# here deletes it: that's the operator's call to make deliberately, once
+# they've confirmed the plugin's copy is registered. This only reports it
+# rather than leaving it silently in place.
+report_unsynced_hooks() {
+    local project_dir="$1"
+    local hook found=""
+
+    for hook in "${BUNDLE_HOOKS[@]}"; do
+        [[ -f "$project_dir/hooks/$hook" ]] || continue
+        found+="  .claude/hooks/$hook"$'\n'
+    done
+
+    [[ -n "$found" ]] || return 0
+
+    {
+        echo ""
+        echo "NOTE: found hook copies this script no longer syncs (issue #812):"
+        echo ""
+        printf '%s' "$found"
+        echo ""
+        echo "plugins/pipeline-core/ already provides these, and its"
+        echo "hooks.json auto-registers them — a leftover copy here risks"
+        echo "double-registration if the project's settings.json also"
+        echo "references it. Remove the copy once you've confirmed the"
+        echo "plugin's is registered."
+    } >&2
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -728,6 +803,8 @@ case "$COMMAND" in
         echo ""
         echo "Patching consumer agents:"
         patch_agents "$PROJECT_DIR"
+
+        report_unsynced_hooks "$PROJECT_DIR"
 
         echo ""
         echo "Done. Project-specific files (agents, prompts, existing config)"
