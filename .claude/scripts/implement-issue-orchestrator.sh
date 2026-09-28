@@ -7794,6 +7794,73 @@ delete_merged_local_branch() {
 	fi
 }
 
+# Delete a feature branch's local copy once it is fully merged into base
+# (issue #950 AC1). Companion to delete_merged_local_branch above, used by
+# the stale-worktree/branch reclaim path rather than the merge_pr terminal
+# path: with no PR head tracked here, "merged" is judged directly against
+# base_branch.
+#
+# Unlike delete_merged_local_branch, a branch still checked out in another
+# worktree is not skipped — the worktree is force-removed first and the
+# branch then deleted, reproducing what a manual `git worktree remove
+# --force && git branch -D` would do. This closes the exact production
+# failure from issue #950's Gap 1: "error: Cannot delete branch
+# 'feature/issue-5961' checked out at '<worktree path>'".
+#
+# Every branch still passes through salvage_unmerged_commits first (AC4):
+# commits absent from base are tagged salvage/<branch, slashes as dashes>
+# and the branch is KEPT, with the reason logged.
+#
+# Arguments:
+#   $1 - branch name (e.g. feature/issue-950)
+#   $2 - base branch already containing the merge (e.g. main)
+#
+# Returns 0 when the branch was deleted (or never existed), 1 when it was
+# kept.
+#
+reclaim_merged_branch() {
+	local wt_branch="$1"
+	local base="$2"
+	local salvage_tag="salvage/${wt_branch//\//-}"
+
+	git show-ref --verify --quiet \
+		"refs/heads/$wt_branch" 2>/dev/null || return 0
+
+	local active_wt
+	active_wt=$(git worktree list --porcelain 2>/dev/null \
+		| awk -v b="refs/heads/$wt_branch" \
+			'/^worktree /{wt=substr($0, 10)}
+			/^branch /{if ($2 == b) print wt}')
+	if [[ -n "$active_wt" ]]; then
+		git worktree remove --force "$active_wt" 2>/dev/null >&2 || true
+	fi
+
+	salvage_unmerged_commits "$wt_branch" "$salvage_tag" "$base"
+
+	local extra
+	extra=$(git rev-list --count "${base}..${wt_branch}" 2>/dev/null)
+	if [[ -z "$extra" ]]; then
+		log_warn "Keeping local branch $wt_branch: cannot compare" \
+			"it against $base"
+		return 1
+	fi
+	if ((extra > 0)); then
+		log "Keeping local branch $wt_branch: $extra commit(s)" \
+			"absent from $base; tagged as $salvage_tag"
+		return 1
+	fi
+
+	local delete_out delete_exit=0
+	delete_out=$(git branch -D "$wt_branch" 2>&1) || delete_exit=$?
+	if ((delete_exit == 0)); then
+		log "Deleted local branch $wt_branch (merged into $base)"
+		return 0
+	fi
+	log_warn "Failed to delete local branch $wt_branch" \
+		"after merge into $base: $delete_out"
+	return 1
+}
+
 # Formats `git status --porcelain` output as a space-separated path list for
 # an error message.
 #
