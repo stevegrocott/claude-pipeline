@@ -7764,8 +7764,9 @@ delete_merged_local_branch() {
 			'/^worktree /{wt=substr($0, 10)}
 			/^branch /{if ($2 == b) print wt}')
 	if [[ -n "$active_wt" ]]; then
-		log "Keeping local branch $wt_branch:" \
-			"still checked out at $active_wt"
+		log "Local branch $wt_branch still checked out at $active_wt;" \
+			"reclaiming it (issue #950 AC1)"
+		reclaim_merged_branch "$wt_branch" "$compare"
 		return 0
 	fi
 

@@ -562,7 +562,7 @@ _i950_squash_merged_branch() {
 	grep -qF "Keeping local branch feature/issue-950" "$LOG_FILE"
 }
 
-@test "#950 delete_merged_local_branch: keeps a branch still checked out in a worktree" {
+@test "#950 delete_merged_local_branch: reclaims a branch still checked out in a worktree" {
 	cd "$TEST_TMP/repo" || exit 1
 	local tip
 	tip=$(_i950_squash_merged_branch)
@@ -572,11 +572,9 @@ _i950_squash_merged_branch() {
 	[ "$status" -eq 0 ]
 
 	run git show-ref --verify --quiet refs/heads/feature/issue-950
-	[ "$status" -eq 0 ]
-	[[ -d "$TEST_TMP/wt-950" ]]
-	grep -qF "still checked out at" "$LOG_FILE"
-
-	git worktree remove --force "$TEST_TMP/wt-950"
+	[ "$status" -eq 1 ]
+	[[ ! -d "$TEST_TMP/wt-950" ]]
+	grep -qF "reclaiming it" "$LOG_FILE"
 }
 
 @test "#950 delete_merged_local_branch: absent branch is a no-op" {
