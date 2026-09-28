@@ -64,6 +64,23 @@ _extract_readonly_array_guards() {
 
 # Create isolated test environment
 setup_test_env() {
+    # Both orchestrators export their re-exec guard (and the temp-copy path
+    # alongside it) once they've re-exec'd themselves from a private copy
+    # (issue #775). When bats itself runs inside such an orchestrator's own
+    # process tree, these vars leak into every test's environment: a test
+    # that then launches the real script inherits an already-set guard, the
+    # script skips its re-exec, and any assertion expecting a fresh private
+    # copy sees none. Scrub them here so each test starts from a clean
+    # re-exec state regardless of the ancestry bats was launched from; a
+    # test that specifically wants an inherited guard sets it explicitly in
+    # its own body (see test-reexec.bats's "inherited guard" test). The
+    # carried-over SCRIPT_DIR is scrubbed too: a leaked value repoints a
+    # launched script's siblings at the ancestor's (e.g. plugin-cache) tree.
+    unset _BATCH_ORCHESTRATOR_REEXECED _BATCH_ORCHESTRATOR_REEXEC_COPY \
+        _BATCH_ORCHESTRATOR_SCRIPT_DIR
+    unset _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED \
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY
+
     TEST_TMP=$(mktemp -d)
     export TEST_TMP
 
