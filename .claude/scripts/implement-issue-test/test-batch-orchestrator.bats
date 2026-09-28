@@ -5168,3 +5168,267 @@ _capture_log() {
 	refute _iso_to_epoch "not-a-timestamp"
 	refute _iso_to_epoch "2026-13-45T99:99:99Z"
 }
+
+# =============================================================================
+# ISSUE #950: merged-branch reclaim, and worktree reclaim that spares a live
+# run.
+#
+# The pipeline deletes the REMOTE branch on merge (--delete-branch in
+# platform/merge-mr.sh) and prunes worktrees whose directory has already
+# vanished (cleanup_stale_worktrees), but leaves two gaps open:
+#
+#   Gap 1 — the local `feature/issue-<n>` branch survives a merge. Deleting
+#   it fails whenever a worktree still has it checked out, and the failure
+#   is non-fatal, so the branch persists indefinitely.
+#
+#   Gap 2 — a worktree belonging to a run killed mid-flight (circuit
+#   breaker, operator kill, crash) is never reclaimed: `git worktree prune`
+#   only drops entries whose directory has disappeared, and this one's
+#   directory is still there.
+#
+# The tests below specify the two functions these gaps need:
+#
+#   reclaim_merged_branch <branch_name> <base_branch>
+#       Deletes $branch_name locally once it is fully reachable from
+#       $base_branch (AC1). When it is NOT — the branch carries commits
+#       base_branch does not have — the branch is KEPT, not deleted, and
+#       the reason is logged; those commits are tagged via the existing
+#       salvage_unmerged_commits() guard so they stay addressable even if
+#       a later, less careful pass force-deletes the branch (AC4). Returns
+#       0 when the branch was deleted (or never existed), 1 when it was
+#       kept.
+#
+#   cleanup_stale_worktrees (extended)
+#       In addition to its existing behaviour (deleting wt-i* branches
+#       whose worktree entry is already gone), it now also inspects every
+#       STILL-PRESENT worktree entry for a `wt-i*-t*` branch. Each such
+#       worktree carries a `.claude-task.pid` file, written when the
+#       worktree was created, naming the pid of the run that owns it. When
+#       that pid is no longer running, the worktree and its branch are
+#       reclaimed (through the same salvage-tag-then-delete pattern as the
+#       existing stale-branch path). When the pid IS still running, the
+#       worktree is a LIVE run's and must not be touched at all — no
+#       removal, no branch delete, no log line about it (AC2).
+#
+# reclaim_merged_branch does not exist yet, so every test that depends on
+# it skips with a clear reason until issue #950's implementation task adds
+# it — this is the RED half of TDD, not a gap in this test file. The
+# cleanup_stale_worktrees tests call the function that already exists
+# today; the "reclaims a dead run" case is expected to fail until the
+# liveness check above is added, and the "never touches a live run" case
+# is a regression guard that must keep passing once it is.
+# =============================================================================
+
+# Shared fixture for the tests below: a throwaway git repo (independent of
+# the repo this suite itself lives in) with one commit on `main`, plus the
+# environment source_orchestrator_functions needs (mirrors the setup() in
+# test-task-batching.bats). Not folded into this file's global setup()
+# because it is unrelated to the ~200 batch-orchestrator.sh tests above.
+_setup_950_repo() {
+	mkdir -p "$TEST_TMP/repo"
+	cd "$TEST_TMP/repo" || return 1
+	git init -q
+	git checkout -q -b main
+	printf 'initial\n' > README.md
+	git add README.md
+	git commit -q -m "initial"
+
+	export ISSUE_NUMBER=950
+	export BASE_BRANCH=main
+	export LOG_BASE="$TEST_TMP/logs/test"
+	export LOG_FILE="$LOG_BASE/orchestrator.log"
+	export STAGE_COUNTER=0
+	mkdir -p "$LOG_BASE"
+
+	source_orchestrator_functions
+}
+
+# Prints a pid that is guaranteed to no longer be running: a subshell that
+# has already exited and been reaped by `wait`. Simulates a worktree whose
+# owning run crashed or was killed.
+_dead_pid() {
+	( exit 0 ) &
+	local pid="$!"
+	wait "$pid" 2>/dev/null
+	printf '%s' "$pid"
+}
+
+# =============================================================================
+# AC1/AC4 (#950): reclaim_merged_branch
+# =============================================================================
+
+@test "issue #950 AC1: reclaim_merged_branch is defined in implement-issue-orchestrator.sh" {
+	_setup_950_repo
+
+	local msg="reclaim_merged_branch is not yet defined (issue #950"
+	msg="$msg AC1/AC4: delete the local branch after a confirmed merge,"
+	msg="$msg via the existing salvage guard)"
+	declare -f reclaim_merged_branch > /dev/null || fail "$msg"
+}
+
+@test "issue #950 AC1: reclaim_merged_branch deletes a fully-merged local branch" {
+	_setup_950_repo
+	declare -f reclaim_merged_branch > /dev/null \
+		|| skip "reclaim_merged_branch not yet implemented (issue #950)"
+
+	git checkout -q -b feature/issue-950 main
+	printf 'landed\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that reached main"
+	git checkout -q main
+	git merge -q --no-edit feature/issue-950
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -eq 0 ]
+	refute git rev-parse --verify --quiet refs/heads/feature/issue-950
+}
+
+@test "issue #950 AC1: reclaim_merged_branch is a no-op when the branch does not exist" {
+	_setup_950_repo
+	declare -f reclaim_merged_branch > /dev/null \
+		|| skip "reclaim_merged_branch not yet implemented (issue #950)"
+
+	run reclaim_merged_branch feature/issue-nonexistent main
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC1: reclaim_merged_branch deletes a branch even while checked out in another worktree" {
+	_setup_950_repo
+	declare -f reclaim_merged_branch > /dev/null \
+		|| skip "reclaim_merged_branch not yet implemented (issue #950)"
+
+	git checkout -q -b feature/issue-950 main
+	git checkout -q main
+
+	# Reproduces the exact production failure from issue #950's Gap 1:
+	# "error: Cannot delete branch 'feature/issue-5961' checked out at
+	# '<worktree path>'". The branch is checked out in a SEPARATE
+	# worktree, not the one running the reclaim.
+	local wt_path="$TEST_TMP/other-worktree"
+	git worktree add -q "$wt_path" feature/issue-950
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -eq 0 ]
+	refute git rev-parse --verify --quiet refs/heads/feature/issue-950
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+}
+
+@test "issue #950 AC1/AC4: reclaim_merged_branch keeps a branch with unmerged commits and salvage-tags them" {
+	_setup_950_repo
+	declare -f reclaim_merged_branch > /dev/null \
+		|| skip "reclaim_merged_branch not yet implemented (issue #950)"
+
+	git checkout -q -b feature/issue-950 main
+	printf 'extra work\n' > extra.txt
+	git add extra.txt
+	git commit -q -m "committed locally after the PR was opened"
+	local extra_sha
+	extra_sha=$(git rev-parse feature/issue-950)
+	git checkout -q main
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -ne 0 ]
+
+	# The branch is kept, not deleted (AC1) ...
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+
+	# ... and AC4: nothing is deleted without going through the existing
+	# salvage_unmerged_commits() guard — the extra commit is tagged so it
+	# stays addressable even if a later pass force-deletes the branch.
+	run git rev-parse --verify --quiet refs/tags/salvage/feature-issue-950
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+
+	run grep -F "Keeping local branch feature/issue-950" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# AC2/AC4 (#950): cleanup_stale_worktrees spares a live run, reclaims a dead
+# one
+# =============================================================================
+
+@test "issue #950 AC2: cleanup_stale_worktrees reclaims a worktree whose owning run is no longer alive" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	local wt_path="$TEST_TMP/worktrees/task-1"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "1" "950" \
+		> /dev/null
+
+	# Marks the worktree as belonging to a run that has already died —
+	# e.g. the circuit breaker killed it, or an operator killed -9'd it,
+	# mid-task. The directory (and its branch) survive on disk; only the
+	# pid marker distinguishes "abandoned" from "in flight".
+	local dead
+	dead=$(_dead_pid)
+	printf '%s' "$dead" > "$wt_path/.claude-task.pid"
+
+	cleanup_stale_worktrees
+
+	[[ ! -d "$wt_path" ]] \
+		|| fail "worktree for a dead run was not reclaimed"
+	refute git rev-parse --verify --quiet refs/heads/wt-i950-t1
+}
+
+@test "issue #950 AC2: cleanup_stale_worktrees never touches a live run's worktree" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	local wt_path="$TEST_TMP/worktrees/task-2"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "2" "950" \
+		> /dev/null
+
+	# A run genuinely still in flight: its pid marker names a background
+	# process that stays alive for the duration of this test.
+	sleep 100 &
+	local live_pid="$!"
+	printf '%s' "$live_pid" > "$wt_path/.claude-task.pid"
+
+	cleanup_stale_worktrees
+
+	local msg="a LIVE run's worktree was destroyed — this would have"
+	msg="$msg deleted in-flight work"
+	[[ -d "$wt_path" ]] || fail "$msg"
+	run git rev-parse --verify --quiet refs/heads/wt-i950-t2
+	[ "$status" -eq 0 ]
+
+	kill "$live_pid" 2>/dev/null
+	wait "$live_pid" 2>/dev/null || true
+}
+
+# Implementation note (verified against a reference implementation while
+# writing this test, not left in the tree): salvage_unmerged_commits()'s
+# no-base path computes `git rev-list $branch --not --exclude=refs/heads/
+# $branch --all`. While a worktree still has $branch checked out, --all
+# resolves the worktree's HEAD to a ref --exclude cannot name, so the
+# branch reads as reachable from --all and the tag is silently skipped.
+# `git worktree remove` the worktree BEFORE calling salvage_unmerged_
+# commits — matching the order the already-tested no-worktree stale-
+# branch path uses — not after.
+@test "issue #950 AC2/AC4: cleanup_stale_worktrees salvage-tags a dead run's unmerged commits before reclaiming it" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	local wt_path="$TEST_TMP/worktrees/task-3"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "3" "950" \
+		> /dev/null
+
+	printf 'unfinished work\n' > "$wt_path/unfinished.txt"
+	git -C "$wt_path" add unfinished.txt
+	git -C "$wt_path" commit -q -m "in-progress work, run then died"
+	local unmerged_sha
+	unmerged_sha=$(git -C "$wt_path" rev-parse wt-i950-t3)
+
+	local dead
+	dead=$(_dead_pid)
+	printf '%s' "$dead" > "$wt_path/.claude-task.pid"
+
+	cleanup_stale_worktrees
+
+	run git rev-parse --verify --quiet refs/tags/salvage/issue-950-task3
+	[ "$status" -eq 0 ]
+	[ "$output" = "$unmerged_sha" ]
+}
