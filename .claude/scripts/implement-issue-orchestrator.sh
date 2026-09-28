@@ -7635,6 +7635,77 @@ cleanup_worktree() {
 	git branch -D "$wt_branch" 2>/dev/null >&2 || true
 }
 
+# Delete a feature branch's local copy once its PR has merged (issue #950).
+#
+# `platform/merge-mr.sh` deletes the *remote* branch via `--delete-branch`;
+# nothing reclaims the local copy, so it survives indefinitely. This is
+# called from merge_pr once HEAD has been moved to the up-to-date base.
+#
+# "Merged" is judged against the tip that was actually merged — the PR
+# head, captured from the remote-tracking ref before merge-mr.sh ran —
+# because a squash or rebase merge rewrites the commits, so the branch is
+# never an ancestor of base even when nothing is missing. With no merged
+# tip recorded, base is the comparison and a squash merge errs towards
+# keeping the branch.
+#
+# Guards that keep this from destroying work:
+#   - A branch still checked out in any worktree is kept, not forced.
+#   - Every branch passes through salvage_unmerged_commits first. Commits
+#     absent from the merge (e.g. committed locally after the last push)
+#     are tagged salvage/issue-<n>-merged and the branch is KEPT, with
+#     the reason logged. Only a branch with nothing extra is deleted.
+#
+# Arguments:
+#   $1 - branch name (e.g. feature/issue-950)
+#   $2 - base already containing the merge (e.g. BASE_BRANCH)
+#   $3 - merged tip SHA (optional; the PR head at merge time)
+#
+delete_merged_local_branch() {
+	local wt_branch="$1"
+	local base="$2"
+	local merged_tip="${3:-}"
+	local compare="${merged_tip:-$base}"
+	local salvage_tag="salvage/issue-${ISSUE_NUMBER}-merged"
+
+	git show-ref --verify --quiet \
+		"refs/heads/$wt_branch" 2>/dev/null || return 0
+
+	local active_wt
+	active_wt=$(git worktree list --porcelain 2>/dev/null \
+		| awk -v b="refs/heads/$wt_branch" \
+			'/^worktree /{wt=substr($0, 10)}
+			/^branch /{if ($2 == b) print wt}')
+	if [[ -n "$active_wt" ]]; then
+		log "Keeping local branch $wt_branch:" \
+			"still checked out at $active_wt"
+		return 0
+	fi
+
+	salvage_unmerged_commits "$wt_branch" "$salvage_tag" "$compare"
+
+	local extra
+	extra=$(git rev-list --count "${compare}..${wt_branch}" 2>/dev/null)
+	if [[ -z "$extra" ]]; then
+		log_warn "Keeping local branch $wt_branch: cannot compare" \
+			"it against the merge ($compare)"
+		return 0
+	fi
+	if ((extra > 0)); then
+		log "Keeping local branch $wt_branch: $extra commit(s)" \
+			"absent from the merge ($compare); tagged as $salvage_tag"
+		return 0
+	fi
+
+	local delete_out delete_exit=0
+	delete_out=$(git branch -D "$wt_branch" 2>&1) || delete_exit=$?
+	if ((delete_exit == 0)); then
+		log "Deleted local branch $wt_branch (merged into $base)"
+	else
+		log_warn "Failed to delete local branch $wt_branch" \
+			"after merge into $base: $delete_out"
+	fi
+}
+
 # Formats `git status --porcelain` output as a space-separated path list for
 # an error message.
 #
@@ -13845,6 +13916,13 @@ $_task_summary_line}" \
         log "merge_pr: merge-in-progress comment posted"
         log "merge_pr: invoking merge-mr.sh for PR #$pr_number"
 
+        # The PR head as last pushed; recorded before merge-mr.sh deletes
+        # the remote branch so the local copy can be judged against what
+        # actually merged (issue #950).
+        local _merged_tip
+        _merged_tip=$(git rev-parse --verify -q \
+            "refs/remotes/origin/$branch" 2>/dev/null)
+
         local _merge_exit
         timeout "$MERGE_MR_STEP_TIMEOUT" "$PLATFORM_DIR/merge-mr.sh" \
             "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1
@@ -13910,6 +13988,10 @@ $_task_summary_line}" \
 
         log "merge_pr: git fetch/checkout/pull complete"
         log "Now on $BASE_BRANCH (up to date)"
+
+        log "merge_pr: reclaiming local branch $branch"
+        delete_merged_local_branch "$branch" "$BASE_BRANCH" \
+            "$_merged_tip"
 
         if [[ "${QUIET:-false}" != "true" ]]; then
             log "merge_pr: posting merge-complete comment on issue"
