@@ -37,6 +37,14 @@
 #     3. tags unmerged commits as salvage/issue-<n>-task<m> before delete
 #     4. does not create a salvage tag when branch has no unmerged commits
 #
+#   delete_merged_local_branch (issue #950):
+#     1. deletes a squash-merged branch judged against the merged tip
+#     2. deletes a merge-committed branch with no merged tip
+#     3. keeps and salvages a branch with commits absent from the merge
+#     4. squash merge without a merged tip keeps the branch
+#     5. keeps a branch still checked out in a worktree
+#     6. absent branch is a no-op
+#
 #   stale-branch salvage (issue #838):
 #     1. cleanup_stale_worktrees tags a stale branch's unmerged commits
 #     2. cleanup_stale_worktrees leaves a merged stale branch untagged
@@ -466,6 +474,115 @@ teardown() {
 
 	git checkout -q main
 	git branch -D feature/no-salvage-test 2>/dev/null || true
+}
+
+# =============================================================================
+# delete_merged_local_branch (issue #950)
+# =============================================================================
+
+# Build feature/issue-950 with one commit, squash-merge it into main and
+# print the branch tip (the PR head that was merged).
+_i950_squash_merged_branch() {
+	git checkout -q -b feature/issue-950 main
+	printf 'feature\n' > feature.txt
+	git add feature.txt
+	git commit -q -m "feature work"
+	git checkout -q main
+	git merge -q --squash feature/issue-950 >/dev/null
+	git commit -q -m "squash: feature work"
+	git rev-parse feature/issue-950
+}
+
+@test "#950 delete_merged_local_branch: deletes a squash-merged branch" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tip
+	tip=$(_i950_squash_merged_branch)
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	run git show-ref --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -ne 0 ]
+	run git show-ref --verify --quiet refs/tags/salvage/issue-99-merged
+	[ "$status" -ne 0 ]
+	grep -qF "Deleted local branch feature/issue-950" "$LOG_FILE"
+}
+
+@test "#950 delete_merged_local_branch: deletes a merge-committed branch with no merged tip" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/issue-950 main
+	printf 'feature\n' > feature.txt
+	git add feature.txt
+	git commit -q -m "feature work"
+	git checkout -q main
+	git merge -q --no-ff -m "merge" feature/issue-950
+
+	run delete_merged_local_branch feature/issue-950 main ""
+	[ "$status" -eq 0 ]
+
+	run git show-ref --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -ne 0 ]
+}
+
+@test "#950 delete_merged_local_branch: keeps and salvages a branch with commits absent from the merge" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tip extra_sha
+	tip=$(_i950_squash_merged_branch)
+
+	# A commit made locally after the PR head was pushed and merged.
+	git checkout -q feature/issue-950
+	printf 'late\n' > late.txt
+	git add late.txt
+	git commit -q -m "late local work"
+	extra_sha=$(git rev-parse HEAD)
+	git checkout -q main
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	run git rev-parse --verify refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+	run git rev-parse refs/tags/salvage/issue-99-merged
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+	grep -qF "Keeping local branch feature/issue-950: 1 commit(s)" \
+		"$LOG_FILE"
+}
+
+@test "#950 delete_merged_local_branch: squash merge without a merged tip keeps the branch" {
+	cd "$TEST_TMP/repo" || exit 1
+	_i950_squash_merged_branch >/dev/null
+
+	run delete_merged_local_branch feature/issue-950 main ""
+	[ "$status" -eq 0 ]
+
+	run git show-ref --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+	grep -qF "Keeping local branch feature/issue-950" "$LOG_FILE"
+}
+
+@test "#950 delete_merged_local_branch: reclaims a branch still checked out in a worktree" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tip
+	tip=$(_i950_squash_merged_branch)
+	git worktree add -q "$TEST_TMP/wt-950" feature/issue-950
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	run git show-ref --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 1 ]
+	[[ ! -d "$TEST_TMP/wt-950" ]]
+	grep -qF "reclaiming it" "$LOG_FILE"
+}
+
+@test "#950 delete_merged_local_branch: absent branch is a no-op" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	run delete_merged_local_branch feature/issue-nope main ""
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
 }
 
 # =============================================================================
