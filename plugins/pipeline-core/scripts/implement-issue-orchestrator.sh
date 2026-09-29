@@ -6984,6 +6984,19 @@ salvage_unmerged_commits() {
 	fi
 }
 
+# True when reclaim paths should only report what they would do (issue
+# #950 AC6). Set RECLAIM_DRY_RUN=true so an operator can review what the
+# first real run would reclaim; any other value, or unset, is a live run.
+# Read at call time, never cached, so each reclaim function sees the
+# current environment.
+#
+# Returns:
+#   0 when RECLAIM_DRY_RUN is "true", 1 otherwise
+#
+reclaim_dry_run_enabled() {
+	[[ "${RECLAIM_DRY_RUN:-false}" == "true" ]]
+}
+
 # Create a git worktree for a single task.
 #
 # Clean up stale worktree branches from previous failed runs.
@@ -7004,12 +7017,26 @@ salvage_unmerged_commits() {
 # left completely untouched — the latter belongs to a live run, and
 # destroying it would destroy in-flight work.
 #
+# With RECLAIM_DRY_RUN=true (issue #950 AC6) discovery still runs —
+# stale branches are found, and each worktree's owning pid is checked —
+# but prune runs as `--dry-run`, and every stale branch or dead-run
+# worktree is only logged as "[dry-run] would ...": no salvage tag is
+# written and nothing is removed or deleted. The live-run guard runs
+# first either way, so a live run's worktree is never listed.
+#
 # Arguments:
 #   (none)
 #
 cleanup_stale_worktrees() {
+	local dry_run=false
+	reclaim_dry_run_enabled && dry_run=true
+
 	# Prune broken worktree references
-	git worktree prune 2>&1 | while IFS= read -r line; do
+	local -a prune_cmd=(git worktree prune)
+	if [[ "$dry_run" == "true" ]]; then
+		prune_cmd+=(--dry-run --verbose)
+	fi
+	"${prune_cmd[@]}" 2>&1 | while IFS= read -r line; do
 		log "worktree prune: $line"
 	done
 
@@ -7038,7 +7065,9 @@ cleanup_stale_worktrees() {
 				break
 			fi
 		done
-		if [[ "$is_active" == "false" ]]; then
+		if [[ "$is_active" == "false" && "$dry_run" == "true" ]]; then
+			log "[dry-run] would delete stale branch $branch_name"
+		elif [[ "$is_active" == "false" ]]; then
 			log "Cleaning stale branch: $branch_name"
 			# The branch may carry commits a crashed prior
 			# run never merged; tag them before -D drops
@@ -7109,6 +7138,13 @@ cleanup_stale_worktrees() {
 		# batch's pre-flight and would otherwise spam the log for
 		# every task currently in flight.
 		kill -0 "$owner_pid" 2>/dev/null && continue
+
+		if [[ "$dry_run" == "true" ]]; then
+			log "[dry-run] would reclaim worktree $dead_wt_path" \
+				"(branch $dead_wt_branch): owning process" \
+				"$owner_pid is no longer running"
+			continue
+		fi
 
 		log "Reclaiming worktree $dead_wt_path: owning" \
 			"process $owner_pid is no longer running"
@@ -7748,12 +7784,19 @@ cleanup_worktree() {
 #   $2 - base already containing the merge (e.g. BASE_BRANCH)
 #   $3 - merged tip SHA (optional; the PR head at merge time)
 #
+# With RECLAIM_DRY_RUN=true (issue #950 AC6) the comparison still runs, but
+# no salvage tag is written and no branch is deleted; the outcome is logged
+# as "[dry-run] would ...". The checked-out case defers to
+# reclaim_merged_branch, which honours the same flag.
+#
 delete_merged_local_branch() {
 	local wt_branch="$1"
 	local base="$2"
 	local merged_tip="${3:-}"
 	local compare="${merged_tip:-$base}"
 	local salvage_tag="salvage/issue-${ISSUE_NUMBER}-merged"
+	local dry_run=false
+	reclaim_dry_run_enabled && dry_run=true
 
 	git show-ref --verify --quiet \
 		"refs/heads/$wt_branch" 2>/dev/null || return 0
@@ -7770,7 +7813,9 @@ delete_merged_local_branch() {
 		return 0
 	fi
 
-	salvage_unmerged_commits "$wt_branch" "$salvage_tag" "$compare"
+	if [[ "$dry_run" != "true" ]]; then
+		salvage_unmerged_commits "$wt_branch" "$salvage_tag" "$compare"
+	fi
 
 	local extra
 	extra=$(git rev-list --count "${compare}..${wt_branch}" 2>/dev/null)
@@ -7780,8 +7825,20 @@ delete_merged_local_branch() {
 		return 0
 	fi
 	if ((extra > 0)); then
+		if [[ "$dry_run" == "true" ]]; then
+			log "[dry-run] would keep local branch $wt_branch:" \
+				"$extra commit(s) absent from the merge" \
+				"($compare); would tag as $salvage_tag"
+			return 0
+		fi
 		log "Keeping local branch $wt_branch: $extra commit(s)" \
 			"absent from the merge ($compare); tagged as $salvage_tag"
+		return 0
+	fi
+
+	if [[ "$dry_run" == "true" ]]; then
+		log "[dry-run] would delete branch $wt_branch" \
+			"(merged into $base)"
 		return 0
 	fi
 
@@ -7816,13 +7873,19 @@ delete_merged_local_branch() {
 #   $1 - branch name (e.g. feature/issue-950)
 #   $2 - base branch already containing the merge (e.g. main)
 #
-# Returns 0 when the branch was deleted (or never existed), 1 when it was
-# kept.
+# With RECLAIM_DRY_RUN=true (issue #950 AC6) the worktree lookup and the
+# merged/unmerged comparison still run, but the worktree removal, salvage
+# tag and branch deletion are skipped and logged as "[dry-run] would ...".
+#
+# Returns 0 when the branch was deleted (or never existed, or in dry-run
+# would be deleted), 1 when it was kept.
 #
 reclaim_merged_branch() {
 	local wt_branch="$1"
 	local base="$2"
 	local salvage_tag="salvage/${wt_branch//\//-}"
+	local dry_run=false
+	reclaim_dry_run_enabled && dry_run=true
 
 	git show-ref --verify --quiet \
 		"refs/heads/$wt_branch" 2>/dev/null || return 0
@@ -7833,10 +7896,18 @@ reclaim_merged_branch() {
 			'/^worktree /{wt=substr($0, 10)}
 			/^branch /{if ($2 == b) print wt}')
 	if [[ -n "$active_wt" ]]; then
-		git worktree remove --force "$active_wt" 2>/dev/null >&2 || true
+		if [[ "$dry_run" == "true" ]]; then
+			log "[dry-run] would reclaim worktree $active_wt" \
+				"(branch $wt_branch)"
+		else
+			git worktree remove --force "$active_wt" \
+				2>/dev/null >&2 || true
+		fi
 	fi
 
-	salvage_unmerged_commits "$wt_branch" "$salvage_tag" "$base"
+	if [[ "$dry_run" != "true" ]]; then
+		salvage_unmerged_commits "$wt_branch" "$salvage_tag" "$base"
+	fi
 
 	local extra
 	extra=$(git rev-list --count "${base}..${wt_branch}" 2>/dev/null)
@@ -7846,9 +7917,21 @@ reclaim_merged_branch() {
 		return 1
 	fi
 	if ((extra > 0)); then
+		if [[ "$dry_run" == "true" ]]; then
+			log "[dry-run] would keep local branch $wt_branch:" \
+				"$extra commit(s) absent from $base;" \
+				"would tag as $salvage_tag"
+			return 1
+		fi
 		log "Keeping local branch $wt_branch: $extra commit(s)" \
 			"absent from $base; tagged as $salvage_tag"
 		return 1
+	fi
+
+	if [[ "$dry_run" == "true" ]]; then
+		log "[dry-run] would delete branch $wt_branch" \
+			"(merged into $base)"
+		return 0
 	fi
 
 	local delete_out delete_exit=0
@@ -7881,6 +7964,10 @@ reclaim_merged_branch() {
 # checkout is definitionally not a place work is meant to land, matching
 # cleanup_stale_worktrees' tag-then-delete handling of stale wt-i* branches.
 #
+# With RECLAIM_DRY_RUN=true (issue #950 AC6) the PR state is still queried,
+# but each reclaimable branch is only logged as "[dry-run] would delete" —
+# no salvage tag is written and no branch is deleted.
+#
 # Arguments:
 #   (none)
 #
@@ -7900,6 +7987,12 @@ reclaim_pr_scratch_branches() {
 			--jq '.state' 2>/dev/null)
 		[[ -n "$pr_state" ]] || continue
 		[[ "$pr_state" == "OPEN" ]] && continue
+
+		if reclaim_dry_run_enabled; then
+			log "[dry-run] would delete scratch branch" \
+				"$branch_name (PR #$pr_num is $pr_state)"
+			continue
+		fi
 
 		log "Reclaiming scratch branch $branch_name:" \
 			"PR #$pr_num is $pr_state"

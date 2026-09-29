@@ -5516,3 +5516,266 @@ _dead_pid() {
 	run grep -F "Keeping local branch feature/issue-950" "$LOG_FILE"
 	[ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# AC3/AC4 (#950): reclaim_pr_scratch_branches removes review/check scratch
+# branches once their PR is no longer open
+# =============================================================================
+
+# Stubs `gh pr view <n> --json state --jq '.state'` to return $1 regardless
+# of which PR number is queried. Scratch-branch tests only ever create one
+# such branch at a time, so a single fixed answer is enough and avoids the
+# ordering fragility a queue would have against git's own branch ordering.
+_stub_gh_pr_state_fixed() {
+	local state="$1"
+	mkdir -p "$TEST_TMP/bin"
+	: > "$TEST_TMP/gh-calls.log"
+	cat > "$TEST_TMP/bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_TMP/gh-calls.log"
+printf '%s\n' "$state"
+exit 0
+STUB
+	chmod +x "$TEST_TMP/bin/gh"
+	PATH="$TEST_TMP/bin:$PATH"
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches deletes a pr-N-review branch once its PR is MERGED" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed MERGED
+
+	git checkout -q -b pr-42-review main
+	git checkout -q main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	refute git rev-parse --verify --quiet refs/heads/pr-42-review
+	grep -q "PR #42 is MERGED" "$LOG_FILE" \
+		|| fail "reclaim was not logged with the PR number and state"
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches deletes a pr-N-check branch once its PR is CLOSED" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed CLOSED
+
+	git checkout -q -b pr-7-check main
+	git checkout -q main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	refute git rev-parse --verify --quiet refs/heads/pr-7-check
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches keeps a scratch branch while its PR is OPEN" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed OPEN
+
+	git checkout -q -b pr-9-review main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	run git rev-parse --verify --quiet refs/heads/pr-9-review
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches keeps a scratch branch when gh reports nothing" {
+	_setup_950_repo
+	# Empty state — gh unavailable, PR not found, offline — must be treated
+	# the same as "still open": the branch is kept rather than guessed at.
+	_stub_gh_pr_state_fixed ""
+
+	git checkout -q -b pr-13-review main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	run git rev-parse --verify --quiet refs/heads/pr-13-review
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC3/AC4: reclaim_pr_scratch_branches salvage-tags a scratch branch's unique commits before deleting it" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed MERGED
+
+	git checkout -q -b pr-55-review main
+	printf 'scratch work\n' > scratch.txt
+	git add scratch.txt
+	git commit -q -m "work that only exists on the scratch branch"
+	local scratch_sha
+	scratch_sha=$(git rev-parse pr-55-review)
+	git checkout -q main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+
+	# AC3: still deleted even though it carried commits — a scratch
+	# review/check checkout is never a place work is meant to land.
+	refute git rev-parse --verify --quiet refs/heads/pr-55-review
+
+	# AC4: nothing is deleted without going through salvage_unmerged_commits
+	# first — the commit is tagged so it stays addressable.
+	run git rev-parse --verify --quiet refs/tags/salvage/pr-55-review
+	[ "$status" -eq 0 ]
+	[ "$output" = "$scratch_sha" ]
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches ignores branches that do not match the pr-N-review/pr-N-check pattern" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed MERGED
+
+	git checkout -q -b feature/issue-950 main
+	git checkout -q main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+	[ ! -s "$TEST_TMP/gh-calls.log" ] \
+		|| fail "queried gh for a branch that isn't a scratch branch"
+}
+
+# =============================================================================
+# AC5 (#950): report_stashes reports the stash stack without ever touching it
+# =============================================================================
+
+@test "issue #950 AC5: report_stashes logs a zero count and touches nothing when the stash stack is empty" {
+	_setup_950_repo
+
+	run report_stashes
+	[ "$status" -eq 0 ]
+	run grep -F "No stashes present" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC5: report_stashes logs the stash count without dropping, popping or applying any entry" {
+	_setup_950_repo
+
+	printf 'wip one\n' >> README.md
+	git stash push -q -m "wip one"
+	printf 'wip two\n' >> README.md
+	git stash push -q -m "wip two"
+
+	local before
+	before=$(git stash list)
+
+	run report_stashes
+	[ "$status" -eq 0 ]
+
+	local after
+	after=$(git stash list)
+	[ "$before" = "$after" ] \
+		|| fail "the stash stack changed: before=[$before] after=[$after]"
+
+	run grep -F "2 stash(es) present; not touched" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# AC6 (#950): RECLAIM_DRY_RUN lists what would be reclaimed without acting
+# =============================================================================
+
+@test "issue #950 AC6: reclaim_dry_run_enabled is false by default" {
+	_setup_950_repo
+	unset RECLAIM_DRY_RUN
+
+	run reclaim_dry_run_enabled
+	[ "$status" -ne 0 ]
+}
+
+@test "issue #950 AC6: reclaim_dry_run_enabled is true only when RECLAIM_DRY_RUN is exactly \"true\"" {
+	_setup_950_repo
+
+	RECLAIM_DRY_RUN=true run reclaim_dry_run_enabled
+	[ "$status" -eq 0 ]
+
+	RECLAIM_DRY_RUN=yes run reclaim_dry_run_enabled
+	[ "$status" -ne 0 ]
+}
+
+@test "issue #950 AC6: dry-run reclaim_merged_branch reports a mergeable branch without deleting it" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'landed\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that reached main"
+	git checkout -q main
+	git merge -q --no-edit feature/issue-950
+
+	export RECLAIM_DRY_RUN=true
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -eq 0 ]
+
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ] \
+		|| fail "dry-run deleted the branch it should only have reported"
+
+	run grep -F "[dry-run] would delete branch feature/issue-950" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC6: dry-run cleanup_stale_worktrees reports a dead run's worktree without reclaiming it" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	local wt_path="$TEST_TMP/worktrees/task-6"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "6" "950" \
+		> /dev/null
+
+	local dead
+	dead=$(_dead_pid)
+	printf '%s' "$dead" > "$wt_path/.claude-task.pid"
+
+	export RECLAIM_DRY_RUN=true
+	cleanup_stale_worktrees
+
+	[[ -d "$wt_path" ]] \
+		|| fail "dry-run reclaimed a worktree it should only have reported"
+	run git rev-parse --verify --quiet refs/heads/wt-i950-t6
+	[ "$status" -eq 0 ]
+
+	# Match on branch name rather than the full worktree path: TEST_TMP is
+	# created via mktemp, and on macOS git resolves it through the
+	# /var -> /private/var symlink, so the logged path is not always a
+	# byte-for-byte match for $wt_path.
+	run grep -F "[dry-run] would reclaim worktree" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+	run grep -F "branch wt-i950-t6" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC6: dry-run reclaim_pr_scratch_branches reports a reclaimable scratch branch without deleting it" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed MERGED
+
+	git checkout -q -b pr-88-review main
+	git checkout -q main
+
+	export RECLAIM_DRY_RUN=true
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+
+	run git rev-parse --verify --quiet refs/heads/pr-88-review
+	[ "$status" -eq 0 ] \
+		|| fail "dry-run deleted a scratch branch it should only have reported"
+
+	run grep -F "[dry-run] would delete scratch branch pr-88-review" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC6: dry-run never writes a salvage tag" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'extra work\n' > extra.txt
+	git add extra.txt
+	git commit -q -m "committed locally after the PR was opened"
+	git checkout -q main
+
+	export RECLAIM_DRY_RUN=true
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -ne 0 ]
+
+	run git rev-parse --verify --quiet refs/tags/salvage/feature-issue-950
+	[ "$status" -ne 0 ] \
+		|| fail "dry-run wrote a salvage tag even though nothing is deleted"
+}
