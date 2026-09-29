@@ -7914,6 +7914,33 @@ reclaim_pr_scratch_branches() {
 		--format='%(refname:short)' 2>/dev/null)
 }
 
+# Report the git stash stack without touching it (issue #950 AC5).
+#
+# The stash stack is per-repository, not per-worktree, so it is shared by
+# every concurrent session working in this clone — including an operator's
+# interactive shell. An entry that looks abandoned to this run may be
+# another session's in-flight work, so nothing here ever drops, clears,
+# pops or applies a stash; the count is logged so an operator can decide.
+# Strictly read-only: only `git stash list` is run.
+#
+# Arguments:
+#   (none)
+#
+report_stashes() {
+	local stash_count=0
+	local stash_line
+	while IFS= read -r stash_line; do
+		[[ -n "$stash_line" ]] && ((stash_count++))
+	done < <(git stash list 2>/dev/null)
+
+	if ((stash_count == 0)); then
+		log "No stashes present (issue #950 AC5)"
+		return 0
+	fi
+	log "$stash_count stash(es) present; not touched" \
+		"(issue #950 AC5)"
+}
+
 # Formats `git status --porcelain` output as a space-separated path list for
 # an error message.
 #
@@ -7994,6 +8021,7 @@ execute_batch_parallel() {
 	# any previous failed run before creating new ones.
 	cleanup_stale_worktrees
 	reclaim_pr_scratch_branches
+	report_stashes
 
 	local wt_base="${LOG_BASE}/worktrees"
 	local batch_count
