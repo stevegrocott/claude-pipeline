@@ -7862,6 +7862,58 @@ reclaim_merged_branch() {
 	return 1
 }
 
+# Remove pr-<N>-review and pr-<N>-check scratch branches once the PR they
+# reference is no longer open (issue #950 AC3).
+#
+# These are throwaway checkouts created to review or validate a PR — they
+# hold no work meant to land anywhere. While the PR is OPEN, review or
+# checks may still be in progress, so the branch is left alone; once it is
+# MERGED or CLOSED the branch has served its purpose. `gh pr view` failing
+# (offline, PR not found, `gh` unavailable) is treated the same as "still
+# open" — the branch is kept rather than guessed at.
+#
+# Every branch still passes through salvage_unmerged_commits first (AC4):
+# a branch holding commits reachable nowhere else is tagged
+# salvage/pr-<n>-review (or -check) before it is deleted, so nothing is
+# silently lost. Unlike delete_merged_local_branch/reclaim_merged_branch
+# (issue #950 AC1), the branch is still deleted even when it carried extra
+# commits — the tag keeps them addressable, and a scratch review/check
+# checkout is definitionally not a place work is meant to land, matching
+# cleanup_stale_worktrees' tag-then-delete handling of stale wt-i* branches.
+#
+# Arguments:
+#   (none)
+#
+reclaim_pr_scratch_branches() {
+	local branch_name
+	while IFS= read -r branch_name; do
+		[[ -z "$branch_name" ]] && continue
+
+		local pr_num="$branch_name"
+		pr_num="${pr_num#pr-}"
+		pr_num="${pr_num%-review}"
+		pr_num="${pr_num%-check}"
+		[[ "$pr_num" =~ ^[0-9]+$ ]] || continue
+
+		local pr_state
+		pr_state=$(gh pr view "$pr_num" --json state \
+			--jq '.state' 2>/dev/null)
+		[[ -n "$pr_state" ]] || continue
+		[[ "$pr_state" == "OPEN" ]] && continue
+
+		log "Reclaiming scratch branch $branch_name:" \
+			"PR #$pr_num is $pr_state"
+
+		local scratch_tag="salvage/${branch_name}"
+		salvage_unmerged_commits "$branch_name" "$scratch_tag"
+		git branch -D "$branch_name" 2>&1 \
+			| while IFS= read -r line; do
+				log "  $line"
+			done
+	done < <(git branch --list 'pr-*-review' 'pr-*-check' \
+		--format='%(refname:short)' 2>/dev/null)
+}
+
 # Formats `git status --porcelain` output as a space-separated path list for
 # an error message.
 #
@@ -7941,6 +7993,7 @@ execute_batch_parallel() {
 	# Pre-flight: clean up stale worktree branches from
 	# any previous failed run before creating new ones.
 	cleanup_stale_worktrees
+	reclaim_pr_scratch_branches
 
 	local wt_base="${LOG_BASE}/worktrees"
 	local batch_count
