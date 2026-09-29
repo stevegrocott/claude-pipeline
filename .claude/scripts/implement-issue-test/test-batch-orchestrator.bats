@@ -5432,3 +5432,87 @@ _dead_pid() {
 	[ "$status" -eq 0 ]
 	[ "$output" = "$unmerged_sha" ]
 }
+
+# =============================================================================
+# AC1/AC4 (#950): delete_merged_local_branch through the actual merge_pr call
+# path, for a branch still checked out in another worktree.
+#
+# This is the scenario merge_pr hits in production, not an edge case: the
+# orchestrator runs the feature/issue-<n> branch out of its own worktree, so
+# by the time merge_pr calls delete_merged_local_branch, that branch is
+# almost always checked out somewhere other than the process's own HEAD.
+# 8abb6d4c wired that call site to reclaim_merged_branch instead of just
+# logging and keeping the branch; these tests cover both outcomes of that
+# wiring, complementing the direct reclaim_merged_branch coverage above.
+# =============================================================================
+
+@test "issue #950 AC1: delete_merged_local_branch reclaims a merged feature/issue-N branch checked out in another worktree" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'landed\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that reached main"
+	local tip
+	tip=$(git rev-parse feature/issue-950)
+	git checkout -q main
+	git merge -q --no-edit feature/issue-950
+
+	local wt_path="$TEST_TMP/wt-950"
+	git worktree add -q "$wt_path" feature/issue-950
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	refute git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[[ ! -d "$wt_path" ]] \
+		|| fail "worktree for the merged branch was not reclaimed"
+}
+
+@test "issue #950 AC1/AC4: delete_merged_local_branch keeps an unmerged feature/issue-N branch checked out in another worktree, salvage-tagging its commits" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'landed\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that reached main"
+	local tip
+	tip=$(git rev-parse feature/issue-950)
+	git checkout -q main
+	git merge -q --no-edit feature/issue-950
+
+	local wt_path="$TEST_TMP/wt-950"
+	git worktree add -q "$wt_path" feature/issue-950
+
+	# Committed locally, in the worktree, after the tip that was merged —
+	# the exact "operator committed after merge" hazard AC1 calls out.
+	printf 'late\n' > "$wt_path/late.txt"
+	git -C "$wt_path" add late.txt
+	git -C "$wt_path" commit -q -m "late local work"
+	local extra_sha
+	extra_sha=$(git -C "$wt_path" rev-parse feature/issue-950)
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	# The branch is kept, not deleted (AC1) ...
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+
+	# ... even though its worktree is gone — reclaimed like any other
+	# checked-out branch once merge_pr calls in, same as the merged case
+	# above.
+	[[ ! -d "$wt_path" ]] \
+		|| fail "worktree was not removed while reclaiming"
+
+	# ... and AC4: the extra commit is salvage-tagged before anything is
+	# force-deleted, so it stays addressable even if a later, less
+	# careful pass removes the branch.
+	run git rev-parse --verify --quiet refs/tags/salvage/feature-issue-950
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+
+	run grep -F "Keeping local branch feature/issue-950" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
