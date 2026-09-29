@@ -7272,6 +7272,7 @@ __pycache__/
 *.dylib
 *.dll
 *.exe
+.claude-task.pid
 STAGE_EXCLUDES
 	fi
 
@@ -7895,20 +7896,16 @@ reclaim_merged_branch() {
 		| awk -v b="refs/heads/$wt_branch" \
 			'/^worktree /{wt=substr($0, 10)}
 			/^branch /{if ($2 == b) print wt}')
-	if [[ -n "$active_wt" ]]; then
-		if [[ "$dry_run" == "true" ]]; then
-			log "[dry-run] would reclaim worktree $active_wt" \
-				"(branch $wt_branch)"
-		else
-			git worktree remove --force "$active_wt" \
-				2>/dev/null >&2 || true
-		fi
-	fi
 
 	if [[ "$dry_run" != "true" ]]; then
 		salvage_unmerged_commits "$wt_branch" "$salvage_tag" "$base"
 	fi
 
+	# Decide whether the branch is actually going away before touching
+	# its worktree — removing the worktree first meant a branch that
+	# turned out to be "kept" (commits absent from base) already had its
+	# worktree destroyed, and salvage_unmerged_commits only protects
+	# commits, not uncommitted/untracked work (issue #950 review).
 	local extra
 	extra=$(git rev-list --count "${base}..${wt_branch}" 2>/dev/null)
 	if [[ -z "$extra" ]]; then
@@ -7926,6 +7923,21 @@ reclaim_merged_branch() {
 		log "Keeping local branch $wt_branch: $extra commit(s)" \
 			"absent from $base; tagged as $salvage_tag"
 		return 1
+	fi
+
+	if [[ -n "$active_wt" ]]; then
+		if [[ -n "$(git -C "$active_wt" status --porcelain 2>/dev/null)" ]]; then
+			log_warn "Keeping local branch $wt_branch: worktree" \
+				"$active_wt has uncommitted or untracked changes"
+			return 1
+		fi
+		if [[ "$dry_run" == "true" ]]; then
+			log "[dry-run] would reclaim worktree $active_wt" \
+				"(branch $wt_branch)"
+		else
+			git worktree remove --force "$active_wt" \
+				2>/dev/null >&2 || true
+		fi
 	fi
 
 	if [[ "$dry_run" == "true" ]]; then
@@ -8113,8 +8125,6 @@ execute_batch_parallel() {
 	# Pre-flight: clean up stale worktree branches from
 	# any previous failed run before creating new ones.
 	cleanup_stale_worktrees
-	reclaim_pr_scratch_branches
-	report_stashes
 
 	local wt_base="${LOG_BASE}/worktrees"
 	local batch_count
@@ -8219,7 +8229,7 @@ execute_batch_parallel() {
 		# cleanup_stale_worktrees can tell a dead run's worktree
 		# (reclaim it) from a live one (never touch it) — issue #950
 		# AC2.
-		printf '%s' "$last_pid" \
+		printf '%s' "$$" \
 			> "${wt_path}/.claude-task.pid" 2>/dev/null
 		log "Task $tid launched (PID $last_pid," \
 			"wall-time limit ${twall}s)" \
@@ -12592,6 +12602,15 @@ $impl_summary" "$tagent"
                 update_task "$tid" "failed" "0"
             done
         }
+
+        # Pre-flight: reclaim stale PR scratch branches and report the
+        # stash stack once per run, not once per batch — each batch's
+        # own pre-flight (cleanup_stale_worktrees) still runs per batch
+        # since a concurrent run's worktree can go stale mid-run, but
+        # these two make network/state calls that don't need repeating
+        # (issue #950 review).
+        reclaim_pr_scratch_branches
+        report_stashes
 
         # Iterate over batches in order
         for batch_num in "${batch_nums[@]}"; do

@@ -5314,6 +5314,45 @@ _dead_pid() {
 	git worktree remove --force "$wt_path" 2>/dev/null || true
 }
 
+# The worktree must not be removed before the branch is known to be going
+# away, and never while it holds uncommitted/untracked work — the salvage
+# tag only protects commits.
+@test "issue #950 AC1/AC4: reclaim_merged_branch keeps a merged branch whose worktree has uncommitted work" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	git checkout -q main
+	local wt_path="$TEST_TMP/dirty-worktree"
+	git worktree add -q "$wt_path" feature/issue-950
+	printf 'wip\n' > "$wt_path/untracked.txt"
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -ne 0 ]
+	[ -f "$wt_path/untracked.txt" ]
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+}
+
+@test "issue #950 AC1/AC4: reclaim_merged_branch keeps the worktree of a branch with unmerged commits" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'extra work\n' > extra.txt
+	git add extra.txt
+	git commit -q -m "unmerged"
+	git checkout -q main
+	local wt_path="$TEST_TMP/kept-worktree"
+	git worktree add -q "$wt_path" feature/issue-950
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -ne 0 ]
+	[ -d "$wt_path" ]
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+}
+
 @test "issue #950 AC1/AC4: reclaim_merged_branch keeps a branch with unmerged commits and salvage-tags them" {
 	_setup_950_repo
 	declare -f reclaim_merged_branch > /dev/null \
@@ -5433,6 +5472,83 @@ _dead_pid() {
 	[ "$output" = "$unmerged_sha" ]
 }
 
+# Regression guard for the exact hazard AC2 exists to close: the pid marker
+# must name the run that owns the worktree, not one task's own background
+# subshell. A batch's subshell exits the moment that one task finishes, well
+# before the run itself is done — it still waits on the rest of the batch,
+# then merges every worktree. If the marker named that subshell's pid
+# instead, a concurrent run's cleanup_stale_worktrees would see it as dead
+# and reclaim (force-remove) the worktree during that gap, destroying work
+# the owning run has not merged yet.
+@test "issue #950 AC2: .claude-task.pid names the run, not a finished task's own subshell" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950-pidowner main
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+	# Task 1 finishes almost immediately, so its background subshell
+	# exits (and its pid goes dead) well before task 2 — and the batch
+	# as a whole — is done.
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || return 1
+		[[ "$task_id" == "2" ]] && sleep 2
+		printf 'task %s\n' "$task_id" > "task-${task_id}.txt"
+		git add "task-${task_id}.txt"
+		git commit -q -m "task $task_id"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+	export -f run_task_in_worktree
+
+	local tasks='[
+		{"id":1,"description":"quick task","agent":"default","batch":1},
+		{"id":2,"description":"slow task","agent":"default","batch":1}
+	]'
+
+	execute_batch_parallel 1 "$tasks" "feature/issue-950-pidowner" main \
+		> "$TEST_TMP/batch_result.json" 2>/dev/null &
+	local batch_pid="$!"
+
+	# Poll for task 1's commit instead of a fixed sleep: proof that its
+	# subshell has run to completion (and thus exited) while task 2 (and
+	# the batch itself) is still in flight.
+	local wt1="$LOG_BASE/worktrees/task-1"
+	local waited=0
+	while [[ ! -f "$wt1/task-1.txt" ]] && ((waited < 50)); do
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+	[[ -f "$wt1/task-1.txt" ]] \
+		|| fail "task 1 never completed within the timeout"
+	# Let its background subshell/watchdog finish tearing down.
+	sleep 0.3
+
+	[[ -d "$wt1" ]] \
+		|| fail "task 1's worktree is already gone -- the batch merges" \
+			"after task 2, so it should still be here"
+
+	local marker_pid
+	marker_pid=$(<"$wt1/.claude-task.pid")
+	[[ "$marker_pid" == "$$" ]] \
+		|| fail "expected .claude-task.pid to hold the run's own pid" \
+			"($$), got $marker_pid (a finished task's subshell pid" \
+			"would already be dead)"
+
+	# The actual hazard: a concurrent run's pre-flight must not reclaim
+	# this worktree while the owning run is still alive and mid-batch.
+	cleanup_stale_worktrees
+	[[ -d "$wt1" ]] \
+		|| fail "a live run's worktree was reclaimed -- the marker" \
+			"named a dead task subshell instead of the live run"
+
+	wait "$batch_pid" 2>/dev/null || true
+}
+
 # =============================================================================
 # AC1/AC4 (#950): delete_merged_local_branch through the actual merge_pr call
 # path, for a branch still checked out in another worktree.
@@ -5500,11 +5616,10 @@ _dead_pid() {
 	[ "$status" -eq 0 ]
 	[ "$output" = "$extra_sha" ]
 
-	# ... even though its worktree is gone — reclaimed like any other
-	# checked-out branch once merge_pr calls in, same as the merged case
-	# above.
-	[[ ! -d "$wt_path" ]] \
-		|| fail "worktree was not removed while reclaiming"
+	# ... and so is its worktree: it is only removed when the branch is
+	# actually going away, never for a branch that is kept.
+	[[ -d "$wt_path" ]] \
+		|| fail "worktree of a kept branch was removed"
 
 	# ... and AC4: the extra commit is salvage-tagged before anything is
 	# force-deleted, so it stays addressable even if a later, less
