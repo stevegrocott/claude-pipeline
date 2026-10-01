@@ -1653,9 +1653,12 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# pr / pr-review budgets are intentionally unchanged by the stage-type-aware
-# override — verify they still get their original caps (10 / 10) and that the
-# new MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect them.
+# pr budget is intentionally unchanged by the stage-type-aware override —
+# verify it still gets its original cap (10) and that the new
+# MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect it.
+#
+# pr-review has its own dedicated MAX_TURNS_PR_REVIEW env var (default 20) —
+# verify it honours that var and ignores unrelated ones.
 # -----------------------------------------------------------------------------
 
 @test "run_stage passes --max-turns 10 to pr stage (unchanged)" {
@@ -1731,7 +1734,7 @@ EOF
         fail "pr stage must not be affected by MAX_TURNS_SIMPLIFY" || true
 }
 
-@test "run_stage passes --max-turns 10 to pr-review stage (unchanged)" {
+@test "run_stage passes --max-turns 20 to pr-review stage (default)" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
@@ -1741,15 +1744,15 @@ EOF
     }
     export -f timeout
 
-    # pr-review matches the "pr-review" prefix — focused diff analysis = 10 turns
+    # pr-review matches the "pr-review" prefix — focused diff analysis = 20 turns
     run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 10" "$claude_calls" || \
-        fail "Expected --max-turns 10 for pr-review stage. Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 for pr-review stage. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage logs pr-review stage max-turns at original value (10)" {
+@test "run_stage logs pr-review stage max-turns at default value (20)" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
@@ -1759,8 +1762,48 @@ EOF
 
     run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
 
-    grep -q "Max turns: 10 (PR review" "$LOG_FILE" || \
+    grep -q "Max turns: 20 (PR review" "$LOG_FILE" || \
         fail "Expected PR review max-turns log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage honours MAX_TURNS_PR_REVIEW env var for pr-review stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_PR_REVIEW=12
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_PR_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 12" "$claude_calls" || \
+        fail "Expected --max-turns 12 when MAX_TURNS_PR_REVIEW=12. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage pr-review budget ignores MAX_TURNS_SIMPLIFY env var" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_SIMPLIFY=99
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_SIMPLIFY
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 (pr-review unchanged by MAX_TURNS_SIMPLIFY). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 99" "$claude_calls" && \
+        fail "pr-review should not honour MAX_TURNS_SIMPLIFY" || true
 }
 
 @test "run_stage pr budget ignores MAX_TURNS_SIMPLIFY env var" {
@@ -1799,8 +1842,8 @@ EOF
 
     unset MAX_TURNS_FIX_REVIEW
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 10" "$claude_calls" || \
-        fail "Expected --max-turns 10 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
     grep -q -- "--max-turns 99" "$claude_calls" && \
         fail "pr-review should not honour MAX_TURNS_FIX_REVIEW" || true
 }
