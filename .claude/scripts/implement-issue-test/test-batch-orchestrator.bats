@@ -6041,3 +6041,81 @@ MOCK_CLAUDE
 	[ "$output" == "completed" ] \
 		|| fail "summary.json reported state='$output', not 'completed' — an early exit or skipped issue must fail this test"
 }
+
+# =============================================================================
+# TASK 7 (#891): an end-to-end circuit-breaker case
+# =============================================================================
+#
+# AC4: with an always-failing inner orchestrator and 4 issues, the run must
+# exit 2, status.json.state must be "circuit_breaker", the 4th issue must
+# still be "pending" (never attempted), and the fake inner orchestrator must
+# have been invoked exactly 3 times — MAX_CONSECUTIVE_FAILURES (batch-
+# orchestrator.sh:224) trips the breaker on the 3rd consecutive failure and
+# `break`s the driver loop before a 4th issue is ever started.
+#
+# Overwrites the copy's implement-issue-orchestrator.sh with a fake that
+# unconditionally reports state=error — unlike _install_fake_inner_orchestrator
+# above (which always reports completed), this drives every issue through
+# process_issue()'s failure arm so consecutive_failures actually climbs.
+_install_fake_inner_orchestrator_always_fails() {
+	cat > "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh" << 'FAKE_ORCH'
+#!/usr/bin/env bash
+set -uo pipefail
+issue_num=""
+status_file=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--issue) issue_num="$2"; shift 2 ;;
+		--status-file) status_file="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+
+if [[ -n "${FAKE_INNER_ORCH_CALL_LOG:-}" ]]; then
+	printf '%s\n' "$issue_num" >> "$FAKE_INNER_ORCH_CALL_LOG"
+fi
+
+jq -n '{
+	state: "error",
+	cost_summary: {total_cost_usd: 0}
+}' > "$status_file"
+FAKE_ORCH
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh"
+}
+
+@test "real batch-orchestrator.sh: circuit breaker trips on the 3rd consecutive failure, exits 2, leaves the 4th issue pending" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_always_fails
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	# No PR is ever created by the always-failing fake, so there is nothing
+	# to wait for — but set this anyway, matching the completed-path test,
+	# so a future regression that does leave a PR open can't turn this into
+	# a real sleep loop.
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "801,802,803,804" --branch main
+
+	[ "$status" -eq 2 ] \
+		|| fail "batch-orchestrator.sh exited $status, expected 2 (circuit breaker): $output"
+
+	[[ -f "$FAKE_INNER_ORCH_CALL_LOG" ]] \
+		|| fail "the inner orchestrator was never invoked at all"
+	local invocation_count
+	invocation_count=$(wc -l < "$FAKE_INNER_ORCH_CALL_LOG" | tr -d ' ')
+	[ "$invocation_count" -eq 3 ] \
+		|| fail "inner orchestrator was invoked $invocation_count time(s), expected exactly 3 (log: $(cat "$FAKE_INNER_ORCH_CALL_LOG"))"
+
+	local status_file="$PWD/status.json"
+	[[ -f "$status_file" ]] || fail "no status.json was written"
+
+	run jq -r '.state' "$status_file"
+	[ "$output" == "circuit_breaker" ] \
+		|| fail "status.json reported state='$output', not 'circuit_breaker'"
+
+	run jq -r '.issues[] | select(.number == "804") | .status' "$status_file"
+	[ "$output" == "pending" ] \
+		|| fail "issue #804 (the 4th) reported status='$output', expected 'pending' — it must never have been attempted"
+}
