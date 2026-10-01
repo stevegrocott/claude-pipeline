@@ -95,3 +95,11 @@ jobs:
       - name: Run repo-root tests/
         if: matrix.shard == 0
         run: bats tests/
+
+      # platform-test/'s run-tests.sh has no --ci/sharding support (9 suites,
+      # fast) — run the whole directory on one shard rather than building
+      # sharding for a suite this size.
+      - name: Run platform-test/ suites
+        if: matrix.shard == 0
+        working-directory: .claude/scripts/platform-test
+        run: ./run-tests.sh

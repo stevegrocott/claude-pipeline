@@ -276,27 +276,21 @@ _run_merge_hook() {
 # ---------------------------------------------------------------------------
 
 @test "#876 regression: the script reaches the merge for an OPEN, CLEAN PR" {
-	mkdir -p "$TEST_TMP/bin"
-	: > "$TEST_TMP/gh-e2e.log"
-	cat > "$TEST_TMP/bin/gh" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "GHLOG"
+	run_whole_script "$TEST_TMP/gh-e2e.log" '
 for a in "$@"; do
   case "$a" in
-    state) printf 'OPEN\n'; exit 0 ;;
+    state) printf "OPEN\n"; exit 0 ;;
     mergeStateStatus,statusCheckRollup)
-      printf '%s\n' '{"mergeStateStatus":"CLEAN","statusCheckRollup":[]}'; exit 0 ;;
+      printf "%s\n" "{\"mergeStateStatus\":\"CLEAN\",\"statusCheckRollup\":[]}"
+      exit 0 ;;
   esac
 done
 case "$1 $2" in
-  "pr merge") printf 'merged\n'; exit 0 ;;
+  "pr merge") printf "merged\n"; exit 0 ;;
 esac
-printf '{}\n'; exit 0
-STUB
-	sed -i.bak "s|GHLOG|$TEST_TMP/gh-e2e.log|" "$TEST_TMP/bin/gh"
-	chmod +x "$TEST_TMP/bin/gh"
+printf "{}\n"; exit 0
+' "$MERGE_MR" 5979
 
-	PATH="$TEST_TMP/bin:$PATH" run "$MERGE_MR" 5979
 	[[ "$status" -eq 0 ]] \
 		|| fail "script aborted on an OPEN PR (exit $status) — set -e regression: $output"
 

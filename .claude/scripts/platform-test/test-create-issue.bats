@@ -30,6 +30,34 @@ esac
 exit "${MOCK_GH_EXIT_CODE:-0}"
 GH_EOF
     chmod +x "$TEST_TMP/bin/gh"
+
+    # Callable acli stub: create-issue.sh invokes `acli jira workitem create`
+    # (issue #906 bundle regen), not the shared helper's `acli jira
+    # create-issue` case, so a local override is needed to return a
+    # parseable issue key.
+    cat > "$TEST_TMP/bin/acli" << 'ACLI_EOF'
+#!/usr/bin/env bash
+echo "acli $*" >> "$TEST_TMP/mock_calls.log"
+if [[ "$1" == "jira" && "$2" == "workitem" && "$3" == "create" ]]; then
+    echo "Issue TEST-123 created successfully"
+fi
+exit "${MOCK_ACLI_EXIT_CODE:-0}"
+ACLI_EOF
+    chmod +x "$TEST_TMP/bin/acli"
+
+    # Callable python3 stub: create-issue.sh's jira path shells out to
+    # markdown-to-adf.py via `$SCRIPT_DIR/../markdown-to-adf.py`, but
+    # setup_test_env's fixture only copies *.sh into $TEST_TMP/scripts/platform
+    # (see helpers/test-helper.bash), so the real .py file never lands there.
+    # python3 is resolved via PATH (not an absolute path) in create-issue.sh,
+    # so this stub intercepts the call regardless of the missing file.
+    cat > "$TEST_TMP/bin/python3" << 'PY_EOF'
+#!/usr/bin/env bash
+echo "python3 $*" >> "$TEST_TMP/mock_calls.log"
+cat > /dev/null
+echo '{"type":"doc"}'
+PY_EOF
+    chmod +x "$TEST_TMP/bin/python3"
 }
 
 teardown() {
@@ -42,7 +70,7 @@ teardown() {
 
 @test "create-issue github: calls gh issue create and returns issue number" {
     export TRACKER="github"
-    run run_platform_script create-issue.sh --title "Bug fix" --body "Fix the bug"
+    run run_platform_script create-issue.sh --title "Bug fix" --body "Fix the bug" --skip-validation
     [ "$status" -eq 0 ]
     [[ "$output" == *"42"* ]]
     assert_mock_called_with "gh issue create --title Bug fix --body Fix the bug"
@@ -50,7 +78,7 @@ teardown() {
 
 @test "create-issue github: passes labels to gh" {
     export TRACKER="github"
-    run run_platform_script create-issue.sh --title "Bug" --body "Body" --labels "bug,critical"
+    run run_platform_script create-issue.sh --title "Bug" --body "Body" --labels "bug,critical" --skip-validation
     [ "$status" -eq 0 ]
     assert_mock_called_with "gh issue create"
     assert_mock_called_with "--label bug,critical"
@@ -60,13 +88,13 @@ teardown() {
 # JIRA MODE
 # =============================================================================
 
-@test "create-issue jira: calls acli jira create-issue and returns issue key" {
+@test "create-issue jira: calls acli jira workitem create and returns issue key" {
     export TRACKER="jira"
     export JIRA_PROJECT="TEST"
-    run run_platform_script create-issue.sh --title "Jira task" --body "Task body"
+    run run_platform_script create-issue.sh --title "Jira task" --body "Task body" --skip-validation
     [ "$status" -eq 0 ]
     [[ "$output" == *"TEST-123"* ]]
-    assert_mock_called_with "acli jira create-issue"
+    assert_mock_called_with "acli jira workitem create"
     assert_mock_called_with "--project TEST"
     assert_mock_called_with "--summary Jira task"
 }
@@ -74,7 +102,7 @@ teardown() {
 @test "create-issue jira: uses configured issue type" {
     export TRACKER="jira"
     export JIRA_DEFAULT_ISSUE_TYPE="Bug"
-    run run_platform_script create-issue.sh --title "A bug" --body "Bug details"
+    run run_platform_script create-issue.sh --title "A bug" --body "Bug details" --skip-validation
     [ "$status" -eq 0 ]
     assert_mock_called_with "--type Bug"
 }
@@ -99,7 +127,10 @@ echo "GraphQL: Could not resolve to a Repository with the login of 'no-such-repo
 exit 1
 GH_EOF
     chmod +x "$TEST_TMP/bin/gh"
-    run run_platform_script create-issue.sh --title "Error test" --body "Should fail"
+    # --separate-stderr: --skip-validation now emits a WARNING to stderr,
+    # so $output must isolate stdout to still prove nothing was printed
+    # there (gh's error text must not leak out as a fake issue number).
+    run --separate-stderr run_platform_script create-issue.sh --title "Error test" --body "Should fail" --skip-validation
     [ "$status" -ne 0 ]
     [ -z "$output" ]
 }
@@ -112,7 +143,7 @@ GH_EOF
     export TRACKER="github"
     export GH_API_ARGS="$TEST_TMP/gh_api_args.log"
 
-    run run_platform_script create-issue.sh --title "No parent" --body "body"
+    run run_platform_script create-issue.sh --title "No parent" --body "body" --skip-validation
     [ "$status" -eq 0 ]
     # GH_API_ARGS points to a real file; the stub writes to it if gh api
     # fires.  An empty or absent file proves gh api was never invoked.
@@ -184,7 +215,7 @@ GH_EOF
     export GH_API_ARGS="$TEST_TMP/gh_api_args.log"
 
     run run_platform_script create-issue.sh \
-        --title "With parent" --body "body" --parent "7"
+        --title "With parent" --body "body" --parent "7" --skip-validation
     [ "$status" -eq 0 ]
     # Stub was invoked: GH_API_ARGS must be non-empty.
     [ -s "$GH_API_ARGS" ]
@@ -238,7 +269,7 @@ GH_EOF
     chmod +x "$TEST_TMP/bin/gh"
 
     run --separate-stderr run_platform_script create-issue.sh \
-        --title "Guard test" --body "body" --parent "42"
+        --title "Guard test" --body "body" --parent "42" --skip-validation
 
     [ "$status" -eq 0 ]
     [[ "$stderr" == *"WARNING"*"not numeric"* ]]
@@ -268,7 +299,7 @@ GH_EOF
     chmod +x "$TEST_TMP/bin/gh"
 
     run --separate-stderr run_platform_script create-issue.sh \
-        --title "Guard test" --body "body" --parent "42"
+        --title "Guard test" --body "body" --parent "42" --skip-validation
 
     [ "$status" -eq 0 ]
     [[ "$stderr" == *"lacks required https://github.com/ prefix"* ]]
