@@ -4004,12 +4004,13 @@ for m in re.finditer(r'\[\s*\{', t):
                 "stage_attempt:=2"
 
             # Issue #637: drop the turn cap when decide-action.sh flagged this
-            # retry uncapped (S task at sonnet that exhausted its 25-turn
-            # budget).  Same model — #579's finding that opus buys no
-            # completion lift for S tasks stands — but the constraint that
-            # actually killed the stage is lifted.  Exactly one such attempt is
-            # made: this branch does not loop, and a second exhaustion is
-            # treated as terminal below.
+            # retry uncapped (any non-ceiling model that exhausted its turn
+            # budget — generalized from an S-at-sonnet-only exception in
+            # issue #900).  Same model — escalating to the next tier just to
+            # get the cap-lift would waste a model upgrade — but the
+            # constraint that actually killed the stage is lifted.  Exactly
+            # one such attempt is made: this branch does not loop, and a
+            # second exhaustion is treated as terminal below.
             local -a _retry_turns_args=()
             if [[ "$_da_uncapped" == "true" ]]; then
                 log "  Retry: turn cap lifted (issue #637)"

@@ -64,6 +64,28 @@ _next_model() {
 }
 
 # ---------------------------------------------------------------------------
+# _s_opus_gate_action <error_kind>
+# Emit the S-complexity Opus-gate bail action (issue #579).  A short task at
+# sonnet must not auto-escalate to opus on a single stage failure — Opus buys
+# no completion lift for S tasks, only cost — so the model never changes here.
+#
+# max_turns_exhausted is handled separately by _uncapped_retry_action, which
+# is checked before this gate runs (issue #900 generalized that retry to any
+# non-ceiling model, independent of task complexity), so this function only
+# ever sees the remaining error kinds and always bails.
+#
+# Shared by _bash_decide (quality_stall, double_timeout + default branches)
+# and _compose_decide (escalate branch) so both backends emit identical
+# output.
+# ---------------------------------------------------------------------------
+_s_opus_gate_action() {
+	local error_kind="${1:-unknown}"
+
+	printf '{"action":"bail","reason":"%s: S-complexity task at sonnet — not escalating to opus (issue #579)"}\n' \
+		"$error_kind"
+}
+
+# ---------------------------------------------------------------------------
 # _uncapped_retry_action <error_kind>
 # Emit a same-model retry_same carrying "uncapped":true (issues #637 + #900).
 #
@@ -72,14 +94,15 @@ _next_model() {
 # (see run_stage's _esc_turns_args, pinned by test-stage-runner.bats "run_stage
 # does not include max-turns cap on error_max_turns escalation retry").
 # Escalating to the next tier just to get that cap-lift wastes a model
-# upgrade — and bailing, as the old S-complexity-only gate did (issue #579),
-# discards the cap-lift entirely, recording a task that merely needed more
-# turns as failed after one capped attempt (issue #637).
+# upgrade — and bailing, as the #579 gate did for S-at-sonnet, discards the
+# cap-lift entirely, recording a task that merely needed more turns as failed
+# after one capped attempt (issue #637).
 #
-# Issue #900 generalized this from an S-complexity-only exception to any
-# non-ceiling model: the caller only invokes this once the opus-ceiling case
-# has already been bailed, so every remaining model is eligible regardless of
-# task complexity (the S-complexity gate on this path is dropped).
+# Issue #900 generalized this one case from an S-complexity-only exception to
+# any non-ceiling model: the caller only invokes this once the opus-ceiling
+# case has already been bailed, so every remaining model is eligible for the
+# cap-lift regardless of task complexity. The #579 gate itself is unchanged
+# for every other error kind — see _s_opus_gate_action.
 #
 # Shared by _bash_decide (default branch) and _compose_decide (escalate
 # branch) so both backends emit identical output.
@@ -100,10 +123,11 @@ _bash_decide() {
 	local stage_result="$1"
 	local history="$2"
 
-	local status error_kind model
+	local status error_kind model complexity
 	status=$(printf '%s' "$stage_result" | jq -r '.status')
 	error_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind')
 	model=$(printf '%s' "$stage_result" | jq -r '.model // "haiku"')
+	complexity=$(printf '%s' "$stage_result" | jq -r '.complexity // empty')
 
 	# success at top level → accept regardless of .output.status presence
 	if [[ "$status" == "success" ]]; then
@@ -138,6 +162,14 @@ _bash_decide() {
 		if [[ "$model" == "opus" ]]; then
 			printf '%s\n' \
 				'{"action":"bail","reason":"quality_stall: already at opus ceiling"}'
+		elif [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+			# S-complexity gate (issue #579): a short task at sonnet must
+			# not auto-escalate to opus on a quality_stall — mirrors the
+			# double_timeout branch, and matches the compose backend which
+			# already bails this case.  run_quality_loop threads task_size
+			# through, so a fix/simplify stage quality-stalling on an S task
+			# reaches here on a realistic path.
+			_s_opus_gate_action "quality_stall"
 		else
 			local next_model
 			next_model=$(_next_model "$model")
@@ -152,6 +184,10 @@ _bash_decide() {
 		if [[ "$model" == "opus" ]]; then
 			printf '%s\n' \
 				'{"action":"bail","reason":"double_timeout"}'
+		elif [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+			# S-complexity gate (issue #579): a short task at sonnet must
+			# not auto-escalate to opus on a single double_timeout.
+			_s_opus_gate_action "double_timeout"
 		else
 			local next_model
 			next_model=$(_next_model "$model")
@@ -184,10 +220,21 @@ _bash_decide() {
 	# max_turns_exhausted on any non-ceiling model (issue #637, generalized
 	# from the S-complexity-only gate in issue #900): one same-model retry
 	# with the turn cap lifted, instead of promoting to the next tier.
-	# Placed after the rate_limit retry_same and opus-ceiling checks so
-	# those paths are unaffected — the opus case already bailed above.
+	# Checked before the S-complexity gate below so it applies regardless of
+	# task size.  Placed after the rate_limit retry_same and opus-ceiling
+	# checks so those paths are unaffected — the opus case already bailed
+	# above.
 	if [[ "$error_kind" == "max_turns_exhausted" ]]; then
 		_uncapped_retry_action "$error_kind"
+		return 0
+	fi
+
+	# S-complexity gate (issue #579): before the default escalate, bail an
+	# S task at sonnet rather than promoting it to opus.  Placed after the
+	# rate_limit retry_same and opus-ceiling checks so those paths are
+	# unaffected — only the sonnet→opus escalation is gated.
+	if [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+		_s_opus_gate_action "${error_kind:-unknown}"
 		return 0
 	fi
 
@@ -237,10 +284,11 @@ _compose_decide() {
 	local stage_result="$1"
 	local history="$2"
 
-	local status error_kind model
+	local status error_kind model complexity
 	status=$(printf '%s' "$stage_result" | jq -r '.status')
 	error_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind')
 	model=$(printf '%s' "$stage_result" | jq -r '.model // "haiku"')
+	complexity=$(printf '%s' "$stage_result" | jq -r '.complexity // empty')
 
 	# success at top level → accept regardless of .output.status presence
 	if [[ "$status" == "success" ]]; then
@@ -309,6 +357,16 @@ _compose_decide() {
 			# delegation since there is no model to select here.
 			if [[ "$error_kind" == "max_turns_exhausted" ]]; then
 				_uncapped_retry_action "$error_kind"
+				return 0
+			fi
+
+			# S-complexity gate (issue #579): keep the skill-native path in
+			# agreement with _bash_decide — an S task at sonnet bails rather
+			# than escalating to opus, so Opus requires a bounded trigger.
+			# Checked after the max_turns_exhausted retry above so that
+			# generalized cap-lift applies regardless of complexity.
+			if [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
+				_s_opus_gate_action "${error_kind:-unknown}"
 				return 0
 			fi
 
