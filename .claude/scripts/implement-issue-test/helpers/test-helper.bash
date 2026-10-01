@@ -844,3 +844,69 @@ _extract_function_body() {
 		}
 	' "$script_file"
 }
+
+# =============================================================================
+# WHOLE-SCRIPT RUNNER
+# =============================================================================
+
+# run_whole_script <log_file> <gh_stub_body> <script> [args...]
+#
+# Runs <script> end-to-end through bats `run` — not through a function
+# extracted out of it and called through `run`. That distinction is the
+# whole point of this helper: `run` captures the exit status of whatever it
+# invokes directly, so a bare command inside <script> that aborts under its
+# own `set -e` shows up here as a non-zero $status. An extracted-function
+# test can never observe that: `run some_extracted_function` traps the
+# abort at the function-call boundary bats itself installed, not at the
+# real top-level `set -e` the production script runs under. That gap is
+# exactly how the #876 regression shipped green — see the #876 regression
+# case in test-scripted-merge.bats, the first caller of this helper and the
+# reason it exists.
+#
+# Writes a `gh` stub to $TEST_TMP/bin/gh so <script> can call `gh` without
+# touching the network or GitHub, appends one line per invocation
+# ("$*") to <log_file> for call-count/content assertions, and prepends
+# $TEST_TMP/bin to PATH for the duration of the run only (PATH is restored
+# once this function returns, since the modified PATH is local to the `run`
+# command's own environment, not exported here).
+#
+# <gh_stub_body> is the stub's body ONLY — the part after the shebang and
+# the call-logging line. Callers write just the behaviour specific to their
+# scenario (matching on "$1 $2", a fixed payload, a scripted per-call
+# sequence, …) and never repeat the logging boilerplate. It is spliced into
+# the generated script verbatim, so it must be valid bash once written to
+# file; pass it single-quoted at the call site so "$@"/"$1"/"$*" reach the
+# generated stub literally instead of expanding against this function's own
+# arguments.
+#
+# Any env vars <script> itself must see (e.g. GIT_HOST=bitbucket) have to be
+# exported BEFORE calling this helper — PATH is the only variable this
+# helper sets. Sets $status/$output/$lines exactly as `run` does; <log_file>
+# remains on disk afterward.
+#
+# Usage:
+#   run_whole_script "$TEST_TMP/gh-e2e.log" '
+#       case "$1 $2" in
+#         "pr merge") printf "merged\n"; exit 0 ;;
+#       esac
+#       printf "{}\n"
+#   ' "$MERGE_MR" 5979
+#   [[ "$status" -eq 0 ]] || fail "aborted: $output"
+#   grep -q "pr merge" "$TEST_TMP/gh-e2e.log" || fail "never merged"
+run_whole_script() {
+	local log_file="$1"
+	local gh_stub_body="$2"
+	shift 2
+
+	mkdir -p "$TEST_TMP/bin"
+	: > "$log_file"
+
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'printf '\''%%s\n'\'' "$*" >> %q\n' "$log_file"
+		printf '%s\n' "$gh_stub_body"
+	} > "$TEST_TMP/bin/gh"
+	chmod +x "$TEST_TMP/bin/gh"
+
+	PATH="$TEST_TMP/bin:$PATH" run "$@"
+}
