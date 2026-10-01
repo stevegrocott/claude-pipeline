@@ -1283,6 +1283,45 @@ teardown() {
         fail "Expected max_turns error_kind, got: $err_kind ($sr)"
 }
 
+@test "run_stage uncapped retry reuses stage_timeout unchanged (issue #900 AC6)" {
+    # The plain-timeout retry path (see "retries with 20% longer timeout"
+    # above) deliberately inflates the timeout on retry. The uncapped
+    # max-turns retry must NOT: dropping --max-turns already buys the task
+    # more room, so stage_timeout passed to `timeout` must be identical on
+    # both the initial attempt and the uncapped retry.
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local timeout_values="$TEST_TMP/timeout-values.txt"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        local t="$1"
+        printf '%s\n' "$t" >> "$timeout_values"
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file timeout_values
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    local first_timeout second_timeout
+    first_timeout=$(sed -n '1p' "$timeout_values")
+    second_timeout=$(sed -n '2p' "$timeout_values")
+    [ -n "$first_timeout" ] || fail "Initial attempt made no timeout()-wrapped call"
+    [ -n "$second_timeout" ] || \
+        fail "Uncapped retry made no timeout()-wrapped call — timeout wrapper may be missing"
+    [ "$second_timeout" = "$first_timeout" ] || \
+        fail "Uncapped retry must reuse stage_timeout unchanged. First: $first_timeout, second: $second_timeout"
+}
+
 @test "TASK_DESC_PROMOTE_CHARS default equals the explore skill's description limit" {
     local repo_root explore_skill orch
     repo_root=$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)
@@ -1861,6 +1900,49 @@ EOF
         fail "Expected --max-turns 20 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
     grep -q -- "--max-turns 99" "$claude_calls" && \
         fail "pr-review should not honour MAX_TURNS_FIX_REVIEW" || true
+}
+
+@test "run_stage pr-review retry_same keeps the pinned 10-turn cap (issue #900)" {
+    # pr-review's cap is hard-wired, not stage-type derived, so it must stay
+    # pinned through a same-model retry (e.g. rate_limit) rather than being
+    # dropped the way an uncapped max-turns retry drops --max-turns.
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" >> "$claude_calls"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"rate limit exceeded, please retry"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file claude_calls
+
+    # detect_rate_limit(true) drives handle_rate_limit()'s backoff sleep
+    # before decide-action.sh is ever reached; stub it out so the test stays
+    # fast (mirrors the existing retry_same watchdog test above).
+    sleep() { :; }
+    export -f sleep
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || \
+        fail "Expected 2 claude calls (rate-limit retry_same), got $final_count"
+
+    local second_call_args
+    second_call_args=$(sed -n '2p' "$claude_calls")
+    [[ "$second_call_args" == *"--max-turns 10"* ]] || \
+        fail "pr-review retry must keep the pinned 10-turn cap. Args: $second_call_args"
 }
 
 # =============================================================================
