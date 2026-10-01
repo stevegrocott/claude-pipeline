@@ -76,10 +76,21 @@ setup_test_env() {
     # its own body (see test-reexec.bats's "inherited guard" test). The
     # carried-over SCRIPT_DIR is scrubbed too: a leaked value repoints a
     # launched script's siblings at the ancestor's (e.g. plugin-cache) tree.
+    #
+    # Issue #922 bisect: before #835 a leaked _SCRIPT_DIR repointed every
+    # extracted-function suite at the plugin cache (8 of the 14 gate-only
+    # failures, e.g. "Schema file not found: .../pipeline-core/0.8.10/...");
+    # a leaked _SCRIPT_PATH together with the guard made usage() name the
+    # ancestor's script (the 9th). Neither reproduces alone, which is why
+    # single-variable probes ruled them out. Scrub both here, not just in
+    # source_orchestrator_functions(), so no suite depends on which
+    # extractor it happens to use.
     unset _BATCH_ORCHESTRATOR_REEXECED _BATCH_ORCHESTRATOR_REEXEC_COPY \
         _BATCH_ORCHESTRATOR_SCRIPT_DIR
     unset _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED \
-        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY \
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR \
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_PATH
 
     TEST_TMP=$(mktemp -d)
     export TEST_TMP

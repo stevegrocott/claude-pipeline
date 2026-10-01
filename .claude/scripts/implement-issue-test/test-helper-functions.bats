@@ -1175,6 +1175,34 @@ WRAPPER
     [ "$SCRIPT_DIR" = "$TEST_TMP" ]
 }
 
+# Issue #922: the pipeline's full-suite gate runs bats inside a live
+# orchestrator, which exports these. A leaked SCRIPT_DIR repointed extracted
+# functions at the plugin cache (8 of the 14 gate-only failures); a leaked
+# SCRIPT_PATH plus guard made usage() name the ancestor's script (the 9th).
+@test "setup_test_env scrubs inherited orchestrator path vars (#922)" {
+    local outer_tmp="$TEST_TMP" var
+    local -a leaked=(
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_PATH
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY
+        _BATCH_ORCHESTRATOR_SCRIPT_DIR
+        _BATCH_ORCHESTRATOR_REEXECED
+        _BATCH_ORCHESTRATOR_REEXEC_COPY
+    )
+    for var in "${leaked[@]}"; do
+        export "$var=/stale/plugin-cache/$var"
+    done
+
+    setup_test_env
+    rm -rf "$TEST_TMP"
+    TEST_TMP="$outer_tmp"
+
+    for var in "${leaked[@]}"; do
+        [[ -z "${!var+set}" ]] || fail "$var survived setup_test_env"
+    done
+}
+
 @test "_timeout_perl_fallback rejects an empty duration with exit 125" {
     run _timeout_perl_fallback "" true
     [ "$status" -eq 125 ]
