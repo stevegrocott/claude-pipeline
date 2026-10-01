@@ -1902,10 +1902,11 @@ EOF
         fail "pr-review should not honour MAX_TURNS_FIX_REVIEW" || true
 }
 
-@test "run_stage pr-review retry_same keeps the pinned 10-turn cap (issue #900)" {
-    # pr-review's cap is hard-wired, not stage-type derived, so it must stay
-    # pinned through a same-model retry (e.g. rate_limit) rather than being
-    # dropped the way an uncapped max-turns retry drops --max-turns.
+@test "run_stage pr-review retry_same keeps the pinned 20-turn cap (issue #900)" {
+    # pr-review's cap is hard-wired (default 20, env: MAX_TURNS_PR_REVIEW),
+    # not stage-type derived, so it must stay pinned through a same-model
+    # retry (e.g. rate_limit) rather than being dropped the way an uncapped
+    # max-turns retry drops --max-turns.
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     local counter_file="$TEST_TMP/call-counter.txt"
@@ -1941,8 +1942,8 @@ EOF
 
     local second_call_args
     second_call_args=$(sed -n '2p' "$claude_calls")
-    [[ "$second_call_args" == *"--max-turns 10"* ]] || \
-        fail "pr-review retry must keep the pinned 10-turn cap. Args: $second_call_args"
+    [[ "$second_call_args" == *"--max-turns 20"* ]] || \
+        fail "pr-review retry must keep the pinned 20-turn cap. Args: $second_call_args"
 }
 
 # =============================================================================
