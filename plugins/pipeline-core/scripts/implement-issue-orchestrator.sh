@@ -3252,7 +3252,11 @@ run_stage() {
     #
     # fix/fix-review-* gets a dedicated sonnet cap (env: MAX_TURNS_FIX_REVIEW,
     # default 20) — targeted corrections, less scope than implement/review.
-    # pr/pr-review/research turn limits are unchanged.
+    #
+    # pr-review gets a dedicated cap (env: MAX_TURNS_PR_REVIEW, default 20) —
+    # focused diff analysis; raised from the prior fixed 10 to give larger
+    # diffs enough turns to complete a full review (issue #900).
+    # pr/research turn limits are unchanged.
     # One-shot task-description length hint, set by the task-launch site
     # immediately before calling run_stage.  Consumed and cleared here so a
     # stale value can never raise the budget of an unrelated later stage.
@@ -3277,8 +3281,10 @@ run_stage() {
         turns_args=(--max-turns "$_max_pr")
         log "  Max turns: $_max_pr (PR creation — push + create MR, env: MAX_TURNS_PR)"
     elif [[ "${_matched_prefix:-}" == "pr-review" ]]; then
-        turns_args=(--max-turns 10)
-        log "  Max turns: 10 (PR review — focused diff analysis)"
+        local _max_pr_review="${MAX_TURNS_PR_REVIEW:-20}"
+        turns_args=(--max-turns "$_max_pr_review")
+        log "  Max turns: $_max_pr_review (PR review — focused diff" \
+            "analysis, env: MAX_TURNS_PR_REVIEW)"
     elif [[ "${_matched_prefix:-}" == "simplify" && "$model" == "haiku" ]]; then
         local _max_simplify="${MAX_TURNS_SIMPLIFY:-15}"
         turns_args=(--max-turns "$_max_simplify")
@@ -3998,12 +4004,13 @@ for m in re.finditer(r'\[\s*\{', t):
                 "stage_attempt:=2"
 
             # Issue #637: drop the turn cap when decide-action.sh flagged this
-            # retry uncapped (S task at sonnet that exhausted its 25-turn
-            # budget).  Same model — #579's finding that opus buys no
-            # completion lift for S tasks stands — but the constraint that
-            # actually killed the stage is lifted.  Exactly one such attempt is
-            # made: this branch does not loop, and a second exhaustion is
-            # treated as terminal below.
+            # retry uncapped (any non-ceiling model that exhausted its turn
+            # budget — generalized from an S-at-sonnet-only exception in
+            # issue #900).  Same model — escalating to the next tier just to
+            # get the cap-lift would waste a model upgrade — but the
+            # constraint that actually killed the stage is lifted.  Exactly
+            # one such attempt is made: this branch does not loop, and a
+            # second exhaustion is treated as terminal below.
             local -a _retry_turns_args=()
             if [[ "$_da_uncapped" == "true" ]]; then
                 log "  Retry: turn cap lifted (issue #637)"

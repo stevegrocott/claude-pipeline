@@ -470,11 +470,14 @@ teardown() {
 # =============================================================================
 
 @test "escalation re-run watchdog fires when stage subshell is childless and hung" {
-    # First call drives decide-action.sh to `escalate` via error_max_turns
-    # (same trigger as "run_stage escalates model when output subtype is
-    # error_max_turns" above). Second call is the escalation re-run itself —
-    # block childlessly on a FIFO with no writer; only a parent-side
-    # watchdog's SIGTERM can free it.
+    # First call drives decide-action.sh to `escalate` via no_structured_output
+    # (same trigger as "empty output escalates to next model instead of
+    # failing" above) — issue #900 generalized max_turns_exhausted into a
+    # same-model uncapped retry regardless of complexity, so that error_kind
+    # no longer reaches this escalate path and can't be used to drive it here
+    # anymore. Second call is the escalation re-run itself — block childlessly
+    # on a FIFO with no writer; only a parent-side watchdog's SIGTERM can free
+    # it.
     local hang_fifo="$TEST_TMP/escalation-hang.fifo"
     mkfifo "$hang_fifo"
     export hang_fifo
@@ -489,7 +492,7 @@ teardown() {
         n=$((n + 1))
         printf '%s' "$n" > "$counter_file"
         if (( n == 1 )); then
-            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+            echo '{"is_error":true,"result":"gibberish"}'
         else
             read -r _ < "$hang_fifo" 2>/dev/null || true
         fi
@@ -1082,9 +1085,14 @@ teardown() {
 # MODEL ESCALATION — error_max_turns
 # =============================================================================
 
-@test "run_stage escalates model when output subtype is error_max_turns" {
+@test "run_stage retries same model (not opus) when output subtype is error_max_turns (generalized, issue #900)" {
     # BATS runs each @test in a forked subprocess — re-source model-config to
     # make readonly arrays available (same pattern as MODEL SELECTION tests).
+    #
+    # Issue #900 generalized the uncapped retry from an S-complexity-only
+    # exception to any non-ceiling model, dropping the S-complexity gate —
+    # so an empty-complexity sonnet stage now gets the same-model uncapped
+    # retry instead of escalating to opus.
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
@@ -1107,18 +1115,22 @@ teardown() {
     export -f timeout
     export counter_file
 
-    # test-iter-1 resolves to sonnet; sonnet escalates to opus on error_max_turns
+    # test-iter-1 resolves to sonnet; sonnet now retries uncapped at sonnet
+    # on error_max_turns rather than escalating (gate dropped, issue #900)
     run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
 
     local final_count
     final_count=$(cat "$counter_file")
     (( final_count == 2 )) || fail "Expected 2 claude calls, got $final_count"
 
-    # Second call must use escalated model (opus — next tier above sonnet)
+    # Second call must stay at sonnet (same-model uncapped retry)
     local second_call_args
     second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
-    [[ "$second_call_args" == *"--model opus"* ]] || \
-        fail "Expected --model opus in escalated retry. Args: $second_call_args"
+    [[ "$second_call_args" == *"--model sonnet"* ]] || \
+        fail "Expected --model sonnet in uncapped retry. Args: $second_call_args"
+    [[ "$second_call_args" != *"--model opus"* ]] || \
+        fail "max_turns_exhausted must not promote to opus (issue #900)." \
+            "Args: $second_call_args"
 }
 
 @test "run_stage fails with max_turns_exhausted_at_ceiling when opus hits error_max_turns" {
@@ -1186,11 +1198,14 @@ teardown() {
 }
 
 # =============================================================================
-# S-COMPLEXITY UNCAPPED RETRY — error_max_turns (issue #637)
+# UNCAPPED RETRY — error_max_turns (issue #637, generalized from an
+# S-complexity-only exception to any non-ceiling model by issue #900)
 #
-# An S task at sonnet must NOT be promoted to opus (issue #579), but it must
-# still get the cap-lift that the escalation path provides: exactly one
-# same-model retry with no --max-turns, and a second exhaustion is terminal.
+# A non-ceiling task must NOT be promoted to the next tier on
+# max_turns_exhausted; it must instead get the cap-lift that the escalation
+# path provides: exactly one same-model retry with no --max-turns, and a
+# second exhaustion is terminal. The S-complexity case below remains a
+# representative example now that the gate applies regardless of complexity.
 # =============================================================================
 
 @test "run_stage retries an S task at sonnet with no max-turns cap after error_max_turns" {
@@ -1266,6 +1281,45 @@ teardown() {
         fail "Expected error stage_result after second exhaustion, got: $sr"
     [ "$err_kind" = "max_turns_exhausted_at_ceiling" ] || \
         fail "Expected max_turns error_kind, got: $err_kind ($sr)"
+}
+
+@test "run_stage uncapped retry reuses stage_timeout unchanged (issue #900 AC6)" {
+    # The plain-timeout retry path (see "retries with 20% longer timeout"
+    # above) deliberately inflates the timeout on retry. The uncapped
+    # max-turns retry must NOT: dropping --max-turns already buys the task
+    # more room, so stage_timeout passed to `timeout` must be identical on
+    # both the initial attempt and the uncapped retry.
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local timeout_values="$TEST_TMP/timeout-values.txt"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        local t="$1"
+        printf '%s\n' "$t" >> "$timeout_values"
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file timeout_values
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    local first_timeout second_timeout
+    first_timeout=$(sed -n '1p' "$timeout_values")
+    second_timeout=$(sed -n '2p' "$timeout_values")
+    [ -n "$first_timeout" ] || fail "Initial attempt made no timeout()-wrapped call"
+    [ -n "$second_timeout" ] || \
+        fail "Uncapped retry made no timeout()-wrapped call — timeout wrapper may be missing"
+    [ "$second_timeout" = "$first_timeout" ] || \
+        fail "Uncapped retry must reuse stage_timeout unchanged. First: $first_timeout, second: $second_timeout"
 }
 
 @test "TASK_DESC_PROMOTE_CHARS default equals the explore skill's description limit" {
@@ -1653,9 +1707,12 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# pr / pr-review budgets are intentionally unchanged by the stage-type-aware
-# override — verify they still get their original caps (10 / 10) and that the
-# new MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect them.
+# pr budget is intentionally unchanged by the stage-type-aware override —
+# verify it still gets its original cap (10) and that the new
+# MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect it.
+#
+# pr-review has its own dedicated MAX_TURNS_PR_REVIEW env var (default 20) —
+# verify it honours that var and ignores unrelated ones.
 # -----------------------------------------------------------------------------
 
 @test "run_stage passes --max-turns 10 to pr stage (unchanged)" {
@@ -1731,7 +1788,7 @@ EOF
         fail "pr stage must not be affected by MAX_TURNS_SIMPLIFY" || true
 }
 
-@test "run_stage passes --max-turns 10 to pr-review stage (unchanged)" {
+@test "run_stage passes --max-turns 20 to pr-review stage (default)" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
@@ -1741,15 +1798,15 @@ EOF
     }
     export -f timeout
 
-    # pr-review matches the "pr-review" prefix — focused diff analysis = 10 turns
+    # pr-review matches the "pr-review" prefix — focused diff analysis = 20 turns
     run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 10" "$claude_calls" || \
-        fail "Expected --max-turns 10 for pr-review stage. Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 for pr-review stage. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage logs pr-review stage max-turns at original value (10)" {
+@test "run_stage logs pr-review stage max-turns at default value (20)" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
@@ -1759,8 +1816,48 @@ EOF
 
     run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
 
-    grep -q "Max turns: 10 (PR review" "$LOG_FILE" || \
+    grep -q "Max turns: 20 (PR review" "$LOG_FILE" || \
         fail "Expected PR review max-turns log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage honours MAX_TURNS_PR_REVIEW env var for pr-review stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_PR_REVIEW=12
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_PR_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 12" "$claude_calls" || \
+        fail "Expected --max-turns 12 when MAX_TURNS_PR_REVIEW=12. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage pr-review budget ignores MAX_TURNS_SIMPLIFY env var" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_SIMPLIFY=99
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_SIMPLIFY
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 (pr-review unchanged by MAX_TURNS_SIMPLIFY). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 99" "$claude_calls" && \
+        fail "pr-review should not honour MAX_TURNS_SIMPLIFY" || true
 }
 
 @test "run_stage pr budget ignores MAX_TURNS_SIMPLIFY env var" {
@@ -1799,10 +1896,54 @@ EOF
 
     unset MAX_TURNS_FIX_REVIEW
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 10" "$claude_calls" || \
-        fail "Expected --max-turns 10 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
     grep -q -- "--max-turns 99" "$claude_calls" && \
         fail "pr-review should not honour MAX_TURNS_FIX_REVIEW" || true
+}
+
+@test "run_stage pr-review retry_same keeps the pinned 20-turn cap (issue #900)" {
+    # pr-review's cap is hard-wired (default 20, env: MAX_TURNS_PR_REVIEW),
+    # not stage-type derived, so it must stay pinned through a same-model
+    # retry (e.g. rate_limit) rather than being dropped the way an uncapped
+    # max-turns retry drops --max-turns.
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" >> "$claude_calls"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"rate limit exceeded, please retry"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file claude_calls
+
+    # detect_rate_limit(true) drives handle_rate_limit()'s backoff sleep
+    # before decide-action.sh is ever reached; stub it out so the test stays
+    # fast (mirrors the existing retry_same watchdog test above).
+    sleep() { :; }
+    export -f sleep
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || \
+        fail "Expected 2 claude calls (rate-limit retry_same), got $final_count"
+
+    local second_call_args
+    second_call_args=$(sed -n '2p' "$claude_calls")
+    [[ "$second_call_args" == *"--max-turns 20"* ]] || \
+        fail "pr-review retry must keep the pinned 20-turn cap. Args: $second_call_args"
 }
 
 # =============================================================================

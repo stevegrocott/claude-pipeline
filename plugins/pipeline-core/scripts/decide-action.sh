@@ -21,7 +21,8 @@
 # Output (stdout):
 #   {"action":"<accept|escalate|bail|retry_same>",
 #    "model":"<tier>",    # present only when action == "escalate"
-#    "uncapped":true,     # present only on the S-task max_turns retry (#637);
+#    "uncapped":true,     # present only on a max_turns_exhausted retry at a
+#                         # non-ceiling model (#637, generalized in #900);
 #                         # tells run_stage to drop --max-turns on the retry
 #    "reason":"<string>"}
 #
@@ -64,34 +65,52 @@ _next_model() {
 
 # ---------------------------------------------------------------------------
 # _s_opus_gate_action <error_kind>
-# Emit the S-complexity Opus-gate action (issues #579 + #637).  A short task at
+# Emit the S-complexity Opus-gate bail action (issue #579).  A short task at
 # sonnet must not auto-escalate to opus on a single stage failure — Opus buys
 # no completion lift for S tasks, only cost — so the model never changes here.
 #
-# On error_kind=max_turns_exhausted the escalation path's real benefit was
-# never the model upgrade: the escalated retry runs with the turn cap REMOVED
-# (see run_stage's _esc_turns_args, pinned by test-stage-runner.bats "run_stage
-# does not include max-turns cap on error_max_turns escalation retry").  Bailing
-# discarded that cap-lift too, so a task that merely needed more turns was
-# recorded failed after one capped attempt (issue #637).  Emit a SAME-MODEL
-# retry carrying an "uncapped" marker instead — the cap is lifted, the model
-# stays at sonnet, and #579's cost finding is preserved.
+# max_turns_exhausted is handled separately by _uncapped_retry_action, which
+# is checked before this gate runs (issue #900 generalized that retry to any
+# non-ceiling model, independent of task complexity), so this function only
+# ever sees the remaining error kinds and always bails.
 #
-# Every other error kind keeps the #579 bail.
-#
-# Shared by _bash_decide (double_timeout, quality_stall + default branches) and
-# _compose_decide (escalate branch) so both backends emit identical output.
+# Shared by _bash_decide (quality_stall, double_timeout + default branches)
+# and _compose_decide (escalate branch) so both backends emit identical
+# output.
 # ---------------------------------------------------------------------------
 _s_opus_gate_action() {
 	local error_kind="${1:-unknown}"
 
-	if [[ "$error_kind" == "max_turns_exhausted" ]]; then
-		printf '{"action":"retry_same","uncapped":true,"reason":"%s: S-complexity task at sonnet — retrying at the same model with the turn cap lifted (issue #637)"}\n' \
-			"$error_kind"
-		return 0
-	fi
-
 	printf '{"action":"bail","reason":"%s: S-complexity task at sonnet — not escalating to opus (issue #579)"}\n' \
+		"$error_kind"
+}
+
+# ---------------------------------------------------------------------------
+# _uncapped_retry_action <error_kind>
+# Emit a same-model retry_same carrying "uncapped":true (issues #637 + #900).
+#
+# On error_kind=max_turns_exhausted the escalation path's real benefit was
+# never the model upgrade: the escalated retry runs with the turn cap REMOVED
+# (see run_stage's _esc_turns_args, pinned by test-stage-runner.bats "run_stage
+# does not include max-turns cap on error_max_turns escalation retry").
+# Escalating to the next tier just to get that cap-lift wastes a model
+# upgrade — and bailing, as the #579 gate did for S-at-sonnet, discards the
+# cap-lift entirely, recording a task that merely needed more turns as failed
+# after one capped attempt (issue #637).
+#
+# Issue #900 generalized this one case from an S-complexity-only exception to
+# any non-ceiling model: the caller only invokes this once the opus-ceiling
+# case has already been bailed, so every remaining model is eligible for the
+# cap-lift regardless of task complexity. The #579 gate itself is unchanged
+# for every other error kind — see _s_opus_gate_action.
+#
+# Shared by _bash_decide (default branch) and _compose_decide (escalate
+# branch) so both backends emit identical output.
+# ---------------------------------------------------------------------------
+_uncapped_retry_action() {
+	local error_kind="${1:-unknown}"
+
+	printf '{"action":"retry_same","uncapped":true,"reason":"%s: retrying at the same model with the turn cap lifted (issue #637)"}\n' \
 		"$error_kind"
 }
 
@@ -135,6 +154,10 @@ _bash_decide() {
 	fi
 
 	# quality_stall → escalate, or bail if already at opus ceiling
+	#
+	# NOTE: M/L quality_stall backend divergence (bash escalates, compose
+	# bails "not a recognised upgrade trigger") is pre-existing and left
+	# unchanged here.
 	if [[ "$error_kind" == "quality_stall" ]]; then
 		if [[ "$model" == "opus" ]]; then
 			printf '%s\n' \
@@ -146,10 +169,6 @@ _bash_decide() {
 			# already bails this case.  run_quality_loop threads task_size
 			# through, so a fix/simplify stage quality-stalling on an S task
 			# reaches here on a realistic path.
-			#
-			# NOTE: M/L quality_stall backend divergence (bash escalates,
-			# compose bails "not a recognised upgrade trigger") is
-			# pre-existing and NOT introduced by #579 — left unchanged here.
 			_s_opus_gate_action "quality_stall"
 		else
 			local next_model
@@ -196,6 +215,18 @@ _bash_decide() {
 				'{"action":"retry_same","reason":"rate_limit: transient throttle, retrying with same model"}'
 			return 0
 		fi
+	fi
+
+	# max_turns_exhausted on any non-ceiling model (issue #637, generalized
+	# from the S-complexity-only gate in issue #900): one same-model retry
+	# with the turn cap lifted, instead of promoting to the next tier.
+	# Checked before the S-complexity gate below so it applies regardless of
+	# task size.  Placed after the rate_limit retry_same and opus-ceiling
+	# checks so those paths are unaffected — the opus case already bailed
+	# above.
+	if [[ "$error_kind" == "max_turns_exhausted" ]]; then
+		_uncapped_retry_action "$error_kind"
+		return 0
 	fi
 
 	# S-complexity gate (issue #579): before the default escalate, bail an
@@ -316,11 +347,24 @@ _compose_decide() {
 			return 0
 			;;
 		escalate)
+			# max_turns_exhausted on any non-ceiling model (issue #637,
+			# generalized in #900): keep the skill-native path in agreement
+			# with _bash_decide — one same-model retry with the turn cap
+			# lifted, instead of promoting to the next tier.  decide-retry.sh
+			# only returns "escalate" for max_turns_exhausted once the
+			# opus-ceiling case has already been bailed, so this applies
+			# regardless of complexity. Checked before model-fallback
+			# delegation since there is no model to select here.
+			if [[ "$error_kind" == "max_turns_exhausted" ]]; then
+				_uncapped_retry_action "$error_kind"
+				return 0
+			fi
+
 			# S-complexity gate (issue #579): keep the skill-native path in
 			# agreement with _bash_decide — an S task at sonnet bails rather
 			# than escalating to opus, so Opus requires a bounded trigger.
-			# Checked before model-fallback delegation because sonnet's next
-			# tier is opus.
+			# Checked after the max_turns_exhausted retry above so that
+			# generalized cap-lift applies regardless of complexity.
 			if [[ "$complexity" == "S" && "$model" == "sonnet" ]]; then
 				_s_opus_gate_action "${error_kind:-unknown}"
 				return 0
