@@ -5894,3 +5894,150 @@ STUB
 	[ "$status" -ne 0 ] \
 		|| fail "dry-run wrote a salvage tag even though nothing is deleted"
 }
+
+# =============================================================================
+# TASK 6 (#891): a first end-to-end run of the batch driver loop
+# =============================================================================
+#
+# Every test above drives batch-orchestrator.sh through extracted functions
+# or static text assertions; none has ever executed the real top-level
+# script. This is the first: it runs the actual batch-orchestrator.sh
+# against a real (throwaway) git repo, with a fake inner orchestrator
+# standing in for implement-issue-orchestrator.sh at the one seam
+# process_issue() calls through — `setsid "$SCRIPT_DIR/implement-issue-
+# orchestrator.sh" ...`. Replacing that file in a private copy of scripts/
+# IS the seam (see issue #891's own prototype), so the real driver loop —
+# init_status, the idempotency/upstream skip gates, process_issue, the
+# process-pr dispatch, wait_for_pr_merged and final-state selection — all
+# run for real.
+#
+# `gh` is stubbed to fail outright rather than omitted from PATH: that
+# keeps the run deterministic regardless of whether the host machine has a
+# real `gh` installed or authenticated to an unrelated repo.
+# validate_issue_for_processing() and the upstream-resolution gate both
+# treat a gh failure as "proceed" (never a skip) by design, so a failing
+# stub exercises the exact codepath a real, unauthenticated CI runner hits.
+# `claude` is stubbed to answer the one dispatch_composition call this path
+# reaches (/process-pr) with a "merged" verdict — the cheapest terminal
+# outcome that still reaches update_progress/set_state without touching
+# perform_scripted_merge or transition-issue.sh, which are their own seam
+# for a future test.
+
+BATCH_E2E_REAL_SCRIPTS_DIR="$SCRIPT_DIR"
+BATCH_E2E_REAL_CONFIG_DIR="$SCRIPT_DIR/../config"
+BATCH_E2E_SCRIPTS_COPY=""
+BATCH_E2E_ORCH_COPY=""
+
+# Copies the real scripts/ tree into TEST_TMP so the fake inner orchestrator
+# can be dropped in without ever touching tracked repo source. Sets
+# BATCH_E2E_SCRIPTS_COPY / BATCH_E2E_ORCH_COPY. Mirrors test-reexec.bats's
+# make_scripts_copy().
+_make_batch_e2e_scripts_copy() {
+	BATCH_E2E_SCRIPTS_COPY="$TEST_TMP/batch_e2e_scripts_copy"
+	mkdir -p "$BATCH_E2E_SCRIPTS_COPY"
+	cp -r "$BATCH_E2E_REAL_SCRIPTS_DIR/." "$BATCH_E2E_SCRIPTS_COPY/"
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY"/*.sh
+	export PIPELINE_CONFIG_DIR="$BATCH_E2E_REAL_CONFIG_DIR"
+	BATCH_E2E_ORCH_COPY="$BATCH_E2E_SCRIPTS_COPY/batch-orchestrator.sh"
+}
+
+# Overwrites the copy's implement-issue-orchestrator.sh — the exact file
+# process_issue() setsid-launches — with a fake that records the issue
+# number it was invoked with to FAKE_INNER_ORCH_CALL_LOG and writes a
+# status file reporting state=completed with a PR number, mirroring what a
+# real completed run leaves behind for process_issue() to parse.
+_install_fake_inner_orchestrator() {
+	cat > "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh" << 'FAKE_ORCH'
+#!/usr/bin/env bash
+set -uo pipefail
+issue_num=""
+status_file=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--issue) issue_num="$2"; shift 2 ;;
+		--status-file) status_file="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+
+if [[ -n "${FAKE_INNER_ORCH_CALL_LOG:-}" ]]; then
+	printf '%s\n' "$issue_num" >> "$FAKE_INNER_ORCH_CALL_LOG"
+fi
+
+pr_number="${FAKE_INNER_ORCH_PR_NUMBER:-101}"
+jq -n --argjson pr "$pr_number" '{
+	state: "completed",
+	stages: {pr: {pr_number: $pr}},
+	cost_summary: {total_cost_usd: 0}
+}' > "$status_file"
+FAKE_ORCH
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh"
+}
+
+# Isolated throwaway git repo to run the batch from: STATUS_FILE, LOG_BASE
+# and the lock file are all CWD-relative in batch-orchestrator.sh, so the
+# CWD a batch runs from IS its workspace (see issue #891's research). Leaves
+# the caller's CWD inside the repo, on a branch named "main", with one
+# commit.
+_init_batch_e2e_repo() {
+	local repo="$TEST_TMP/batch_e2e_repo"
+	mkdir -p "$repo"
+	cd "$repo" || return 1
+	git init -q
+	git checkout -q -b main
+	printf 'initial\n' > README.md
+	git add README.md
+	git commit -q -m "initial"
+}
+
+# Installs a `gh` that always fails (no output, exit 1) and a `claude` that
+# answers the single /process-pr dispatch this path reaches with a "merged"
+# verdict. Prepended to PATH ahead of any real gh/claude the host has
+# installed, so the run never depends on host auth state or network access.
+_install_batch_e2e_mocks() {
+	local mock_bin="$TEST_TMP/batch_e2e_bin"
+	mkdir -p "$mock_bin"
+
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$mock_bin/gh"
+	chmod +x "$mock_bin/gh"
+
+	cat > "$mock_bin/claude" << 'MOCK_CLAUDE'
+#!/usr/bin/env bash
+echo '{"result":"mocked process-pr","structured_output":{"status":"merged","follow_up_issues":[]}}'
+MOCK_CLAUDE
+	chmod +x "$mock_bin/claude"
+
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "real batch-orchestrator.sh: invokes the inner orchestrator for the named issue and summary.json reports completed" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export FAKE_INNER_ORCH_PR_NUMBER=4242
+	# Nothing to wait for in this harness — there is no real PR to poll via
+	# gh, and the stubbed gh above always fails, so skip the merge-wait
+	# poll entirely rather than have it fall through to a real sleep loop.
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "777" --branch main
+
+	[ "$status" -eq 0 ] || fail "batch-orchestrator.sh exited $status: $output"
+
+	[[ -f "$FAKE_INNER_ORCH_CALL_LOG" ]] \
+		|| fail "the inner orchestrator was never invoked at all"
+	run cat "$FAKE_INNER_ORCH_CALL_LOG"
+	[[ "$output" == *"777"* ]] \
+		|| fail "inner orchestrator was not invoked for issue #777 (got: $output)"
+
+	local summary
+	summary=$(find "$PWD/logs" -name summary.json | head -1)
+	[[ -n "$summary" ]] || fail "no summary.json was written"
+
+	run jq -r '.state' "$summary"
+	[ "$output" == "completed" ] \
+		|| fail "summary.json reported state='$output', not 'completed' — an early exit or skipped issue must fail this test"
+}
