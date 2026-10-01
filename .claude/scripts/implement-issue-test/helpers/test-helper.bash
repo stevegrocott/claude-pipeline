@@ -77,14 +77,16 @@ setup_test_env() {
     # carried-over SCRIPT_DIR is scrubbed too: a leaked value repoints a
     # launched script's siblings at the ancestor's (e.g. plugin-cache) tree.
     #
-    # Issue #922 bisect: before #835 a leaked _SCRIPT_DIR repointed every
-    # extracted-function suite at the plugin cache (8 of the 14 gate-only
-    # failures, e.g. "Schema file not found: .../pipeline-core/0.8.10/...");
-    # a leaked _SCRIPT_PATH together with the guard made usage() name the
-    # ancestor's script (the 9th). Neither reproduces alone, which is why
-    # single-variable probes ruled them out. Scrub both here, not just in
-    # source_orchestrator_functions(), so no suite depends on which
-    # extractor it happens to use.
+    # Issue #922 bisect: a leaked _SCRIPT_DIR would repoint an
+    # extracted-function suite at the plugin cache (e.g. "Schema file not
+    # found: .../pipeline-core/0.8.10/..."), and a leaked _SCRIPT_PATH
+    # together with the guard would make usage() name the ancestor's
+    # script. The issue's single-variable probes ruled out each of these
+    # alone; whether the two together explain any of AC6's remaining 9
+    # failures is an unverified hypothesis, not a confirmed finding -- no
+    # reproduction has tied this combination to those specific cases.
+    # Scrub both here anyway, not just in source_orchestrator_functions(),
+    # so no suite depends on which extractor it happens to use.
     unset _BATCH_ORCHESTRATOR_REEXECED _BATCH_ORCHESTRATOR_REEXEC_COPY \
         _BATCH_ORCHESTRATOR_SCRIPT_DIR
     unset _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED \

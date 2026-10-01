@@ -4195,14 +4195,45 @@ BROKEN
 #
 # Both tests below run the REAL script from an isolated copy of scripts/
 # (never the tracked repo file), exactly as the task 4 test does.
-
-@test "real batch orchestrator: SCRIPT_DIR resolves to the real script directory after re-exec" {
-	local scripts_copy="$TEST_TMP/scripts_copy"
+#
+# Shared by the four re-exec cases below (plus their "...with the batch
+# guard pre-set" counterparts under ISSUE #922): factored out so the
+# duplicated setup can't drift between the pairs.
+setup_batch_scripts_copy() {
+	scripts_copy="$TEST_TMP/scripts_copy"
 	mkdir -p "$scripts_copy"
 	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
 	chmod +x "$scripts_copy"/*.sh
 
 	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+}
+
+# Non-blocking gh mock: resolve the single issue as already CLOSED so the
+# up-front skip gate short-circuits it and the run reaches its terminal
+# state (and the full EXIT trap) without doing any real work.
+mock_gh_closed_issue() {
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'MOCKGH'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "issue view" ]]; then
+	echo "CLOSED"
+	exit 0
+fi
+echo ""
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+count_batch_orchestrator_copies() {
+	find "$1" -maxdepth 1 -name 'batch-orchestrator.*' -type f | wc -l
+}
+
+@test "real batch orchestrator: SCRIPT_DIR resolves to the real script directory after re-exec" {
+	local scripts_copy
+	setup_batch_scripts_copy
 
 	# No args: usage() is the first exit path that only runs after every
 	# SCRIPT_DIR-dependent sibling has already been sourced successfully
@@ -4223,12 +4254,8 @@ BROKEN
 }
 
 @test "real batch orchestrator: re-exec creates exactly one private copy per invocation" {
-	local scripts_copy="$TEST_TMP/scripts_copy"
-	mkdir -p "$scripts_copy"
-	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
-	chmod +x "$scripts_copy"/*.sh
-
-	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+	local scripts_copy
+	setup_batch_scripts_copy
 
 	# Isolate TMPDIR so the private copy the re-exec creates is the only
 	# batch-orchestrator.* file that can appear here — a clean, direct
@@ -4242,10 +4269,7 @@ BROKEN
 
 	run "$scripts_copy/batch-orchestrator.sh"
 
-	local copy_count
-	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
-		-name 'batch-orchestrator.*' -type f | wc -l)
-	[[ "$copy_count" -eq 1 ]]
+	[[ "$(count_batch_orchestrator_copies "$reexec_tmpdir")" -eq 1 ]]
 }
 
 # =============================================================================
@@ -4258,29 +4282,9 @@ BROKEN
 # skip, or failure) leaves $TMPDIR exactly as it found it.
 
 @test "real batch orchestrator: the re-exec private copy is removed once the run exits" {
-	local scripts_copy="$TEST_TMP/scripts_copy"
-	mkdir -p "$scripts_copy"
-	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
-	chmod +x "$scripts_copy"/*.sh
-
-	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
-
-	# Non-blocking gh mock: resolve the single issue as already CLOSED so the
-	# up-front skip gate short-circuits it and the run reaches its terminal
-	# state (and the full EXIT trap) without doing any real work.
-	local mock_bin="$TEST_TMP/mockbin"
-	mkdir -p "$mock_bin"
-	cat > "$mock_bin/gh" << 'MOCKGH'
-#!/usr/bin/env bash
-if [[ "$1 $2" == "issue view" ]]; then
-	echo "CLOSED"
-	exit 0
-fi
-echo ""
-exit 0
-MOCKGH
-	chmod +x "$mock_bin/gh"
-	export PATH="$mock_bin:$PATH"
+	local scripts_copy
+	setup_batch_scripts_copy
+	mock_gh_closed_issue
 
 	# Isolate TMPDIR so the private copy is the only batch-orchestrator.* file
 	# that can appear here -- a direct, unambiguous check for leftovers.
@@ -4293,10 +4297,7 @@ MOCKGH
 		"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
 	)
 
-	local copy_count
-	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
-		-name 'batch-orchestrator.*' -type f | wc -l)
-	[[ "$copy_count" -eq 0 ]]
+	[[ "$(count_batch_orchestrator_copies "$reexec_tmpdir")" -eq 0 ]]
 }
 
 # =============================================================================
@@ -4317,20 +4318,20 @@ MOCKGH
 # copy_count=0 (the leaked guard makes the real script skip its own re-exec)
 # and the second would error out resolving the stale SCRIPT_DIR.
 
-@test "real batch orchestrator: re-exec creates exactly one private copy per invocation with the batch guard pre-set" {
+preset_stale_batch_guard() {
 	export _BATCH_ORCHESTRATOR_REEXECED=1
 	export _BATCH_ORCHESTRATOR_REEXEC_COPY="/tmp/stale-batch-copy-$$"
 	export _BATCH_ORCHESTRATOR_SCRIPT_DIR="/tmp/stale-batch-dir-$$"
 	local old_tmp="$TEST_TMP"
 	setup_test_env
 	rm -rf "$old_tmp"
+}
 
-	local scripts_copy="$TEST_TMP/scripts_copy"
-	mkdir -p "$scripts_copy"
-	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
-	chmod +x "$scripts_copy"/*.sh
+@test "real batch orchestrator: re-exec creates exactly one private copy per invocation with the batch guard pre-set" {
+	preset_stale_batch_guard
 
-	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+	local scripts_copy
+	setup_batch_scripts_copy
 
 	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
 	mkdir -p "$reexec_tmpdir"
@@ -4338,43 +4339,15 @@ MOCKGH
 
 	run "$scripts_copy/batch-orchestrator.sh"
 
-	local copy_count
-	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
-		-name 'batch-orchestrator.*' -type f | wc -l)
-	[[ "$copy_count" -eq 1 ]]
+	[[ "$(count_batch_orchestrator_copies "$reexec_tmpdir")" -eq 1 ]]
 }
 
 @test "real batch orchestrator: the re-exec private copy is removed once the run exits with the batch guard pre-set" {
-	export _BATCH_ORCHESTRATOR_REEXECED=1
-	export _BATCH_ORCHESTRATOR_REEXEC_COPY="/tmp/stale-batch-copy-$$"
-	export _BATCH_ORCHESTRATOR_SCRIPT_DIR="/tmp/stale-batch-dir-$$"
-	local old_tmp="$TEST_TMP"
-	setup_test_env
-	rm -rf "$old_tmp"
+	preset_stale_batch_guard
 
-	local scripts_copy="$TEST_TMP/scripts_copy"
-	mkdir -p "$scripts_copy"
-	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
-	chmod +x "$scripts_copy"/*.sh
-
-	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
-
-	# Non-blocking gh mock: resolve the single issue as already CLOSED so the
-	# up-front skip gate short-circuits it and the run reaches its terminal
-	# state (and the full EXIT trap) without doing any real work.
-	local mock_bin="$TEST_TMP/mockbin"
-	mkdir -p "$mock_bin"
-	cat > "$mock_bin/gh" << 'MOCKGH'
-#!/usr/bin/env bash
-if [[ "$1 $2" == "issue view" ]]; then
-	echo "CLOSED"
-	exit 0
-fi
-echo ""
-exit 0
-MOCKGH
-	chmod +x "$mock_bin/gh"
-	export PATH="$mock_bin:$PATH"
+	local scripts_copy
+	setup_batch_scripts_copy
+	mock_gh_closed_issue
 
 	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
 	mkdir -p "$reexec_tmpdir"
@@ -4385,10 +4358,7 @@ MOCKGH
 		"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
 	)
 
-	local copy_count
-	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
-		-name 'batch-orchestrator.*' -type f | wc -l)
-	[[ "$copy_count" -eq 0 ]]
+	[[ "$(count_batch_orchestrator_copies "$reexec_tmpdir")" -eq 0 ]]
 }
 
 # =============================================================================
