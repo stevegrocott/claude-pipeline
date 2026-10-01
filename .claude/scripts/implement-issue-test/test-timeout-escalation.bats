@@ -161,12 +161,15 @@ teardown() {
 }
 
 # =============================================================================
-# PER-RUN ESCALATION CAP + S-COMPLEXITY OPUS GATE (issue #579)
+# PER-RUN ESCALATION CAP (issue #579) + GATE REMOVAL (issue #900)
 #
 # These exercise decide-action.sh directly (bash backend, pinned by
 # install_decide_scripts) with crafted stage_result + history JSON.  The cap
-# bail is checked in main() before dispatch; the S-Opus gate lives in both
-# _bash_decide and _compose_decide so the two backends agree.
+# bail is checked in main() before dispatch.  The S-complexity Opus gate
+# introduced by #579 was dropped in #900: complexity no longer affects
+# escalation decisions at all, so S-at-sonnet now behaves identically to
+# M/L-at-sonnet for every error kind except max_turns_exhausted (see the
+# generalized uncapped-retry section below).
 # =============================================================================
 
 @test "escalation cap: history length >= MAX_ESCALATIONS_PER_RUN bails" {
@@ -218,25 +221,30 @@ teardown() {
     [ "$action" = "accept" ] || fail "Expected accept for success, got: $action"
 }
 
-@test "S-complexity double_timeout at sonnet bails (does not escalate to opus)" {
+@test "S-complexity double_timeout at sonnet now escalates to opus (S-gate dropped, issue #900)" {
     local sr='{"status":"error","error_kind":"double_timeout","model":"sonnet","complexity":"S"}'
     run env ESCALATION_POLICY_BACKEND=bash \
         bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
     [ "$status" -eq 0 ]
-    local action
+    local action model
     action=$(printf '%s' "$output" | jq -r '.action')
-    [ "$action" = "bail" ] || fail "Expected bail for S-at-sonnet, got: $action ($output)"
-    [[ "$output" == *"S-complexity"* ]] || fail "Expected S-complexity reason, got: $output"
+    model=$(printf '%s' "$output" | jq -r '.model')
+    [ "$action" = "escalate" ] || \
+        fail "Expected escalate for S-at-sonnet (gate dropped), got: $action ($output)"
+    [ "$model" = "opus" ] || fail "Expected opus, got: $model"
 }
 
-@test "S-complexity default error at sonnet bails (does not escalate to opus)" {
+@test "S-complexity default error at sonnet now escalates to opus (S-gate dropped, issue #900)" {
     local sr='{"status":"error","error_kind":"no_structured_output","model":"sonnet","complexity":"S"}'
     run env ESCALATION_POLICY_BACKEND=bash \
         bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
     [ "$status" -eq 0 ]
-    local action
+    local action model
     action=$(printf '%s' "$output" | jq -r '.action')
-    [ "$action" = "bail" ] || fail "Expected bail for S default-error, got: $action ($output)"
+    model=$(printf '%s' "$output" | jq -r '.model')
+    [ "$action" = "escalate" ] || \
+        fail "Expected escalate for S default-error (gate dropped), got: $action ($output)"
+    [ "$model" = "opus" ] || fail "Expected opus, got: $model"
 }
 
 @test "M-complexity double_timeout at sonnet still escalates to opus" {
@@ -273,7 +281,7 @@ teardown() {
     [ "$action" = "escalate" ] || fail "Expected escalate for empty complexity, got: $action"
 }
 
-@test "backend parity: compose path also bails S-at-sonnet double_timeout" {
+@test "backend parity: compose path also escalates S-at-sonnet double_timeout (S-gate dropped)" {
     local sr='{"status":"error","error_kind":"double_timeout","model":"sonnet","complexity":"S"}'
     # Skill-native compose path (bash sub-backends), NOT ESCALATION_POLICY_BACKEND=bash
     run env RETRY_POLICY_BACKEND=bash MODEL_FALLBACK_BACKEND=bash \
@@ -281,7 +289,8 @@ teardown() {
     [ "$status" -eq 0 ]
     local action
     action=$(printf '%s' "$output" | jq -r '.action')
-    [ "$action" = "bail" ] || fail "Expected compose bail for S-at-sonnet, got: $action ($output)"
+    [ "$action" = "escalate" ] || \
+        fail "Expected compose escalate for S-at-sonnet (gate dropped), got: $action ($output)"
 }
 
 @test "backend parity: compose path also bails at per-run cap" {
@@ -297,26 +306,30 @@ teardown() {
 }
 
 # =============================================================================
-# S-COMPLEXITY OPUS GATE — quality_stall branch (issue #579, AC1 + AC4)
+# quality_stall branch — S-gate removal (issue #579 gate dropped by #900)
 #
-# The S-gate must also cover error_kind=quality_stall, not only double_timeout
-# and the default escalate.  run_quality_loop threads task_size through, so a
-# fix/simplify stage quality-stalling on an S task reaches _bash_decide's
-# quality_stall branch on a realistic path.  Both backends must agree.
+# The S-gate previously also covered error_kind=quality_stall, not only
+# double_timeout and the default escalate.  run_quality_loop threads
+# task_size through, so a fix/simplify stage quality-stalling on an S task
+# reaches _bash_decide's quality_stall branch on a realistic path.  Issue
+# #900 dropped the gate entirely, so S now escalates just like M/L. Both
+# backends must agree.
 # =============================================================================
 
-@test "S-complexity quality_stall at sonnet bails in bash backend (does not escalate to opus)" {
+@test "S-complexity quality_stall at sonnet now escalates to opus (S-gate dropped, issue #900)" {
     local sr='{"status":"error","error_kind":"quality_stall","model":"sonnet","complexity":"S"}'
     run env ESCALATION_POLICY_BACKEND=bash \
         bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
     [ "$status" -eq 0 ]
-    local action
+    local action model
     action=$(printf '%s' "$output" | jq -r '.action')
-    [ "$action" = "bail" ] || fail "Expected bail for S-at-sonnet quality_stall, got: $action ($output)"
-    [[ "$output" == *"S-complexity"* ]] || fail "Expected S-complexity reason, got: $output"
+    model=$(printf '%s' "$output" | jq -r '.model')
+    [ "$action" = "escalate" ] || \
+        fail "Expected escalate for S-at-sonnet quality_stall (gate dropped), got: $action ($output)"
+    [ "$model" = "opus" ] || fail "Expected opus, got: $model"
 }
 
-@test "backend parity: compose path also bails S-at-sonnet quality_stall" {
+@test "backend parity: compose path also escalates S-at-sonnet quality_stall (S-gate dropped)" {
     local sr='{"status":"error","error_kind":"quality_stall","model":"sonnet","complexity":"S"}'
     # Skill-native compose path (bash sub-backends), NOT ESCALATION_POLICY_BACKEND=bash
     run env RETRY_POLICY_BACKEND=bash MODEL_FALLBACK_BACKEND=bash \
@@ -324,7 +337,8 @@ teardown() {
     [ "$status" -eq 0 ]
     local action
     action=$(printf '%s' "$output" | jq -r '.action')
-    [ "$action" = "bail" ] || fail "Expected compose bail for S-at-sonnet quality_stall, got: $action ($output)"
+    [ "$action" = "escalate" ] || \
+        fail "Expected compose escalate for S-at-sonnet quality_stall (gate dropped), got: $action ($output)"
 }
 
 @test "M-complexity quality_stall at sonnet still escalates to opus (bash backend, no over-blocking)" {
@@ -352,14 +366,18 @@ teardown() {
 }
 
 # =============================================================================
-# S-COMPLEXITY UNCAPPED RETRY — max_turns_exhausted branch (issue #637)
+# GENERALIZED UNCAPPED RETRY — max_turns_exhausted branch (issue #637,
+# generalized from an S-complexity-only exception to any non-ceiling model
+# by issue #900)
 #
 # On error_max_turns the escalation path's real benefit is that the retry runs
-# with the turn cap REMOVED, not that the model changes.  The #579 gate threw
-# that cap-lift away along with the model upgrade, so an S task that merely
-# needed more turns was recorded failed after a single capped attempt.
-# decide-action must now return a SAME-MODEL retry (never opus) for
-# S + sonnet + max_turns_exhausted, in both backends.
+# with the turn cap REMOVED, not that the model changes.  The old #579 gate
+# only preserved that cap-lift for S-at-sonnet and threw it away for every
+# other complexity, so an M/L task that merely needed more turns was still
+# promoted to the next tier instead of getting a cheap same-model retry.
+# decide-action must now return a SAME-MODEL retry (never the next tier) for
+# max_turns_exhausted at ANY non-ceiling model, regardless of complexity, in
+# both backends.
 # =============================================================================
 
 @test "S-complexity max_turns_exhausted at sonnet retries instead of bailing (issue #637)" {
@@ -426,28 +444,63 @@ teardown() {
         fail "Expected bail at ceiling, got: $action ($output)"
 }
 
-@test "S-complexity double_timeout at sonnet still bails (cap-lift is max_turns only)" {
+@test "S-complexity double_timeout at sonnet still escalates, not an uncapped retry (cap-lift is max_turns only)" {
     local sr='{"status":"error","error_kind":"double_timeout","model":"sonnet","complexity":"S"}'
     run env ESCALATION_POLICY_BACKEND=bash \
         bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
     [ "$status" -eq 0 ]
-    local action
+    local action uncapped
     action=$(printf '%s' "$output" | jq -r '.action')
-    [ "$action" = "bail" ] || \
-        fail "double_timeout must not gain an uncapped retry, got: $action ($output)"
+    uncapped=$(printf '%s' "$output" | jq -r '.uncapped // false')
+    [ "$action" = "escalate" ] || \
+        fail "Expected escalate (gate dropped), got: $action ($output)"
+    [ "$uncapped" = "false" ] || \
+        fail "double_timeout must not gain an uncapped retry, got: $output"
 }
 
-@test "M-complexity max_turns_exhausted at sonnet still escalates to opus" {
+@test "M-complexity max_turns_exhausted at sonnet now retries uncapped too (generalized, issue #900)" {
     local sr='{"status":"error","error_kind":"max_turns_exhausted","model":"sonnet","complexity":"M"}'
     run env ESCALATION_POLICY_BACKEND=bash \
         bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
     [ "$status" -eq 0 ]
-    local action model
+    local action uncapped model
     action=$(printf '%s' "$output" | jq -r '.action')
-    model=$(printf '%s' "$output" | jq -r '.model')
-    [ "$action" = "escalate" ] || \
-        fail "Expected escalate for M max_turns, got: $action ($output)"
-    [ "$model" = "opus" ] || fail "Expected opus for M max_turns, got: $model"
+    uncapped=$(printf '%s' "$output" | jq -r '.uncapped // false')
+    model=$(printf '%s' "$output" | jq -r '.model // empty')
+    [ "$action" = "retry_same" ] || \
+        fail "Expected retry_same for M max_turns (gate dropped), got: $action ($output)"
+    [ "$uncapped" = "true" ] || \
+        fail "Expected uncapped:true marker, got: $output"
+    [ "$model" != "opus" ] || \
+        fail "max_turns_exhausted retry must stay at the same model, got: $output"
+}
+
+@test "L-complexity max_turns_exhausted at sonnet also retries uncapped (generalized, issue #900)" {
+    local sr='{"status":"error","error_kind":"max_turns_exhausted","model":"sonnet","complexity":"L"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action uncapped
+    action=$(printf '%s' "$output" | jq -r '.action')
+    uncapped=$(printf '%s' "$output" | jq -r '.uncapped // false')
+    [ "$action" = "retry_same" ] || \
+        fail "Expected retry_same for L max_turns (gate dropped), got: $action ($output)"
+    [ "$uncapped" = "true" ] || \
+        fail "Expected uncapped:true marker, got: $output"
+}
+
+@test "max_turns_exhausted at opus still bails (ceiling checked before the uncapped retry)" {
+    local sr='{"status":"error","error_kind":"max_turns_exhausted","model":"opus","complexity":"M"}'
+    run env ESCALATION_POLICY_BACKEND=bash \
+        bash "$TEST_TMP/decide-action.sh" "$sr" '[]'
+    [ "$status" -eq 0 ]
+    local action uncapped
+    action=$(printf '%s' "$output" | jq -r '.action')
+    uncapped=$(printf '%s' "$output" | jq -r '.uncapped // false')
+    [ "$action" = "bail" ] || \
+        fail "Expected bail at opus ceiling, got: $action ($output)"
+    [ "$uncapped" = "false" ] || \
+        fail "opus ceiling must not get an uncapped retry, got: $output"
 }
 
 @test "stage_result envelope carries complexity field (issue #579)" {
