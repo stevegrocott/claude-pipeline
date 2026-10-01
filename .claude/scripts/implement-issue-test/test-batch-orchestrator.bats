@@ -4300,6 +4300,98 @@ MOCKGH
 }
 
 # =============================================================================
+# ISSUE #922: the two re-exec cases above still pass when the batch guard is
+# already present in the environment that launched bats
+# =============================================================================
+#
+# implement-issue-orchestrator.sh's full-suite check launches bats as a child
+# of its own (already re-exec'd) process tree, so a prior batch-orchestrator.sh
+# re-exec's exported _BATCH_ORCHESTRATOR_REEXECED / _REEXEC_COPY / SCRIPT_DIR
+# can leak into every test's environment. setup_test_env() scrubs those three
+# vars (see helpers/test-helper.bash) so each test starts from a clean re-exec
+# state regardless of bats' own ancestry. These two cases simulate that leak
+# directly -- exporting the guard (and a deliberately stale SCRIPT_DIR, so a
+# missed scrub fails loudly rather than by accident resolving somewhere real)
+# before re-running setup_test_env() -- and then repeat the exact assertions
+# from the two tests above. Without the scrub, the first case would see
+# copy_count=0 (the leaked guard makes the real script skip its own re-exec)
+# and the second would error out resolving the stale SCRIPT_DIR.
+
+@test "real batch orchestrator: re-exec creates exactly one private copy per invocation with the batch guard pre-set" {
+	export _BATCH_ORCHESTRATOR_REEXECED=1
+	export _BATCH_ORCHESTRATOR_REEXEC_COPY="/tmp/stale-batch-copy-$$"
+	export _BATCH_ORCHESTRATOR_SCRIPT_DIR="/tmp/stale-batch-dir-$$"
+	local old_tmp="$TEST_TMP"
+	setup_test_env
+	rm -rf "$old_tmp"
+
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
+	mkdir -p "$reexec_tmpdir"
+	export TMPDIR="$reexec_tmpdir"
+
+	run "$scripts_copy/batch-orchestrator.sh"
+
+	local copy_count
+	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
+		-name 'batch-orchestrator.*' -type f | wc -l)
+	[[ "$copy_count" -eq 1 ]]
+}
+
+@test "real batch orchestrator: the re-exec private copy is removed once the run exits with the batch guard pre-set" {
+	export _BATCH_ORCHESTRATOR_REEXECED=1
+	export _BATCH_ORCHESTRATOR_REEXEC_COPY="/tmp/stale-batch-copy-$$"
+	export _BATCH_ORCHESTRATOR_SCRIPT_DIR="/tmp/stale-batch-dir-$$"
+	local old_tmp="$TEST_TMP"
+	setup_test_env
+	rm -rf "$old_tmp"
+
+	local scripts_copy="$TEST_TMP/scripts_copy"
+	mkdir -p "$scripts_copy"
+	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
+	chmod +x "$scripts_copy"/*.sh
+
+	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+
+	# Non-blocking gh mock: resolve the single issue as already CLOSED so the
+	# up-front skip gate short-circuits it and the run reaches its terminal
+	# state (and the full EXIT trap) without doing any real work.
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'MOCKGH'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "issue view" ]]; then
+	echo "CLOSED"
+	exit 0
+fi
+echo ""
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
+	mkdir -p "$reexec_tmpdir"
+	export TMPDIR="$reexec_tmpdir"
+
+	(
+		cd "$TEST_TMP" || exit 1
+		"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
+	)
+
+	local copy_count
+	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
+		-name 'batch-orchestrator.*' -type f | wc -l)
+	[[ "$copy_count" -eq 0 ]]
+}
+
+# =============================================================================
 # ISSUE #861 — the batch must not fork issue N+1 while PR N is still open
 # =============================================================================
 #
