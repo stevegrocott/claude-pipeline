@@ -470,11 +470,14 @@ teardown() {
 # =============================================================================
 
 @test "escalation re-run watchdog fires when stage subshell is childless and hung" {
-    # First call drives decide-action.sh to `escalate` via error_max_turns
-    # (same trigger as "run_stage escalates model when output subtype is
-    # error_max_turns" above). Second call is the escalation re-run itself —
-    # block childlessly on a FIFO with no writer; only a parent-side
-    # watchdog's SIGTERM can free it.
+    # First call drives decide-action.sh to `escalate` via no_structured_output
+    # (same trigger as "empty output escalates to next model instead of
+    # failing" above) — issue #900 generalized max_turns_exhausted into a
+    # same-model uncapped retry regardless of complexity, so that error_kind
+    # no longer reaches this escalate path and can't be used to drive it here
+    # anymore. Second call is the escalation re-run itself — block childlessly
+    # on a FIFO with no writer; only a parent-side watchdog's SIGTERM can free
+    # it.
     local hang_fifo="$TEST_TMP/escalation-hang.fifo"
     mkfifo "$hang_fifo"
     export hang_fifo
@@ -489,7 +492,7 @@ teardown() {
         n=$((n + 1))
         printf '%s' "$n" > "$counter_file"
         if (( n == 1 )); then
-            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+            echo '{"is_error":true,"result":"gibberish"}'
         else
             read -r _ < "$hang_fifo" 2>/dev/null || true
         fi
@@ -1082,9 +1085,14 @@ teardown() {
 # MODEL ESCALATION — error_max_turns
 # =============================================================================
 
-@test "run_stage escalates model when output subtype is error_max_turns" {
+@test "run_stage retries same model (not opus) when output subtype is error_max_turns (generalized, issue #900)" {
     # BATS runs each @test in a forked subprocess — re-source model-config to
     # make readonly arrays available (same pattern as MODEL SELECTION tests).
+    #
+    # Issue #900 generalized the uncapped retry from an S-complexity-only
+    # exception to any non-ceiling model, dropping the S-complexity gate —
+    # so an empty-complexity sonnet stage now gets the same-model uncapped
+    # retry instead of escalating to opus.
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
@@ -1107,18 +1115,22 @@ teardown() {
     export -f timeout
     export counter_file
 
-    # test-iter-1 resolves to sonnet; sonnet escalates to opus on error_max_turns
+    # test-iter-1 resolves to sonnet; sonnet now retries uncapped at sonnet
+    # on error_max_turns rather than escalating (gate dropped, issue #900)
     run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
 
     local final_count
     final_count=$(cat "$counter_file")
     (( final_count == 2 )) || fail "Expected 2 claude calls, got $final_count"
 
-    # Second call must use escalated model (opus — next tier above sonnet)
+    # Second call must stay at sonnet (same-model uncapped retry)
     local second_call_args
     second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
-    [[ "$second_call_args" == *"--model opus"* ]] || \
-        fail "Expected --model opus in escalated retry. Args: $second_call_args"
+    [[ "$second_call_args" == *"--model sonnet"* ]] || \
+        fail "Expected --model sonnet in uncapped retry. Args: $second_call_args"
+    [[ "$second_call_args" != *"--model opus"* ]] || \
+        fail "max_turns_exhausted must not promote to opus (issue #900)." \
+            "Args: $second_call_args"
 }
 
 @test "run_stage fails with max_turns_exhausted_at_ceiling when opus hits error_max_turns" {
@@ -1186,11 +1198,14 @@ teardown() {
 }
 
 # =============================================================================
-# S-COMPLEXITY UNCAPPED RETRY — error_max_turns (issue #637)
+# UNCAPPED RETRY — error_max_turns (issue #637, generalized from an
+# S-complexity-only exception to any non-ceiling model by issue #900)
 #
-# An S task at sonnet must NOT be promoted to opus (issue #579), but it must
-# still get the cap-lift that the escalation path provides: exactly one
-# same-model retry with no --max-turns, and a second exhaustion is terminal.
+# A non-ceiling task must NOT be promoted to the next tier on
+# max_turns_exhausted; it must instead get the cap-lift that the escalation
+# path provides: exactly one same-model retry with no --max-turns, and a
+# second exhaustion is terminal. The S-complexity case below remains a
+# representative example now that the gate applies regardless of complexity.
 # =============================================================================
 
 @test "run_stage retries an S task at sonnet with no max-turns cap after error_max_turns" {
