@@ -287,6 +287,39 @@ BROKEN
 	expect_glob "$output" '*--issue <number>*' "usage text was reached"
 }
 
+# setup_test_env() must scrub the same guard the test above sets
+# deliberately (#922): the orchestrator's own full-suite check launches
+# bats from inside a process that has already re-exec'd and exported these
+# vars, so every OTHER test would inherit an already-set guard unless
+# setup_test_env() unsets it first. Drive setup_test_env() in a subshell
+# with the leak simulated ahead of it, rather than in this test's own
+# process, since this test's setup() already ran before the guard could be
+# exported here.
+@test "setup_test_env scrubs an inherited orchestrator re-exec environment" {
+	run env \
+		_IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED=1 \
+		_IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY=/tmp/stale-impl \
+		_BATCH_ORCHESTRATOR_REEXECED=1 \
+		_BATCH_ORCHESTRATOR_REEXEC_COPY=/tmp/stale-batch \
+		_BATCH_ORCHESTRATOR_SCRIPT_DIR=/tmp/stale-dir \
+		bash -c '
+			source "'"$TEST_DIR"'/helpers/test-helper.bash"
+			setup_test_env
+			for v in _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED \
+				_IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY \
+				_BATCH_ORCHESTRATOR_REEXECED \
+				_BATCH_ORCHESTRATOR_REEXEC_COPY \
+				_BATCH_ORCHESTRATOR_SCRIPT_DIR; do
+				[[ -n "${!v+x}" ]] && echo "LEAKED:$v"
+			done
+			teardown_test_env
+		'
+
+	expect_ok "subshell ran cleanly" [ "$status" -eq 0 ]
+	expect_no_substring "$output" "LEAKED:" \
+		"no inherited re-exec guard survived setup_test_env"
+}
+
 # =============================================================================
 # AC4: the private copy is removed by the EXIT/TERM traps
 # =============================================================================

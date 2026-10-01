@@ -76,10 +76,23 @@ setup_test_env() {
     # its own body (see test-reexec.bats's "inherited guard" test). The
     # carried-over SCRIPT_DIR is scrubbed too: a leaked value repoints a
     # launched script's siblings at the ancestor's (e.g. plugin-cache) tree.
+    #
+    # Issue #922 bisect: a leaked _SCRIPT_DIR would repoint an
+    # extracted-function suite at the plugin cache (e.g. "Schema file not
+    # found: .../pipeline-core/0.8.10/..."), and a leaked _SCRIPT_PATH
+    # together with the guard would make usage() name the ancestor's
+    # script. The issue's single-variable probes ruled out each of these
+    # alone; whether the two together explain any of AC6's remaining 9
+    # failures is an unverified hypothesis, not a confirmed finding -- no
+    # reproduction has tied this combination to those specific cases.
+    # Scrub both here anyway, not just in source_orchestrator_functions(),
+    # so no suite depends on which extractor it happens to use.
     unset _BATCH_ORCHESTRATOR_REEXECED _BATCH_ORCHESTRATOR_REEXEC_COPY \
         _BATCH_ORCHESTRATOR_SCRIPT_DIR
     unset _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED \
-        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY \
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR \
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_PATH
 
     TEST_TMP=$(mktemp -d)
     export TEST_TMP
