@@ -127,7 +127,8 @@ teardown() {
     run run_platform_script merge-mr.sh 99
     [ "$status" -ne 0 ]
     assert_output_contains "Waiting for PR"
-    assert_output_contains "Timed out waiting"
+    assert_output_contains "Timed out after"
+    assert_output_contains "checks were still pending"
     [[ "$output" != *"refusing to wait"* ]]
     ! assert_mock_called_with "gh pr merge"
 }
