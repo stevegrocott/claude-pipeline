@@ -209,11 +209,26 @@ readonly -a _STAGE_PREFIXES=(
 #   Push + create MR; default is 10 rather than 5 to accommodate a
 #   rebase-before-push when the branch has drifted from main.
 #
-# pr-review budget is intentionally fixed and NOT affected by env vars:
-#   pr-review: 10 turns (focused diff analysis)
+# pr-review stage (sonnet model, standard-tier):
+#   Default: 20 turns   Env: MAX_TURNS_PR_REVIEW
+#   The prior 10-turn cap was a hard-wired ceiling, not a measured budget.
+#   num_turns across pr-review stage logs (#900, 2026-09-26):
+#
+#     turns  3     -> 192 runs   <- natural mode
+#     turns  4     ->  51
+#     turns  5-10  -> 104
+#     turns  11    ->  56 runs   <- pile-up at cap+1 (old cap was 10)
+#     turns  12    ->   4 runs   <- collapses immediately after
+#     turns  13-15 ->  27        <- uncapped opus re-runs, tail to ~31
+#
+#   A pile-up of 56 at cap+1 against a mode of 3 is a budget ceiling, not
+#   workload — this previously forced turn-exhausted pr-review runs to
+#   escalate to opus just to shed the cap. Raised to 20 (above the pile-up)
+#   and made tunable like the other stages; it is no longer env-immune.
 #
 # Decision logic: implement-issue-orchestrator.sh
-# (search for MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW / MAX_TURNS_PR)
+# (search for MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW / MAX_TURNS_PR /
+# MAX_TURNS_PR_REVIEW)
 # =============================================================================
 
 # =============================================================================
