@@ -6059,6 +6059,61 @@ _task_declared_files() {
 	_normalize_declared_paths "${raw[@]+"${raw[@]}"}"
 }
 
+# _matches_test_path_pattern() — true if $1 matches a TEST_PATH_PATTERNS glob
+# (pipe-separated, same contract and `set -f` guard as
+# _matches_e2e_spec_pattern()). Empty TEST_PATH_PATTERNS matches nothing.
+_matches_test_path_pattern() {
+	local file="$1"
+	[[ -n "${TEST_PATH_PATTERNS:-}" ]] || return 1
+
+	local pattern rc=1
+	local IFS='|'
+	set -f
+	for pattern in $TEST_PATH_PATTERNS; do
+		# shellcheck disable=SC2254
+		case "$file" in
+			$pattern) rc=0; break ;;
+		esac
+	done
+	set +f
+	return "$rc"
+}
+
+# _undeclared_test_edits() — lists pre-existing test files modified on the
+# branch that task $2 never declared (issue #969). One path per line; empty
+# output means none (or no declared scope to compare against). Only
+# modified/deleted files count: a newly added test file is not an edit to an
+# existing assertion. A declared entry ending in "/" covers everything under it.
+# Arguments:
+#   $1 - base branch   $2 - task id
+_undeclared_test_edits() {
+	local base_branch="$1" task_id="$2"
+
+	[[ -n "${TEST_PATH_PATTERNS:-}" ]] || return 0
+
+	local declared
+	declared=$(_task_declared_files "$task_id")
+	[[ -n "$declared" ]] || return 0
+
+	local f d is_declared
+	while IFS= read -r -d '' f; do
+		_matches_test_path_pattern "$f" || continue
+		is_declared=1
+		while IFS= read -r d; do
+			[[ -n "$d" ]] || continue
+			if [[ "$d" == */ ]]; then
+				[[ "$f" == "$d"* ]] && { is_declared=0; break; }
+			elif [[ "$f" == "$d" ]]; then
+				is_declared=0
+				break
+			fi
+		done <<< "$declared"
+		(( is_declared == 0 )) || printf '%s\n' "$f"
+	done < <(git diff -z --no-renames --diff-filter=MD --name-only \
+		"${base_branch}...HEAD" 2>/dev/null)
+	return 0
+}
+
 # _file_set_contained() — true if every path in newline-separated set A also
 # appears in newline-separated set B (A == B counts as contained). Used by
 # the cross-task containment check below.

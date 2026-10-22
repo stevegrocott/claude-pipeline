@@ -114,6 +114,15 @@ FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 # e.g., "tests/e2e/*|e2e/*.spec.ts|cypress/e2e/*"
 TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
 
+# Test path patterns — pipe-separated globs used by _undeclared_test_edits()
+# to recognise test files.  An implement stage that modifies a PRE-EXISTING
+# file matching one of these, which the task never declared, is recorded in
+# DEGRADED_STAGES as implement:undeclared_test_edit:<path> (issue #969): the
+# commonest way to force a green test loop is rewriting the failing assertion.
+# Set to your repo's layout; empty disables the guard.
+# e.g., "tests/*|*/tests/*|*.test.ts|*.spec.ts|*_test.py"
+TEST_PATH_PATTERNS="${TEST_PATH_PATTERNS:-tests/*|test/*|*/tests/*|*/test/*|*/__tests__/*|*.test.*|*.spec.*|*_test.*|test_*|*.bats}"
+
 # E2E_VERIFY_BLOCKING — when 1 (default), a PR that changes a file matching
 # TEST_E2E_PATH_PATTERNS is not auto-merged while e2e_verify is degraded
 # (no run on the branch reported a single test executing).  Set to 0 for a
