@@ -5549,44 +5549,68 @@ _extract_tasks_section() {
 # Non-fatal by default so existing runs do not start breaking; set
 # FAIL_ON_STALE_ISSUE_BODY=1 to refuse the run instead.
 #
-# Both timestamps come from one tracker fetch and share one ISO-8601 UTC
-# format, so a lexicographic compare orders them correctly. Trackers that
-# cannot report them (Jira) and any pre-#846 payload leave the fields empty,
-# which is treated as "no evidence" rather than as staleness.
+# Timestamps share one ISO-8601 UTC format, so a lexicographic compare orders
+# them correctly. Trackers that report no comments (Jira) and any pre-#970
+# payload yield an empty set, which is treated as "no evidence".
 #
 # Globals:
 #   ISSUE_NUMBER, FAIL_ON_STALE_ISSUE_BODY
 # Arguments:
 #   $1 - the read-issue.sh JSON payload
 # Returns:
-#   0 when the body is current, the payload carries no timestamps, or the
-#   warning is advisory; 1 only when a stale body is detected AND
+#   0 when every discussion comment is acknowledged, the payload carries
+#   none, or the warning is advisory; 1 only when an unacknowledged comment
+#   is detected AND
 #   FAIL_ON_STALE_ISSUE_BODY=1
 #
 warn_if_issue_body_stale() {
 	local issue_json="${1:-}"
 
-	local body_at comment_at
-	body_at=$(printf '%s' "$issue_json" \
-		| jq -r '.bodyUpdatedAt // ""' 2>/dev/null) || body_at=""
-	comment_at=$(printf '%s' "$issue_json" \
-		| jq -r '.latestHumanCommentAt // ""' 2>/dev/null) || comment_at=""
+	# Acknowledgement test (issue #970), mechanical and model-free.  A
+	# discussion comment is acknowledged iff the body cites its URL or numeric
+	# comment id, OR its createdAt is at or before the timestamp in a
+	# "<!-- comments-acknowledged-through: <ISO8601> -->" body marker.  Recency
+	# against the body edit is deliberately NOT consulted: editing the body must
+	# not silence a comment that was never itself acknowledged.  Every comment in
+	# the payload is considered, not just the newest.
+	local unacked
+	unacked=$(printf '%s' "$issue_json" | jq -c '
+		(.body // "") as $body
+		| ($body | [scan("<!-- *comments-acknowledged-through: *([^ >]+) *-->")] | map(.[0]) | last // "") as $through
+		| (.comments // [] | if type == "array" then . else [] end)
+		| map(select(type == "object"))
+		| map(
+			(.url // "") as $url
+			| ($url | capture("issuecomment-(?<id>[0-9]+)")? // {id: ""}).id as $id
+			| select(
+				((($url != "") and ($body | contains($url))) | not)
+				and (($id == "") or (($body | test("(^|[^0-9])" + $id + "([^0-9]|$)")) | not))
+				and (($through == "") or ((.createdAt // "") > $through))
+			)
+		)
+		| sort_by(.createdAt)
+	' 2>/dev/null) || unacked="[]"
 
-	[[ -n "$body_at" && -n "$comment_at" ]] || return 0
-	[[ "$comment_at" > "$body_at" ]] || return 0
+	local count
+	count=$(printf '%s' "$unacked" | jq 'length' 2>/dev/null) || count=0
+	[[ "$count" =~ ^[0-9]+$ ]] || count=0
+	(( count > 0 )) || return 0
 
-	local comment_author comment_url
-	comment_author=$(printf '%s' "$issue_json" \
-		| jq -r '.latestHumanCommentAuthor // "unknown"' 2>/dev/null) \
-		|| comment_author="unknown"
-	comment_url=$(printf '%s' "$issue_json" \
-		| jq -r '.latestHumanCommentUrl // ""' 2>/dev/null) || comment_url=""
+	local oldest_at newest_at newest_author newest_url body_at
+	oldest_at=$(printf '%s' "$unacked" | jq -r '.[0].createdAt // ""')
+	newest_at=$(printf '%s' "$unacked" | jq -r '.[-1].createdAt // ""')
+	newest_author=$(printf '%s' "$unacked" | jq -r '.[-1].author // "unknown"')
+	newest_url=$(printf '%s' "$unacked" | jq -r '.[-1].url // ""')
+	body_at=$(printf '%s' "$issue_json" | jq -r '.bodyUpdatedAt // ""' 2>/dev/null) || body_at=""
 
 	log_warn "Issue #$ISSUE_NUMBER body may be STALE:" \
-		"a non-pipeline comment by @$comment_author at $comment_at postdates" \
-		"the last body edit ($body_at).${comment_url:+ See $comment_url.}" \
+		"$count discussion comment(s) not acknowledged in the body" \
+		"(oldest $oldest_at, newest by @$newest_author at $newest_at," \
+		"body last edited ${body_at:-unknown}).${newest_url:+ See $newest_url.}" \
+		"A comment counts as acknowledged only if the body cites its URL/id or" \
+		"carries <!-- comments-acknowledged-through: <ISO8601> --> at or after it." \
 		"The pipeline parses the issue BODY only — comments are never read" \
-		"as tasks or acceptance criteria. If that comment re-scoped the work," \
+		"as tasks or acceptance criteria. If a comment re-scoped the work," \
 		"apply it to the body and re-run."
 
 	if [[ "${FAIL_ON_STALE_ISSUE_BODY:-0}" == "1" ]]; then

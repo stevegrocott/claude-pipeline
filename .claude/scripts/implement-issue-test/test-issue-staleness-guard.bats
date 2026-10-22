@@ -155,10 +155,12 @@ source_stale_guard() {
 # The read-issue.sh payload shape the orchestrator consumes.
 _payload() {
 	jq -n --arg body_at "$1" --arg comment_at "${2:-}" \
-		--arg who "${3:-}" --arg url "${4:-}" \
+		--arg who "${3:-}" --arg url "${4:-}" --arg extra "${5:-}" \
 		'{
 			title: "Some issue",
-			body: "## Implementation Tasks\n- [ ] `[default]` do the thing",
+			body: ("## Implementation Tasks\n- [ ] `[default]` do the thing" + $extra),
+			comments: (if $comment_at == "" then [] else
+				[{author: $who, createdAt: $comment_at, url: $url, body: "x"}] end),
 			status: "OPEN",
 			bodyUpdatedAt: $body_at,
 			latestHumanCommentAt: (if $comment_at == "" then null
@@ -362,7 +364,7 @@ _payload() {
 		"the warning names the body edit it is being compared against"
 }
 
-@test "stale guard: silent when the body is newer than every comment (AC4)" {
+@test "stale guard: warns for a comment that PREDATES the body edit (#970 AC4/AC6)" {
 	source_stale_guard
 
 	run warn_if_issue_body_stale \
@@ -370,8 +372,59 @@ _payload() {
 			"stevegrocott" "https://example.invalid/c/1")"
 	[ "$status" -eq 0 ]
 
-	expect_glob "$(cat "$WARN_LOG")" '' \
-		"a body newer than every comment must produce no warning"
+	expect_glob "$(cat "$WARN_LOG")" '*2026-08-25T11:30:00Z*' \
+		"editing the body must not silence an unacknowledged comment"
+}
+
+@test "stale guard: silent when the body cites the comment URL (#970 AC5)" {
+	source_stale_guard
+
+	run warn_if_issue_body_stale \
+		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T11:30:00Z" \
+			"stevegrocott" "https://github.com/o/r/issues/1#issuecomment-77" \
+			" see https://github.com/o/r/issues/1#issuecomment-77")"
+	[ "$status" -eq 0 ]
+	expect_glob "$(cat "$WARN_LOG")" '' "a cited comment is acknowledged"
+}
+
+@test "stale guard: silent when the body cites the comment id (#970 AC5)" {
+	source_stale_guard
+
+	run warn_if_issue_body_stale \
+		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T11:30:00Z" \
+			"stevegrocott" "https://github.com/o/r/issues/1#issuecomment-77" \
+			" per comment 77")"
+	expect_glob "$(cat "$WARN_LOG")" '' "a comment id citation acknowledges"
+}
+
+@test "stale guard: acknowledged-through marker covers older comments only (#970 AC5)" {
+	source_stale_guard
+	local marker=$'\n<!-- comments-acknowledged-through: 2026-08-25T12:00:00Z -->'
+
+	run warn_if_issue_body_stale \
+		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T11:30:00Z" \
+			"a" "https://example.invalid/c/1" "$marker")"
+	expect_glob "$(cat "$WARN_LOG")" '' "comment before the marker is acknowledged"
+
+	run warn_if_issue_body_stale \
+		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T12:30:00Z" \
+			"a" "https://example.invalid/c/2" "$marker")"
+	expect_glob "$(cat "$WARN_LOG")" '*2026-08-25T12:30:00Z*' \
+		"comment after the marker is still reported"
+}
+
+@test "stale guard: considers every comment, not only the newest (#970 AC7)" {
+	source_stale_guard
+	local payload
+	payload=$(jq -n '{body: "b <!-- comments-acknowledged-through: 2026-08-02T00:00:00Z -->",
+		comments: [
+		{author:"a", createdAt:"2026-08-01T00:00:00Z", url:"u/1#issuecomment-1", body:"x"},
+		{author:"b", createdAt:"2026-08-03T00:00:00Z", url:"u/1#issuecomment-2", body:"y"},
+		{author:"c", createdAt:"2026-08-04T00:00:00Z", url:"u/1#issuecomment-3", body:"z"}]}')
+
+	run warn_if_issue_body_stale "$payload"
+	expect_glob "$(cat "$WARN_LOG")" '*2 discussion comment(s)*' \
+		"both unacknowledged comments are counted"
 }
 
 @test "stale guard: silent when every comment was pipeline-generated (AC2)" {
@@ -443,7 +496,8 @@ _payload() {
 
 	run warn_if_issue_body_stale \
 		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T11:30:00Z" \
-			"stevegrocott" "https://example.invalid/c/1")"
+			"stevegrocott" "https://example.invalid/c/1" \
+			" see https://example.invalid/c/1")"
 	expect_glob "$status" '0' \
 		"failing closed must only fire on an actually stale body"
 }
