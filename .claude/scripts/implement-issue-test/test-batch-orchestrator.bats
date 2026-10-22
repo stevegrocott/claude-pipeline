@@ -4440,9 +4440,13 @@ _stub_comment_issue() {
 	mkdir -p "$PLATFORM_DIR"
 	: > "$TEST_TMP/comments.log"
 
+	# Newlines in the body are folded to spaces so the log keeps exactly one
+	# line per invocation, whatever shape the body has.  Comment bodies became
+	# multi-line in #970 (the pipeline-chatter attribution stamp), which made a
+	# single comment look like three to any line-counting assertion below.
 	cat > "$PLATFORM_DIR/comment-issue.sh" <<STUB
 #!/usr/bin/env bash
-printf '%s|%s\n' "\$1" "\$2" >> "$TEST_TMP/comments.log"
+printf '%s|%s\n' "\$1" "\$(printf '%s' "\$2" | tr '\n' ' ')" >> "$TEST_TMP/comments.log"
 exit 0
 STUB
 	chmod +x "$PLATFORM_DIR/comment-issue.sh"
