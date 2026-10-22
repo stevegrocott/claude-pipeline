@@ -61,11 +61,14 @@ Refine the vague input into concrete requirements:
 
 **Existing-issue discussion (run only when exploring an existing issue number):**
 
-Read the issue's discussion comments, not just its body — decisions, corrections, and scope changes often live only in the thread:
+Read the issue's discussion comments, not just its body — decisions, corrections, and scope changes often live only in the thread.
+
+Read them through the platform wrapper, never with a raw `gh issue view --json comments`: the wrapper's `comments` array has already had pipeline status chatter (`## Task N Complete`, `## Test Loop: …`, `## Merge: …`, and anything carrying the `###### *Written by …*` attribution stamp) filtered out by the shared classifier. On a mature issue that is the difference between 1 substantive comment and 19 mostly-mechanical ones.
 
 ```bash
-gh issue view "$ISSUE_NUMBER" --json comments \
-  --jq '.comments[] | "--- \(.author.login) @ \(.createdAt)\n\(.body)\n"'
+PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
+"$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER" \
+  | jq -r '.comments[]? | "--- \(.author // "unknown") @ \(.createdAt)\n\(.body)\n"'
 ```
 
 - Treat later comments that contradict the body as superseding it; record the resolved requirement in the research findings.
