@@ -5657,6 +5657,20 @@ ${entries}"
 	printf '%s\n' "$out"
 }
 
+# Builds the background block appended to implement prompts (issue #970).
+# Reads the saved discussion comments and renders them via
+# format_background_comments.  Prints nothing when there are none, so callers
+# can interpolate it unconditionally.
+build_background_block() {
+	local cfile="${LOG_BASE:-}/context/discussion-comments.json"
+	[[ -f "$cfile" ]] || return 0
+	local comments block
+	comments=$(cat "$cfile" 2>/dev/null) || return 0
+	block=$(format_background_comments "$comments") || return 0
+	[[ -n "$block" ]] || return 0
+	printf '\n%s\n' "$block"
+}
+
 # Reads one backtick-delimited task annotation out of a task description
 # (issue #634).
 #
@@ -7528,6 +7542,8 @@ run_task_in_worktree() {
 		line_range_hint=$(build_line_range_hint "$task_desc")
 		local test_discovery_skill
 		test_discovery_skill=$(load_skill "test-discovery")
+		local background_block
+		background_block=$(build_background_block)
 		local impl_prompt
 		impl_prompt="${PLATFORM_PATTERNS_PREFIX}Implement task $task_id on branch $wt_branch in the current working directory:
 
@@ -7537,7 +7553,7 @@ $test_discovery_skill
 
 ## End Skill Instructions
 
-}$task_desc${line_range_hint}${files_block}
+}$task_desc${line_range_hint}${files_block}${background_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
@@ -8780,10 +8796,12 @@ execute_batch_serial() {
 					# Build prompt for the playwright task
 					local _pw_files_block
 					_pw_files_block=$(build_files_block)
+					local _pw_background_block
+					_pw_background_block=$(build_background_block)
 					local _pw_prompt
 					_pw_prompt="Implement task $_next_tid on branch $feature_branch in the current working directory:
 
-$_next_tdesc${_pw_files_block}
+$_next_tdesc${_pw_files_block}${_pw_background_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
@@ -8934,10 +8952,12 @@ Commit your changes with a descriptive message."
 
 			local line_range_hint
 			line_range_hint=$(build_line_range_hint "$tdesc")
+			local background_block
+			background_block=$(build_background_block)
 			local impl_prompt
 			impl_prompt="Implement task $tid on branch $feature_branch in the current working directory:
 
-$tdesc${line_range_hint}${files_block}
+$tdesc${line_range_hint}${files_block}${background_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
