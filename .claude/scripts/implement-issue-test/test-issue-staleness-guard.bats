@@ -548,3 +548,103 @@ _payload() {
 	(( read_issue_fields > 0 )) || fail "read-issue.sh no longer returns a body"
 
 }
+
+# =============================================================================
+# BATCH CHATTER + BACKGROUND BLOCK (#970)
+# =============================================================================
+
+@test "read-issue: the batch paused_on_pr comment is classified as pipeline chatter (#970)" {
+	local paused_body
+	paused_body=$(_extract_function_body comment_paused_on_pr \
+		"$BUNDLE_SCRIPTS/batch-orchestrator.sh")
+	[[ "$paused_body" == *'###### *Posted by `batch-orchestrator`*'* ]] || \
+		fail "comment_paused_on_pr no longer stamps the attribution line"
+
+	export MOCK_GRAPHQL_JSON
+	MOCK_GRAPHQL_JSON=$(_graphql_response '"2026-08-01T09:00:00Z"' \
+		"2026-08-01T09:00:00Z" \
+		"2026-08-05T10:00:00Z" "stevegrocott" \
+			$'## Batch Paused\n###### *Posted by `batch-orchestrator`*\n\nBatch paused: waiting for PR #9 to merge.')
+
+	_run_read_issue
+	[ "$status" -eq 0 ]
+	expect_glob "$(jq -r '.comments | length' <<< "$output")" '0' \
+		"the paused comment must not surface as discussion"
+}
+
+_source_background_helpers() {
+	local fn_file="$TEST_TMP/background.bash"
+	{
+		_extract_function_body format_background_comments "$BUNDLED_ORCHESTRATOR"
+		_extract_function_body build_background_block "$BUNDLED_ORCHESTRATOR"
+	} > "$fn_file"
+	# shellcheck disable=SC1090
+	source "$fn_file"
+}
+
+@test "background block: labelled NON-CONTRACT, dated and attributed (#970)" {
+	_source_background_helpers
+	local out
+	out=$(format_background_comments \
+		'[{"author":"alice","createdAt":"2026-08-05T10:00:00Z","body":"consider X"}]')
+
+	expect_glob "$out" '*NON-CONTRACT*' "the block is labelled non-contract"
+	expect_glob "$out" '*@alice, 2026-08-05T10:00:00Z*' "author and date shown"
+	expect_glob "$out" '*consider X*' "the body is included"
+}
+
+@test "background block: empty or blank input prints nothing (#970)" {
+	_source_background_helpers
+	[ -z "$(format_background_comments '[]')" ]
+	[ -z "$(format_background_comments '[{"author":"a","body":"   "}]')" ]
+	[ -z "$(format_background_comments 'not json')" ]
+}
+
+@test "background block: keeps only the newest N comments (#970)" {
+	_source_background_helpers
+	local out
+	out=$(BACKGROUND_COMMENTS_MAX=2 format_background_comments \
+		'[{"author":"a","createdAt":"1","body":"first"},{"author":"b","createdAt":"2","body":"second"},{"author":"c","createdAt":"3","body":"third"}]')
+
+	[[ "$out" != *first* ]] || fail "oldest comment should be dropped"
+	expect_glob "$out" '*second*third*' "newest two kept in order"
+}
+
+@test "background block: per-comment and total caps are enforced (#970)" {
+	_source_background_helpers
+	local long out
+	long=$(printf 'z%.0s' {1..300})
+
+	out=$(BACKGROUND_COMMENT_MAX_CHARS=50 format_background_comments \
+		"[{\"author\":\"a\",\"createdAt\":\"1\",\"body\":\"$long\"}]")
+	expect_glob "$out" '*…\[truncated\]*' "long comment is truncated"
+	[[ "$out" != *"$long"* ]] || fail "full long body leaked through"
+
+	out=$(BACKGROUND_COMMENTS_MAX_TOTAL=400 format_background_comments \
+		"[{\"author\":\"a\",\"createdAt\":\"1\",\"body\":\"$long\"}]")
+	expect_glob "$out" '*…\[background truncated\]*' "total cap applied"
+}
+
+@test "background block: build_background_block reads the saved context file (#970)" {
+	_source_background_helpers
+	LOG_BASE="$TEST_TMP/logbase"
+	mkdir -p "$LOG_BASE/context"
+
+	[ -z "$(build_background_block)" ] # no file -> nothing
+
+	printf '[]\n' > "$LOG_BASE/context/discussion-comments.json"
+	[ -z "$(build_background_block)" ] # empty array -> nothing
+
+	printf '[{"author":"bob","createdAt":"2026-08-06","body":"hello"}]' \
+		> "$LOG_BASE/context/discussion-comments.json"
+	expect_glob "$(build_background_block)" '*@bob*hello*' \
+		"saved comments are rendered"
+}
+
+@test "background block: interpolated into all three implement prompts (#970)" {
+	local n
+	n=$(grep -c 'background_block}' "$BUNDLED_ORCHESTRATOR")
+	(( n >= 3 )) || fail "expected >=3 prompt interpolations, found $n"
+	grep -q 'discussion-comments.json' "$BUNDLED_ORCHESTRATOR" || \
+		fail "parse step no longer writes discussion-comments.json"
+}
