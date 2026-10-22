@@ -14087,11 +14087,20 @@ $complete_summary
             else
                 local _ds
                 for _ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
-                    if [[ "$_ds" == quality:convergence_failure:* ]]; then
-                        merge_blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
-                        merge_block_kind="convergence"
-                        break
-                    fi
+                    case "$_ds" in
+                        quality:convergence_failure:*)
+                            merge_blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
+                            merge_block_kind="convergence"
+                            break
+                            ;;
+                        # Test-loop degradation: the test loop gave up without
+                        # converging, so the tests never validated this PR.
+                        test:wall_timeout:*|test:wall_timeout_budget:*|test:max_iterations:*|test:bats_incomplete:*|test:oscillation:*)
+                            merge_blocked_reason="Test loop convergence failure recorded in degraded_stages: $_ds"
+                            merge_block_kind="convergence"
+                            break
+                            ;;
+                    esac
                 done
             fi
         fi
