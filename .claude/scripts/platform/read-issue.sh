@@ -126,7 +126,18 @@ def is_pipeline_comment:
 	bodyUpdatedAt: ($issue.lastEditedAt // $issue.createdAt),
 	latestHumanCommentAt: ($human.createdAt // null),
 	latestHumanCommentAuthor: ($human.author.login // null),
-	latestHumanCommentUrl: ($human.url // null)
+	latestHumanCommentUrl: ($human.url // null),
+	comments: (
+		$issue.comments.nodes // []
+		| map(select(is_pipeline_comment | not))
+		| sort_by(.createdAt)
+		| map({
+			author: (.author.login // null),
+			createdAt,
+			url,
+			body: (.body // "")
+		})
+	)
 }
 JQ
 

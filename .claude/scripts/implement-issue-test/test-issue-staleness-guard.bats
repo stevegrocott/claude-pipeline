@@ -291,24 +291,35 @@ _payload() {
 		"body and comment timestamps must come from a single fetch"
 }
 
-@test "read-issue: the payload carries no comment body text (AC5)" {
+@test "read-issue: discussion comment bodies ride in comments[] without touching body" {
 	export MOCK_GRAPHQL_JSON
 	MOCK_GRAPHQL_JSON=$(_graphql_response '"2026-08-01T09:00:00Z"' \
 		"2026-08-01T09:00:00Z" \
 		"2026-08-05T10:00:00Z" "stevegrocott" \
-			'DROP TASK 3 and add a new acceptance criterion AC9.')
+			'DROP TASK 3 and add a new acceptance criterion AC9.' \
+		"2026-08-06T10:00:00Z" "bot" \
+			$'automated note\n\n###### *Written by the pipeline*')
 
 	_run_read_issue
 	[ "$status" -eq 0 ]
 
-	[[ "$output" != *"DROP TASK 3"* ]] || \
-		fail "comment prose leaked into the parsed payload — comments must stay non-authoritative"
-	[[ "$output" != *"AC9"* ]] || \
-		fail "comment prose leaked into the parsed payload — comments must stay non-authoritative"
+	# Only the human comment is emitted, with its body, newest data intact.
+	expect_glob "$(jq -r '.comments | length' <<< "$output")" '1' \
+		"pipeline-generated comments must not appear in comments[]"
+	expect_glob "$(jq -r '.comments[0].body' <<< "$output")" \
+		'DROP TASK 3*' "the human comment body is emitted"
+	expect_glob "$(jq -r '.comments[0].author' <<< "$output")" \
+		'stevegrocott' "the comment author is emitted"
+	expect_glob "$(jq -r '.comments[0].url' <<< "$output")" \
+		'https://github.com/*' "the comment url is emitted"
 
-	# The body the pipeline parses must be exactly what the tracker returned.
+	# Existing fields are kept, and the parsed body is untouched.
+	expect_glob "$(jq -r '.latestHumanCommentAuthor' <<< "$output")" \
+		'stevegrocott' "existing latestHumanComment* fields are kept"
 	expect_glob "$(jq -r '.body' <<< "$output")" '## Implementation Tasks*' \
 		"the parsed body is the issue body, untouched by comment content"
+	[[ "$(jq -r '.body' <<< "$output")" != *"AC9"* ]] || \
+		fail "comment prose leaked into the issue body"
 }
 
 @test "read-issue: still returns title/body/status when the staleness fetch fails" {
@@ -482,7 +493,4 @@ _payload() {
 	read_issue_fields=$(grep -c 'body' "$BUNDLED_READ_ISSUE")
 	(( read_issue_fields > 0 )) || fail "read-issue.sh no longer returns a body"
 
-	# The emitted payload must not expose comment prose to any caller.
-	! grep -qE 'latestHumanCommentBody' "$BUNDLED_READ_ISSUE" || \
-		fail "read-issue.sh exposes comment prose — comments must stay non-authoritative"
 }
