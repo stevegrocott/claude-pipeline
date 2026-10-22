@@ -317,10 +317,18 @@ _valid_stage_end() {
 		'{"ts":"2020-01-01T00:00:00Z","run_id":"old","stage":"s","event":"stage_end","status":"success"}' \
 		> "$old_dir/events.jsonl"
 
-	# Back-date the file to 31 days ago (portable: use touch -t)
+	# Back-date the file well past the 30-day threshold (portable: touch -t).
+	#
+	# 40 days, not 31: `date -v-31d` returns the same WALL-CLOCK time 31
+	# calendar days earlier, which across a daylight-saving transition is only
+	# 30d23h of real elapsed time.  `find -mtime` truncates the age to whole
+	# 24-hour periods, so that fixture scores 30 and `-mtime +30` (strictly
+	# more than 30) does not match — the test then failed for about a month
+	# after each DST change while passing in UTC CI (issue #973).  40 days
+	# leaves ~24h of margin and matches the --dry-run test below.
 	local old_date
-	old_date=$(date -d "31 days ago" +"%Y%m%d%H%M" 2>/dev/null \
-		|| date -v-31d +"%Y%m%d%H%M" 2>/dev/null) \
+	old_date=$(date -d "40 days ago" +"%Y%m%d%H%M" 2>/dev/null \
+		|| date -v-40d +"%Y%m%d%H%M" 2>/dev/null) \
 		|| { skip "cannot back-date file on this platform"; return; }
 
 	touch -t "${old_date}" "$old_dir/events.jsonl"
