@@ -788,3 +788,81 @@ teardown() {
 
 	(( actual_delta > review_only_delta ))
 }
+
+# =============================================================================
+# FUNCTIONAL: test-loop degradation markers block merge (issue #969)
+# =============================================================================
+# These run the REAL Gate A block extracted from the orchestrator, not a
+# hand-copied mirror, so a drift in the case patterns turns them red.
+
+# Evaluate the orchestrator's Gate A against the current DEGRADED_STAGES and
+# status.json; prints "<kind>|<reason>" (both empty when merge is allowed).
+run_gate_a() {
+	local block
+	block=$(awk '
+		/if \[\[ "\$\{BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1\}" == "0" \]\]; then/ { grab=1 }
+		grab { print }
+		grab && /^        fi$/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$block" && "$block" == *'test:oscillation:*'* ]] || return 99
+
+	eval "_gate_a() {
+		local merge_blocked_reason='' merge_block_kind=''
+		local _persisted
+		_persisted=\$(jq -r '.merge_blocked_reason // empty' \"\$STATUS_FILE\")
+		log() { :; }
+		$block
+		printf '%s|%s' \"\$merge_block_kind\" \"\$merge_blocked_reason\"
+	}"
+	_gate_a
+}
+
+@test "Gate A blocks merge for every test-loop degradation marker" {
+	local marker
+	for marker in \
+		"test:wall_timeout:iter=2" \
+		"test:wall_timeout_budget:iter=2" \
+		"test:max_iterations:iter=5" \
+		"test:bats_incomplete:iter=1" \
+		"test:oscillation:iter=3"; do
+		DEGRADED_STAGES=("$marker")
+		run run_gate_a
+		[ "$status" -eq 0 ]
+		[[ "$output" == "convergence|Test loop convergence failure recorded in degraded_stages: $marker" ]]
+	done
+}
+
+@test "Gate A does not block on non-loop test markers or an empty DEGRADED_STAGES" {
+	DEGRADED_STAGES=()
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+
+	DEGRADED_STAGES=("test:e2e_unvalidated" "test:full_suite_red")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "Gate A: BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 overrides a test-loop block" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	DEGRADED_STAGES=("test:max_iterations:iter=5")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "Gate A: BLOCK_MERGE_ON_CONVERGENCE_FAILURE=1 still blocks a test-loop marker" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=1
+	DEGRADED_STAGES=("test:oscillation:iter=3")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == convergence\|* ]]
+}
+
+@test "Gate A: quality:convergence_failure still blocks alongside test markers (regression)" {
+	DEGRADED_STAGES=("quality:convergence_failure:main:iter=3")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|Quality loop convergence failure"* ]]
+}
