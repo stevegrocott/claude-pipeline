@@ -905,3 +905,72 @@ _undeclared_repo() {
 	_record_undeclared_test_edits test
 	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
 }
+
+_set_tasks() {
+	jq --argjson t "$1" '.tasks = $t' "$STATUS_FILE" > "$STATUS_FILE.tmp" \
+		&& mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+@test "scope guard: empty TEST_PATH_PATTERNS records nothing" {
+	_undeclared_repo
+	export TEST_PATH_PATTERNS=''
+	_set_tasks '[{"id":1,"description":"Edit","affected_files":["src/x.sh"]}]'
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "scope guard: a task with no declared scope skips the guard" {
+	_undeclared_repo
+	_set_tasks '[{"id":1,"description":"no files mentioned here"}]'
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "scope guard: newly added test files are not flagged" {
+	_undeclared_repo
+	_set_tasks '[{"id":1,"description":"Edit","affected_files":["src/x.sh"]}]'
+	run _undeclared_test_edits test 1
+	[ "$status" -eq 0 ]
+	[[ "$output" == "tests/old.bats" ]]
+}
+
+@test "scope guard: a declared directory covers files under it" {
+	_undeclared_repo
+	_set_tasks '[{"id":1,"description":"Edit","affected_files":["src/x.sh","tests/"]}]'
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "scope guard: a file declared by any one task is not recorded" {
+	_undeclared_repo
+	_set_tasks '[{"id":1,"description":"A","affected_files":["src/x.sh"]},{"id":2,"description":"B","affected_files":["./tests/old.bats"]}]'
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "_task_declared_files prefers affected_files and normalises paths" {
+	_set_tasks '[{"id":1,"description":"Touch `other/ignored.sh`","affected_files":["./src/a.sh","/lib/b.sh"]}]'
+	run _task_declared_files 1
+	[ "$status" -eq 0 ]
+	[[ "$output" == $'src/a.sh\nlib/b.sh' ]]
+}
+
+@test "_task_declared_files falls back to the description when affected_files is empty" {
+	_set_tasks '[{"id":1,"description":"Edit `src/foo.sh` please","affected_files":[]},{"id":2,"description":"Edit `src/bar.sh`"}]'
+	run _task_declared_files 1
+	[[ "$output" == "src/foo.sh" ]]
+	run _task_declared_files 2
+	[[ "$output" == "src/bar.sh" ]]
+}
+
+@test "_task_declared_files is empty for an unknown task or file-less description" {
+	_set_tasks '[{"id":1,"description":"nothing"}]'
+	run _task_declared_files 1
+	[ -z "$output" ]
+	run _task_declared_files 99
+	[ -z "$output" ]
+}
