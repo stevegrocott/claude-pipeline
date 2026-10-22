@@ -155,10 +155,12 @@ source_stale_guard() {
 # The read-issue.sh payload shape the orchestrator consumes.
 _payload() {
 	jq -n --arg body_at "$1" --arg comment_at "${2:-}" \
-		--arg who "${3:-}" --arg url "${4:-}" \
+		--arg who "${3:-}" --arg url "${4:-}" --arg extra "${5:-}" \
 		'{
 			title: "Some issue",
-			body: "## Implementation Tasks\n- [ ] `[default]` do the thing",
+			body: ("## Implementation Tasks\n- [ ] `[default]` do the thing" + $extra),
+			comments: (if $comment_at == "" then [] else
+				[{author: $who, createdAt: $comment_at, url: $url, body: "x"}] end),
 			status: "OPEN",
 			bodyUpdatedAt: $body_at,
 			latestHumanCommentAt: (if $comment_at == "" then null
@@ -291,24 +293,35 @@ _payload() {
 		"body and comment timestamps must come from a single fetch"
 }
 
-@test "read-issue: the payload carries no comment body text (AC5)" {
+@test "read-issue: discussion comment bodies ride in comments[] without touching body" {
 	export MOCK_GRAPHQL_JSON
 	MOCK_GRAPHQL_JSON=$(_graphql_response '"2026-08-01T09:00:00Z"' \
 		"2026-08-01T09:00:00Z" \
 		"2026-08-05T10:00:00Z" "stevegrocott" \
-			'DROP TASK 3 and add a new acceptance criterion AC9.')
+			'DROP TASK 3 and add a new acceptance criterion AC9.' \
+		"2026-08-06T10:00:00Z" "bot" \
+			$'automated note\n\n###### *Written by the pipeline*')
 
 	_run_read_issue
 	[ "$status" -eq 0 ]
 
-	[[ "$output" != *"DROP TASK 3"* ]] || \
-		fail "comment prose leaked into the parsed payload — comments must stay non-authoritative"
-	[[ "$output" != *"AC9"* ]] || \
-		fail "comment prose leaked into the parsed payload — comments must stay non-authoritative"
+	# Only the human comment is emitted, with its body, newest data intact.
+	expect_glob "$(jq -r '.comments | length' <<< "$output")" '1' \
+		"pipeline-generated comments must not appear in comments[]"
+	expect_glob "$(jq -r '.comments[0].body' <<< "$output")" \
+		'DROP TASK 3*' "the human comment body is emitted"
+	expect_glob "$(jq -r '.comments[0].author' <<< "$output")" \
+		'stevegrocott' "the comment author is emitted"
+	expect_glob "$(jq -r '.comments[0].url' <<< "$output")" \
+		'https://github.com/*' "the comment url is emitted"
 
-	# The body the pipeline parses must be exactly what the tracker returned.
+	# Existing fields are kept, and the parsed body is untouched.
+	expect_glob "$(jq -r '.latestHumanCommentAuthor' <<< "$output")" \
+		'stevegrocott' "existing latestHumanComment* fields are kept"
 	expect_glob "$(jq -r '.body' <<< "$output")" '## Implementation Tasks*' \
 		"the parsed body is the issue body, untouched by comment content"
+	[[ "$(jq -r '.body' <<< "$output")" != *"AC9"* ]] || \
+		fail "comment prose leaked into the issue body"
 }
 
 @test "read-issue: still returns title/body/status when the staleness fetch fails" {
@@ -351,7 +364,7 @@ _payload() {
 		"the warning names the body edit it is being compared against"
 }
 
-@test "stale guard: silent when the body is newer than every comment (AC4)" {
+@test "stale guard: warns for a comment that PREDATES the body edit (#970 AC4/AC6)" {
 	source_stale_guard
 
 	run warn_if_issue_body_stale \
@@ -359,8 +372,59 @@ _payload() {
 			"stevegrocott" "https://example.invalid/c/1")"
 	[ "$status" -eq 0 ]
 
-	expect_glob "$(cat "$WARN_LOG")" '' \
-		"a body newer than every comment must produce no warning"
+	expect_glob "$(cat "$WARN_LOG")" '*2026-08-25T11:30:00Z*' \
+		"editing the body must not silence an unacknowledged comment"
+}
+
+@test "stale guard: silent when the body cites the comment URL (#970 AC5)" {
+	source_stale_guard
+
+	run warn_if_issue_body_stale \
+		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T11:30:00Z" \
+			"stevegrocott" "https://github.com/o/r/issues/1#issuecomment-77" \
+			" see https://github.com/o/r/issues/1#issuecomment-77")"
+	[ "$status" -eq 0 ]
+	expect_glob "$(cat "$WARN_LOG")" '' "a cited comment is acknowledged"
+}
+
+@test "stale guard: silent when the body cites the comment id (#970 AC5)" {
+	source_stale_guard
+
+	run warn_if_issue_body_stale \
+		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T11:30:00Z" \
+			"stevegrocott" "https://github.com/o/r/issues/1#issuecomment-77" \
+			" per comment 77")"
+	expect_glob "$(cat "$WARN_LOG")" '' "a comment id citation acknowledges"
+}
+
+@test "stale guard: acknowledged-through marker covers older comments only (#970 AC5)" {
+	source_stale_guard
+	local marker=$'\n<!-- comments-acknowledged-through: 2026-08-25T12:00:00Z -->'
+
+	run warn_if_issue_body_stale \
+		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T11:30:00Z" \
+			"a" "https://example.invalid/c/1" "$marker")"
+	expect_glob "$(cat "$WARN_LOG")" '' "comment before the marker is acknowledged"
+
+	run warn_if_issue_body_stale \
+		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T12:30:00Z" \
+			"a" "https://example.invalid/c/2" "$marker")"
+	expect_glob "$(cat "$WARN_LOG")" '*2026-08-25T12:30:00Z*' \
+		"comment after the marker is still reported"
+}
+
+@test "stale guard: considers every comment, not only the newest (#970 AC7)" {
+	source_stale_guard
+	local payload
+	payload=$(jq -n '{body: "b <!-- comments-acknowledged-through: 2026-08-02T00:00:00Z -->",
+		comments: [
+		{author:"a", createdAt:"2026-08-01T00:00:00Z", url:"u/1#issuecomment-1", body:"x"},
+		{author:"b", createdAt:"2026-08-03T00:00:00Z", url:"u/1#issuecomment-2", body:"y"},
+		{author:"c", createdAt:"2026-08-04T00:00:00Z", url:"u/1#issuecomment-3", body:"z"}]}')
+
+	run warn_if_issue_body_stale "$payload"
+	expect_glob "$(cat "$WARN_LOG")" '*2 discussion comment(s)*' \
+		"both unacknowledged comments are counted"
 }
 
 @test "stale guard: silent when every comment was pipeline-generated (AC2)" {
@@ -432,7 +496,8 @@ _payload() {
 
 	run warn_if_issue_body_stale \
 		"$(_payload "2026-08-26T09:00:00Z" "2026-08-25T11:30:00Z" \
-			"stevegrocott" "https://example.invalid/c/1")"
+			"stevegrocott" "https://example.invalid/c/1" \
+			" see https://example.invalid/c/1")"
 	expect_glob "$status" '0' \
 		"failing closed must only fire on an actually stale body"
 }
@@ -482,7 +547,104 @@ _payload() {
 	read_issue_fields=$(grep -c 'body' "$BUNDLED_READ_ISSUE")
 	(( read_issue_fields > 0 )) || fail "read-issue.sh no longer returns a body"
 
-	# The emitted payload must not expose comment prose to any caller.
-	! grep -qE 'latestHumanCommentBody' "$BUNDLED_READ_ISSUE" || \
-		fail "read-issue.sh exposes comment prose — comments must stay non-authoritative"
+}
+
+# =============================================================================
+# BATCH CHATTER + BACKGROUND BLOCK (#970)
+# =============================================================================
+
+@test "read-issue: the batch paused_on_pr comment is classified as pipeline chatter (#970)" {
+	local paused_body
+	paused_body=$(_extract_function_body comment_paused_on_pr \
+		"$BUNDLE_SCRIPTS/batch-orchestrator.sh")
+	[[ "$paused_body" == *'###### *Posted by `batch-orchestrator`*'* ]] || \
+		fail "comment_paused_on_pr no longer stamps the attribution line"
+
+	export MOCK_GRAPHQL_JSON
+	MOCK_GRAPHQL_JSON=$(_graphql_response '"2026-08-01T09:00:00Z"' \
+		"2026-08-01T09:00:00Z" \
+		"2026-08-05T10:00:00Z" "stevegrocott" \
+			$'## Batch Paused\n###### *Posted by `batch-orchestrator`*\n\nBatch paused: waiting for PR #9 to merge.')
+
+	_run_read_issue
+	[ "$status" -eq 0 ]
+	expect_glob "$(jq -r '.comments | length' <<< "$output")" '0' \
+		"the paused comment must not surface as discussion"
+}
+
+_source_background_helpers() {
+	local fn_file="$TEST_TMP/background.bash"
+	{
+		_extract_function_body format_background_comments "$BUNDLED_ORCHESTRATOR"
+		_extract_function_body build_background_block "$BUNDLED_ORCHESTRATOR"
+	} > "$fn_file"
+	# shellcheck disable=SC1090
+	source "$fn_file"
+}
+
+@test "background block: labelled NON-CONTRACT, dated and attributed (#970)" {
+	_source_background_helpers
+	local out
+	out=$(format_background_comments \
+		'[{"author":"alice","createdAt":"2026-08-05T10:00:00Z","body":"consider X"}]')
+
+	expect_glob "$out" '*NON-CONTRACT*' "the block is labelled non-contract"
+	expect_glob "$out" '*@alice, 2026-08-05T10:00:00Z*' "author and date shown"
+	expect_glob "$out" '*consider X*' "the body is included"
+}
+
+@test "background block: empty or blank input prints nothing (#970)" {
+	_source_background_helpers
+	[ -z "$(format_background_comments '[]')" ]
+	[ -z "$(format_background_comments '[{"author":"a","body":"   "}]')" ]
+	[ -z "$(format_background_comments 'not json')" ]
+}
+
+@test "background block: keeps only the newest N comments (#970)" {
+	_source_background_helpers
+	local out
+	out=$(BACKGROUND_COMMENTS_MAX=2 format_background_comments \
+		'[{"author":"a","createdAt":"1","body":"first"},{"author":"b","createdAt":"2","body":"second"},{"author":"c","createdAt":"3","body":"third"}]')
+
+	[[ "$out" != *first* ]] || fail "oldest comment should be dropped"
+	expect_glob "$out" '*second*third*' "newest two kept in order"
+}
+
+@test "background block: per-comment and total caps are enforced (#970)" {
+	_source_background_helpers
+	local long out
+	long=$(printf 'z%.0s' {1..300})
+
+	out=$(BACKGROUND_COMMENT_MAX_CHARS=50 format_background_comments \
+		"[{\"author\":\"a\",\"createdAt\":\"1\",\"body\":\"$long\"}]")
+	expect_glob "$out" '*…\[truncated\]*' "long comment is truncated"
+	[[ "$out" != *"$long"* ]] || fail "full long body leaked through"
+
+	out=$(BACKGROUND_COMMENTS_MAX_TOTAL=400 format_background_comments \
+		"[{\"author\":\"a\",\"createdAt\":\"1\",\"body\":\"$long\"}]")
+	expect_glob "$out" '*…\[background truncated\]*' "total cap applied"
+}
+
+@test "background block: build_background_block reads the saved context file (#970)" {
+	_source_background_helpers
+	LOG_BASE="$TEST_TMP/logbase"
+	mkdir -p "$LOG_BASE/context"
+
+	[ -z "$(build_background_block)" ] # no file -> nothing
+
+	printf '[]\n' > "$LOG_BASE/context/discussion-comments.json"
+	[ -z "$(build_background_block)" ] # empty array -> nothing
+
+	printf '[{"author":"bob","createdAt":"2026-08-06","body":"hello"}]' \
+		> "$LOG_BASE/context/discussion-comments.json"
+	expect_glob "$(build_background_block)" '*@bob*hello*' \
+		"saved comments are rendered"
+}
+
+@test "background block: interpolated into all three implement prompts (#970)" {
+	local n
+	n=$(grep -c 'background_block}' "$BUNDLED_ORCHESTRATOR")
+	(( n >= 3 )) || fail "expected >=3 prompt interpolations, found $n"
+	grep -q 'discussion-comments.json' "$BUNDLED_ORCHESTRATOR" || \
+		fail "parse step no longer writes discussion-comments.json"
 }
