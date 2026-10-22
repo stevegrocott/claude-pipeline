@@ -2584,12 +2584,15 @@ comment_paused_on_pr() {
 		return 0
 	fi
 
+	# Stamp with the attribution line comment_issue() uses so read-issue.sh's
+	# chatter filter classifies this as pipeline status, not discussion.
 	local body
-	body="Batch paused: waiting for PR #$pr to merge before the next issue"
-	body="$body in this batch forks its branch. The batch waits up to"
-	body="$body ${max}s, then stops with the remaining issues left pending."
-	body="$body Set BATCH_WAIT_FOR_MERGE_MAX=0 to continue immediately"
-	body="$body instead of waiting."
+	body=$'## Batch Paused\n###### *Posted by `batch-orchestrator`*\n\n'
+	body+="Batch paused: waiting for PR #$pr to merge before the next issue"
+	body+=" in this batch forks its branch. The batch waits up to"
+	body+=" ${max}s, then stops with the remaining issues left pending."
+	body+=" Set BATCH_WAIT_FOR_MERGE_MAX=0 to continue immediately"
+	body+=" instead of waiting."
 
 	"$commenter" "$issue_num" "$body" >/dev/null 2>&1 \
 		|| log_warn "Issue #$issue_num: failed to post the" \
