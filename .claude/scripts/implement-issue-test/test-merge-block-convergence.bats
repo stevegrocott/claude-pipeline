@@ -866,3 +866,42 @@ run_gate_a() {
 	[ "$status" -eq 0 ]
 	[[ "$output" == "convergence|Quality loop convergence failure"* ]]
 }
+
+# =============================================================================
+# FUNCTIONAL: undeclared pre-existing test edits are recorded (issue #969)
+# =============================================================================
+
+_undeclared_repo() {
+	export TEST_PATH_PATTERNS='tests/*|*.bats'
+	cd "$TEST_TMP" || return 1
+	rm -rf repo && mkdir repo && cd repo || return 1
+	git init -q -b test . && git config user.email t@t && git config user.name t
+	mkdir tests src
+	echo a > tests/old.bats; echo a > tests/other.bats; echo a > src/x.sh
+	git add -A && git commit -qm base
+	git checkout -qb feat
+	echo b >> tests/old.bats; echo b >> src/x.sh; echo n > tests/new.bats
+	git add -A && git commit -qm change
+}
+
+@test "undeclared edit to a pre-existing test file is recorded in DEGRADED_STAGES" {
+	_undeclared_repo
+	jq '.tasks = [{id:1,status:"completed",description:"Edit x",affected_files:["src/x.sh"]}]' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 1 ]
+	[ "${DEGRADED_STAGES[0]}" = "implement:undeclared_test_edit:tests/old.bats" ]
+	# idempotent
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 1 ]
+}
+
+@test "declared test edit is not recorded" {
+	_undeclared_repo
+	jq '.tasks = [{id:1,status:"completed",description:"Edit",affected_files:["src/x.sh","tests/old.bats"]}]' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}

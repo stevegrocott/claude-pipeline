@@ -6114,6 +6114,50 @@ _undeclared_test_edits() {
 	return 0
 }
 
+# _record_undeclared_test_edits() — appends implement:undeclared_test_edit:<path>
+# to DEGRADED_STAGES for each pre-existing test file the branch modified that
+# NO task declared (issue #969). The branch diff is whole-branch, so a file is
+# only flagged when every task flags it; if any task has no declared scope the
+# guard is skipped (that task may legitimately touch anything). Idempotent.
+# Arguments: $1 - base branch
+_record_undeclared_test_edits() {
+	local base_branch="$1"
+	[[ -n "${TEST_PATH_PATTERNS:-}" ]] || return 0
+
+	local ids tid ntasks=0 declared out
+	ids=$(jq -r '.tasks[]?.id' "$STATUS_FILE" 2>/dev/null)
+	[[ -n "$ids" ]] || return 0
+
+	local all=""
+	while IFS= read -r tid; do
+		[[ -n "$tid" ]] || continue
+		declared=$(_task_declared_files "$tid")
+		[[ -n "$declared" ]] || return 0
+		out=$(_undeclared_test_edits "$base_branch" "$tid")
+		all+="${out:+$out$'\n'}"
+		ntasks=$((ntasks + 1))
+	done <<< "$ids"
+	(( ntasks > 0 )) || return 0
+	[[ -n "$all" ]] || return 0
+
+	local f cnt marker e dup
+	while IFS= read -r f; do
+		[[ -n "$f" ]] || continue
+		cnt=$(printf '%s' "$all" | grep -cxF -- "$f")
+		(( cnt == ntasks )) || continue
+		marker="implement:undeclared_test_edit:$f"
+		dup=0
+		for e in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+			[[ "$e" == "$marker" ]] && { dup=1; break; }
+		done
+		if (( dup == 0 )); then
+			DEGRADED_STAGES+=("$marker")
+			log_warn "Undeclared edit to pre-existing test file: $f"
+		fi
+	done < <(printf '%s' "$all" | sort -u)
+	return 0
+}
+
 # _file_set_contained() — true if every path in newline-separated set A also
 # appears in newline-separated set B (A == B counts as contained). Used by
 # the cross-task containment check below.
@@ -12822,6 +12866,7 @@ $impl_summary" "$tagent"
 
         set_stage_completed "implement"
         set_stage_completed "quality_loop"
+        _record_undeclared_test_edits "$BASE_BRANCH"
         log "Implementation complete." \
             "$completed_tasks/$task_count tasks" \
             "completed (with per-task quality loops)."
