@@ -12239,6 +12239,16 @@ Log directory: \`$LOG_BASE\`"
         # Save issue body for reference
         printf '%s\n' "$issue_body" > "$LOG_BASE/context/issue-body.md"
 
+        # Save discussion comments (non-pipeline, issue #970) as a JSON array
+        # for later background-context injection.  Always written — "[]" when
+        # the payload carries none — so consumers can read it unconditionally.
+        # Reference material only: never parsed for tasks (the task parse below
+        # reads issue-body.md content alone).
+        printf '%s' "$issue_json" \
+            | jq -c '(.discussionComments // []) | if type == "array" then . else [] end' \
+                > "$LOG_BASE/context/discussion-comments.json" 2>/dev/null \
+            || printf '[]\n' > "$LOG_BASE/context/discussion-comments.json"
+
         # Extract tasks from ## Implementation Tasks section
         # Format: - [ ] `[agent-name]` Task description
         log "Parsing implementation tasks from issue body..."
