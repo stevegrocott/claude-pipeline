@@ -6059,6 +6059,105 @@ _task_declared_files() {
 	_normalize_declared_paths "${raw[@]+"${raw[@]}"}"
 }
 
+# _matches_test_path_pattern() — true if $1 matches a TEST_PATH_PATTERNS glob
+# (pipe-separated, same contract and `set -f` guard as
+# _matches_e2e_spec_pattern()). Empty TEST_PATH_PATTERNS matches nothing.
+_matches_test_path_pattern() {
+	local file="$1"
+	[[ -n "${TEST_PATH_PATTERNS:-}" ]] || return 1
+
+	local pattern rc=1
+	local IFS='|'
+	set -f
+	for pattern in $TEST_PATH_PATTERNS; do
+		# shellcheck disable=SC2254
+		case "$file" in
+			$pattern) rc=0; break ;;
+		esac
+	done
+	set +f
+	return "$rc"
+}
+
+# _undeclared_test_edits() — lists pre-existing test files modified on the
+# branch that task $2 never declared (issue #969). One path per line; empty
+# output means none (or no declared scope to compare against). Only
+# modified/deleted files count: a newly added test file is not an edit to an
+# existing assertion. A declared entry ending in "/" covers everything under it.
+# Arguments:
+#   $1 - base branch   $2 - task id
+_undeclared_test_edits() {
+	local base_branch="$1" task_id="$2"
+
+	[[ -n "${TEST_PATH_PATTERNS:-}" ]] || return 0
+
+	local declared
+	declared=$(_task_declared_files "$task_id")
+	[[ -n "$declared" ]] || return 0
+
+	local f d is_declared
+	while IFS= read -r -d '' f; do
+		_matches_test_path_pattern "$f" || continue
+		is_declared=1
+		while IFS= read -r d; do
+			[[ -n "$d" ]] || continue
+			if [[ "$d" == */ ]]; then
+				[[ "$f" == "$d"* ]] && { is_declared=0; break; }
+			elif [[ "$f" == "$d" ]]; then
+				is_declared=0
+				break
+			fi
+		done <<< "$declared"
+		(( is_declared == 0 )) || printf '%s\n' "$f"
+	done < <(git diff -z --no-renames --diff-filter=MD --name-only \
+		"${base_branch}...HEAD" 2>/dev/null)
+	return 0
+}
+
+# _record_undeclared_test_edits() — appends implement:undeclared_test_edit:<path>
+# to DEGRADED_STAGES for each pre-existing test file the branch modified that
+# NO task declared (issue #969). The branch diff is whole-branch, so a file is
+# only flagged when every task flags it; if any task has no declared scope the
+# guard is skipped (that task may legitimately touch anything). Idempotent.
+# Arguments: $1 - base branch
+_record_undeclared_test_edits() {
+	local base_branch="$1"
+	[[ -n "${TEST_PATH_PATTERNS:-}" ]] || return 0
+
+	local ids tid ntasks=0 declared out
+	ids=$(jq -r '.tasks[]?.id' "$STATUS_FILE" 2>/dev/null)
+	[[ -n "$ids" ]] || return 0
+
+	local all=""
+	while IFS= read -r tid; do
+		[[ -n "$tid" ]] || continue
+		declared=$(_task_declared_files "$tid")
+		[[ -n "$declared" ]] || return 0
+		out=$(_undeclared_test_edits "$base_branch" "$tid")
+		all+="${out:+$out$'\n'}"
+		ntasks=$((ntasks + 1))
+	done <<< "$ids"
+	(( ntasks > 0 )) || return 0
+	[[ -n "$all" ]] || return 0
+
+	local f cnt marker e dup
+	while IFS= read -r f; do
+		[[ -n "$f" ]] || continue
+		cnt=$(printf '%s' "$all" | grep -cxF -- "$f")
+		(( cnt == ntasks )) || continue
+		marker="implement:undeclared_test_edit:$f"
+		dup=0
+		for e in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+			[[ "$e" == "$marker" ]] && { dup=1; break; }
+		done
+		if (( dup == 0 )); then
+			DEGRADED_STAGES+=("$marker")
+			log_warn "Undeclared edit to pre-existing test file: $f"
+		fi
+	done < <(printf '%s' "$all" | sort -u)
+	return 0
+}
+
 # _file_set_contained() — true if every path in newline-separated set A also
 # appears in newline-separated set B (A == B counts as contained). Used by
 # the cross-task containment check below.
@@ -12767,6 +12866,7 @@ $impl_summary" "$tagent"
 
         set_stage_completed "implement"
         set_stage_completed "quality_loop"
+        _record_undeclared_test_edits "$BASE_BRANCH"
         log "Implementation complete." \
             "$completed_tasks/$task_count tasks" \
             "completed (with per-task quality loops)."
@@ -14087,11 +14187,20 @@ $complete_summary
             else
                 local _ds
                 for _ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
-                    if [[ "$_ds" == quality:convergence_failure:* ]]; then
-                        merge_blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
-                        merge_block_kind="convergence"
-                        break
-                    fi
+                    case "$_ds" in
+                        quality:convergence_failure:*)
+                            merge_blocked_reason="Quality loop convergence failure recorded in degraded_stages: $_ds"
+                            merge_block_kind="convergence"
+                            break
+                            ;;
+                        # Test-loop degradation: the test loop gave up without
+                        # converging, so the tests never validated this PR.
+                        test:wall_timeout:*|test:wall_timeout_budget:*|test:max_iterations:*|test:bats_incomplete:*|test:oscillation:*)
+                            merge_blocked_reason="Test loop convergence failure recorded in degraded_stages: $_ds"
+                            merge_block_kind="convergence"
+                            break
+                            ;;
+                    esac
                 done
             fi
         fi

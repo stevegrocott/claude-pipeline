@@ -788,3 +788,189 @@ teardown() {
 
 	(( actual_delta > review_only_delta ))
 }
+
+# =============================================================================
+# FUNCTIONAL: test-loop degradation markers block merge (issue #969)
+# =============================================================================
+# These run the REAL Gate A block extracted from the orchestrator, not a
+# hand-copied mirror, so a drift in the case patterns turns them red.
+
+# Evaluate the orchestrator's Gate A against the current DEGRADED_STAGES and
+# status.json; prints "<kind>|<reason>" (both empty when merge is allowed).
+run_gate_a() {
+	local block
+	block=$(awk '
+		/if \[\[ "\$\{BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1\}" == "0" \]\]; then/ { grab=1 }
+		grab { print }
+		grab && /^        fi$/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$block" && "$block" == *'test:oscillation:*'* ]] || return 99
+
+	eval "_gate_a() {
+		local merge_blocked_reason='' merge_block_kind=''
+		local _persisted
+		_persisted=\$(jq -r '.merge_blocked_reason // empty' \"\$STATUS_FILE\")
+		log() { :; }
+		$block
+		printf '%s|%s' \"\$merge_block_kind\" \"\$merge_blocked_reason\"
+	}"
+	_gate_a
+}
+
+@test "Gate A blocks merge for every test-loop degradation marker" {
+	local marker
+	for marker in \
+		"test:wall_timeout:iter=2" \
+		"test:wall_timeout_budget:iter=2" \
+		"test:max_iterations:iter=5" \
+		"test:bats_incomplete:iter=1" \
+		"test:oscillation:iter=3"; do
+		DEGRADED_STAGES=("$marker")
+		run run_gate_a
+		[ "$status" -eq 0 ]
+		[[ "$output" == "convergence|Test loop convergence failure recorded in degraded_stages: $marker" ]]
+	done
+}
+
+@test "Gate A does not block on non-loop test markers or an empty DEGRADED_STAGES" {
+	DEGRADED_STAGES=()
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+
+	DEGRADED_STAGES=("test:e2e_unvalidated" "test:full_suite_red")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "Gate A: BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 overrides a test-loop block" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	DEGRADED_STAGES=("test:max_iterations:iter=5")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "Gate A: BLOCK_MERGE_ON_CONVERGENCE_FAILURE=1 still blocks a test-loop marker" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=1
+	DEGRADED_STAGES=("test:oscillation:iter=3")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == convergence\|* ]]
+}
+
+@test "Gate A: quality:convergence_failure still blocks alongside test markers (regression)" {
+	DEGRADED_STAGES=("quality:convergence_failure:main:iter=3")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|Quality loop convergence failure"* ]]
+}
+
+# =============================================================================
+# FUNCTIONAL: undeclared pre-existing test edits are recorded (issue #969)
+# =============================================================================
+
+_undeclared_repo() {
+	export TEST_PATH_PATTERNS='tests/*|*.bats'
+	cd "$TEST_TMP" || return 1
+	rm -rf repo && mkdir repo && cd repo || return 1
+	git init -q -b test . && git config user.email t@t && git config user.name t
+	mkdir tests src
+	echo a > tests/old.bats; echo a > tests/other.bats; echo a > src/x.sh
+	git add -A && git commit -qm base
+	git checkout -qb feat
+	echo b >> tests/old.bats; echo b >> src/x.sh; echo n > tests/new.bats
+	git add -A && git commit -qm change
+}
+
+@test "undeclared edit to a pre-existing test file is recorded in DEGRADED_STAGES" {
+	_undeclared_repo
+	jq '.tasks = [{id:1,status:"completed",description:"Edit x",affected_files:["src/x.sh"]}]' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 1 ]
+	[ "${DEGRADED_STAGES[0]}" = "implement:undeclared_test_edit:tests/old.bats" ]
+	# idempotent
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 1 ]
+}
+
+@test "declared test edit is not recorded" {
+	_undeclared_repo
+	jq '.tasks = [{id:1,status:"completed",description:"Edit",affected_files:["src/x.sh","tests/old.bats"]}]' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+_set_tasks() {
+	jq --argjson t "$1" '.tasks = $t' "$STATUS_FILE" > "$STATUS_FILE.tmp" \
+		&& mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+@test "scope guard: empty TEST_PATH_PATTERNS records nothing" {
+	_undeclared_repo
+	export TEST_PATH_PATTERNS=''
+	_set_tasks '[{"id":1,"description":"Edit","affected_files":["src/x.sh"]}]'
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "scope guard: a task with no declared scope skips the guard" {
+	_undeclared_repo
+	_set_tasks '[{"id":1,"description":"no files mentioned here"}]'
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "scope guard: newly added test files are not flagged" {
+	_undeclared_repo
+	_set_tasks '[{"id":1,"description":"Edit","affected_files":["src/x.sh"]}]'
+	run _undeclared_test_edits test 1
+	[ "$status" -eq 0 ]
+	[[ "$output" == "tests/old.bats" ]]
+}
+
+@test "scope guard: a declared directory covers files under it" {
+	_undeclared_repo
+	_set_tasks '[{"id":1,"description":"Edit","affected_files":["src/x.sh","tests/"]}]'
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "scope guard: a file declared by any one task is not recorded" {
+	_undeclared_repo
+	_set_tasks '[{"id":1,"description":"A","affected_files":["src/x.sh"]},{"id":2,"description":"B","affected_files":["./tests/old.bats"]}]'
+	DEGRADED_STAGES=()
+	_record_undeclared_test_edits test
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "_task_declared_files prefers affected_files and normalises paths" {
+	_set_tasks '[{"id":1,"description":"Touch `other/ignored.sh`","affected_files":["./src/a.sh","/lib/b.sh"]}]'
+	run _task_declared_files 1
+	[ "$status" -eq 0 ]
+	[[ "$output" == $'src/a.sh\nlib/b.sh' ]]
+}
+
+@test "_task_declared_files falls back to the description when affected_files is empty" {
+	_set_tasks '[{"id":1,"description":"Edit `src/foo.sh` please","affected_files":[]},{"id":2,"description":"Edit `src/bar.sh`"}]'
+	run _task_declared_files 1
+	[[ "$output" == "src/foo.sh" ]]
+	run _task_declared_files 2
+	[[ "$output" == "src/bar.sh" ]]
+}
+
+@test "_task_declared_files is empty for an unknown task or file-less description" {
+	_set_tasks '[{"id":1,"description":"nothing"}]'
+	run _task_declared_files 1
+	[ -z "$output" ]
+	run _task_declared_files 99
+	[ -z "$output" ]
+}
