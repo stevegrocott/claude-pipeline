@@ -10771,23 +10771,23 @@ rebuild_and_health_check() {
 	# Step 1: Rebuild containers
 	log "Rebuilding frontend + backend containers (--no-cache)..."
 	if ! docker-compose build --no-cache frontend backend 2>&1 \
-		| tail -5; then
+		| tail -5 >&2; then
 		log_error "Container rebuild failed"
 		rebuild_status="failed"
 		local elapsed=$(( $(date +%s) - start_ts ))
-		printf '{"rebuild":"%s","health":"skipped","elapsed_secs":%d,"poll_secs":0}' \
-			"$rebuild_status" "$elapsed"
+		jq -nc --arg rebuild "$rebuild_status" --argjson elapsed "$elapsed" \
+			'{rebuild: $rebuild, health: "skipped", elapsed_secs: $elapsed, poll_secs: 0}'
 		return 1
 	fi
 
 	# Step 2: Start containers
 	log "Starting containers..."
-	if ! docker-compose up -d frontend backend 2>&1; then
+	if ! docker-compose up -d frontend backend >&2; then
 		log_error "Container start failed"
 		rebuild_status="failed"
 		local elapsed=$(( $(date +%s) - start_ts ))
-		printf '{"rebuild":"%s","health":"skipped","elapsed_secs":%d,"poll_secs":0}' \
-			"$rebuild_status" "$elapsed"
+		jq -nc --arg rebuild "$rebuild_status" --argjson elapsed "$elapsed" \
+			'{rebuild: $rebuild, health: "skipped", elapsed_secs: $elapsed, poll_secs: 0}'
 		return 1
 	fi
 
@@ -10807,9 +10807,9 @@ rebuild_and_health_check() {
 			local poll_elapsed=$(( $(date +%s) - poll_start_ts ))
 			local elapsed=$(( $(date +%s) - start_ts ))
 			log "Health check passed in ${poll_elapsed}s"
-			printf '{"rebuild":"%s","health":"healthy",'\
-'"elapsed_secs":%d,"poll_secs":%d}' \
-				"$rebuild_status" "$elapsed" "$poll_elapsed"
+			jq -nc --arg rebuild "$rebuild_status" \
+				--argjson elapsed "$elapsed" --argjson poll "$poll_elapsed" \
+				'{rebuild: $rebuild, health: "healthy", elapsed_secs: $elapsed, poll_secs: $poll}'
 			return 0
 		fi
 
@@ -10818,9 +10818,9 @@ rebuild_and_health_check() {
 			local elapsed=$(( $(date +%s) - start_ts ))
 			log_error \
 				"Health check timed out after ${poll_elapsed}s"
-			printf '{"rebuild":"%s","health":"timeout",'\
-'"elapsed_secs":%d,"poll_secs":%d}' \
-				"$rebuild_status" "$elapsed" "$poll_elapsed"
+			jq -nc --arg rebuild "$rebuild_status" \
+				--argjson elapsed "$elapsed" --argjson poll "$poll_elapsed" \
+				'{rebuild: $rebuild, health: "timeout", elapsed_secs: $elapsed, poll_secs: $poll}'
 			return 1
 		fi
 
