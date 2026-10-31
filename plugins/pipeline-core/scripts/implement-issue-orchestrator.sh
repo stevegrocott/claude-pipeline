@@ -313,6 +313,20 @@ FAIL_ON_STALE_ISSUE_BODY="${FAIL_ON_STALE_ISSUE_BODY:-0}"
 # a consumer that has not refreshed its config still gets the trigger.
 TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
 
+# TEST_PATH_PATTERNS drives #969's undeclared-test-edit guard.  Defaulted here
+# for the same reason as the sibling above: it was defaulted ONLY in the
+# consumer-owned platform.sh, which sync.sh seeds once and never updates
+# (sync.sh:7), so every consumer that adopted before #969 had no assignment —
+# and all three read sites return early on an unset value.  The guard was a
+# silent no-op for all of them, indistinguishable from one that ran clean
+# (issue #987).
+#
+# `${VAR-...}` deliberately, NOT `${VAR:-...}`: platform.sh documents an EMPTY
+# value as the way to turn the guard off, and the colon form substitutes the
+# default over an empty string, which would silently override a consumer's
+# explicit opt-out.  Unset gets the default; empty stays empty.
+TEST_PATH_PATTERNS="${TEST_PATH_PATTERNS-tests/*|test/*|*/tests/*|*/test/*|*/__tests__/*|*.test.*|*.spec.*|*_test.*|test_*|*.bats}"
+
 # Direct-execution path for e2e_verify (issue #872).  When set (the default),
 # the stage runs TEST_E2E_CMD itself and parses the runner's own summary
 # counts instead of asking an agent to run it and self-report — deterministic,

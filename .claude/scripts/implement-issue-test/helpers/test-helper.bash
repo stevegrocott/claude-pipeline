@@ -681,7 +681,12 @@ HEADER
         #
         # NOTE: this awk program is inside a single-quoted shell string, so
         # no comment here may contain an apostrophe.
-        /^[A-Z_][A-Z_0-9]*="\$\{[A-Z_][A-Z_0-9]*:-[^$`"]*\}"$/ { print; next }
+        # The colon is optional: `${NAME-literal}` (unset-only default) is the
+        # correct form for a knob whose EMPTY value means "disabled", so that
+        # the default cannot silently override an explicit opt-out — see
+        # TEST_PATH_PATTERNS and issue #987.  Accepting both keeps every
+        # existing `:-` line extracted exactly as before.
+        /^[A-Z_][A-Z_0-9]*="\$\{[A-Z_][A-Z_0-9]*:?-[^$`"]*\}"$/ { print; next }
 
         # Extract array declarations (DEGRADED_STAGES)
         /^declare -a [A-Z_]+=/ { print; next }
