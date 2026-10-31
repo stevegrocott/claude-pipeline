@@ -7889,11 +7889,30 @@ guard_commit_path_allowlist() {
 	)
 
 	if (( ${#bad[@]} > 0 )); then
+		# Name each unrecognised extension and build a ready-to-paste
+		# EXTRA_COMMIT_PATHS value (dir/*.ext per path, or the exact path
+		# for extensionless files and dotfiles), deduplicated (issue #978).
+		local bp base dir ext pat exts="" suggest=""
+		for bp in "${bad[@]}"; do
+			base="${bp##*/}"
+			dir=""
+			[[ "$bp" == */* ]] && dir="${bp%/*}/"
+			if [[ "$base" == ?*.* ]]; then
+				ext=".${base##*.}"
+				pat="${dir}*${ext}"
+			else
+				ext="$base (no extension)"
+				pat="$bp"
+			fi
+			[[ "|$exts|" == *"|$ext|"* ]] || exts+="${exts:+|}$ext"
+			[[ "|$suggest|" == *"|$pat|"* ]] || suggest+="${suggest:+|}$pat"
+		done
 		log_error \
 			"commit $ref touches paths outside the" \
 			"code/tests allowlist: ${bad[*]}" \
-			"— set EXTRA_COMMIT_PATHS to a pipe-separated list of" \
-			"glob patterns to allow additional paths"
+			"(unrecognised extension: ${exts//|/, })" \
+			"— to allow, set EXTRA_COMMIT_PATHS='${suggest}'" \
+			"(pipe-separated glob patterns)"
 		return 1
 	fi
 	return 0
