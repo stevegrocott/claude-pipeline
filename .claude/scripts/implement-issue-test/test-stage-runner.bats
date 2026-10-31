@@ -72,10 +72,25 @@ teardown() {
 
 @test "run_stage fails with missing schema file" {
     run run_stage "test-stage" "test prompt" "nonexistent.json"
-    [ "$status" -eq 1 ]
+
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
+
     # New stage_result envelope reports error_kind="schema_not_found"
     # (snake_case; see schemas/stage-result.json enum).
-    [[ "$output" == *"schema_not_found"* ]]
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "schema_not_found" ] || \
+        fail "Expected error_kind=schema_not_found, got: $error_kind"
 }
 
 @test "run_stage uses correct schema file" {
@@ -188,7 +203,7 @@ teardown() {
     echo '{"result":"no structured output"}' > "$MOCK_CLAUDE_RESPONSE"
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ]
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
     # Envelope reports error_kind="no_structured_output" (snake_case enum).
     [[ "$output" == *"no_structured_output"* ]]
 }
@@ -307,9 +322,17 @@ teardown() {
     export -f timeout
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"timeout"* ]] \
-        || fail "Expected output to contain 'timeout'; got: $output"
+    local error_kind
+    error_kind=$(printf "%s" "$output" | grep "^{" | tail -1 \
+        | jq -r ".error_kind // empty")
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
+    # Double timeout escalates to the fallback model, which also times out
+    # with no output to extract — error_kind lands on no_structured_output,
+    # not "timeout". Asserting the exact value catches drift that a bare
+    # `[[ "$output" == *"timeout"* ]]` substring check would miss: that check
+    # passed on nothing but an incidental "timed out after ...s" log line.
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind 'no_structured_output'; got: $error_kind"
 }
 
 @test "run_stage retries with 20% longer timeout after initial timeout" {
@@ -372,9 +395,16 @@ teardown() {
 
     # Pass 1s as timeout_override (arg 6) so the test completes quickly
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"timeout"* ]] \
-        || fail "Expected output to contain 'timeout'; got: $output"
+    local error_kind
+    error_kind=$(printf "%s" "$output" | grep "^{" | tail -1 \
+        | jq -r ".error_kind // empty")
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
+    # Same double-timeout-then-failed-escalation outcome as the exit-124
+    # case above: error_kind is no_structured_output, not "timeout". A bare
+    # substring check on $output would pass on nothing but an incidental
+    # "timed out after ...s" log line, so assert the exact value instead.
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind 'no_structured_output'; got: $error_kind"
 }
 
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
@@ -389,23 +419,148 @@ teardown() {
     local hang_fifo="$TEST_TMP/childless-hang.fifo"
     mkfifo "$hang_fifo"
     export hang_fifo
+    local counter_file="$TEST_TMP/childless-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
 
     timeout() {
         # bash function: no child processes exist — the stage subshell is
         # childless.  Block on a FIFO with no writer; only the parent
         # watchdog's SIGTERM can interrupt this read.  No output is emitted
         # so run_stage cannot recover structured data from either attempt.
-        read -r _ < "$hang_fifo" 2>/dev/null || true
+        #
+        # Scoped to the two dispatches this test names (initial + retry):
+        # a double timeout drives decide-action.sh to `escalate` (model
+        # isn't at the opus ceiling), which fires a THIRD, unnamed dispatch
+        # here. Blocking that one too relies on the escalation watchdog
+        # alone to ever return — any hiccup there wedges the whole suite.
+        # Fail it immediately instead so only the two watchdogs this test
+        # is about are actually exercised.
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n <= 2 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 124
+        fi
     }
     export -f timeout
 
     # 1s timeout_override keeps wall-time short (~2 s total: 1 s initial +
     # 1 s retry) while exercising both the initial and retry watchdogs.
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
-    [ "$status" -eq 1 ] \
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ] \
         || fail "Expected run_stage to fail (childless subshell wedge); status=$status output=$output"
     [[ "$output" == *"timeout"* ]] \
         || fail "Expected 'timeout' in output (childless subshell wedge); got: $output"
+}
+
+# =============================================================================
+# RE-RUN WATCHDOG COVERAGE (issue #910)
+#
+# Unlike the primary and timeout-retry launches above, the escalation re-run
+# (~line 3738) and retry_same re-run (~line 3864) dispatch the CLI in the
+# foreground with no parent-side watchdog. These tests drive a hung CLI
+# through each re-run path with a FIFO-blocked `timeout` mock, exactly like
+# the childless-hang test above, so each one hangs (mirroring the bug) if its
+# watchdog is missing or removed and completes within the wall-clock bound
+# once the watchdog is in place.
+# =============================================================================
+
+@test "escalation re-run watchdog fires when stage subshell is childless and hung" {
+    # First call drives decide-action.sh to `escalate` via no_structured_output
+    # (same trigger as "empty output escalates to next model instead of
+    # failing" above) — issue #900 generalized max_turns_exhausted into a
+    # same-model uncapped retry regardless of complexity, so that error_kind
+    # no longer reaches this escalate path and can't be used to drive it here
+    # anymore. Second call is the escalation re-run itself — block childlessly
+    # on a FIFO with no writer; only a parent-side watchdog's SIGTERM can free
+    # it.
+    local hang_fifo="$TEST_TMP/escalation-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+    local counter_file="$TEST_TMP/esc-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
+
+    timeout() {
+        shift; shift; shift; shift  # timeout value, env, -u, CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"gibberish"}'
+        else
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        fi
+    }
+    export -f timeout
+
+    # 1s timeout_override keeps the wall-clock bound tight; without a
+    # watchdog guarding the escalation re-run this call never returns.
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "1"
+
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] \
+        || fail "Expected run_stage to return a stage_result envelope (escalation re-run wedge); status=$status output=$output"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind=no_structured_output once the wedged escalation call was terminated; got: $error_kind"
+}
+
+@test "retry_same re-run watchdog fires when stage subshell is childless and hung" {
+    # First call drives decide-action.sh to `retry_same` via rate_limit with
+    # no prior attempt at this model. Second call is the retry_same re-run
+    # itself — block childlessly on a FIFO with no writer; only a
+    # parent-side watchdog's SIGTERM can free it.
+    local hang_fifo="$TEST_TMP/retry-same-hang.fifo"
+    mkfifo "$hang_fifo"
+    export hang_fifo
+    local counter_file="$TEST_TMP/retry-same-call-counter.txt"
+    printf '0' > "$counter_file"
+    export counter_file
+
+    timeout() {
+        shift; shift; shift; shift  # timeout value, env, -u, CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"rate limit exceeded, please retry"}'
+        else
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        fi
+    }
+    export -f timeout
+
+    # detect_rate_limit(true) on the first call makes run_stage call
+    # handle_rate_limit(), which sleeps for the parsed backoff (defaulting to
+    # RATE_LIMIT_DEFAULT_WAIT=3600s when unparseable) before ever reaching
+    # decide-action.sh. That backoff is orthogonal to the re-run watchdog
+    # this test targets, so stub it out.
+    sleep() { :; }
+    export -f sleep
+
+    # 1s timeout_override keeps the wall-clock bound tight; without a
+    # watchdog guarding the retry_same re-run this call never returns.
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "1"
+
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] \
+        || fail "Expected run_stage to return a stage_result envelope (retry_same re-run wedge); status=$status output=$output"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "no_structured_output" ] \
+        || fail "Expected error_kind=no_structured_output once the wedged retry_same call was terminated; got: $error_kind"
 }
 
 # =============================================================================
@@ -620,13 +775,23 @@ teardown() {
 
     run run_stage "stage-1" "prompt" "test-schema.json" "bad-agent"
 
-    # run_stage must bail (non-zero exit)
-    [ "$status" -ne 0 ] || \
-        fail "Expected non-zero exit when agent not found, got: status=$status"
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
 
     # Stage result envelope must report error_kind=agent_not_found
-    [[ "$output" == *'"agent_not_found"'* ]] || \
-        fail "Expected agent_not_found in stage result, got: $output"
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "agent_not_found" ] || \
+        fail "Expected error_kind=agent_not_found, got: $error_kind"
 
     # Must not retry — exactly one invocation of the claude CLI
     local call_count=0
@@ -856,13 +1021,14 @@ teardown() {
 	export calls_file
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
-	# Both initial attempt and retry must have been called (fallback skipped)
+	# Initial attempt, timeout retry, and double_timeout escalation must all
+	# have been called (fallback skipped)
 	local call_count
 	call_count=$(wc -l < "$calls_file")
-	(( call_count == 2 )) || \
-		fail "Expected 2 timeout calls (fallback skipped, retry made), got $call_count"
+	(( call_count == 3 )) || \
+		fail "Expected 3 timeout calls (fallback skipped, retry + escalation made), got $call_count"
 }
 
 # =============================================================================
@@ -879,7 +1045,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "Diagnostic fallback failure — Output byte count:" "$LOG_FILE" || \
 		fail "Expected diagnostic byte count in log. Log: $(cat "$LOG_FILE")"
@@ -893,7 +1059,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "Diagnostic fallback failure — First 500 characters:" "$LOG_FILE" || \
 		fail "Expected diagnostic preview in log. Log: $(cat "$LOG_FILE")"
@@ -909,7 +1075,7 @@ teardown() {
 	export -f timeout
 
 	run run_stage "test" "prompt" "test-schema.json"
-	[ "$status" -eq 1 ]
+	[ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ]
 
 	grep -q "recognizable-debug-marker-abc123" "$LOG_FILE" || \
 		fail "Diagnostic log must include actual output content. Log: $(cat "$LOG_FILE")"
@@ -919,9 +1085,14 @@ teardown() {
 # MODEL ESCALATION — error_max_turns
 # =============================================================================
 
-@test "run_stage escalates model when output subtype is error_max_turns" {
+@test "run_stage retries same model (not opus) when output subtype is error_max_turns (generalized, issue #900)" {
     # BATS runs each @test in a forked subprocess — re-source model-config to
     # make readonly arrays available (same pattern as MODEL SELECTION tests).
+    #
+    # Issue #900 generalized the uncapped retry from an S-complexity-only
+    # exception to any non-ceiling model, dropping the S-complexity gate —
+    # so an empty-complexity sonnet stage now gets the same-model uncapped
+    # retry instead of escalating to opus.
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local counter_file="$TEST_TMP/call-counter.txt"
     printf '0' > "$counter_file"
@@ -944,18 +1115,22 @@ teardown() {
     export -f timeout
     export counter_file
 
-    # test-iter-1 resolves to sonnet; sonnet escalates to opus on error_max_turns
+    # test-iter-1 resolves to sonnet; sonnet now retries uncapped at sonnet
+    # on error_max_turns rather than escalating (gate dropped, issue #900)
     run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
 
     local final_count
     final_count=$(cat "$counter_file")
     (( final_count == 2 )) || fail "Expected 2 claude calls, got $final_count"
 
-    # Second call must use escalated model (opus — next tier above sonnet)
+    # Second call must stay at sonnet (same-model uncapped retry)
     local second_call_args
     second_call_args=$(cat "$TEST_TMP/call-2-args.txt" 2>/dev/null)
-    [[ "$second_call_args" == *"--model opus"* ]] || \
-        fail "Expected --model opus in escalated retry. Args: $second_call_args"
+    [[ "$second_call_args" == *"--model sonnet"* ]] || \
+        fail "Expected --model sonnet in uncapped retry. Args: $second_call_args"
+    [[ "$second_call_args" != *"--model opus"* ]] || \
+        fail "max_turns_exhausted must not promote to opus (issue #900)." \
+            "Args: $second_call_args"
 }
 
 @test "run_stage fails with max_turns_exhausted_at_ceiling when opus hits error_max_turns" {
@@ -970,9 +1145,23 @@ teardown() {
     # implement + L complexity resolves to opus, the ceiling model that
     # cannot escalate further on error_max_turns.
     run run_stage "implement-task-1" "prompt" "test-schema.json" "" "L"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"max_turns_exhausted_at_ceiling"* ]] || \
-        fail "Expected ceiling error in output. Got: $output"
+
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # assert on the emitted stage_result envelope instead.
+    local emitted_envelope
+    emitted_envelope=$(printf '%s' "$output" | grep '^{' | tail -1)
+    [ -n "$emitted_envelope" ] || \
+        fail "Expected run_stage to emit a stage_result envelope; got: $output"
+
+    local envelope_status
+    envelope_status=$(printf '%s' "$emitted_envelope" | jq -r '.status')
+    [ "$envelope_status" = "error" ] || \
+        fail "Expected envelope status=error, got: $envelope_status"
+
+    local error_kind
+    error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
+    [ "$error_kind" = "max_turns_exhausted_at_ceiling" ] || \
+        fail "Expected error_kind=max_turns_exhausted_at_ceiling, got: $error_kind"
 }
 
 @test "run_stage does not include max-turns cap on error_max_turns escalation retry" {
@@ -1009,11 +1198,14 @@ teardown() {
 }
 
 # =============================================================================
-# S-COMPLEXITY UNCAPPED RETRY — error_max_turns (issue #637)
+# UNCAPPED RETRY — error_max_turns (issue #637, generalized from an
+# S-complexity-only exception to any non-ceiling model by issue #900)
 #
-# An S task at sonnet must NOT be promoted to opus (issue #579), but it must
-# still get the cap-lift that the escalation path provides: exactly one
-# same-model retry with no --max-turns, and a second exhaustion is terminal.
+# A non-ceiling task must NOT be promoted to the next tier on
+# max_turns_exhausted; it must instead get the cap-lift that the escalation
+# path provides: exactly one same-model retry with no --max-turns, and a
+# second exhaustion is terminal. The S-complexity case below remains a
+# representative example now that the gate applies regardless of complexity.
 # =============================================================================
 
 @test "run_stage retries an S task at sonnet with no max-turns cap after error_max_turns" {
@@ -1073,8 +1265,8 @@ teardown() {
     export counter_file
 
     run run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
-    [ "$status" -eq 1 ] || \
-        fail "Second exhaustion must be terminal, got status $status. Out: $output"
+    # Never inspect the raw exit code (documented run_stage contract) —
+    # terminality is asserted below via the envelope's status/error_kind.
 
     local final_count
     final_count=$(cat "$counter_file")
@@ -1089,6 +1281,45 @@ teardown() {
         fail "Expected error stage_result after second exhaustion, got: $sr"
     [ "$err_kind" = "max_turns_exhausted_at_ceiling" ] || \
         fail "Expected max_turns error_kind, got: $err_kind ($sr)"
+}
+
+@test "run_stage uncapped retry reuses stage_timeout unchanged (issue #900 AC6)" {
+    # The plain-timeout retry path (see "retries with 20% longer timeout"
+    # above) deliberately inflates the timeout on retry. The uncapped
+    # max-turns retry must NOT: dropping --max-turns already buys the task
+    # more room, so stage_timeout passed to `timeout` must be identical on
+    # both the initial attempt and the uncapped retry.
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local timeout_values="$TEST_TMP/timeout-values.txt"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        local t="$1"
+        printf '%s\n' "$t" >> "$timeout_values"
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"subtype":"error_max_turns","is_error":false,"result":"Hit max turns"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file timeout_values
+
+    run_stage "implement-task-1" "prompt" "test-schema.json" "" "S" "" "sonnet"
+
+    local first_timeout second_timeout
+    first_timeout=$(sed -n '1p' "$timeout_values")
+    second_timeout=$(sed -n '2p' "$timeout_values")
+    [ -n "$first_timeout" ] || fail "Initial attempt made no timeout()-wrapped call"
+    [ -n "$second_timeout" ] || \
+        fail "Uncapped retry made no timeout()-wrapped call — timeout wrapper may be missing"
+    [ "$second_timeout" = "$first_timeout" ] || \
+        fail "Uncapped retry must reuse stage_timeout unchanged. First: $first_timeout, second: $second_timeout"
 }
 
 @test "TASK_DESC_PROMOTE_CHARS default equals the explore skill's description limit" {
@@ -1476,9 +1707,12 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# pr / pr-review budgets are intentionally unchanged by the stage-type-aware
-# override — verify they still get their original caps (10 / 10) and that the
-# new MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect them.
+# pr budget is intentionally unchanged by the stage-type-aware override —
+# verify it still gets its original cap (10) and that the new
+# MAX_TURNS_SIMPLIFY / MAX_TURNS_FIX_REVIEW env vars do not affect it.
+#
+# pr-review has its own dedicated MAX_TURNS_PR_REVIEW env var (default 20) —
+# verify it honours that var and ignores unrelated ones.
 # -----------------------------------------------------------------------------
 
 @test "run_stage passes --max-turns 10 to pr stage (unchanged)" {
@@ -1554,7 +1788,7 @@ EOF
         fail "pr stage must not be affected by MAX_TURNS_SIMPLIFY" || true
 }
 
-@test "run_stage passes --max-turns 10 to pr-review stage (unchanged)" {
+@test "run_stage passes --max-turns 20 to pr-review stage (default)" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     local claude_calls="$TEST_TMP/claude-calls.txt"
     timeout() {
@@ -1564,15 +1798,15 @@ EOF
     }
     export -f timeout
 
-    # pr-review matches the "pr-review" prefix — focused diff analysis = 10 turns
+    # pr-review matches the "pr-review" prefix — focused diff analysis = 20 turns
     run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
 
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 10" "$claude_calls" || \
-        fail "Expected --max-turns 10 for pr-review stage. Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 for pr-review stage. Calls: $(cat "$claude_calls")"
 }
 
-@test "run_stage logs pr-review stage max-turns at original value (10)" {
+@test "run_stage logs pr-review stage max-turns at default value (20)" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     timeout() {
         shift; shift; shift; shift
@@ -1582,8 +1816,48 @@ EOF
 
     run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
 
-    grep -q "Max turns: 10 (PR review" "$LOG_FILE" || \
+    grep -q "Max turns: 20 (PR review" "$LOG_FILE" || \
         fail "Expected PR review max-turns log. Log: $(cat "$LOG_FILE")"
+}
+
+@test "run_stage honours MAX_TURNS_PR_REVIEW env var for pr-review stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_PR_REVIEW=12
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_PR_REVIEW
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 12" "$claude_calls" || \
+        fail "Expected --max-turns 12 when MAX_TURNS_PR_REVIEW=12. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage pr-review budget ignores MAX_TURNS_SIMPLIFY env var" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+    export MAX_TURNS_SIMPLIFY=99
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    unset MAX_TURNS_SIMPLIFY
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 (pr-review unchanged by MAX_TURNS_SIMPLIFY). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 99" "$claude_calls" && \
+        fail "pr-review should not honour MAX_TURNS_SIMPLIFY" || true
 }
 
 @test "run_stage pr budget ignores MAX_TURNS_SIMPLIFY env var" {
@@ -1622,10 +1896,54 @@ EOF
 
     unset MAX_TURNS_FIX_REVIEW
     [ -f "$claude_calls" ] || fail "Claude was not called"
-    grep -q -- "--max-turns 10" "$claude_calls" || \
-        fail "Expected --max-turns 10 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
+    grep -q -- "--max-turns 20" "$claude_calls" || \
+        fail "Expected --max-turns 20 (pr-review unchanged by MAX_TURNS_FIX_REVIEW). Calls: $(cat "$claude_calls")"
     grep -q -- "--max-turns 99" "$claude_calls" && \
         fail "pr-review should not honour MAX_TURNS_FIX_REVIEW" || true
+}
+
+@test "run_stage pr-review retry_same keeps the pinned 20-turn cap (issue #900)" {
+    # pr-review's cap is hard-wired (default 20, env: MAX_TURNS_PR_REVIEW),
+    # not stage-type derived, so it must stay pinned through a same-model
+    # retry (e.g. rate_limit) rather than being dropped the way an uncapped
+    # max-turns retry drops --max-turns.
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    timeout() {
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" >> "$claude_calls"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"rate limit exceeded, please retry"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file claude_calls
+
+    # detect_rate_limit(true) drives handle_rate_limit()'s backoff sleep
+    # before decide-action.sh is ever reached; stub it out so the test stays
+    # fast (mirrors the existing retry_same watchdog test above).
+    sleep() { :; }
+    export -f sleep
+
+    run_stage "pr-review-iter-1" "prompt" "test-schema.json" "" ""
+
+    local final_count
+    final_count=$(cat "$counter_file")
+    (( final_count == 2 )) || \
+        fail "Expected 2 claude calls (rate-limit retry_same), got $final_count"
+
+    local second_call_args
+    second_call_args=$(sed -n '2p' "$claude_calls")
+    [[ "$second_call_args" == *"--max-turns 20"* ]] || \
+        fail "pr-review retry must keep the pinned 20-turn cap. Args: $second_call_args"
 }
 
 # =============================================================================
@@ -2589,6 +2907,201 @@ _repro_full_suite_bats_check() {
 }
 
 # =============================================================================
+# FULL-SUITE BATS CHECK — WALL-CLOCK TIMEOUT (FULL_SUITE_BATS_TIMEOUT)
+#
+# The informational full-suite check above (`bash "$bats_runner" --ci`) takes
+# ~20-35 minutes on a healthy run (#799) and nothing previously bounded its
+# OWN runtime, so a wedged suite (e.g. test-stage-runner.bats itself, per the
+# deadlock this file documents at test 22) stalled the orchestrator
+# indefinitely even though the check exists purely to surface unrelated red
+# suites non-blockingly. It is now wrapped in `timeout` with an overridable
+# budget (FULL_SUITE_BATS_TIMEOUT, default 2700s / 45 minutes — issue #926's
+# evaluation section: generous headroom above the suite's normal 20-35
+# minute range); on exit 124 it records a degraded-stage marker distinct
+# from a confirmed-red run (test:bats_full_suite_timeout, not
+# test:bats_full_suite_red — issue #926 AC3, since a suite that never
+# finished is not proof it would have failed) plus an explicit log_warn
+# naming the budget it exceeded, and always falls through non-blockingly.
+# =============================================================================
+
+@test "FULL_SUITE_BATS_TIMEOUT defaults to 2700 and is overridable" {
+	# Static: pins the default-with-override idiom so a future edit cannot
+	# hard-code the budget and silently drop the override hook.
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"'* ]] || \
+		fail "Expected FULL_SUITE_BATS_TIMEOUT default-with-override assignment (default 2700s / 45min)"
+}
+
+@test "full-suite BATS check invocation is bounded by a process-group kill" {
+	# Static: the actual bats_runner --ci invocation (not the run-tests.sh
+	# repro below) must go through _run_bounded_process_group with the
+	# FULL_SUITE_BATS_TIMEOUT budget — a bare `timeout CMD` only signals its
+	# direct child and cannot reap surviving bats-exec-* descendants (#926
+	# AC5). Anchored on the unique invocation line rather than
+	# `bash "$bats_runner" --ci`, which also appears verbatim in the
+	# CI_EXCLUDED_SUITES comment further up the file.
+	local marker_line window start_line end_line
+	marker_line=$(awk '/_run_bounded_process_group "\$\{FULL_SUITE_BATS_TIMEOUT:-[0-9]+\}"/{print NR; exit}' \
+		"$ORCHESTRATOR_SCRIPT")
+	[ -n "$marker_line" ] || \
+		fail 'Could not locate the _run_bounded_process_group "${FULL_SUITE_BATS_TIMEOUT:-...}" call'
+	start_line=$marker_line
+	end_line=$(( marker_line + 3 ))
+	window=$(awk -v s="$start_line" -v e="$end_line" \
+		'NR >= s && NR <= e' "$ORCHESTRATOR_SCRIPT")
+	[[ "$window" == *'bash "$bats_runner" --ci'* ]] || \
+		fail "The bounded call must run bash \"\$bats_runner\" --ci. Window: $window"
+}
+
+# Faithful reproduction of main()'s bounded full-suite BATS check
+# (post-#926-AC5 fix). Mirrors _repro_full_suite_bats_check above but runs
+# the suite through the real _run_bounded_process_group helper and adds the
+# rc==124 branch, which records a degraded-stage marker distinct from a
+# confirmed-red run (test:bats_full_suite_timeout, not
+# test:bats_full_suite_red) — a suite that never finished is not proof it
+# would have failed.
+_repro_full_suite_bats_check_with_timeout() {
+	local run_tests_cmd="$1"
+	local bats_full_output bats_full_rc=0
+	local bats_full_tmp
+	bats_full_tmp=$(mktemp)
+	_run_bounded_process_group "${FULL_SUITE_BATS_TIMEOUT:-2700}" \
+		"${FULL_SUITE_KILL_GRACE:-10}" "$bats_full_tmp" \
+		bash -c "$run_tests_cmd" || bats_full_rc=$?
+	bats_full_output=$(< "$bats_full_tmp")
+	rm -f "$bats_full_tmp"
+
+	if (( bats_full_rc == 124 )); then
+		log_warn "Full-suite BATS check timed out after" \
+			"${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
+			"unmeasured, not red (non-blocking)"
+		DEGRADED_STAGES+=("test:bats_full_suite_timeout")
+	elif (( bats_full_rc != 0 )); then
+		DEGRADED_STAGES+=("test:bats_full_suite_red")
+	fi
+	return 0
+}
+
+@test "full-suite BATS check records a distinct timeout marker without hanging the orchestrator" {
+	# Functional: a suite that runs past FULL_SUITE_BATS_TIMEOUT must be
+	# killed at the budget, exit 124, and be recorded under its own
+	# degraded-stage marker — not the confirmed-red marker a suite that
+	# actually ran and failed gets (#926 AC3).
+	local -a DEGRADED_STAGES=()
+	export FULL_SUITE_BATS_TIMEOUT=1
+	export FULL_SUITE_KILL_GRACE=1
+	local hung_suite="$TEST_TMP/run-tests-hung.sh"
+	printf '#!/usr/bin/env bash\nwhile :; do :; done\n' > "$hung_suite"
+	chmod +x "$hung_suite"
+
+	local start_epoch end_epoch elapsed
+	start_epoch=$(date +%s)
+	_repro_full_suite_bats_check_with_timeout "'$hung_suite'"
+	local rc=$?
+	end_epoch=$(date +%s)
+	elapsed=$(( end_epoch - start_epoch ))
+
+	# (a) Non-blocking: the check itself must not fail the pipeline.
+	[ "$rc" -eq 0 ] || \
+		fail "Timeout must be non-blocking to the caller; got rc=$rc"
+
+	# (b) Must be bounded near the 1s budget, not run away unbounded.
+	(( elapsed < 5 )) || \
+		fail "Check did not respect FULL_SUITE_BATS_TIMEOUT=1; took ${elapsed}s"
+
+	# (c) A distinct timeout marker must be recorded, not the red marker.
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_full_suite_timeout' || \
+		fail "Expected test:bats_full_suite_timeout after a timeout; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+	if printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_full_suite_red'; then
+		fail "A timeout must not also record the red marker; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+	fi
+}
+
+@test "full-suite BATS check kills a grandchild that outlives the direct child (#926 AC5)" {
+	# Functional: reproduces the real #926 incident shape — a supervisor
+	# process that forks both a busy-loop child and a `sleep` grandchild,
+	# mirroring bats' formatter/bats-exec-* children. A bare `timeout CMD`
+	# only signals the direct child, so these would keep running (and keep
+	# any inherited fd held open) after the "timeout". This asserts every
+	# descendant is actually dead afterward, not just that the check
+	# returned — and that it returned promptly despite them (#926 AC5).
+	local -a DEGRADED_STAGES=()
+	export FULL_SUITE_BATS_TIMEOUT=1
+	export FULL_SUITE_KILL_GRACE=1
+	local grandchild_pid_file="$TEST_TMP/grandchild.pid"
+	local hung_tree="$TEST_TMP/run-tests-hung-tree.sh"
+	# The supervisor ignores TERM, so only the KILL escalation can end it.
+	cat > "$hung_tree" <<EOF
+#!/usr/bin/env bash
+trap '' TERM
+( while :; do :; done ) &
+echo \$! > "$grandchild_pid_file"
+sleep 300 &
+echo \$! >> "$grandchild_pid_file"
+while :; do :; done
+EOF
+	chmod +x "$hung_tree"
+
+	local start_epoch elapsed rc=0
+	start_epoch=$(date +%s)
+	_repro_full_suite_bats_check_with_timeout "'$hung_tree'" || rc=$?
+	elapsed=$(( $(date +%s) - start_epoch ))
+
+	[ "$rc" -eq 0 ] || \
+		fail "Timeout must be non-blocking to the caller; got rc=$rc"
+	(( elapsed < 8 )) || \
+		fail "Descendants held the check open; took ${elapsed}s"
+
+	local -a descendant_pids=()
+	[ -s "$grandchild_pid_file" ] || \
+		fail "Descendants never recorded their PIDs; hung_tree.sh did not run as expected"
+	while IFS= read -r pid; do
+		descendant_pids+=("$pid")
+	done < "$grandchild_pid_file"
+	[ "${#descendant_pids[@]}" -eq 2 ] || \
+		fail "Expected 2 descendant PIDs; got: ${descendant_pids[*]}"
+
+	# KILL is delivered asynchronously; allow a brief window before calling
+	# a still-running PID a true survivor rather than a delivery race.
+	local pid waited
+	for pid in "${descendant_pids[@]}"; do
+		waited=0
+		while kill -0 "$pid" 2>/dev/null && (( waited < 3 )); do
+			sleep 1
+			waited=$(( waited + 1 ))
+		done
+		if kill -0 "$pid" 2>/dev/null; then
+			kill -KILL "$pid" 2>/dev/null
+			fail "Descendant PID $pid survived the timeout kill (#926 AC5 violated)"
+		fi
+	done
+
+	printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+		| grep -qx 'test:bats_full_suite_timeout' || \
+		fail "Expected test:bats_full_suite_timeout after a timeout; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+@test "full-suite BATS check respects an overridden FULL_SUITE_BATS_TIMEOUT budget" {
+	# Functional: FULL_SUITE_BATS_TIMEOUT must be overridable per-run, not
+	# hard-coded — a suite that would time out at a low budget must pass
+	# once the caller raises the budget above its true runtime.
+	local -a DEGRADED_STAGES=()
+	export FULL_SUITE_BATS_TIMEOUT=10
+	local quick_suite="$TEST_TMP/run-tests-quick.sh"
+	printf '#!/usr/bin/env bash\nsleep 1\nexit 0\n' > "$quick_suite"
+	chmod +x "$quick_suite"
+
+	_repro_full_suite_bats_check_with_timeout "'$quick_suite'"
+
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ] || \
+		fail "A suite finishing within the overridden budget must not be" \
+			"treated as degraded; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+}
+
+# =============================================================================
 # BLOCKING BATS GATE — bash scope blocks merge on red suite (issue #535)
 #
 # .claude/scripts/ changes route to bash scope via detect_change_scope.
@@ -2777,7 +3290,7 @@ EOF
     printf '%s\n' 'just a warning, no JSON anywhere' > "$MOCK_CLAUDE_RESPONSE"
 
     run run_stage "test" "prompt" "test-schema.json"
-    [ "$status" -eq 1 ] || {
+    [ "$(printf "%s" "$output" | grep "^{" | tail -1 | jq -r ".status // empty")" = "error" ] || {
         printf 'FAIL: a stream with no envelope must still fail\n' >&2
         return 1
     }
@@ -3112,4 +3625,69 @@ _count_bats_incomplete_markers() {
 	stage_status=$(jq -r '.stages.test_loop.status' "$STATUS_FILE")
 	[ "$stage_status" = "completed" ] || \
 		fail "Expected test_loop status 'completed' for a finished run; got: $stage_status"
+}
+
+# =============================================================================
+# ISSUE #872: e2e-verify's TURN BUDGET
+#
+# e2e-verify is a light-tier stage, so it inherited the blanket 10-turn cap
+# for light-tier haiku stages — and 10 turns cannot bring up a stack and run
+# a Playwright spec. On the observed runs the agent hit max_turns in ~90s
+# with tests_run 0 and the stage recorded "degraded" without a browser ever
+# starting. The direct TEST_E2E_CMD executor is what normally runs this
+# stage now; this budget covers the fallback, which is reached only when the
+# runner's output has no parseable summary — the harder case, not the easier
+# one.
+# =============================================================================
+
+@test "run_stage gives e2e-verify a turn budget above the light-tier default" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "e2e-verify" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 25" "$claude_calls" || \
+        fail "Expected --max-turns 25 for e2e-verify. Calls: $(cat "$claude_calls")"
+}
+
+@test "run_stage applies the e2e-verify budget to the rerun-after-fix stages too" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "e2e-verify-rerun-iter-1" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 25" "$claude_calls" || \
+        fail "Expected --max-turns 25 for an e2e-verify rerun. Calls: $(cat "$claude_calls")"
+}
+
+@test "MAX_TURNS_E2E_VERIFY overrides the e2e-verify turn budget" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    export MAX_TURNS_E2E_VERIFY=40
+    local claude_calls="$TEST_TMP/claude-calls.txt"
+    timeout() {
+        shift; shift; shift; shift
+        echo "$@" >> "$claude_calls"
+        echo '{"result":"ok","structured_output":{"status":"success"}}'
+    }
+    export -f timeout
+
+    run_stage "e2e-verify" "prompt" "test-schema.json" "" ""
+
+    [ -f "$claude_calls" ] || fail "Claude was not called"
+    grep -q -- "--max-turns 40" "$claude_calls" || \
+        fail "Expected --max-turns 40 from MAX_TURNS_E2E_VERIFY. Calls: $(cat "$claude_calls")"
 }

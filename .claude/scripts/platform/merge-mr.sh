@@ -13,6 +13,32 @@ PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
 # shellcheck disable=SC1090
 source "$PLATFORM_SH_FILE"
 
+# Fail loudly on an unrecognised GIT_HOST/MERGE_STYLE instead of letting the
+# dispatch case below match nothing and fall through as a silent no-op that
+# still exits 0 (issue #907). Both variables are consumer-supplied
+# (config/platform.sh) and otherwise unvalidated anywhere in the platform
+# wrappers, so a typo there merges nothing while the caller reads exit 0 as
+# a completed merge. Validated here, at entry, before any API calls or
+# polling — a bad value is refused immediately instead of surfacing as a
+# phantom successful merge later.
+case "$GIT_HOST" in
+    github | gitlab) ;;
+    *)
+        echo "FATAL: GIT_HOST=\"$GIT_HOST\" is not a recognised git host." \
+            "Accepted values: github, gitlab." >&2
+        exit 1
+        ;;
+esac
+
+case "$MERGE_STYLE" in
+    squash | merge | rebase) ;;
+    *)
+        echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised merge" \
+            "style. Accepted values: squash, merge, rebase." >&2
+        exit 1
+        ;;
+esac
+
 MR="$1"
 
 # Gate wait_for_mergeable on GitHub's richer `mergeStateStatus` field rather
@@ -23,6 +49,104 @@ MR="$1"
 # `mergeable`-only behavior.
 MERGE_MR_MERGE_STATE_GATE="${MERGE_MR_MERGE_STATE_GATE:-1}"
 
+# Check-run names (comma-separated) whose failure must NOT block the merge —
+# jobs the consumer runs as informational (`continue-on-error`, a known-red
+# baseline being burned down). GitHub reports such a PR as UNSTABLE, which the
+# gate below would otherwise refuse outright (issue #861: 7 of 13 approved PRs
+# in one day, every blocking gate green). Names are matched exactly against
+# CheckRun `.name` / commit-status `.context`. Empty by default: nothing is
+# ignored unless the consumer says so in config/platform.sh.
+MERGE_MR_NON_BLOCKING_CHECKS="${MERGE_MR_NON_BLOCKING_CHECKS:-}"
+
+# Opt-in (issue #878): request one full CI run against the PR's FINAL head
+# before merging. A consumer whose expensive suite runs once per PR (on open)
+# and on demand via a label would otherwise merge a head that suite never
+# covered — every review-fix push since PR-open is uncovered. When this names a
+# label, merge-mr.sh adds it to the PR and waits for a check run created AFTER
+# the label was applied. Empty by default: unset means no label, no extra wait,
+# and not one extra API call.
+MERGE_MR_FULL_RUN_LABEL="${MERGE_MR_FULL_RUN_LABEL:-}"
+
+# The check-run name that label is expected to (re-)trigger.
+MERGE_MR_FULL_RUN_CHECK="${MERGE_MR_FULL_RUN_CHECK:-e2e}"
+
+# The allowlist as a JSON array, for jq --argjson.
+_non_blocking_checks_json() {
+  # printf with a trailing newline: `jq -R` on a zero-line input emits nothing at
+  # all, which would hand `--argjson` an empty string and make every caller fail
+  # open. One (possibly empty) line always yields a JSON array.
+  local json
+  json=$(printf '%s\n' "$MERGE_MR_NON_BLOCKING_CHECKS" \
+    | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))' 2>/dev/null)
+  case "$json" in
+    \[*\]) printf '%s' "$json" ;;
+    *) printf '[]' ;;
+  esac
+}
+
+# jq filter body: the name a rollup entry is matched by (CheckRun vs status).
+_JQ_CHECK_NAME='(if .__typename == "CheckRun" then .name else .context end)'
+
+# jq filter body: true when the piped-in conclusion/state string is a
+# concluded-failure value. Shared so the failing-state list can't drift
+# between the three functions below (issue #861 follow-up).
+_JQ_IS_FAILED_STATE='(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED" or . == "STARTUP_FAILURE")'
+
+# jq filter body: a rollup entry's name/context if it concluded in failure,
+# nothing otherwise. CheckRun entries report status/conclusion (conclusion is
+# only trustworthy once status is COMPLETED); legacy commit-status entries
+# report state directly.
+_JQ_FAILED_CHECK_NAME='(if .__typename == "CheckRun" then (select(.status == "COMPLETED" and (.conclusion | '"$_JQ_IS_FAILED_STATE"')) | .name) else (select(.state | '"$_JQ_IS_FAILED_STATE"') | .context) end)'
+
+# Names in the rollup that concluded in failure but are allowlisted — for the
+# merge log, so an ignored red check is visible rather than silent.
+_ignored_failed_checks() {
+  local rollup_json="$1"
+  jq -r --argjson ignore "$(_non_blocking_checks_json)" '
+    [.[]? |
+      select(('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) |
+      '"$_JQ_FAILED_CHECK_NAME"'
+    ] | join(", ")
+  ' <<<"$rollup_json" 2>/dev/null || echo ""
+}
+
+# Names in the rollup that are still running but allowlisted — for the merge
+# log, so an ignored in-flight check is visible rather than silent (issue #877).
+_pending_ignored_checks() {
+  local rollup_json="$1"
+  jq -r --argjson ignore "$(_non_blocking_checks_json)" '
+    [.[]? |
+      select(('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) |
+      if .__typename == "CheckRun" then
+        (select(.status != "COMPLETED") | .name)
+      else
+        (select(.state == "PENDING" or .state == "EXPECTED") | .context)
+      end
+    ] | join(", ")
+  ' <<<"$rollup_json" 2>/dev/null || echo ""
+}
+
+# Returns success when any BLOCKING rollup entry is still running or queued.
+# Checks named in MERGE_MR_NON_BLOCKING_CHECKS are excluded, exactly as they are
+# from the failure test: a check that cannot fail the merge is not worth waiting
+# for (issue #877 — a 25-33 min allowlisted job turned every merge into
+# merge_pr_timeout and the batch counted a failure with all blocking checks
+# green). Used so an UNSTABLE or BLOCKED PR whose only outstanding checks are
+# allowlisted merges immediately, while a pending blocking check still waits.
+_has_pending_check() {
+  local rollup_json="$1"
+  jq -e --argjson ignore "$(_non_blocking_checks_json)" '
+    [.[]? |
+      select((('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) | not) |
+      if .__typename == "CheckRun" then
+        (.status != "COMPLETED")
+      else
+        (.state == "PENDING" or .state == "EXPECTED")
+      end
+    ] | any
+  ' <<<"$rollup_json" >/dev/null 2>&1
+}
+
 # Returns success when any entry in a statusCheckRollup JSON array has
 # concluded in a failing state. CheckRun entries report status/conclusion
 # (conclusion is only trustworthy once status is COMPLETED); legacy
@@ -30,29 +154,255 @@ MERGE_MR_MERGE_STATE_GATE="${MERGE_MR_MERGE_STATE_GATE:-1}"
 _has_concluded_check_failure() {
   local rollup_json="$1"
 
-  jq -e '
+  jq -e --argjson ignore "$(_non_blocking_checks_json)" '
     [.[]? |
-      if .__typename == "CheckRun" then
-        (select(.status == "COMPLETED") | .conclusion)
-      else
-        .state
-      end
-    ] | any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or
-        . == "TIMED_OUT" or . == "ACTION_REQUIRED" or
-        . == "STARTUP_FAILURE")
+      select((('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) | not) |
+      '"$_JQ_FAILED_CHECK_NAME"'
+    ] | length > 0
   ' <<<"$rollup_json" >/dev/null 2>&1
+}
+
+# Names the first check in a statusCheckRollup array that concluded in a
+# failing state, for the refusal message. Shared by both poll paths so the two
+# refusals cannot drift apart (issue #853).
+_first_failed_check() {
+  local rollup_json="$1"
+
+  jq -r --argjson ignore "$(_non_blocking_checks_json)" '
+    [.[]? |
+      select((('"$_JQ_CHECK_NAME"') as $n | $ignore | index($n)) | not) |
+      '"$_JQ_FAILED_CHECK_NAME"'
+    ] | first // "unknown check"
+  ' <<<"$rollup_json" 2>/dev/null || echo "unknown check"
+}
+
+# The PR's current head SHA; empty when it cannot be read.
+_pr_head_sha() {
+  gh pr view "$1" --json headRefOid --jq '.headRefOid' 2>/dev/null || printf ''
+}
+
+# Raw check-runs payload for <sha>. Kept in one place so the pre-label
+# watermark and the post-label poll read the SAME source: ids compared across
+# two different endpoints would not be comparing like with like.
+_check_runs_json() {
+  local sha="$1"
+  gh api "repos/{owner}/{repo}/commits/$sha/check-runs?per_page=100" \
+    2>/dev/null || printf '{}'
+}
+
+# Highest check-run id named MERGE_MR_FULL_RUN_CHECK on <sha>, or 0 when that
+# check has never run there.
+#
+# This watermark is the whole mechanism. A suite that went green when the PR
+# opened is still attached to the same head SHA when no new commit has landed,
+# so a wait keyed on the SHA alone matches that stale run instantly and waits
+# for nothing — the exact failure this feature exists to prevent (issue #878).
+# Check-run ids are monotonically increasing, so "id greater than the
+# pre-label maximum" is precisely "created after the label event".
+#
+# Returns 1 without printing when the payload is unreadable (auth failure,
+# rate limit, malformed JSON). That must NOT degrade to 0: a zero watermark
+# makes every run already on the head count as "new", which is precisely the
+# stale-green acceptance this function exists to prevent. The caller refuses
+# the merge instead.
+_latest_full_run_id() {
+  local sha="$1" id
+  id=$(_check_runs_json "$sha" \
+    | jq -r --arg name "$MERGE_MR_FULL_RUN_CHECK" '
+        if (.check_runs | type) != "array" then "unreadable"
+        else ([.check_runs[] | select(.name == $name) | .id] | max // 0)
+        end' 2>/dev/null) || id="unreadable"
+  case "$id" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s' "$id" ;;
+  esac
+}
+
+# State of the newest MERGE_MR_FULL_RUN_CHECK run on <sha> whose id exceeds
+# <baseline>, as "<id> <status> <conclusion>". Empty when no post-label run
+# exists yet.
+_post_label_run_state() {
+  local sha="$1" baseline="$2"
+  _check_runs_json "$sha" \
+    | jq -r --arg name "$MERGE_MR_FULL_RUN_CHECK" \
+      --argjson baseline "$baseline" '
+        [.check_runs[]? | select(.name == $name and .id > $baseline)]
+        | sort_by(.id) | last
+        | if . == null then ""
+          else "\(.id) \(.status) \(.conclusion // "")" end
+      ' 2>/dev/null || printf ''
+}
+
+# Adds MERGE_MR_FULL_RUN_LABEL to the PR and waits for the check run it
+# triggers to succeed on the same head SHA (issue #878).
+#
+# No-op returning success when the variable is unset — that path makes no API
+# call at all, so an unconfigured consumer behaves exactly as before.
+wait_for_full_run() {
+  local pr="$1"
+
+  [ -n "$MERGE_MR_FULL_RUN_LABEL" ] || return 0
+
+  local interval="${MERGE_MR_FULL_RUN_POLL_INTERVAL:-30}"
+  local max="${MERGE_MR_FULL_RUN_POLL_MAX:-2700}"
+  local elapsed=0
+
+  local sha
+  sha=$(_pr_head_sha "$pr")
+  if [ -z "$sha" ]; then
+    echo "Cannot read the head SHA of PR #$pr; refusing to merge without the" \
+      "full run \"$MERGE_MR_FULL_RUN_LABEL\" was meant to request" >&2
+    return 1
+  fi
+
+  local baseline
+  if ! baseline=$(_latest_full_run_id "$sha"); then
+    echo "Cannot read the check runs on $sha; refusing to merge without a" \
+      "verifiable post-label $MERGE_MR_FULL_RUN_CHECK run" >&2
+    return 1
+  fi
+
+  echo "Requesting a full run on PR #$pr head $sha: adding label" \
+    "\"$MERGE_MR_FULL_RUN_LABEL\" (pre-label $MERGE_MR_FULL_RUN_CHECK run" \
+    "id: $baseline)" >&2
+
+  if ! gh pr edit "$pr" --add-label "$MERGE_MR_FULL_RUN_LABEL" \
+    >/dev/null 2>&1; then
+    echo "Could not add label \"$MERGE_MR_FULL_RUN_LABEL\" to PR #$pr;" \
+      "refusing to merge without the full run it triggers" >&2
+    return 1
+  fi
+
+  while [ "$elapsed" -lt "$max" ]; do
+    local head_now
+    head_now=$(_pr_head_sha "$pr")
+    if [ -n "$head_now" ] && [ "$head_now" != "$sha" ]; then
+      echo "PR #$pr head moved from $sha to $head_now while waiting;" \
+        "refusing to merge a head the requested run did not cover" >&2
+      return 1
+    fi
+
+    local state run_id run_status run_conclusion
+    state=$(_post_label_run_state "$sha" "$baseline")
+    if [ -n "$state" ]; then
+      run_id=$(printf '%s' "$state" | awk '{print $1}')
+      run_status=$(printf '%s' "$state" | awk '{print $2}')
+      run_conclusion=$(printf '%s' "$state" | awk '{print $3}')
+
+      if [ "$run_status" = "completed" ]; then
+        case "$run_conclusion" in
+          # Not a verdict. Adding the label fires `pull_request: labeled`,
+          # which starts a second run; a PR-keyed concurrency group with
+          # cancel-in-progress then cancels the run that was already in
+          # flight for the same head. That cancelled run's check is created
+          # AFTER the label, so it satisfies "newer than baseline" and was
+          # read as the full run's result — declining a green PR on the
+          # first real use of this flow (issue #888). A cancelled or skipped
+          # run verified nothing, so keep waiting for one that did.
+          cancelled|skipped)
+            echo "Full run $MERGE_MR_FULL_RUN_CHECK (run $run_id) was" \
+              "$run_conclusion on $sha — not a verdict; still waiting" \
+              "(${elapsed}s elapsed)..." >&2
+            ;;
+          # neutral is retained as a pass, unchanged from before #888: it
+          # means the check ran and declined to judge, which is not the same
+          # as never having run.
+          success|neutral)
+            echo "Full run $MERGE_MR_FULL_RUN_CHECK (run $run_id) concluded" \
+              "$run_conclusion on $sha; proceeding" >&2
+            return 0
+            ;;
+          *)
+            echo "Full run $MERGE_MR_FULL_RUN_CHECK (run $run_id) concluded" \
+              "${run_conclusion:-unknown} on $sha; refusing to merge" >&2
+            return 1
+            ;;
+        esac
+      else
+
+        echo "Waiting for $MERGE_MR_FULL_RUN_CHECK run $run_id on $sha" \
+          "(status: $run_status, ${elapsed}s elapsed)..." >&2
+      fi
+    else
+      echo "Waiting for a $MERGE_MR_FULL_RUN_CHECK run newer than id" \
+        "$baseline on $sha (${elapsed}s elapsed)..." >&2
+    fi
+
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+  done
+
+  echo "Timed out waiting for a post-label $MERGE_MR_FULL_RUN_CHECK run on" \
+    "$sha" >&2
+  return 1
+}
+
+# _report_mergeable_timeout <pr> <last_state> <elapsed> <max>
+#
+# The old message said "Timed out waiting for GitHub to compute mergeability"
+# for every exit, which misdescribed the common case: GitHub computes that
+# field in seconds, and what the loop was really waiting on was a CI run.
+# Reporting the last observed state makes the difference diagnosable from the
+# one log line an operator sees (issue #931).
+_report_mergeable_timeout() {
+  local pr="$1" last_state="$2" elapsed="$3" max="$4"
+
+  case "$last_state" in
+    UNSTABLE|BLOCKED|PENDING)
+      echo "Timed out after ${elapsed}s (limit ${max}s): PR #$pr checks were" \
+        "still pending (last state: $last_state). Raise MERGE_MR_POLL_MAX if" \
+        "this CI run legitimately takes longer." >&2
+      ;;
+    UNKNOWN|"")
+      echo "Timed out after ${elapsed}s (limit ${max}s): GitHub never" \
+        "reported a mergeability state for PR #$pr." >&2
+      ;;
+    *)
+      echo "Timed out after ${elapsed}s (limit ${max}s): PR #$pr never became" \
+        "mergeable (last state: $last_state)." >&2
+      ;;
+  esac
 }
 
 wait_for_mergeable() {
   local pr="$1"
-  local interval="${MERGE_MR_POLL_INTERVAL:-10}"
-  local max="${MERGE_MR_POLL_MAX:-90}"
+  # 90s was far too short for what this loop actually waits on. A PR is
+  # UNSTABLE for the whole CI run — ~9 minutes on this repo — so any merge
+  # attempt that arrived before CI finished expired here and was reported as
+  # a merge FAILURE on a PR that was merely unfinished. Issue #926's PR #930
+  # went green eleven minutes after this gave up (issue #931).
+  #
+  # 2700 matches MERGE_MR_FULL_RUN_POLL_MAX above, which is the existing
+  # precedent in this file for how long waiting on CI costs. The long budget
+  # is only reachable while checks are legitimately pending: a check that has
+  # concluded in failure returns 1 immediately via
+  # _has_concluded_check_failure, and DIRTY returns 1 at once, so a genuinely
+  # doomed PR still fails fast.
+  local interval="${MERGE_MR_POLL_INTERVAL:-15}"
+  local max="${MERGE_MR_POLL_MAX:-2700}"
   local elapsed=0
+  # Remembered so the timeout message can say what it was waiting FOR —
+  # pending checks read very differently from an uncomputed field.
+  local last_state="UNKNOWN"
 
   if [ "$MERGE_MR_MERGE_STATE_GATE" != "1" ]; then
     while [ "$elapsed" -lt "$max" ]; do
-      local state
-      state=$(gh pr view "$pr" --json mergeable --jq '.mergeable' 2>/dev/null || echo "UNKNOWN")
+      # The concluded-check-failure test is NOT part of the mergeStateStatus
+      # gate that this branch opts out of (issue #853). MERGE_MR_MERGE_STATE_GATE
+      # selects the coarser `mergeable` poll; it must not also disable the last
+      # thing standing between a failing check and the base branch. On a repo
+      # that cannot enable branch protection this refusal is the only gate, and
+      # `mergeable` reports MERGEABLE for a PR whose checks have failed, so
+      # without this the legacy path merges it.
+      local legacy_json state rollup
+      legacy_json=$(gh pr view "$pr" --json mergeable,statusCheckRollup 2>/dev/null || echo "{}")
+      state=$(jq -r '.mergeable // "UNKNOWN"' <<<"$legacy_json" 2>/dev/null || echo "UNKNOWN")
+      rollup=$(jq -c '.statusCheckRollup // []' <<<"$legacy_json" 2>/dev/null || echo "[]")
+
+      if _has_concluded_check_failure "$rollup"; then
+        echo "PR #$pr has check \"$(_first_failed_check "$rollup")\" that concluded in failure (mergeable: $state); refusing to wait" >&2
+        return 1
+      fi
 
       case "$state" in
         MERGEABLE)
@@ -63,6 +413,7 @@ wait_for_mergeable() {
           return 1
           ;;
         *)
+          last_state="$state"
           echo "Waiting for PR #$pr to become mergeable (state: $state, ${elapsed}s elapsed)..." >&2
           sleep "$interval"
           elapsed=$((elapsed + interval))
@@ -70,7 +421,7 @@ wait_for_mergeable() {
       esac
     done
 
-    echo "Timed out waiting for GitHub to compute mergeability" >&2
+    _report_mergeable_timeout "$pr" "$last_state" "$elapsed" "$max"
     return 1
   fi
 
@@ -94,20 +445,34 @@ wait_for_mergeable() {
         rollup=$(jq -c '.statusCheckRollup // []' <<<"$json" 2>/dev/null || echo "[]")
 
         if _has_concluded_check_failure "$rollup"; then
-          local failed_check
-          failed_check=$(jq -r '
-            [.[]? |
-              if .__typename == "CheckRun" then
-                (select(.status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "ERROR" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "ACTION_REQUIRED" or .conclusion == "STARTUP_FAILURE")) | .name)
-              else
-                (select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED" or .state == "STARTUP_FAILURE") | .context)
-              end
-            ] | first // "unknown check"
-          ' <<<"$rollup" 2>/dev/null || echo "unknown check")
-          echo "PR #$pr has check \"$failed_check\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
+          echo "PR #$pr has check \"$(_first_failed_check "$rollup")\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
           return 1
         fi
 
+        # UNSTABLE means "a check failed"; if every failed check is on the
+        # non-blocking list and nothing is still running, that is the green
+        # state the consumer asked for (issue #861). While anything is pending
+        # keep waiting — a blocking check may still fail.
+        if { [ "$merge_state" = "UNSTABLE" ] || [ "$merge_state" = "BLOCKED" ]; } \
+          && ! _has_pending_check "$rollup"; then
+          local ignored pending_ignored remaining
+          ignored=$(_ignored_failed_checks "$rollup")
+          pending_ignored=$(_pending_ignored_checks "$rollup")
+          remaining="$ignored"
+          if [ -n "$pending_ignored" ]; then
+            if [ -n "$remaining" ]; then
+              remaining="$remaining, $pending_ignored (still running)"
+            else
+              remaining="$pending_ignored (still running)"
+            fi
+          fi
+          if [ -n "$remaining" ]; then
+            echo "PR #$pr is $merge_state only because of non-blocking check(s) [$remaining] (MERGE_MR_NON_BLOCKING_CHECKS); proceeding" >&2
+            return 0
+          fi
+        fi
+
+        last_state="$merge_state"
         echo "Waiting for PR #$pr to become mergeable (mergeStateStatus: $merge_state, ${elapsed}s elapsed)..." >&2
         sleep "$interval"
         elapsed=$((elapsed + interval))
@@ -115,17 +480,64 @@ wait_for_mergeable() {
     esac
   done
 
-  echo "Timed out waiting for GitHub to compute mergeability" >&2
+  _report_mergeable_timeout "$pr" "$last_state" "$elapsed" "$max"
+  return 1
+}
+
+# Reports whether the PR has already reached a terminal state, so the caller can
+# skip the mergeability poll entirely.
+#
+# A MERGED or CLOSED PR reports `mergeStateStatus: UNKNOWN` forever. Without
+# this, wait_for_mergeable() polls it to MERGE_MR_POLL_MAX and reports a
+# decline — the batch then counts a *failure* for a PR that actually merged and
+# feeds the circuit breaker (issue #876: the inner orchestrator merged PR #6032,
+# the batch re-merged it, waited 1,790s on UNKNOWN and recorded the issue failed).
+#
+# Returns:
+#   0  already MERGED — the caller is done, nothing to merge
+#   2  CLOSED without a merge — a refusal, not a transient state
+#   1  still open (or state unreadable) — proceed to the mergeability wait
+_pr_terminal_state() {
+  local pr="$1" state
+  state=$(gh pr view "$pr" --json state --jq '.state' 2>/dev/null) || state=""
+  case "$state" in
+    MERGED)
+      echo "PR #$pr is already MERGED — nothing to do" >&2
+      return 0
+      ;;
+    CLOSED)
+      echo "PR #$pr is CLOSED without having been merged — refusing to merge" >&2
+      return 2
+      ;;
+  esac
   return 1
 }
 
 case "$GIT_HOST" in
   github)
+    # Check the terminal states before polling: a merged PR is success, a
+    # closed one is a refusal, and neither ever leaves UNKNOWN (issue #876).
+    # `set -e` is active: a bare call would abort the script on the function's
+    # own "still open, proceed" return of 1. Capture the status instead.
+    _terminal_rc=0
+    _pr_terminal_state "$MR" || _terminal_rc=$?
+    case "$_terminal_rc" in
+      0) exit 0 ;;
+      2) exit 1 ;;
+    esac
+    # Opt-in: request one full CI run on this head and wait for it before the
+    # mergeability poll. Inert unless MERGE_MR_FULL_RUN_LABEL names a label.
+    wait_for_full_run "$MR" || exit 1
     wait_for_mergeable "$MR" || exit 1
     case "$MERGE_STYLE" in
       squash) gh pr merge "$MR" --squash --delete-branch ;;
       merge) gh pr merge "$MR" --merge --delete-branch ;;
       rebase) gh pr merge "$MR" --rebase --delete-branch ;;
+      *)
+        echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised" \
+            "merge style. Accepted values: squash, merge, rebase." >&2
+        exit 1
+        ;;
     esac
     ;;
   gitlab)
@@ -133,6 +545,11 @@ case "$GIT_HOST" in
       squash) glab mr merge "$MR" --squash --remove-source-branch --yes ;;
       merge) glab mr merge "$MR" --remove-source-branch --yes ;;
       rebase) glab mr merge "$MR" --rebase --remove-source-branch --yes ;;
+      *)
+        echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised" \
+            "merge style. Accepted values: squash, merge, rebase." >&2
+        exit 1
+        ;;
     esac
     ;;
 esac

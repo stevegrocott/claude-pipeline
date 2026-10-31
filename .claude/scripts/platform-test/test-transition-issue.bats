@@ -43,21 +43,21 @@ teardown() {
     export JIRA_DONE_TRANSITION="Done"
     run run_platform_script transition-issue.sh TEST-42
     [ "$status" -eq 0 ]
-    assert_mock_called_with "acli jira transition-issue --issue TEST-42 --transition Done"
+    assert_mock_called_with "acli jira workitem transition --key TEST-42 --status Done"
 }
 
 @test "transition-issue jira: accepts custom transition name" {
     export TRACKER="jira"
     run run_platform_script transition-issue.sh TEST-42 "In Review"
     [ "$status" -eq 0 ]
-    assert_mock_called_with "acli jira transition-issue --issue TEST-42 --transition In Review"
+    assert_mock_called_with "acli jira workitem transition --key TEST-42 --status In Review"
 }
 
 @test "transition-issue jira: uses In Progress transition" {
     export TRACKER="jira"
     run run_platform_script transition-issue.sh TEST-42 "In Progress"
     [ "$status" -eq 0 ]
-    assert_mock_called_with "acli jira transition-issue --issue TEST-42 --transition In Progress"
+    assert_mock_called_with "acli jira workitem transition --key TEST-42 --status In Progress"
 }
 
 # =============================================================================

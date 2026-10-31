@@ -726,6 +726,21 @@ WRAPPER
     [ "$status" -eq 0 ]
 }
 
+@test "guard_commit_path_allowlist rejection message names EXTRA_COMMIT_PATHS as the remedy" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-835-remedy
+    echo "some,csv,data" > notes.csv
+    git add notes.csv
+    git commit -q -m "add notes.csv"
+
+    make_guard_wrapper "$TEST_TMP/guard_remedy_wrapper.sh"
+
+    run "$TEST_TMP/guard_remedy_wrapper.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"EXTRA_COMMIT_PATHS"* ]] || \
+        fail "Expected rejection message to name EXTRA_COMMIT_PATHS as the remedy. Got: $output"
+}
+
 # =============================================================================
 # E2E_CONTAINER_REBUILD gating + the repaired e2e_verify skip guard (issue #801)
 # =============================================================================
@@ -1113,3 +1128,175 @@ WRAPPER
         fail "Did not expect a warning when TEST_E2E_CMD is unset. Log: $(cat "$LOG_FILE")"
 }
 
+
+# =============================================================================
+# HARNESS CONFIG EXTRACTION + TIMEOUT SHIM (issue #859)
+#
+# source_orchestrator_functions() used to keep only readonly/MAX_*/declare -a
+# lines out of the orchestrator, so every other module-level config default
+# arrived EMPTY. `timeout "$TEST_LOOP_GIT_TIMEOUT" git diff ...` then became
+# `timeout "" git diff ...`, which GNU timeout rejects with exit 125 on Linux
+# while the perl fallback silently ran with no alarm on macOS.
+# =============================================================================
+
+@test "extractor carries TEST_LOOP_GIT_TIMEOUT into the harness" {
+    [ "$TEST_LOOP_GIT_TIMEOUT" = "30" ]
+}
+
+@test "extractor carries the other dropped config defaults" {
+    [ "$MERGE_GIT_TIMEOUT" = "60" ]
+    [ "$MERGE_COMMENT_TIMEOUT" = "60" ]
+    # 3000 since #931: this wrapper must stay above merge-mr.sh's own
+    # MERGE_MR_POLL_MAX (2700), or the outer timeout kills the script
+    # mid-wait. test-scripted-merge.bats asserts that ordering directly.
+    [ "$MERGE_MR_STEP_TIMEOUT" = "3000" ]
+    [ "$VALIDATE_PLAN_GIT_TIMEOUT" = "30" ]
+    [ "$IMPLEMENT_GIT_TIMEOUT" = "30" ]
+    [ "$TEST_ITER_WALL_TIME_SLACK" = "120" ]
+    [ "$PR_REVIEW_WALL_TIME_SLACK" = "120" ]
+    [ "$TEST_LOOP_PLANNED_ITERATIONS" = "3" ]
+    [ "$RUN_BUDGET_SOFT_PCT" = "80" ]
+    [ "$STATUS_LOCK_TIMEOUT" = "10" ]
+}
+
+@test "extractor does not capture SCRIPT_PATH (default contains \$0)" {
+    local extract="$TEST_TMP/orchestrator_functions.bash"
+    [ -f "$extract" ]
+    refute grep -q '^SCRIPT_PATH=' "$extract"
+}
+
+@test "extractor still captures the multi-line SCRIPT_DIR assignment" {
+    local extract="$TEST_TMP/orchestrator_functions.bash"
+    grep -q '^SCRIPT_DIR="\${_IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR:-\$($' \
+        "$extract" || fail "multi-line SCRIPT_DIR opener missing from extract"
+    grep -q '^)}"$' "$extract" \
+        || fail "multi-line SCRIPT_DIR closer missing from extract"
+    # ...and the resume tests depend on it resolving to TEST_TMP.
+    [ "$SCRIPT_DIR" = "$TEST_TMP" ]
+}
+
+# Issue #922: the pipeline's full-suite gate runs bats inside a live
+# orchestrator, which exports these. A leaked SCRIPT_DIR repointed extracted
+# functions at the plugin cache (8 of the 14 gate-only failures); a leaked
+# SCRIPT_PATH plus guard made usage() name the ancestor's script (the 9th).
+@test "setup_test_env scrubs inherited orchestrator path vars (#922)" {
+    local outer_tmp="$TEST_TMP" var
+    local -a leaked=(
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_PATH
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY
+        _BATCH_ORCHESTRATOR_SCRIPT_DIR
+        _BATCH_ORCHESTRATOR_REEXECED
+        _BATCH_ORCHESTRATOR_REEXEC_COPY
+    )
+    for var in "${leaked[@]}"; do
+        export "$var=/stale/plugin-cache/$var"
+    done
+
+    setup_test_env
+    rm -rf "$TEST_TMP"
+    TEST_TMP="$outer_tmp"
+
+    for var in "${leaked[@]}"; do
+        [[ -z "${!var+set}" ]] || fail "$var survived setup_test_env"
+    done
+}
+
+@test "_timeout_perl_fallback rejects an empty duration with exit 125" {
+    run _timeout_perl_fallback "" true
+    [ "$status" -eq 125 ]
+    [[ "$output" == *"invalid time interval"* ]]
+}
+
+@test "_timeout_perl_fallback rejects a non-numeric duration with exit 125" {
+    run _timeout_perl_fallback abc true
+    [ "$status" -eq 125 ]
+    [[ "$output" == *"invalid time interval"* ]]
+}
+
+@test "_timeout_perl_fallback still passes a valid duration through" {
+    run _timeout_perl_fallback 5 bash -c "exit 42"
+    [ "$status" -eq 42 ]
+}
+
+@test "_timeout_perl_fallback still exits 124 when the command overruns" {
+    run _timeout_perl_fallback 1 sleep 5
+    [ "$status" -eq 124 ]
+}
+
+# =============================================================================
+# guard_commit_path_allowlist() — intake/guard agreement (issue #928)
+# =============================================================================
+#
+# assert_issue_valid accepts a task's declared paths at intake; this guard
+# decides whether the resulting commit may land. When they disagree, an issue
+# is filed, validated, scheduled and worked, and then its commit is rejected —
+# the task is recorded `failed` despite reporting success, and because a failed
+# task's worktree commit is never merged back, the branch-evidence
+# reconciliation finds no diff and leaves it failed. Issue #909 lost two of
+# three tasks exactly this way.
+
+_guard_wrapper() {
+    local wrapper="$TEST_TMP/guard_928_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+unset EXTRA_COMMIT_PATHS
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+    printf '%s' "$wrapper"
+}
+
+@test "guard_commit_path_allowlist allows a .bash test helper (issue #928)" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-928-bash
+    mkdir -p .claude/scripts/implement-issue-test/helpers
+    printf 'true\n' > .claude/scripts/implement-issue-test/helpers/test-helper.bash
+    git add .claude/scripts/implement-issue-test/helpers/test-helper.bash
+    git commit -q -m "edit the bats helper library"
+
+    run "$(_guard_wrapper)"
+    [ "$status" -eq 0 ] || \
+        fail "a .bash shell source must be committable like .sh. Got: $output"
+}
+
+@test "guard_commit_path_allowlist still denies .github/workflows (issue #928)" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-928-workflows
+    mkdir -p .github/workflows
+    printf 'name: x\n' > .github/workflows/bats-suite.yml
+    git add .github/workflows/bats-suite.yml
+    git commit -q -m "edit CI workflow"
+
+    run "$(_guard_wrapper)"
+    # Deliberate and documented as non-overridable: a pipeline that can
+    # rewrite the CI gating it is a hazard. This pins that it stays denied,
+    # so the #928 .bash fix cannot be widened into the workflows arm.
+    [ "$status" -eq 1 ] || \
+        fail "workflows must stay denied. Got status=$status output=$output"
+    [[ "$output" == *".github/workflows/bats-suite.yml"* ]] || \
+        fail "the denial must name the offending path. Got: $output"
+}
+
+@test "guard_commit_path_allowlist agrees with assert_issue_valid on shell sources (issue #928)" {
+    # Every extension the guard treats as a shell source must be one a task
+    # can legitimately declare. This is the cross-gate check whose absence
+    # let .bash diverge: each gate had tests, nothing compared them.
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-928-agree
+
+    local ext
+    for ext in sh bash bats; do
+        printf 'true\n' > "sample.${ext}"
+        git add "sample.${ext}"
+        git commit -q -m "add sample.${ext}"
+
+        run "$(_guard_wrapper)"
+        [ "$status" -eq 0 ] || \
+            fail "guard rejected .${ext}, which intake accepts. Got: $output"
+    done
+}

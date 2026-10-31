@@ -298,6 +298,34 @@ _write_status_with_timestamps() {
     [ "$p" = "0" ]
 }
 
+# reconcile_failed_tasks_with_branch_evidence() (issue #810 task 1) persists a
+# run-wide .reconciled_count tally in $STATUS_FILE. These cover task 3:
+# surfacing that tally in metrics.json so downstream consumers (not just the
+# human-facing completion summary from task 2) can see it.
+@test "metrics.json iteration_summary contains reconciled_count" {
+    _write_status_with_timestamps
+    status_json_write '.reconciled_count = 2'
+    export_metrics
+
+    local v
+    v=$(jq -r '.iteration_summary.reconciled_count' "$LOG_BASE/metrics.json")
+    [ "$v" = "2" ]
+}
+
+@test "metrics.json reconciled_count defaults to zero when absent from status.json" {
+    # init_status() seeds reconciled_count, but a status.json from before
+    # issue #810 task 1 (or any hand-crafted fixture) may lack the key
+    # entirely — the // 0 fallback must cover it, not emit null.
+    _write_status_with_timestamps
+    jq 'del(.reconciled_count)' "$STATUS_FILE" > "${STATUS_FILE}.tmp" &&
+        mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    export_metrics
+
+    local v
+    v=$(jq -r '.iteration_summary.reconciled_count' "$LOG_BASE/metrics.json")
+    [ "$v" = "0" ]
+}
+
 # =============================================================================
 # STARTED_AT / COMPLETED_AT ROLLUP (AC2)
 # =============================================================================

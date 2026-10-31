@@ -139,6 +139,16 @@ _stage_result_success_no_output_status() {
 		'"error_kind":null,"elapsed_ms":100}'
 }
 
+# A failed stage_result for max_turns_exhausted at sonnet with NO complexity
+# field at all — the pr-review shape (issue #900): pr-review passes no
+# complexity argument, so the S-complexity gate must not be the only path to
+# the uncapped same-model retry.
+_stage_result_max_turns_sonnet_no_complexity() {
+	printf '%s' \
+		'{"status":"failure","error_kind":"max_turns_exhausted",' \
+		'"model":"sonnet","raw":"","denials":[],"elapsed_ms":100}'
+}
+
 # ===========================================================================
 # (1) ESCALATION_POLICY_BACKEND=bash bypasses the skill entirely
 # ===========================================================================
@@ -608,4 +618,70 @@ _load_deploy_verify_fn() {
 
 	run --separate-stderr should_run_deploy_verify "99"
 	[ "$status" -eq 1 ]
+}
+
+# ===========================================================================
+# (issue-900 AC3) empty-complexity sonnet turn-exhaustion → retry_same uncapped
+# pr-review passes no complexity argument, so the #637 uncapped-retry gate
+# must fire for ANY non-ceiling model on max_turns_exhausted, not only when
+# complexity=="S".  Currently gated on "$complexity" == "S", so pr-review's
+# empty complexity falls through to a plain escalate instead.
+# ===========================================================================
+
+@test "(15) empty-complexity sonnet max_turns_exhausted -> retry_same uncapped (bash backend)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	local stage_result history
+	stage_result=$(_stage_result_max_turns_sonnet_no_complexity)
+	history=$(_history_empty)
+
+	ESCALATION_POLICY_BACKEND=bash run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$stage_result" "$history"
+
+	[ "$status" -eq 0 ]
+
+	local action uncapped
+	action=$(printf '%s' "$output" | jq -r '.action')
+	uncapped=$(printf '%s' "$output" | jq -r '.uncapped')
+	if [[ "$action" != "retry_same" ]]; then
+		printf 'FAIL: expected action=retry_same, got: %s\n' "$action" >&2
+		printf 'Stdout: %s\n' "$output" >&2
+		return 1
+	fi
+	if [[ "$uncapped" != "true" ]]; then
+		printf 'FAIL: expected uncapped=true, got: %s\n' "$uncapped" >&2
+		printf 'Stdout: %s\n' "$output" >&2
+		return 1
+	fi
+}
+
+@test "(16) empty-complexity sonnet max_turns_exhausted -> retry_same uncapped (compose backend)" {
+	[[ -x "$DECIDE_ACTION_SCRIPT" ]] \
+		|| fail "decide-action.sh not present or not executable"
+
+	local stage_result history
+	stage_result=$(_stage_result_max_turns_sonnet_no_complexity)
+	history=$(_history_empty)
+
+	# Default backends (bash under the hood for both decide-retry.sh and
+	# decide-model-fallback.sh) — no mock claude needed, matching test (5).
+	run --separate-stderr \
+		bash "$DECIDE_ACTION_SCRIPT" "$stage_result" "$history"
+
+	[ "$status" -eq 0 ]
+
+	local action uncapped
+	action=$(printf '%s' "$output" | jq -r '.action')
+	uncapped=$(printf '%s' "$output" | jq -r '.uncapped')
+	if [[ "$action" != "retry_same" ]]; then
+		printf 'FAIL: expected action=retry_same, got: %s\n' "$action" >&2
+		printf 'Stdout: %s\n' "$output" >&2
+		return 1
+	fi
+	if [[ "$uncapped" != "true" ]]; then
+		printf 'FAIL: expected uncapped=true, got: %s\n' "$uncapped" >&2
+		printf 'Stdout: %s\n' "$output" >&2
+		return 1
+	fi
 }

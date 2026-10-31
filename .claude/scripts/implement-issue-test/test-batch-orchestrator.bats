@@ -491,6 +491,225 @@ _simulate_state_routing() {
 	[[ "$body" == *'merge_blocked'* ]]
 }
 
+# =============================================================================
+# ISSUE #781: batch fingerprint on init_status resume preservation
+# =============================================================================
+#
+# init_status()'s resume path preserves completed/already_implemented status
+# for any matching issue number in a prior status.json, with no check that
+# the prior file came from the same batch launch. Running issue #42 in batch
+# A (completed), then again in batch B because it was reopened, silently
+# preserves "completed" and skips it. #781 scopes preservation to a batch
+# fingerprint (base branch + sorted issue set) written into status.json:
+# AC4 requires init_status to write the fingerprint, AC5 requires a mismatch
+# to contribute no preserved terminal state (every issue starts pending,
+# logged), and AC6 requires a matching fingerprint to keep today's resume
+# behaviour unchanged.
+#
+# init_status() doesn't compute or check a fingerprint yet, so these tests
+# are expected to fail (RED) until that scoping is added — the same
+# "source the real function" harness exercises the real code the moment it
+# exists.
+
+# Sources the real init_status() out of batch-orchestrator.sh so these tests
+# exercise production logic rather than a hand-copied re-implementation.
+source_init_status() {
+	local func_file="$TEST_TMP/init_status.bash"
+	_extract_function_body init_status "$BATCH_ORCHESTRATOR_SCRIPT" \
+		> "$func_file"
+	grep -q 'init_status' "$func_file" 2>/dev/null || return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+@test "functional: init_status writes a batch_fingerprint field to status.json (AC4, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2 3)
+	rm -f "$STATUS_FILE"
+
+	init_status
+
+	local fp
+	fp=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+	[[ -n "$fp" ]] || fail "init_status did not write a batch_fingerprint"
+}
+
+@test "functional: init_status batch_fingerprint changes when the issue set changes (AC4, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2 3)
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_a
+	fp_a=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	ISSUE_ARRAY=(1 2 4)
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_b
+	fp_b=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	[[ -n "$fp_a" && -n "$fp_b" ]] || fail "batch_fingerprint missing"
+	[[ "$fp_a" != "$fp_b" ]] \
+		|| fail "batch_fingerprint did not change with a different issue set"
+}
+
+@test "functional: init_status batch_fingerprint changes when the base branch changes (AC4, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	ISSUE_ARRAY=(1 2 3)
+	BRANCH="main"
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_a
+	fp_a=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	BRANCH="develop"
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_b
+	fp_b=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	[[ -n "$fp_a" && -n "$fp_b" ]] || fail "batch_fingerprint missing"
+	[[ "$fp_a" != "$fp_b" ]] \
+		|| fail "batch_fingerprint did not change with a different base branch"
+}
+
+@test "functional: init_status batch_fingerprint is stable regardless of issue array order (AC4, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(3 1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_a
+	fp_a=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	ISSUE_ARRAY=(1 2 3)
+	rm -f "$STATUS_FILE"
+	init_status
+	local fp_b
+	fp_b=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+
+	[[ -n "$fp_a" && -n "$fp_b" ]] || fail "batch_fingerprint missing"
+	[[ "$fp_a" == "$fp_b" ]] \
+		|| fail "batch_fingerprint depends on issue array order (should be sorted)"
+}
+
+@test "functional: init_status preserves completed status when the batch_fingerprint matches the prior status.json (AC6, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+
+	jq '(.issues[] | select(.number == "1")).status = "completed"' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	# Re-launch with the SAME base branch and issue set.
+	init_status
+
+	local status
+	status=$(jq -r '.issues[] | select(.number == "1") | .status' \
+		"$STATUS_FILE")
+	[[ "$status" == "completed" ]] \
+		|| fail "matching-fingerprint resume did not preserve completed status (got: $status)"
+}
+
+@test "functional: init_status resets a completed issue to pending when the prior status.json fingerprint does not match (AC5, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+
+	jq '(.issues[] | select(.number == "1")).status = "completed"' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	# Re-launch as a DIFFERENT batch: same branch, different issue set.
+	ISSUE_ARRAY=(1 3)
+	init_status
+
+	local status
+	status=$(jq -r '.issues[] | select(.number == "1") | .status' \
+		"$STATUS_FILE")
+	[[ "$status" == "pending" ]] \
+		|| fail "mismatched-fingerprint resume preserved completed status (got: $status)"
+}
+
+@test "functional: init_status logs a fingerprint mismatch instead of silently resetting resume state (AC5, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+
+	jq '(.issues[] | select(.number == "1")).status = "completed"' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	: > "$TEST_TMP/log.out"
+	ISSUE_ARRAY=(1 3)
+	init_status
+
+	grep -qi 'fingerprint' "$TEST_TMP/log.out" \
+		|| fail "log did not mention the fingerprint mismatch"
+}
+
+@test "functional: init_status treats a pre-#781 status.json with no batch_fingerprint as a mismatch (AC5, #781)" {
+	source_init_status || skip "init_status() not yet present"
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+
+	# A status.json in the shape init_status produced before #781 — no
+	# batch_fingerprint field at all.
+	jq -n '{
+		state: "running",
+		issues: [
+			{number: "1", status: "completed"},
+			{number: "2", status: "pending"}
+		]
+	}' > "$STATUS_FILE"
+
+	init_status
+
+	local status
+	status=$(jq -r '.issues[] | select(.number == "1") | .status' \
+		"$STATUS_FILE")
+	[[ "$status" == "pending" ]] \
+		|| fail "a pre-#781 status.json with no fingerprint was treated as a match (got: $status)"
+}
+
 # --- Functional simulation ---
 #
 # Build a mock status.json with mixed issue statuses and verify that the
@@ -861,10 +1080,10 @@ _simulate_cost_rollup() {
 @test "up-front skip gate: gh failures are non-fatal (|| true pattern)" {
 	# Network errors from gh must not abort the batch; the gate must use
 	# || true (or equivalent) to suppress non-zero exit codes.
-	local block
-	block=$(awk '/Up-front skip gate/,/fi.*#.*end.*GIT_HOST|^\s+fi$/' \
-		"$BATCH_ORCHESTRATOR_SCRIPT" | head -40)
-	[[ "$block" == *'|| true'* ]]
+	local body
+	body=$(_extract_function_body check_issue_resolved_upstream \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'|| true'* ]]
 }
 
 @test "up-front skip gate: appears before process_issue call in the loop" {
@@ -1015,12 +1234,17 @@ _extract_timeout_failure_block() {
 # git mocked to capture calls instead of touching the real filesystem or
 # git/gh. Leaves the block's return code in _failure_block_rc (0 or 1).
 # PROC_EXIT_IN (default 0) seeds $proc_exit, needed for the timeout site's
-# "(( proc_exit == 124 ))" guard.
+# "(( proc_exit == 124 ))" guard. PROC_STATUS_IN (default "error") seeds
+# $proc_status so a case-arm block other than the error arm can be selected,
+# and PR_NUMBER_IN (default "") seeds $pr_number for the arms that report it.
 _run_failure_site_block() {
 	local block_file="$1"
 
 	log()                { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
 	log_error()          { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	# Mirrors production's WARN: prefix so the #817 accept-on-unknown
+	# warnings are assertable from the captured log.
+	log_warn()           { printf 'WARN: %s\n' "$*" >> "$TEST_TMP/log.out"; }
 	update_issue_field() { printf '%s\n' "$*" >> "$TEST_TMP/update.out"; }
 	update_progress()    { printf 'called\n' >> "$TEST_TMP/progress.out"; }
 	# shellcheck disable=SC2317
@@ -1038,12 +1262,14 @@ _run_failure_site_block() {
 	source_check_issue_pr_merged \
 		|| { _failure_block_rc=1; return 1; }
 
-	issue_num=695
+	# ISSUE_NUM_IN lets a caller replay a specific issue number (#817
+	# AC5) so status.json's per-issue started_at can be matched.
+	issue_num="${ISSUE_NUM_IN:-695}"
 	impl_status="error"
 	impl_error="pr stage aborted: already exists"
-	proc_status="error"
+	proc_status="${PROC_STATUS_IN:-error}"
 	proc_error="status was error"
-	pr_number=""
+	pr_number="${PR_NUMBER_IN:-}"
 	BRANCH="main"
 	ISSUE_TIMEOUT=3600
 	proc_exit="${PROC_EXIT_IN:-0}"
@@ -1093,7 +1319,7 @@ GHEOF
 
 	grep -qw 'completed' "$TEST_TMP/update.out"
 	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 0 ]]
 }
 
@@ -1136,7 +1362,7 @@ GHEOF
 
 	grep -qw 'completed' "$TEST_TMP/update.out"
 	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 0 ]]
 }
 
@@ -1162,7 +1388,7 @@ GHEOF
 
 	grep -qw 'completed' "$TEST_TMP/update.out"
 	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 0 ]]
 }
 
@@ -1188,7 +1414,7 @@ GHEOF
 
 	grep -qw 'completed' "$TEST_TMP/update.out"
 	grep -q '735' "$TEST_TMP/update.out"
-	! grep -qw 'failed' "$TEST_TMP/update.out"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
 	[[ "$_failure_block_rc" -eq 0 ]]
 }
 
@@ -1234,6 +1460,198 @@ GHEOF
 }
 
 # =============================================================================
+# ISSUE #847: changes_requested must not credit completion without a merge
+# =============================================================================
+#
+# The process-pr result handler's changes_requested arm recorded `completed`
+# unconditionally, reasoning that reaching the arm proved the
+# re-implementation cycle had finished. It does — but a finished cycle is not
+# a merged PR. Observed live: process-pr applied a review fix and pushed it,
+# the push restarted CI, and the batch reported
+# state=completed/completed:1/failed:0 over a PR that was still OPEN and an
+# issue that was still open. A human merged it by hand 25 minutes later.
+#
+# The fix reuses check_issue_pr_merged() — the same reconciliation helper the
+# error arm immediately below already calls — rather than a second
+# implementation, so both arms agree on what "the work landed" means. When
+# the helper reports no merge the arm records an explicitly unresolved status
+# (never `completed`) and returns 1, so the batch's final state is not
+# `completed` either.
+#
+# Negative assertions here are written as `if grep ...; then fail ...; fi`
+# rather than `! grep ...`: bash exempts a `!`-negated pipeline from errexit,
+# so a bare `! grep` only fails the test when it happens to be the last
+# command in the body.
+#
+# The arm is extracted by its stable case pattern and wrapped in its own
+# `case`, mirroring _extract_process_pr_failure_block — a bare case arm is
+# not sourceable bash on its own.
+
+# Extracts one arm of the process-pr `case "$proc_status"` statement, wrapped
+# in a standalone case. Same not-found contract as _extract_impl_failure_block.
+# Usage: _extract_process_pr_case_arm <arm-pattern> <out-basename>
+_extract_process_pr_case_arm() {
+	local arm="$1"
+	local block_file="$TEST_TMP/process_pr_$2_block.bash"
+	{
+		printf 'case "$proc_status" in\n'
+		awk -v arm="$arm" \
+			'$0 ~ "^[[:space:]]+"arm"\\)$" { capture = 1 }
+			 capture { print }
+			 capture && $0 ~ "^[[:space:]]+;;$" { capture = 0 }' \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		printf 'esac\n'
+	} > "$block_file"
+	grep -q 'update_issue_field' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+_extract_process_pr_changes_requested_block() {
+	_extract_process_pr_case_arm changes_requested changes_requested
+}
+
+@test "functional: changes_requested records completed when the PR did merge" {
+	# AC5(a): reconciliation confirms the merge, so completion is credited —
+	# and with the merged PR number, matching the other reconciling sites.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	_stub_gh_pr_merged
+
+	PROC_STATUS_IN=changes_requested PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+
+	if grep -qx '695 status failed' "$TEST_TMP/update.out"; then
+		fail "a merged PR must not be recorded as failed"
+	fi
+	grep -qx '695 status completed' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: changes_requested does not record completed when the PR is still open" {
+	# AC5(b) / AC2: the observed bug. gh reports an OPEN issue and no merged
+	# PR, so nothing landed — the arm must not write `completed`, nor stamp
+	# a completed_at that would make the run look finished.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_STATUS_IN=changes_requested PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+
+	if grep -qx '695 status completed' "$TEST_TMP/update.out"; then
+		fail "unmerged PR was credited as completed"
+	fi
+	if grep -q 'completed_at' "$TEST_TMP/update.out"; then
+		fail "unmerged PR was stamped with completed_at"
+	fi
+}
+
+@test "functional: changes_requested records an unresolved status when the PR is still open" {
+	# AC2: not merely "not completed" — the issue must carry a status that
+	# surfaces as unresolved, so the run does not present as silently clean.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_STATUS_IN=changes_requested PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+
+	grep -qx '695 status failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]]
+}
+
+@test "functional: changes_requested records why the unmerged PR was not credited" {
+	# The recorded error must distinguish this from a process-pr crash:
+	# process-pr behaved correctly here, the PR simply had not merged.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	_stub_gh_pr_not_merged
+
+	PROC_STATUS_IN=changes_requested PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+
+	grep -q 'not merged' "$TEST_TMP/update.out"
+	grep -q '735' "$TEST_TMP/update.out"
+}
+
+@test "functional: changes_requested reuses check_issue_pr_merged, not a second implementation" {
+	# AC1: the arm must call the existing reconciliation helper. Asserted on
+	# the extracted source so a hand-rolled `gh pr list` inline in the arm
+	# fails this test even if it happened to produce the right verdict.
+	local block_file
+	block_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+
+	grep -q 'check_issue_pr_merged' "$block_file"
+	if grep -q 'gh pr list' "$block_file"; then
+		fail "arm re-implements reconciliation instead of reusing the helper"
+	fi
+}
+
+@test "AC3: a batch whose only changes_requested issue did not merge does not report completed" {
+	# Chains production code end to end: the real update_progress jq filter
+	# rolls up the status the arm wrote, and the real final-state block reads
+	# that rollup. Guards the gap the bug hid in — a per-issue status that is
+	# "not completed" but that the batch state never notices.
+	local progress_block final_block arm_file arm_status
+	arm_file=$(_extract_process_pr_changes_requested_block) \
+		|| skip "changes_requested arm not found (script changed)"
+	final_block=$(_extract_final_state_block) \
+		|| skip "Final state block not found (script changed)"
+	progress_block=$(_extract_function_body update_progress \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$progress_block" ]] || skip "update_progress not found"
+
+	# The status the arm writes for an unmerged PR is read back out of the
+	# arm itself rather than hardcoded, so this stays honest if the chosen
+	# value changes. The last `status` write in the arm is the unmerged path.
+	arm_status=$(awk -F'"' '/update_issue_field "\$issue_num" "status"/ {
+		print $6 }' "$arm_file" | tail -1)
+	[[ -n "$arm_status" ]]
+
+	jq -n --arg st "$arm_status" '{
+		state: "running",
+		progress: {total: 1, completed: 0, failed: 0, skipped: 0,
+			merge_blocked: 0, pending: 0, in_progress: 0},
+		issues: [{number: "695", status: $st}],
+		cost_summary: {}
+	}' > "$STATUS_FILE"
+
+	eval "$progress_block"
+	update_progress
+
+	local final_failed final_skipped
+	set_state() { printf '%s\n' "$*" >> "$TEST_TMP/final_state.out"; }
+	: > "$TEST_TMP/final_state.out"
+	exit_code=0
+	# shellcheck disable=SC1090
+	source "$final_block"
+
+	[[ -s "$TEST_TMP/final_state.out" ]]
+	if grep -qx 'completed' "$TEST_TMP/final_state.out"; then
+		fail "batch state is 'completed' though its only issue never merged"
+	fi
+}
+
+@test "AC4: the merged arm still credits completion without reconciliation" {
+	# Regression guard: the fix must not leak a merge check into the `merged`
+	# arm, which is already authoritative that the PR merged.
+	local block_file
+	block_file=$(_extract_process_pr_case_arm merged merged) \
+		|| skip "merged arm not found (script changed)"
+
+	grep -q 'status" "completed' "$block_file"
+	if grep -q 'check_issue_pr_merged' "$block_file"; then
+		fail "the merged arm must not re-verify a merge it already proved"
+	fi
+}
+
+# =============================================================================
 # ISSUE #690 (task 5): preflight skips must not affect the circuit breaker,
 # and the pre-existing up-front skip gate must be unaffected by the fix
 # =============================================================================
@@ -1272,9 +1690,9 @@ GHEOF
 	MAX_CONSECUTIVE_FAILURES=3 CF_IN=2 _run_process_issue_call_site \
 		"$block_file" 0 true "body failed structural validation"
 
-	! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+	refute grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
 	[[ ! -s "$TEST_TMP/state.out" ]]
-	! grep -q 'batch_paused' "$TEST_TMP/events.out"
+	refute grep -q 'batch_paused' "$TEST_TMP/events.out"
 	[[ "$exit_code" -eq 0 ]]
 }
 
@@ -1290,7 +1708,7 @@ GHEOF
 		CF_IN="$cf" _run_process_issue_call_site \
 			"$block_file" 0 true "body failed structural validation"
 		cf="$consecutive_failures"
-		! grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
+		refute grep -q 'CIRCUIT BREAKER' "$TEST_TMP/log.out"
 		[[ "$exit_code" -eq 0 ]]
 	done
 
@@ -1327,8 +1745,16 @@ GHEOF
 # implementation rather than a hand-copied block.
 source_check_issue_resolved_upstream() {
 	local func_file="$TEST_TMP/check_issue_resolved_upstream.bash"
-	_extract_function_body check_issue_resolved_upstream \
-		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	{
+		_extract_function_body check_issue_resolved_upstream \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		# #781: the grace window compares a PR's mergedAt against "now",
+		# which needs the same GNU-then-BSD epoch parsing check_issue_pr_merged
+		# already relies on (#817) — source it so the gate can reuse it
+		# instead of a hand-rolled second implementation.
+		_extract_function_body _iso_to_epoch \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+	} > "$func_file"
 	grep -q 'check_issue_resolved_upstream' "$func_file" 2>/dev/null \
 		|| return 1
 	# shellcheck disable=SC1090
@@ -1341,8 +1767,17 @@ source_check_issue_resolved_upstream() {
 # skipping still-open issues up front.
 source_check_issue_pr_merged() {
 	local func_file="$TEST_TMP/check_issue_pr_merged.bash"
-	_extract_function_body check_issue_pr_merged \
-		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	{
+		_extract_function_body check_issue_pr_merged \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		# #817: the gate delegates its merge-time bound to these two
+		# helpers. Source them from the same script so the tests run
+		# the shipped comparison rather than an undefined command.
+		_extract_function_body _merged_pr_within_run \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+		_extract_function_body _iso_to_epoch \
+			"$BATCH_ORCHESTRATOR_SCRIPT"
+	} > "$func_file"
 	grep -q 'check_issue_pr_merged' "$func_file" 2>/dev/null \
 		|| return 1
 	# shellcheck disable=SC1090
@@ -1403,6 +1838,39 @@ GHEOF
 	[[ "$rc" -eq 1 ]]
 	[[ -z "$_UPFRONT_SKIP_REASON" ]]
 	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q '123' "$TEST_TMP/log.out"
+}
+
+@test "functional: check_issue_resolved_upstream (reopened issue, merged PR) names REOPENED in the log" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	local mock_bin="$TEST_TMP/mock-bin-upfront-reopened"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+case "$1" in
+	issue) printf 'OPEN\tREOPENED\n' ;;
+	pr) printf '123\n' ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+	GIT_HOST=github
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# The issue's stateReason (REOPENED) is fetched alongside state and
+	# named in the merged-PR gate log, so an operator scanning logs can
+	# tell a reopened issue apart from one that was simply never closed.
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q 'REOPENED' "$TEST_TMP/log.out"
 	grep -q '123' "$TEST_TMP/log.out"
 }
 
@@ -1495,6 +1963,181 @@ GHEOF
 
 	[[ "$rc" -eq 1 ]]
 	[[ -z "$_UPFRONT_SKIP_PR" ]]
+}
+
+# =============================================================================
+# ISSUE #781: close-propagation grace window and REOPENED on the up-front gate
+# =============================================================================
+#
+# #771 made check_issue_resolved_upstream process an open issue with a merged
+# branch PR instead of skipping it — correct for a stale merge, but it also
+# reprocesses an issue whose PR merged moments ago and simply hasn't had the
+# close webhook land yet. #781 narrows that: a merge younger than
+# MERGED_PR_GRACE_SECONDS (default 120) still skips (AC2), a merge older than
+# the window still processes exactly as #771 established (AC1), and an issue
+# GitHub reports as `stateReason: REOPENED` always processes regardless of
+# merge age, because that reason means someone deliberately reopened partial
+# work rather than a propagation lag (AC3).
+#
+# check_issue_resolved_upstream() isn't written yet for any of this, so these
+# tests are expected to fail (RED) until that gate is extended — the same
+# "source the real function, skip if absent" harness already used above will
+# start exercising the real code the moment it exists.
+
+# Smart `gh` stub for the gate tests below. Real `gh ... --json F --jq E`
+# resolves E against GitHub's live JSON; this stub builds the same shape from
+# MOCK_ISSUE_STATE / MOCK_STATE_REASON / MOCK_PR_NUMBER / MOCK_PR_MERGED_AT
+# and pipes it through the real `jq` binary using whatever --jq expression
+# the caller passed. That keeps these tests bound only to the GitHub fields
+# the gate reads, not to the exact jq filter the implementation writes.
+_stub_gh_gate() {
+	local mock_bin="$TEST_TMP/mock-bin-gate-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+subcmd="$1"
+shift
+jq_expr="."
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--jq) jq_expr="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+
+payload="null"
+case "$subcmd" in
+	issue)
+		reason="null"
+		[[ -n "${MOCK_STATE_REASON:-}" ]] && reason="\"$MOCK_STATE_REASON\""
+		payload="{\"state\":\"${MOCK_ISSUE_STATE:-OPEN}\",\"stateReason\":$reason}"
+		;;
+	pr)
+		if [[ -n "${MOCK_PR_NUMBER:-}" ]]; then
+			merged="null"
+			[[ -n "${MOCK_PR_MERGED_AT:-}" ]] \
+				&& merged="\"$MOCK_PR_MERGED_AT\""
+			payload="[{\"number\":${MOCK_PR_NUMBER},\"mergedAt\":$merged}]"
+		else
+			payload="[]"
+		fi
+		;;
+esac
+
+printf '%s' "$payload" | jq -r "$jq_expr"
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+# Prints an ISO-8601 UTC timestamp <offset> seconds before "now" — GNU-then-
+# BSD fallback, mirroring _iso_to_epoch's own portability shim so a merge
+# timestamp built here round-trips through the real function under test.
+_iso_seconds_ago() {
+	local offset="$1"
+	local epoch=$((EPOCHSECONDS - offset))
+	date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+		|| date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ
+}
+
+@test "functional: check_issue_resolved_upstream skips a PR merged inside the grace window (AC2, #781)" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	export MOCK_ISSUE_STATE=OPEN
+	export MOCK_PR_NUMBER=123
+	export MOCK_PR_MERGED_AT=$(_iso_seconds_ago 10)
+	_stub_gh_gate
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a PR merged 10s ago was not skipped (rc=$rc)"
+	[[ "$_UPFRONT_SKIP_PR" == "123" ]]
+	[[ "$_UPFRONT_SKIP_REASON" == *'123'* ]]
+}
+
+@test "functional: check_issue_resolved_upstream processes an issue whose merged PR predates the grace window (AC1, #781)" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	export MOCK_ISSUE_STATE=OPEN
+	export MOCK_PR_NUMBER=123
+	export MOCK_PR_MERGED_AT=$(_iso_seconds_ago $((10 * 24 * 60 * 60)))
+	_stub_gh_gate
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# #771 preserved: an old merge is stale evidence, not resolution.
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a 10-day-old merged PR was skipped instead of processed"
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -q '123' "$TEST_TMP/log.out"
+}
+
+@test "functional: check_issue_resolved_upstream honors a custom MERGED_PR_GRACE_SECONDS window (#781)" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	export MOCK_ISSUE_STATE=OPEN
+	export MOCK_PR_NUMBER=123
+	export MOCK_PR_MERGED_AT=$(_iso_seconds_ago 30)
+	_stub_gh_gate
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+	MERGED_PR_GRACE_SECONDS=5
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# A merge 30s old falls outside a 5s window even though it would have
+	# been inside the 120s default — the override must actually narrow it.
+	[[ "$rc" -eq 1 ]] \
+		|| fail "MERGED_PR_GRACE_SECONDS=5 did not shrink the window (rc=$rc)"
+}
+
+@test "functional: check_issue_resolved_upstream never skips a REOPENED issue inside the grace window (AC3, #781)" {
+	source_check_issue_resolved_upstream \
+		|| skip "check_issue_resolved_upstream() not yet present"
+
+	export MOCK_ISSUE_STATE=OPEN
+	export MOCK_STATE_REASON=REOPENED
+	export MOCK_PR_NUMBER=123
+	export MOCK_PR_MERGED_AT=$(_iso_seconds_ago 10)
+	_stub_gh_gate
+	GIT_HOST=github
+	unset SKIP_ON_MERGED_PR
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+
+	local rc=0
+	check_issue_resolved_upstream 690 || rc=$?
+
+	# A merge this fresh would otherwise skip (see the grace-window test
+	# above) — REOPENED must override the window, not merely widen it.
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a REOPENED issue was skipped despite a fresh merge (rc=$rc)"
+	[[ -z "$_UPFRONT_SKIP_REASON" ]]
+	[[ -z "$_UPFRONT_SKIP_PR" ]]
+	grep -qi 'reopen' "$TEST_TMP/log.out" \
+		|| fail "log did not name REOPENED as the reason to proceed"
 }
 
 @test "functional: check_issue_pr_merged reconciles a merged PR on a still-open issue (#740)" {
@@ -2348,11 +2991,19 @@ _simulate_recovery_with_stage() {
 		"$issue_status" 2>/dev/null)
 	[[ -n "$stuck_stage" ]] || stuck_stage="unknown"
 
+	# The stage gate is NOT replicated — issue #848 added
+	# pr_recovery_allowed() and this simulation sources the real one, so a
+	# future change to which stages are excluded cannot silently diverge
+	# from what these tests assert.
+	eval "$(_extract_function_body pr_recovery_allowed \
+		"$BATCH_ORCHESTRATOR_SCRIPT")"
+
 	# Recovery block (replicates the post-task-4 implementation)
 	local recovered_pr
 	recovered_pr=$(jq -r '.stages.pr.pr_number // empty' \
 		"$issue_status" 2>/dev/null)
-	if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
+	if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]] \
+		&& pr_recovery_allowed "$stuck_stage"; then
 		sim_recovering=true
 		sim_warn_msg="Orchestrator exited with state='$st'"
 		sim_warn_msg+=" (stuck at: $stuck_stage)"
@@ -2363,9 +3014,23 @@ _simulate_recovery_with_stage() {
 }
 
 @test "recovery simulation: warn names the stuck stage when current_stage is set" {
-	_simulate_recovery_with_stage "error" 99 "merge_pr_timeout"
+	# pr_review is after pr and before merge_pr — the genuine post-PR crash
+	# the heuristic exists for, so it still recovers and still names its stage.
+	_simulate_recovery_with_stage "error" 99 "pr_review"
 	[[ "$sim_recovering" == "true" ]]
-	[[ "$sim_warn_msg" == *"merge_pr_timeout"* ]]
+	[[ "$sim_warn_msg" == *"pr_review"* ]]
+}
+
+@test "recovery simulation: merge_pr is not recovered even with a PR (i848)" {
+	_simulate_recovery_with_stage "error" 5857 "merge_pr"
+	[[ "$sim_recovering" == "false" ]]
+	[[ "$sim_impl_status" == "error" ]]
+}
+
+@test "recovery simulation: merge_pr_timeout is not recovered either (i848)" {
+	_simulate_recovery_with_stage "error" 99 "merge_pr_timeout"
+	[[ "$sim_recovering" == "false" ]]
+	[[ "$sim_impl_status" == "error" ]]
 }
 
 @test "recovery simulation: warn names stuck stage for any error state with PR" {
@@ -2388,7 +3053,7 @@ _simulate_recovery_with_stage() {
 }
 
 @test "recovery simulation: still recovers as success when current_stage is set" {
-	_simulate_recovery_with_stage "error" 42 "merge_pr_timeout"
+	_simulate_recovery_with_stage "error" 42 "pr_review"
 	[[ "$sim_impl_status" == "success" ]]
 	[[ "$sim_pr_number" == "42" ]]
 }
@@ -2493,7 +3158,7 @@ source_sweep_implement_followups() {
 	# Depth-1 follow-up #100 WAS implemented.
 	grep -qx '100' "$TEST_TMP/process_issue.calls"
 	# Depth-2 follow-up #200 was NOT implemented (beyond MAX_FOLLOWUP_DEPTH).
-	! grep -qx '200' "$TEST_TMP/process_issue.calls"
+	refute grep -qx '200' "$TEST_TMP/process_issue.calls"
 	# Depth-2 follow-up #200 WAS surfaced as a warning for manual triage.
 	grep -q '200' "$TEST_TMP/warn.out"
 	grep -q 'MAX_FOLLOWUP_DEPTH' "$TEST_TMP/warn.out"
@@ -3530,14 +4195,45 @@ BROKEN
 #
 # Both tests below run the REAL script from an isolated copy of scripts/
 # (never the tracked repo file), exactly as the task 4 test does.
-
-@test "real batch orchestrator: SCRIPT_DIR resolves to the real script directory after re-exec" {
-	local scripts_copy="$TEST_TMP/scripts_copy"
+#
+# Shared by the four re-exec cases below (plus their "...with the batch
+# guard pre-set" counterparts under ISSUE #922): factored out so the
+# duplicated setup can't drift between the pairs.
+setup_batch_scripts_copy() {
+	scripts_copy="$TEST_TMP/scripts_copy"
 	mkdir -p "$scripts_copy"
 	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
 	chmod +x "$scripts_copy"/*.sh
 
 	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+}
+
+# Non-blocking gh mock: resolve the single issue as already CLOSED so the
+# up-front skip gate short-circuits it and the run reaches its terminal
+# state (and the full EXIT trap) without doing any real work.
+mock_gh_closed_issue() {
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'MOCKGH'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "issue view" ]]; then
+	echo "CLOSED"
+	exit 0
+fi
+echo ""
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+count_batch_orchestrator_copies() {
+	find "$1" -maxdepth 1 -name 'batch-orchestrator.*' -type f | wc -l
+}
+
+@test "real batch orchestrator: SCRIPT_DIR resolves to the real script directory after re-exec" {
+	local scripts_copy
+	setup_batch_scripts_copy
 
 	# No args: usage() is the first exit path that only runs after every
 	# SCRIPT_DIR-dependent sibling has already been sourced successfully
@@ -3558,12 +4254,8 @@ BROKEN
 }
 
 @test "real batch orchestrator: re-exec creates exactly one private copy per invocation" {
-	local scripts_copy="$TEST_TMP/scripts_copy"
-	mkdir -p "$scripts_copy"
-	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
-	chmod +x "$scripts_copy"/*.sh
-
-	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
+	local scripts_copy
+	setup_batch_scripts_copy
 
 	# Isolate TMPDIR so the private copy the re-exec creates is the only
 	# batch-orchestrator.* file that can appear here — a clean, direct
@@ -3577,10 +4269,7 @@ BROKEN
 
 	run "$scripts_copy/batch-orchestrator.sh"
 
-	local copy_count
-	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
-		-name 'batch-orchestrator.*' -type f | wc -l)
-	[[ "$copy_count" -eq 1 ]]
+	[[ "$(count_batch_orchestrator_copies "$reexec_tmpdir")" -eq 1 ]]
 }
 
 # =============================================================================
@@ -3593,29 +4282,9 @@ BROKEN
 # skip, or failure) leaves $TMPDIR exactly as it found it.
 
 @test "real batch orchestrator: the re-exec private copy is removed once the run exits" {
-	local scripts_copy="$TEST_TMP/scripts_copy"
-	mkdir -p "$scripts_copy"
-	cp -r "$SCRIPT_DIR/." "$scripts_copy/"
-	chmod +x "$scripts_copy"/*.sh
-
-	export PIPELINE_CONFIG_DIR="$SCRIPT_DIR/../config"
-
-	# Non-blocking gh mock: resolve the single issue as already CLOSED so the
-	# up-front skip gate short-circuits it and the run reaches its terminal
-	# state (and the full EXIT trap) without doing any real work.
-	local mock_bin="$TEST_TMP/mockbin"
-	mkdir -p "$mock_bin"
-	cat > "$mock_bin/gh" << 'MOCKGH'
-#!/usr/bin/env bash
-if [[ "$1 $2" == "issue view" ]]; then
-	echo "CLOSED"
-	exit 0
-fi
-echo ""
-exit 0
-MOCKGH
-	chmod +x "$mock_bin/gh"
-	export PATH="$mock_bin:$PATH"
+	local scripts_copy
+	setup_batch_scripts_copy
+	mock_gh_closed_issue
 
 	# Isolate TMPDIR so the private copy is the only batch-orchestrator.* file
 	# that can appear here -- a direct, unambiguous check for leftovers.
@@ -3628,8 +4297,1891 @@ MOCKGH
 		"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
 	)
 
-	local copy_count
-	copy_count=$(find "$reexec_tmpdir" -maxdepth 1 \
-		-name 'batch-orchestrator.*' -type f | wc -l)
-	[[ "$copy_count" -eq 0 ]]
+	[[ "$(count_batch_orchestrator_copies "$reexec_tmpdir")" -eq 0 ]]
+}
+
+# =============================================================================
+# ISSUE #922: the two re-exec cases above still pass when the batch guard is
+# already present in the environment that launched bats
+# =============================================================================
+#
+# implement-issue-orchestrator.sh's full-suite check launches bats as a child
+# of its own (already re-exec'd) process tree, so a prior batch-orchestrator.sh
+# re-exec's exported _BATCH_ORCHESTRATOR_REEXECED / _REEXEC_COPY / SCRIPT_DIR
+# can leak into every test's environment. setup_test_env() scrubs those three
+# vars (see helpers/test-helper.bash) so each test starts from a clean re-exec
+# state regardless of bats' own ancestry. These two cases simulate that leak
+# directly -- exporting the guard (and a deliberately stale SCRIPT_DIR, so a
+# missed scrub fails loudly rather than by accident resolving somewhere real)
+# before re-running setup_test_env() -- and then repeat the exact assertions
+# from the two tests above. Without the scrub, the first case would see
+# copy_count=0 (the leaked guard makes the real script skip its own re-exec)
+# and the second would error out resolving the stale SCRIPT_DIR.
+
+preset_stale_batch_guard() {
+	export _BATCH_ORCHESTRATOR_REEXECED=1
+	export _BATCH_ORCHESTRATOR_REEXEC_COPY="/tmp/stale-batch-copy-$$"
+	export _BATCH_ORCHESTRATOR_SCRIPT_DIR="/tmp/stale-batch-dir-$$"
+	local old_tmp="$TEST_TMP"
+	setup_test_env
+	rm -rf "$old_tmp"
+}
+
+@test "real batch orchestrator: re-exec creates exactly one private copy per invocation with the batch guard pre-set" {
+	preset_stale_batch_guard
+
+	local scripts_copy
+	setup_batch_scripts_copy
+
+	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
+	mkdir -p "$reexec_tmpdir"
+	export TMPDIR="$reexec_tmpdir"
+
+	run "$scripts_copy/batch-orchestrator.sh"
+
+	[[ "$(count_batch_orchestrator_copies "$reexec_tmpdir")" -eq 1 ]]
+}
+
+@test "real batch orchestrator: the re-exec private copy is removed once the run exits with the batch guard pre-set" {
+	preset_stale_batch_guard
+
+	local scripts_copy
+	setup_batch_scripts_copy
+	mock_gh_closed_issue
+
+	local reexec_tmpdir="$TEST_TMP/reexec_tmp"
+	mkdir -p "$reexec_tmpdir"
+	export TMPDIR="$reexec_tmpdir"
+
+	(
+		cd "$TEST_TMP" || exit 1
+		"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
+	)
+
+	[[ "$(count_batch_orchestrator_copies "$reexec_tmpdir")" -eq 0 ]]
+}
+
+# =============================================================================
+# ISSUE #861 — the batch must not fork issue N+1 while PR N is still open
+# =============================================================================
+#
+# "Sequential" meant sequential pipeline stages, not sequential merges: the
+# loop advanced the moment process_issue returned, so issue N+1 branched off a
+# main that did not contain PR N. In beegee-farm-3 that produced same-file
+# conflicts (#5980 vs #5979, #5992 vs #5991) and, once a PR went DIRTY, GitHub
+# ran no pull_request workflow on it at all — CI stopped silently.
+#
+# wait_for_pr_merged() parks the loop until the PR reports MERGED, bounded by
+# BATCH_WAIT_FOR_MERGE_MAX, with state paused_on_pr, the PR number in
+# status.json, and exactly one comment on the issue.
+
+# Sources wait_for_pr_merged() and everything it calls out of the real script,
+# with the collaborators the extracted functions cannot supply themselves:
+# log*, a `timeout` shim (macOS ships none, and the script's own shim is
+# top-level code this extraction skips) and a no-op sleep so the poll loop
+# costs no real seconds while still advancing `elapsed` exactly as it does in
+# production.
+_load_wait_for_merge_functions() {
+	local fn body
+	for fn in set_state set_paused_on_pr comment_paused_on_pr \
+		pr_merge_state wait_for_pr_merged; do
+		body=$(_extract_function_body "$fn" "$BATCH_ORCHESTRATOR_SCRIPT")
+		[[ -n "$body" ]] \
+			|| fail "$fn() not defined in batch-orchestrator.sh"
+		eval "$body"
+	done
+
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	log_error() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	timeout() { shift; "$@"; }
+	sleep() { :; }
+	: > "$TEST_TMP/batch.log"
+}
+
+# status.json with issue 5980 carrying PR 1234, and two untouched issues
+# after it — so a halt can be checked against a real manifest.
+_seed_status_with_open_pr() {
+	jq -n '{
+		state: "running",
+		issues: [
+			{number: "5980", status: "completed", pr: "1234"},
+			{number: "5981", status: "pending", pr: null},
+			{number: "5982", status: "pending", pr: null}
+		],
+		progress: {total: 3, completed: 1, pending: 2, failed: 0}
+	}' > "$STATUS_FILE"
+}
+
+# Stubs `gh pr view --json state`. Each queued line is consumed by one call;
+# once the queue is empty the PR reports OPEN forever.
+_stub_gh_pr_states() {
+	mkdir -p "$TEST_TMP/bin"
+	printf '%s\n' "$@" > "$TEST_TMP/pr-states"
+	: > "$TEST_TMP/gh-calls.log"
+
+	cat > "$TEST_TMP/bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_TMP/gh-calls.log"
+state=\$(head -1 "$TEST_TMP/pr-states" 2>/dev/null)
+tail -n +2 "$TEST_TMP/pr-states" > "$TEST_TMP/pr-states.next" 2>/dev/null
+mv "$TEST_TMP/pr-states.next" "$TEST_TMP/pr-states" 2>/dev/null
+[[ -n "\$state" ]] || state="OPEN"
+printf '%s\n' "\$state"
+exit 0
+STUB
+	chmod +x "$TEST_TMP/bin/gh"
+	PATH="$TEST_TMP/bin:$PATH"
+}
+
+# Stubs the platform comment script, recording one line per invocation.
+_stub_comment_issue() {
+	export PLATFORM_DIR="$TEST_TMP/platform"
+	mkdir -p "$PLATFORM_DIR"
+	: > "$TEST_TMP/comments.log"
+
+	# Newlines in the body are folded to spaces so the log keeps exactly one
+	# line per invocation, whatever shape the body has.  Comment bodies became
+	# multi-line in #970 (the pipeline-chatter attribution stamp), which made a
+	# single comment look like three to any line-counting assertion below.
+	cat > "$PLATFORM_DIR/comment-issue.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s|%s\n' "\$1" "\$(printf '%s' "\$2" | tr '\n' ' ')" >> "$TEST_TMP/comments.log"
+exit 0
+STUB
+	chmod +x "$PLATFORM_DIR/comment-issue.sh"
+}
+
+# grep -c prints 0 AND exits 1 on an empty file, so the count must be taken
+# from the substitution rather than chained with `||` (which would print a
+# second 0 and make every arithmetic comparison a syntax error).
+_gh_call_count() {
+	local n
+	n=$(grep -c . "$TEST_TMP/gh-calls.log" 2>/dev/null) || n=0
+	printf '%s\n' "$n"
+}
+
+@test "AC4(#861): the batch parks on an open PR and resumes once it is MERGED" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	# OPEN on the pre-check and the first two polls, MERGED on the third.
+	_stub_gh_pr_states OPEN OPEN OPEN MERGED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] \
+		|| fail "wait_for_pr_merged failed on a PR that merged: $output"
+
+	# It genuinely waited: the pre-check alone is one call, so more than one
+	# means the poll loop ran before the PR reported MERGED.
+	local calls
+	calls=$(_gh_call_count)
+	(( calls > 1 )) \
+		|| fail "returned after $calls gh call(s) — it never polled"
+	grep -q "merged after" "$TEST_TMP/batch.log" \
+		|| fail "no 'merged' line in the batch log: $(cat "$TEST_TMP/batch.log")"
+}
+
+@test "AC4(#861): status.json carries paused_on_pr and the PR number" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=3 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+
+	local state pr
+	state=$(jq -r '.state' "$STATUS_FILE")
+	pr=$(jq -r '.paused_on_pr' "$STATUS_FILE")
+	[[ "$state" == "paused_on_pr" ]] \
+		|| fail "state is \"$state\", expected paused_on_pr"
+	[[ "$pr" == "1234" ]] \
+		|| fail "paused_on_pr is \"$pr\", expected the PR number 1234"
+}
+
+@test "AC4(#861): exactly one comment is posted, however long the park runs" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=10 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+
+	# Ten polls, one comment.
+	local comments
+	comments=$(grep -c . "$TEST_TMP/comments.log")
+	[[ "$comments" -eq 1 ]] \
+		|| fail "posted $comments comments, expected exactly 1"
+	grep -q '^5980|' "$TEST_TMP/comments.log" \
+		|| fail "the comment did not go to issue 5980"
+	grep -q 'PR #1234' "$TEST_TMP/comments.log" \
+		|| fail "the comment does not name the PR being waited on"
+}
+
+@test "AC4(#861): an already-merged PR neither parks nor comments" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states MERGED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "refused to continue past a merged PR"
+	[[ ! -s "$TEST_TMP/comments.log" ]] \
+		|| fail "commented on an issue whose PR had already merged"
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "running" ]] \
+		|| fail "state was changed even though there was nothing to wait for"
+}
+
+@test "AC4(#861): an issue with no PR recorded does not park the batch" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	# 5981 has pr: null.
+	run wait_for_pr_merged 5981
+	[[ "$status" -eq 0 ]] || fail "parked on an issue that opened no PR"
+	[[ "$(_gh_call_count)" -eq 0 ]] \
+		|| fail "queried the platform for a PR that does not exist"
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "running" ]] \
+		|| fail "state changed for an issue with no PR"
+}
+
+@test "AC4(#861): a PR closed without merging does not park the batch" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states CLOSED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] \
+		|| fail "parked for the full timeout on a PR that can never merge"
+	[[ ! -s "$TEST_TMP/comments.log" ]] \
+		|| fail "commented about waiting for a PR that was closed"
+}
+
+@test "AC5(#861): the wait is bounded — it fails once the ceiling passes" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=5 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 1 ]] \
+		|| fail "expected a bounded failure, got status $status"
+	grep -q "WAIT-FOR-MERGE TIMEOUT" "$TEST_TMP/batch.log" \
+		|| fail "the timeout was not reported: $(cat "$TEST_TMP/batch.log")"
+	# The halt state names the PR the operator has to deal with.
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "paused_on_pr" ]] \
+		|| fail "the timeout cleared the paused_on_pr state"
+	[[ "$(jq -r '.paused_on_pr' "$STATUS_FILE")" == "1234" ]] \
+		|| fail "the timeout cleared the PR number"
+}
+
+# ---------------------------------------------------------------------------
+# #870: a merge_pr-stage failure leaves the PR OPEN but reaches the batch as
+# state:error, whose arm historically recorded only status+error. The park
+# keyed off .issues[].pr, so the batch forked the next issue on top of it.
+# ---------------------------------------------------------------------------
+
+# Seeds status.json with the issue carrying NO .pr (the merge_pr-failure
+# shape), plus the orchestrator's own stage record that does carry the PR.
+_seed_merge_pr_failure() {
+	jq -n '{
+		state: "running",
+		issues: [
+			{number: "6010", status: "failed", pr: null,
+			 error: "Merge declined at merge_pr for PR #6017"},
+			{number: "6011", status: "pending", pr: null}
+		],
+		progress: {total: 2, completed: 0, pending: 1, failed: 1}
+	}' > "$STATUS_FILE"
+	jq -n '{state: "error", current_stage: "merge_pr",
+		stages: {pr: {pr_number: "6017"}}}' \
+		> "$LOG_BASE/issue-6010-status.json"
+}
+
+@test "AC1(#870): the failure arm records the open PR, not just the error" {
+	# The fallback in wait_for_pr_merged() would mask a missing write here, so
+	# assert the primary fix independently of it: the generic failure arm must
+	# persist .pr the way the merge_blocked arm does.
+	local body
+	body=$(_extract_function_body process_issue "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$body" ]] || fail "process_issue() not defined in batch-orchestrator.sh"
+
+	local failure_arm
+	failure_arm=${body##*implement-issue failed with status: \$impl_status}
+	failure_arm=${failure_arm%%return 1*}
+
+	[[ "$failure_arm" == *'update_issue_field "$issue_num" "pr"'* ]] \
+		|| fail "failure arm does not persist the PR number: $failure_arm"
+	[[ "$failure_arm" == *'-n "$pr_number"'* ]] \
+		|| fail "the PR write is not guarded by a non-empty check: $failure_arm"
+}
+
+@test "AC1(#870): a merge_pr failure with an OPEN PR parks the batch" {
+	_load_wait_for_merge_functions
+	_seed_merge_pr_failure
+	_stub_gh_pr_states "OPEN" "OPEN" "MERGED"
+	_stub_comment_issue
+
+	run wait_for_pr_merged 6010
+	[ "$status" -eq 0 ] || fail "expected park-then-resume, got: $output"
+
+	# It genuinely polled rather than short-circuiting on an empty .pr.
+	local calls
+	calls=$(_gh_call_count)
+	(( calls > 1 )) || fail "expected repeated polls, saw $calls gh call(s)"
+}
+
+@test "AC3(#870): the PR is recovered from the stage record when .pr is empty" {
+	_load_wait_for_merge_functions
+	_seed_merge_pr_failure
+	_stub_gh_pr_states "MERGED"
+	_stub_comment_issue
+
+	run wait_for_pr_merged 6010
+	[ "$status" -eq 0 ] || fail "expected success, got: $output"
+
+	# The PR number can only have come from .stages.pr.pr_number.
+	grep -q "6017" "$TEST_TMP/gh-calls.log" \
+		|| fail "wait never queried PR 6017; gh-calls: $(cat "$TEST_TMP/gh-calls.log")"
+}
+
+@test "AC2(#870): a merge_pr failure whose PR is CLOSED does not park" {
+	_load_wait_for_merge_functions
+	_seed_merge_pr_failure
+	_stub_gh_pr_states "CLOSED"
+	_stub_comment_issue
+
+	run wait_for_pr_merged 6010
+	[ "$status" -eq 0 ] || fail "a CLOSED PR must not halt the batch: $output"
+
+	# One state query and no park: no comment, state untouched.
+	[ ! -s "$TEST_TMP/comments.log" ] \
+		|| fail "CLOSED PR must not post a park comment: $(cat "$TEST_TMP/comments.log")"
+	local st
+	st=$(jq -r '.state' "$STATUS_FILE")
+	[[ "$st" == "running" ]] || fail "state should stay running, got '$st'"
+}
+
+@test "AC5(#861): BATCH_WAIT_FOR_MERGE_MAX=0 restores immediate continuation" {
+	_load_wait_for_merge_functions
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=0 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "MAX=0 still blocked the batch"
+	[[ "$(_gh_call_count)" -eq 0 ]] \
+		|| fail "MAX=0 still polled the platform"
+	[[ ! -s "$TEST_TMP/comments.log" ]] \
+		|| fail "MAX=0 still commented on the issue"
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "running" ]] \
+		|| fail "MAX=0 still moved the batch into paused_on_pr"
+}
+
+@test "AC5(#861): the default ceiling is 7200s, not an unbounded wait" {
+	local body
+	body=$(_extract_function_body wait_for_pr_merged \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'BATCH_WAIT_FOR_MERGE_MAX:-7200'* ]] \
+		|| fail "wait_for_pr_merged does not default the ceiling to 7200s"
+}
+
+# -----------------------------------------------------------------------------
+# The call site: the main loop must consult the wait and halt like the
+# circuit breaker when it times out.
+# -----------------------------------------------------------------------------
+
+# Extracts the real `if ! wait_for_pr_merged ...` block from the main loop, so
+# the halt semantics below are checked against shipped source rather than a
+# re-typed copy. Returns 1 if the anchor is gone so the caller can skip.
+_extract_wait_call_block() {
+	local block_file="$TEST_TMP/wait_call_block.bash"
+	awk '/^    if ! wait_for_pr_merged /,/^    fi$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$block_file"
+	grep -q 'wait_for_pr_merged' "$block_file" 2>/dev/null || return 1
+	printf '%s\n' "$block_file"
+}
+
+@test "AC4(#861): the main loop calls wait_for_pr_merged after process_issue" {
+	# The call must sit between the process_issue result handling and the end
+	# of the loop body — not before it, where there would be no PR yet.
+	local region
+	region=$(awk '/^    if process_issue "\$issue"; then/,/^done$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$region" ]] || fail "main loop region not found"
+	[[ "$region" == *'wait_for_pr_merged "$issue"'* ]] \
+		|| fail "the main loop never waits for the issue's PR to merge"
+}
+
+@test "AC5(#861): a wait timeout halts the loop with exit_code 2" {
+	local block_file
+	block_file=$(_extract_wait_call_block) \
+		|| skip "wait call block not found (script changed)"
+
+	# Drive the real block through a stand-in loop over the manifest, with
+	# the wait failing on the first issue exactly as a timeout does.
+	wait_for_pr_merged() { return 1; }
+	local exit_code=0 issue processed=""
+	for issue in 5980 5981 5982; do
+		processed="$processed $issue"
+		# shellcheck disable=SC1090
+		source "$block_file"
+	done
+
+	[[ "$exit_code" -eq 2 ]] \
+		|| fail "expected exit_code 2 (circuit-breaker parity), got $exit_code"
+	[[ "$processed" == " 5980" ]] \
+		|| fail "the loop kept going after the timeout:$processed"
+}
+
+@test "AC5(#861): remaining issues are still pending after a wait timeout" {
+	_seed_status_with_open_pr
+	local block_file
+	block_file=$(_extract_wait_call_block) \
+		|| skip "wait call block not found (script changed)"
+
+	wait_for_pr_merged() { return 1; }
+	local exit_code=0 issue
+	for issue in 5980 5981 5982; do
+		# shellcheck disable=SC1090
+		source "$block_file"
+	done
+
+	# The halt leaves the manifest untouched, so a resume re-runs them.
+	local still_pending
+	still_pending=$(jq -r \
+		'[.issues[] | select(.status == "pending") | .number] | join(",")' \
+		"$STATUS_FILE")
+	[[ "$still_pending" == "5981,5982" ]] \
+		|| fail "remaining issues are \"$still_pending\", expected 5981,5982"
+}
+
+@test "AC5(#861): a successful wait does not halt the loop" {
+	local block_file
+	block_file=$(_extract_wait_call_block) \
+		|| skip "wait call block not found (script changed)"
+
+	wait_for_pr_merged() { return 0; }
+	local exit_code=0 issue processed=""
+	for issue in 5980 5981 5982; do
+		processed="$processed $issue"
+		# shellcheck disable=SC1090
+		source "$block_file"
+	done
+
+	[[ "$exit_code" -eq 0 ]] \
+		|| fail "a merged PR halted the batch with exit_code $exit_code"
+	[[ "$processed" == " 5980 5981 5982" ]] \
+		|| fail "the loop stopped early:$processed"
+}
+
+# =============================================================================
+# ISSUE #817: failure-site reconciliation must be bounded by merge time
+# =============================================================================
+#
+# check_issue_pr_merged() reconciled a reported failure against ANY merged PR
+# on feature/issue-<num>, with no bound on when it merged. A PR merged days
+# earlier therefore reconciled a failure from a run that did nothing, and the
+# issue was recorded `completed` — silently skipping the real work.
+#
+# #740 is not reversed here: a PR merged during the run still reconciles. The
+# window simply opens at the issue's own started_at (less a skew tolerance),
+# which is what "the run that just executed" in #740's own rationale always
+# meant. When either timestamp is missing or unparseable the gate accepts and
+# logs a WARN, so a parse failure can never re-arm #740's circuit breaker.
+
+# Writes a minimal status.json carrying one issue's started_at, the timestamp
+# the merge-time bound compares against. An empty started_at writes JSON null,
+# which is what the field holds before an issue enters processing.
+_write_status_started_at() {
+	local issue_num="$1"
+	local started_at="$2"
+	jq -n --arg num "$issue_num" --arg started "$started_at" \
+		'{issues: [{number: $num, started_at:
+			(if $started == "" then null else $started end)}]}' \
+		> "$STATUS_FILE"
+}
+
+# Mocked `gh` that behaves like the real one for the call that matters:
+# `gh pr list --json number,mergedAt --jq <filter>` runs the PRODUCTION jq
+# filter, through real jq, over the fixture PR list. Selection of the most
+# recently merged PR is therefore performed by the shipped expression rather
+# than by the stub — a stub that simply echoed a chosen number would assert
+# nothing about AC3.
+_stub_gh_with_pr_fixture() {
+	local fixture_json="$1"
+	local mock_bin="$TEST_TMP/mock-bin-fixture-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	printf '%s\n' "$fixture_json" > "$mock_bin/prs.json"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+mock_dir="$(cd "$(dirname "$0")" && pwd)"
+if [[ "$1" == "issue" ]]; then
+	printf '%s\n' "${GH_ISSUE_STATE:-OPEN}"
+	exit 0
+fi
+if [[ "$1" == "pr" ]]; then
+	filter=""
+	while [[ $# -gt 0 ]]; do
+		if [[ "$1" == "--jq" ]]; then
+			filter="$2"
+			break
+		fi
+		shift
+	done
+	if [[ -z "$filter" ]]; then
+		echo "gh pr list called without --jq" >&2
+		exit 1
+	fi
+	jq -r "$filter" "$mock_dir/prs.json"
+	exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 1
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+# Captures log output so the WARN / stale-evidence messages can be asserted.
+_capture_log() {
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_warn() { printf 'WARN: %s\n' "$*" >> "$TEST_TMP/log.out"; }
+	: > "$TEST_TMP/log.out"
+}
+
+@test "AC1(#817): a merge predating started_at does not reconcile" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# Merged three days before the run began — stale evidence.
+	_stub_gh_with_pr_fixture \
+		'[{"number":5657,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	_write_status_started_at 5634 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 5634 || rc=$?
+
+	[[ "$rc" -eq 1 ]] \
+		|| fail "stale merge reconciled the failure (rc=$rc)"
+	[[ -z "$_RECONCILE_PR" ]] \
+		|| fail "_RECONCILE_PR set to '$_RECONCILE_PR' for a stale merge"
+	[[ -z "$_RECONCILE_REASON" ]] \
+		|| fail "_RECONCILE_REASON set to '$_RECONCILE_REASON'"
+	# The rejection must be visible in the run log, not silent.
+	grep -q '5657' "$TEST_TMP/log.out" \
+		|| fail "stale merge not reported in the log"
+}
+
+@test "AC2(#817): a merge after started_at still reconciles (#740 preserved)" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# started_at 14:01:41+10:00 is 04:01:41Z; this merge is four minutes
+	# later — #740's canonical case (merge lands, run then times out).
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-17T04:05:00Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "an in-run merge failed to reconcile (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	[[ "$_RECONCILE_REASON" == *'735'* ]] \
+		|| fail "_RECONCILE_REASON was '$_RECONCILE_REASON'"
+}
+
+@test "AC2(#817): a merge exactly at started_at reconciles" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# The boundary itself is inside the window: >= not >.
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-17T04:01:41Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a merge at exactly started_at was rejected (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+}
+
+@test "AC2(#817): a merge inside the skew tolerance reconciles" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# 60s before started_at — inside the 120s clock-skew tolerance, so a
+	# genuine in-run merge is not rejected because GitHub's clock leads
+	# the runner's.
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-17T04:00:41Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a merge inside the skew tolerance was rejected (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+}
+
+@test "AC1(#817): a merge just outside the skew tolerance does not reconcile" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# 121s before started_at — one second past the tolerance. Pairs with
+	# the test above so the boundary is pinned from both sides and the
+	# tolerance cannot silently widen to "any age".
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-17T03:59:40Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a merge outside the tolerance reconciled (rc=$rc)"
+	[[ -z "$_RECONCILE_PR" ]] \
+		|| fail "_RECONCILE_PR set to '$_RECONCILE_PR'"
+}
+
+@test "AC3(#817): the most recently merged PR is selected, not the first listed" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# The API order deliberately differs from merge order: the old
+	# `.[0].number` selection would have named 5640.
+	_stub_gh_with_pr_fixture \
+		'[{"number":5640,"mergedAt":"2026-08-10T01:00:00Z"},
+		  {"number":5662,"mergedAt":"2026-08-14T06:31:22Z"},
+		  {"number":5657,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	# started_at well before every merge, so selection — not the time
+	# bound — is what this test measures.
+	_write_status_started_at 5634 "2026-08-01T00:00:00+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 5634 || rc=$?
+
+	[[ "$rc" -eq 0 ]] || fail "expected reconciliation (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "5662" ]] \
+		|| fail "selected PR was '$_RECONCILE_PR', expected 5662"
+	[[ "$_RECONCILE_REASON" == *'5662'* ]] \
+		|| fail "_RECONCILE_REASON was '$_RECONCILE_REASON'"
+	[[ "$_RECONCILE_REASON" != *'5640'* ]] \
+		|| fail "_RECONCILE_REASON named the first-listed PR 5640"
+	[[ "$_RECONCILE_REASON" != *'5657'* ]] \
+		|| fail "_RECONCILE_REASON named the older PR 5657"
+}
+
+@test "AC4(#817): a missing started_at accepts and logs a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# started_at is JSON null — the issue never reached processing, or
+	# status.json predates the field. Rejecting here would re-arm the
+	# circuit breaker #740 fixed, so the gate must accept.
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	_write_status_started_at 695 ""
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a missing started_at blocked reconciliation (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for a missing started_at"
+	grep -q 'started_at' "$TEST_TMP/log.out" \
+		|| fail "the WARN does not name the missing field"
+}
+
+@test "AC4(#817): an unparseable started_at accepts and logs a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	_write_status_started_at 695 "not-a-timestamp"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "an unparseable started_at blocked reconciliation"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for an unparseable started_at"
+}
+
+@test "AC4(#817): an absent status file accepts and logs a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# No status.json at all — nothing to compare against, so accept.
+	rm -f "$STATUS_FILE"
+	_stub_gh_with_pr_fixture \
+		'[{"number":735,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "an absent status file blocked reconciliation (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for an absent status file"
+}
+
+@test "AC4(#817): a null mergedAt accepts and logs a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# GitHub reported a merged PR without a mergedAt. The age is unknown,
+	# not old — degrade toward #740's safety and accept.
+	_stub_gh_with_pr_fixture '[{"number":735,"mergedAt":null}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a null mergedAt blocked reconciliation (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for a null mergedAt"
+	grep -q 'mergedAt' "$TEST_TMP/log.out" \
+		|| fail "the WARN does not name the missing field"
+}
+
+@test "AC4(#817): the legacy number-only gh response still reconciles" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# A gh build (or a stub) that returns only the PR number carries no
+	# merge time. That is "unknown", not "old", so #740's reconciliation
+	# must survive it.
+	_stub_gh_pr_merged
+	GIT_HOST=github
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "a number-only gh response blocked reconciliation"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for a missing merge time"
+}
+
+@test "AC1(#817): no merged PR at all still returns 1 without a WARN" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# An empty PR list must short-circuit before the time bound is
+	# consulted — otherwise every genuine failure would emit a WARN.
+	_stub_gh_with_pr_fixture '[]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 1 ]] || fail "an empty PR list reconciled (rc=$rc)"
+	[[ -z "$_RECONCILE_PR" ]] \
+		|| fail "_RECONCILE_PR set to '$_RECONCILE_PR'"
+	refute grep -q 'WARN' "$TEST_TMP/log.out"
+}
+
+@test "AC5(#817): replaying the 2026-08-17 batch records failed, not completed" {
+	# The reported case in full: issue #5634 started at 14:01:41+10:00,
+	# with PRs #5657 and #5662 merged two and three days earlier. Driven
+	# through the real implement-issue failure site, so the verdict that
+	# reaches status.json is the one under test — not just the gate's
+	# return code.
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+
+	_stub_gh_with_pr_fixture \
+		'[{"number":5657,"mergedAt":"2026-08-13T20:44:24Z"},
+		  {"number":5662,"mergedAt":"2026-08-14T06:31:22Z"}]'
+	_write_status_started_at 5634 "2026-08-17T14:01:41+10:00"
+
+	ISSUE_NUM_IN=5634 _run_failure_site_block "$block_file"
+
+	grep -qw 'failed' "$TEST_TMP/update.out" \
+		|| fail "issue #5634 was not recorded failed"
+	refute grep -qw 'completed' "$TEST_TMP/update.out"
+	# The stale PR must not be attached to the issue either.
+	refute grep -q '5662' "$TEST_TMP/update.out"
+	refute grep -q '5657' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 1 ]] \
+		|| fail "the failure site returned $_failure_block_rc, expected 1"
+}
+
+@test "AC5(#817): the same replay with an in-run merge still records completed" {
+	# The complement of the replay above: identical fixture except the
+	# most recent merge lands after the run began. Without this pair, a
+	# gate that rejected everything would pass the AC5 test.
+	local block_file
+	block_file=$(_extract_impl_failure_block) \
+		|| skip "implement-issue failure block not found (script changed)"
+
+	_stub_gh_with_pr_fixture \
+		'[{"number":5657,"mergedAt":"2026-08-13T20:44:24Z"},
+		  {"number":5662,"mergedAt":"2026-08-17T04:30:00Z"}]'
+	_write_status_started_at 5634 "2026-08-17T14:01:41+10:00"
+
+	ISSUE_NUM_IN=5634 _run_failure_site_block "$block_file"
+
+	grep -qw 'completed' "$TEST_TMP/update.out" \
+		|| fail "an in-run merge failed to reconcile at the failure site"
+	grep -q '5662' "$TEST_TMP/update.out" \
+		|| fail "the reconciling PR number was not recorded"
+	refute grep -qw 'failed' "$TEST_TMP/update.out"
+	[[ "$_failure_block_rc" -eq 0 ]] \
+		|| fail "the failure site returned $_failure_block_rc, expected 0"
+}
+
+@test "AC1(#817): _iso_to_epoch normalises UTC and local-offset to one scale" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# 2026-08-17T14:01:41+10:00 and 2026-08-17T04:01:41Z are the same
+	# instant. String comparison would order them by their printed digits
+	# ("1" vs "0") and get the answer backwards; epoch comparison does not.
+	local local_epoch utc_epoch
+	local_epoch=$(_iso_to_epoch "2026-08-17T14:01:41+10:00") \
+		|| fail "_iso_to_epoch rejected a local-offset timestamp"
+	utc_epoch=$(_iso_to_epoch "2026-08-17T04:01:41Z") \
+		|| fail "_iso_to_epoch rejected a UTC timestamp"
+
+	[[ "$local_epoch" == "$utc_epoch" ]] \
+		|| fail "same instant parsed as $local_epoch vs $utc_epoch"
+	[[ "$local_epoch" =~ ^[0-9]+$ ]] \
+		|| fail "_iso_to_epoch returned non-numeric '$local_epoch'"
+}
+
+@test "AC4(#817): _iso_to_epoch rejects empty, null and malformed input" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	refute _iso_to_epoch ""
+	refute _iso_to_epoch "null"
+	refute _iso_to_epoch "not-a-timestamp"
+	refute _iso_to_epoch "2026-13-45T99:99:99Z"
+}
+
+# =============================================================================
+# ISSUE #950: merged-branch reclaim, and worktree reclaim that spares a live
+# run.
+#
+# The pipeline deletes the REMOTE branch on merge (--delete-branch in
+# platform/merge-mr.sh) and prunes worktrees whose directory has already
+# vanished (cleanup_stale_worktrees), but leaves two gaps open:
+#
+#   Gap 1 — the local `feature/issue-<n>` branch survives a merge. Deleting
+#   it fails whenever a worktree still has it checked out, and the failure
+#   is non-fatal, so the branch persists indefinitely.
+#
+#   Gap 2 — a worktree belonging to a run killed mid-flight (circuit
+#   breaker, operator kill, crash) is never reclaimed: `git worktree prune`
+#   only drops entries whose directory has disappeared, and this one's
+#   directory is still there.
+#
+# The tests below specify the two functions these gaps need:
+#
+#   reclaim_merged_branch <branch_name> <base_branch>
+#       Deletes $branch_name locally once it is fully reachable from
+#       $base_branch (AC1). When it is NOT — the branch carries commits
+#       base_branch does not have — the branch is KEPT, not deleted, and
+#       the reason is logged; those commits are tagged via the existing
+#       salvage_unmerged_commits() guard so they stay addressable even if
+#       a later, less careful pass force-deletes the branch (AC4). Returns
+#       0 when the branch was deleted (or never existed), 1 when it was
+#       kept.
+#
+#   cleanup_stale_worktrees (extended)
+#       In addition to its existing behaviour (deleting wt-i* branches
+#       whose worktree entry is already gone), it now also inspects every
+#       STILL-PRESENT worktree entry for a `wt-i*-t*` branch. Each such
+#       worktree carries a `.claude-task.pid` file, written when the
+#       worktree was created, naming the pid of the run that owns it. When
+#       that pid is no longer running, the worktree and its branch are
+#       reclaimed (through the same salvage-tag-then-delete pattern as the
+#       existing stale-branch path). When the pid IS still running, the
+#       worktree is a LIVE run's and must not be touched at all — no
+#       removal, no branch delete, no log line about it (AC2).
+#
+# reclaim_merged_branch does not exist yet, so every test that depends on
+# it skips with a clear reason until issue #950's implementation task adds
+# it — this is the RED half of TDD, not a gap in this test file. The
+# cleanup_stale_worktrees tests call the function that already exists
+# today; the "reclaims a dead run" case is expected to fail until the
+# liveness check above is added, and the "never touches a live run" case
+# is a regression guard that must keep passing once it is.
+# =============================================================================
+
+# Shared fixture for the tests below: a throwaway git repo (independent of
+# the repo this suite itself lives in) with one commit on `main`, plus the
+# environment source_orchestrator_functions needs (mirrors the setup() in
+# test-task-batching.bats). Not folded into this file's global setup()
+# because it is unrelated to the ~200 batch-orchestrator.sh tests above.
+_setup_950_repo() {
+	mkdir -p "$TEST_TMP/repo"
+	cd "$TEST_TMP/repo" || return 1
+	git init -q
+	git checkout -q -b main
+	printf 'initial\n' > README.md
+	git add README.md
+	git commit -q -m "initial"
+
+	export ISSUE_NUMBER=950
+	export BASE_BRANCH=main
+	export LOG_BASE="$TEST_TMP/logs/test"
+	export LOG_FILE="$LOG_BASE/orchestrator.log"
+	export STAGE_COUNTER=0
+	mkdir -p "$LOG_BASE"
+
+	source_orchestrator_functions
+}
+
+# Prints a pid that is guaranteed to no longer be running: a subshell that
+# has already exited and been reaped by `wait`. Simulates a worktree whose
+# owning run crashed or was killed.
+_dead_pid() {
+	( exit 0 ) &
+	local pid="$!"
+	wait "$pid" 2>/dev/null
+	printf '%s' "$pid"
+}
+
+# =============================================================================
+# AC1/AC4 (#950): reclaim_merged_branch
+# =============================================================================
+
+@test "issue #950 AC1: reclaim_merged_branch is defined in implement-issue-orchestrator.sh" {
+	_setup_950_repo
+
+	local msg="reclaim_merged_branch is not yet defined (issue #950"
+	msg="$msg AC1/AC4: delete the local branch after a confirmed merge,"
+	msg="$msg via the existing salvage guard)"
+	declare -f reclaim_merged_branch > /dev/null || fail "$msg"
+}
+
+@test "issue #950 AC1: reclaim_merged_branch deletes a fully-merged local branch" {
+	_setup_950_repo
+	declare -f reclaim_merged_branch > /dev/null \
+		|| skip "reclaim_merged_branch not yet implemented (issue #950)"
+
+	git checkout -q -b feature/issue-950 main
+	printf 'landed\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that reached main"
+	git checkout -q main
+	git merge -q --no-edit feature/issue-950
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -eq 0 ]
+	refute git rev-parse --verify --quiet refs/heads/feature/issue-950
+}
+
+@test "issue #950 AC1: reclaim_merged_branch is a no-op when the branch does not exist" {
+	_setup_950_repo
+	declare -f reclaim_merged_branch > /dev/null \
+		|| skip "reclaim_merged_branch not yet implemented (issue #950)"
+
+	run reclaim_merged_branch feature/issue-nonexistent main
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC1: reclaim_merged_branch deletes a branch even while checked out in another worktree" {
+	_setup_950_repo
+	declare -f reclaim_merged_branch > /dev/null \
+		|| skip "reclaim_merged_branch not yet implemented (issue #950)"
+
+	git checkout -q -b feature/issue-950 main
+	git checkout -q main
+
+	# Reproduces the exact production failure from issue #950's Gap 1:
+	# "error: Cannot delete branch 'feature/issue-5961' checked out at
+	# '<worktree path>'". The branch is checked out in a SEPARATE
+	# worktree, not the one running the reclaim.
+	local wt_path="$TEST_TMP/other-worktree"
+	git worktree add -q "$wt_path" feature/issue-950
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -eq 0 ]
+	refute git rev-parse --verify --quiet refs/heads/feature/issue-950
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+}
+
+# The worktree must not be removed before the branch is known to be going
+# away, and never while it holds uncommitted/untracked work — the salvage
+# tag only protects commits.
+@test "issue #950 AC1/AC4: reclaim_merged_branch keeps a merged branch whose worktree has uncommitted work" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	git checkout -q main
+	local wt_path="$TEST_TMP/dirty-worktree"
+	git worktree add -q "$wt_path" feature/issue-950
+	printf 'wip\n' > "$wt_path/untracked.txt"
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -ne 0 ]
+	[ -f "$wt_path/untracked.txt" ]
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+}
+
+@test "issue #950 AC1/AC4: reclaim_merged_branch keeps the worktree of a branch with unmerged commits" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'extra work\n' > extra.txt
+	git add extra.txt
+	git commit -q -m "unmerged"
+	git checkout -q main
+	local wt_path="$TEST_TMP/kept-worktree"
+	git worktree add -q "$wt_path" feature/issue-950
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -ne 0 ]
+	[ -d "$wt_path" ]
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+}
+
+@test "issue #950 AC1/AC4: reclaim_merged_branch keeps a branch with unmerged commits and salvage-tags them" {
+	_setup_950_repo
+	declare -f reclaim_merged_branch > /dev/null \
+		|| skip "reclaim_merged_branch not yet implemented (issue #950)"
+
+	git checkout -q -b feature/issue-950 main
+	printf 'extra work\n' > extra.txt
+	git add extra.txt
+	git commit -q -m "committed locally after the PR was opened"
+	local extra_sha
+	extra_sha=$(git rev-parse feature/issue-950)
+	git checkout -q main
+
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -ne 0 ]
+
+	# The branch is kept, not deleted (AC1) ...
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+
+	# ... and AC4: nothing is deleted without going through the existing
+	# salvage_unmerged_commits() guard — the extra commit is tagged so it
+	# stays addressable even if a later pass force-deletes the branch.
+	run git rev-parse --verify --quiet refs/tags/salvage/feature-issue-950
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+
+	run grep -F "Keeping local branch feature/issue-950" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# AC2/AC4 (#950): cleanup_stale_worktrees spares a live run, reclaims a dead
+# one
+# =============================================================================
+
+@test "issue #950 AC2: cleanup_stale_worktrees reclaims a worktree whose owning run is no longer alive" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	local wt_path="$TEST_TMP/worktrees/task-1"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "1" "950" \
+		> /dev/null
+
+	# Marks the worktree as belonging to a run that has already died —
+	# e.g. the circuit breaker killed it, or an operator killed -9'd it,
+	# mid-task. The directory (and its branch) survive on disk; only the
+	# pid marker distinguishes "abandoned" from "in flight".
+	local dead
+	dead=$(_dead_pid)
+	printf '%s' "$dead" > "$wt_path/.claude-task.pid"
+
+	cleanup_stale_worktrees
+
+	[[ ! -d "$wt_path" ]] \
+		|| fail "worktree for a dead run was not reclaimed"
+	refute git rev-parse --verify --quiet refs/heads/wt-i950-t1
+}
+
+@test "issue #950 AC2: cleanup_stale_worktrees never touches a live run's worktree" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	local wt_path="$TEST_TMP/worktrees/task-2"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "2" "950" \
+		> /dev/null
+
+	# A run genuinely still in flight: its pid marker names a background
+	# process that stays alive for the duration of this test.
+	sleep 100 &
+	local live_pid="$!"
+	printf '%s' "$live_pid" > "$wt_path/.claude-task.pid"
+
+	cleanup_stale_worktrees
+
+	local msg="a LIVE run's worktree was destroyed — this would have"
+	msg="$msg deleted in-flight work"
+	[[ -d "$wt_path" ]] || fail "$msg"
+	run git rev-parse --verify --quiet refs/heads/wt-i950-t2
+	[ "$status" -eq 0 ]
+
+	kill "$live_pid" 2>/dev/null
+	wait "$live_pid" 2>/dev/null || true
+}
+
+# Implementation note (verified against a reference implementation while
+# writing this test, not left in the tree): salvage_unmerged_commits()'s
+# no-base path computes `git rev-list $branch --not --exclude=refs/heads/
+# $branch --all`. While a worktree still has $branch checked out, --all
+# resolves the worktree's HEAD to a ref --exclude cannot name, so the
+# branch reads as reachable from --all and the tag is silently skipped.
+# `git worktree remove` the worktree BEFORE calling salvage_unmerged_
+# commits — matching the order the already-tested no-worktree stale-
+# branch path uses — not after.
+@test "issue #950 AC2/AC4: cleanup_stale_worktrees salvage-tags a dead run's unmerged commits before reclaiming it" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	local wt_path="$TEST_TMP/worktrees/task-3"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "3" "950" \
+		> /dev/null
+
+	printf 'unfinished work\n' > "$wt_path/unfinished.txt"
+	git -C "$wt_path" add unfinished.txt
+	git -C "$wt_path" commit -q -m "in-progress work, run then died"
+	local unmerged_sha
+	unmerged_sha=$(git -C "$wt_path" rev-parse wt-i950-t3)
+
+	local dead
+	dead=$(_dead_pid)
+	printf '%s' "$dead" > "$wt_path/.claude-task.pid"
+
+	cleanup_stale_worktrees
+
+	run git rev-parse --verify --quiet refs/tags/salvage/issue-950-task3
+	[ "$status" -eq 0 ]
+	[ "$output" = "$unmerged_sha" ]
+}
+
+# Regression guard for the exact hazard AC2 exists to close: the pid marker
+# must name the run that owns the worktree, not one task's own background
+# subshell. A batch's subshell exits the moment that one task finishes, well
+# before the run itself is done — it still waits on the rest of the batch,
+# then merges every worktree. If the marker named that subshell's pid
+# instead, a concurrent run's cleanup_stale_worktrees would see it as dead
+# and reclaim (force-remove) the worktree during that gap, destroying work
+# the owning run has not merged yet.
+@test "issue #950 AC2: .claude-task.pid names the run, not a finished task's own subshell" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950-pidowner main
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+	# Task 1 finishes almost immediately, so its background subshell
+	# exits (and its pid goes dead) well before task 2 — and the batch
+	# as a whole — is done.
+	run_task_in_worktree() {
+		local task_id="$1"
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || return 1
+		[[ "$task_id" == "2" ]] && sleep 2
+		printf 'task %s\n' "$task_id" > "task-${task_id}.txt"
+		git add "task-${task_id}.txt"
+		git commit -q -m "task $task_id"
+		local sha
+		sha=$(git rev-parse --short HEAD)
+		printf '{"status":"success","review_attempts":1,"commit":"%s","summary":"done"}' \
+			"$sha" > "$result_file"
+	}
+	export -f run_task_in_worktree
+
+	local tasks='[
+		{"id":1,"description":"quick task","agent":"default","batch":1},
+		{"id":2,"description":"slow task","agent":"default","batch":1}
+	]'
+
+	execute_batch_parallel 1 "$tasks" "feature/issue-950-pidowner" main \
+		> "$TEST_TMP/batch_result.json" 2>/dev/null &
+	local batch_pid="$!"
+
+	# Poll for task 1's commit instead of a fixed sleep: proof that its
+	# subshell has run to completion (and thus exited) while task 2 (and
+	# the batch itself) is still in flight.
+	local wt1="$LOG_BASE/worktrees/task-1"
+	local waited=0
+	while [[ ! -f "$wt1/task-1.txt" ]] && ((waited < 50)); do
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+	[[ -f "$wt1/task-1.txt" ]] \
+		|| fail "task 1 never completed within the timeout"
+	# Let its background subshell/watchdog finish tearing down.
+	sleep 0.3
+
+	[[ -d "$wt1" ]] \
+		|| fail "task 1's worktree is already gone -- the batch merges" \
+			"after task 2, so it should still be here"
+
+	local marker_pid
+	marker_pid=$(<"$wt1/.claude-task.pid")
+	[[ "$marker_pid" == "$$" ]] \
+		|| fail "expected .claude-task.pid to hold the run's own pid" \
+			"($$), got $marker_pid (a finished task's subshell pid" \
+			"would already be dead)"
+
+	# The actual hazard: a concurrent run's pre-flight must not reclaim
+	# this worktree while the owning run is still alive and mid-batch.
+	cleanup_stale_worktrees
+	[[ -d "$wt1" ]] \
+		|| fail "a live run's worktree was reclaimed -- the marker" \
+			"named a dead task subshell instead of the live run"
+
+	wait "$batch_pid" 2>/dev/null || true
+}
+
+# =============================================================================
+# AC1/AC4 (#950): delete_merged_local_branch through the actual merge_pr call
+# path, for a branch still checked out in another worktree.
+#
+# This is the scenario merge_pr hits in production, not an edge case: the
+# orchestrator runs the feature/issue-<n> branch out of its own worktree, so
+# by the time merge_pr calls delete_merged_local_branch, that branch is
+# almost always checked out somewhere other than the process's own HEAD.
+# 8abb6d4c wired that call site to reclaim_merged_branch instead of just
+# logging and keeping the branch; these tests cover both outcomes of that
+# wiring, complementing the direct reclaim_merged_branch coverage above.
+# =============================================================================
+
+@test "issue #950 AC1: delete_merged_local_branch reclaims a merged feature/issue-N branch checked out in another worktree" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'landed\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that reached main"
+	local tip
+	tip=$(git rev-parse feature/issue-950)
+	git checkout -q main
+	git merge -q --no-edit feature/issue-950
+
+	local wt_path="$TEST_TMP/wt-950"
+	git worktree add -q "$wt_path" feature/issue-950
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	refute git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[[ ! -d "$wt_path" ]] \
+		|| fail "worktree for the merged branch was not reclaimed"
+}
+
+@test "issue #950 AC1/AC4: delete_merged_local_branch keeps an unmerged feature/issue-N branch checked out in another worktree, salvage-tagging its commits" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'landed\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that reached main"
+	local tip
+	tip=$(git rev-parse feature/issue-950)
+	git checkout -q main
+	git merge -q --no-edit feature/issue-950
+
+	local wt_path="$TEST_TMP/wt-950"
+	git worktree add -q "$wt_path" feature/issue-950
+
+	# Committed locally, in the worktree, after the tip that was merged —
+	# the exact "operator committed after merge" hazard AC1 calls out.
+	printf 'late\n' > "$wt_path/late.txt"
+	git -C "$wt_path" add late.txt
+	git -C "$wt_path" commit -q -m "late local work"
+	local extra_sha
+	extra_sha=$(git -C "$wt_path" rev-parse feature/issue-950)
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	# The branch is kept, not deleted (AC1) ...
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+
+	# ... and so is its worktree: it is only removed when the branch is
+	# actually going away, never for a branch that is kept.
+	[[ -d "$wt_path" ]] \
+		|| fail "worktree of a kept branch was removed"
+
+	# ... and AC4: the extra commit is salvage-tagged before anything is
+	# force-deleted, so it stays addressable even if a later, less
+	# careful pass removes the branch.
+	run git rev-parse --verify --quiet refs/tags/salvage/feature-issue-950
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+
+	run grep -F "Keeping local branch feature/issue-950" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# AC3/AC4 (#950): reclaim_pr_scratch_branches removes review/check scratch
+# branches once their PR is no longer open
+# =============================================================================
+
+# Stubs `gh pr view <n> --json state --jq '.state'` to return $1 regardless
+# of which PR number is queried. Scratch-branch tests only ever create one
+# such branch at a time, so a single fixed answer is enough and avoids the
+# ordering fragility a queue would have against git's own branch ordering.
+_stub_gh_pr_state_fixed() {
+	local state="$1"
+	mkdir -p "$TEST_TMP/bin"
+	: > "$TEST_TMP/gh-calls.log"
+	cat > "$TEST_TMP/bin/gh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TEST_TMP/gh-calls.log"
+printf '%s\n' "$state"
+exit 0
+STUB
+	chmod +x "$TEST_TMP/bin/gh"
+	PATH="$TEST_TMP/bin:$PATH"
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches deletes a pr-N-review branch once its PR is MERGED" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed MERGED
+
+	git checkout -q -b pr-42-review main
+	git checkout -q main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	refute git rev-parse --verify --quiet refs/heads/pr-42-review
+	grep -q "PR #42 is MERGED" "$LOG_FILE" \
+		|| fail "reclaim was not logged with the PR number and state"
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches deletes a pr-N-check branch once its PR is CLOSED" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed CLOSED
+
+	git checkout -q -b pr-7-check main
+	git checkout -q main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	refute git rev-parse --verify --quiet refs/heads/pr-7-check
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches keeps a scratch branch while its PR is OPEN" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed OPEN
+
+	git checkout -q -b pr-9-review main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	run git rev-parse --verify --quiet refs/heads/pr-9-review
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches keeps a scratch branch when gh reports nothing" {
+	_setup_950_repo
+	# Empty state — gh unavailable, PR not found, offline — must be treated
+	# the same as "still open": the branch is kept rather than guessed at.
+	_stub_gh_pr_state_fixed ""
+
+	git checkout -q -b pr-13-review main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	run git rev-parse --verify --quiet refs/heads/pr-13-review
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC3/AC4: reclaim_pr_scratch_branches salvage-tags a scratch branch's unique commits before deleting it" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed MERGED
+
+	git checkout -q -b pr-55-review main
+	printf 'scratch work\n' > scratch.txt
+	git add scratch.txt
+	git commit -q -m "work that only exists on the scratch branch"
+	local scratch_sha
+	scratch_sha=$(git rev-parse pr-55-review)
+	git checkout -q main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+
+	# AC3: still deleted even though it carried commits — a scratch
+	# review/check checkout is never a place work is meant to land.
+	refute git rev-parse --verify --quiet refs/heads/pr-55-review
+
+	# AC4: nothing is deleted without going through salvage_unmerged_commits
+	# first — the commit is tagged so it stays addressable.
+	run git rev-parse --verify --quiet refs/tags/salvage/pr-55-review
+	[ "$status" -eq 0 ]
+	[ "$output" = "$scratch_sha" ]
+}
+
+@test "issue #950 AC3: reclaim_pr_scratch_branches ignores branches that do not match the pr-N-review/pr-N-check pattern" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed MERGED
+
+	git checkout -q -b feature/issue-950 main
+	git checkout -q main
+
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+	[ ! -s "$TEST_TMP/gh-calls.log" ] \
+		|| fail "queried gh for a branch that isn't a scratch branch"
+}
+
+# =============================================================================
+# AC5 (#950): report_stashes reports the stash stack without ever touching it
+# =============================================================================
+
+@test "issue #950 AC5: report_stashes logs a zero count and touches nothing when the stash stack is empty" {
+	_setup_950_repo
+
+	run report_stashes
+	[ "$status" -eq 0 ]
+	run grep -F "No stashes present" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC5: report_stashes logs the stash count without dropping, popping or applying any entry" {
+	_setup_950_repo
+
+	printf 'wip one\n' >> README.md
+	git stash push -q -m "wip one"
+	printf 'wip two\n' >> README.md
+	git stash push -q -m "wip two"
+
+	local before
+	before=$(git stash list)
+
+	run report_stashes
+	[ "$status" -eq 0 ]
+
+	local after
+	after=$(git stash list)
+	[ "$before" = "$after" ] \
+		|| fail "the stash stack changed: before=[$before] after=[$after]"
+
+	run grep -F "2 stash(es) present; not touched" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# AC6 (#950): RECLAIM_DRY_RUN lists what would be reclaimed without acting
+# =============================================================================
+
+@test "issue #950 AC6: reclaim_dry_run_enabled is false by default" {
+	_setup_950_repo
+	unset RECLAIM_DRY_RUN
+
+	run reclaim_dry_run_enabled
+	[ "$status" -ne 0 ]
+}
+
+@test "issue #950 AC6: reclaim_dry_run_enabled is true only when RECLAIM_DRY_RUN is exactly \"true\"" {
+	_setup_950_repo
+
+	RECLAIM_DRY_RUN=true run reclaim_dry_run_enabled
+	[ "$status" -eq 0 ]
+
+	RECLAIM_DRY_RUN=yes run reclaim_dry_run_enabled
+	[ "$status" -ne 0 ]
+}
+
+@test "issue #950 AC6: dry-run reclaim_merged_branch reports a mergeable branch without deleting it" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'landed\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that reached main"
+	git checkout -q main
+	git merge -q --no-edit feature/issue-950
+
+	export RECLAIM_DRY_RUN=true
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -eq 0 ]
+
+	run git rev-parse --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ] \
+		|| fail "dry-run deleted the branch it should only have reported"
+
+	run grep -F "[dry-run] would delete branch feature/issue-950" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC6: dry-run cleanup_stale_worktrees reports a dead run's worktree without reclaiming it" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	local wt_path="$TEST_TMP/worktrees/task-6"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "6" "950" \
+		> /dev/null
+
+	local dead
+	dead=$(_dead_pid)
+	printf '%s' "$dead" > "$wt_path/.claude-task.pid"
+
+	export RECLAIM_DRY_RUN=true
+	cleanup_stale_worktrees
+
+	[[ -d "$wt_path" ]] \
+		|| fail "dry-run reclaimed a worktree it should only have reported"
+	run git rev-parse --verify --quiet refs/heads/wt-i950-t6
+	[ "$status" -eq 0 ]
+
+	# Match on branch name rather than the full worktree path: TEST_TMP is
+	# created via mktemp, and on macOS git resolves it through the
+	# /var -> /private/var symlink, so the logged path is not always a
+	# byte-for-byte match for $wt_path.
+	run grep -F "[dry-run] would reclaim worktree" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+	run grep -F "branch wt-i950-t6" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC6: dry-run reclaim_pr_scratch_branches reports a reclaimable scratch branch without deleting it" {
+	_setup_950_repo
+	_stub_gh_pr_state_fixed MERGED
+
+	git checkout -q -b pr-88-review main
+	git checkout -q main
+
+	export RECLAIM_DRY_RUN=true
+	run reclaim_pr_scratch_branches
+	[ "$status" -eq 0 ]
+
+	run git rev-parse --verify --quiet refs/heads/pr-88-review
+	[ "$status" -eq 0 ] \
+		|| fail "dry-run deleted a scratch branch it should only have reported"
+
+	run grep -F "[dry-run] would delete scratch branch pr-88-review" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "issue #950 AC6: dry-run never writes a salvage tag" {
+	_setup_950_repo
+
+	git checkout -q -b feature/issue-950 main
+	printf 'extra work\n' > extra.txt
+	git add extra.txt
+	git commit -q -m "committed locally after the PR was opened"
+	git checkout -q main
+
+	export RECLAIM_DRY_RUN=true
+	run reclaim_merged_branch feature/issue-950 main
+	[ "$status" -ne 0 ]
+
+	run git rev-parse --verify --quiet refs/tags/salvage/feature-issue-950
+	[ "$status" -ne 0 ] \
+		|| fail "dry-run wrote a salvage tag even though nothing is deleted"
+}
+
+# =============================================================================
+# TASK 6 (#891): a first end-to-end run of the batch driver loop
+# =============================================================================
+#
+# Every test above drives batch-orchestrator.sh through extracted functions
+# or static text assertions; none has ever executed the real top-level
+# script. This is the first: it runs the actual batch-orchestrator.sh
+# against a real (throwaway) git repo, with a fake inner orchestrator
+# standing in for implement-issue-orchestrator.sh at the one seam
+# process_issue() calls through — `setsid "$SCRIPT_DIR/implement-issue-
+# orchestrator.sh" ...`. Replacing that file in a private copy of scripts/
+# IS the seam (see issue #891's own prototype), so the real driver loop —
+# init_status, the idempotency/upstream skip gates, process_issue, the
+# process-pr dispatch, wait_for_pr_merged and final-state selection — all
+# run for real.
+#
+# `gh` is stubbed to fail outright rather than omitted from PATH: that
+# keeps the run deterministic regardless of whether the host machine has a
+# real `gh` installed or authenticated to an unrelated repo.
+# validate_issue_for_processing() and the upstream-resolution gate both
+# treat a gh failure as "proceed" (never a skip) by design, so a failing
+# stub exercises the exact codepath a real, unauthenticated CI runner hits.
+# `claude` is stubbed to answer the one dispatch_composition call this path
+# reaches (/process-pr) with a "merged" verdict — the cheapest terminal
+# outcome that still reaches update_progress/set_state without touching
+# perform_scripted_merge or transition-issue.sh, which are their own seam
+# for a future test.
+
+BATCH_E2E_REAL_SCRIPTS_DIR="$SCRIPT_DIR"
+BATCH_E2E_REAL_CONFIG_DIR="$SCRIPT_DIR/../config"
+BATCH_E2E_SCRIPTS_COPY=""
+BATCH_E2E_ORCH_COPY=""
+
+# Copies the real scripts/ tree into TEST_TMP so the fake inner orchestrator
+# can be dropped in without ever touching tracked repo source. Sets
+# BATCH_E2E_SCRIPTS_COPY / BATCH_E2E_ORCH_COPY. Mirrors test-reexec.bats's
+# make_scripts_copy().
+_make_batch_e2e_scripts_copy() {
+	BATCH_E2E_SCRIPTS_COPY="$TEST_TMP/batch_e2e_scripts_copy"
+	mkdir -p "$BATCH_E2E_SCRIPTS_COPY"
+	cp -r "$BATCH_E2E_REAL_SCRIPTS_DIR/." "$BATCH_E2E_SCRIPTS_COPY/"
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY"/*.sh
+	export PIPELINE_CONFIG_DIR="$BATCH_E2E_REAL_CONFIG_DIR"
+	BATCH_E2E_ORCH_COPY="$BATCH_E2E_SCRIPTS_COPY/batch-orchestrator.sh"
+}
+
+# Overwrites the copy's implement-issue-orchestrator.sh — the exact file
+# process_issue() setsid-launches — with a fake that records the issue
+# number it was invoked with to FAKE_INNER_ORCH_CALL_LOG and writes a
+# status file reporting state=completed with a PR number, mirroring what a
+# real completed run leaves behind for process_issue() to parse.
+_install_fake_inner_orchestrator() {
+	cat > "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh" << 'FAKE_ORCH'
+#!/usr/bin/env bash
+set -uo pipefail
+issue_num=""
+status_file=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--issue) issue_num="$2"; shift 2 ;;
+		--status-file) status_file="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+
+if [[ -n "${FAKE_INNER_ORCH_CALL_LOG:-}" ]]; then
+	printf '%s\n' "$issue_num" >> "$FAKE_INNER_ORCH_CALL_LOG"
+fi
+
+pr_number="${FAKE_INNER_ORCH_PR_NUMBER:-101}"
+jq -n --argjson pr "$pr_number" '{
+	state: "completed",
+	stages: {pr: {pr_number: $pr}},
+	cost_summary: {total_cost_usd: 0}
+}' > "$status_file"
+FAKE_ORCH
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh"
+}
+
+# Isolated throwaway git repo to run the batch from: STATUS_FILE, LOG_BASE
+# and the lock file are all CWD-relative in batch-orchestrator.sh, so the
+# CWD a batch runs from IS its workspace (see issue #891's research). Leaves
+# the caller's CWD inside the repo, on a branch named "main", with one
+# commit.
+_init_batch_e2e_repo() {
+	local repo="$TEST_TMP/batch_e2e_repo"
+	mkdir -p "$repo"
+	cd "$repo" || return 1
+	git init -q
+	git checkout -q -b main
+	printf 'initial\n' > README.md
+	git add README.md
+	git commit -q -m "initial"
+}
+
+# Installs a `gh` that always fails (no output, exit 1) and a `claude` that
+# answers the single /process-pr dispatch this path reaches with a "merged"
+# verdict. Prepended to PATH ahead of any real gh/claude the host has
+# installed, so the run never depends on host auth state or network access.
+_install_batch_e2e_mocks() {
+	local mock_bin="$TEST_TMP/batch_e2e_bin"
+	mkdir -p "$mock_bin"
+
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$mock_bin/gh"
+	chmod +x "$mock_bin/gh"
+
+	cat > "$mock_bin/claude" << 'MOCK_CLAUDE'
+#!/usr/bin/env bash
+echo '{"result":"mocked process-pr","structured_output":{"status":"merged","follow_up_issues":[]}}'
+MOCK_CLAUDE
+	chmod +x "$mock_bin/claude"
+
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "real batch-orchestrator.sh: invokes the inner orchestrator for the named issue and summary.json reports completed" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export FAKE_INNER_ORCH_PR_NUMBER=4242
+	# Nothing to wait for in this harness — there is no real PR to poll via
+	# gh, and the stubbed gh above always fails, so skip the merge-wait
+	# poll entirely rather than have it fall through to a real sleep loop.
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "777" --branch main
+
+	[ "$status" -eq 0 ] || fail "batch-orchestrator.sh exited $status: $output"
+
+	[[ -f "$FAKE_INNER_ORCH_CALL_LOG" ]] \
+		|| fail "the inner orchestrator was never invoked at all"
+	run cat "$FAKE_INNER_ORCH_CALL_LOG"
+	[[ "$output" == *"777"* ]] \
+		|| fail "inner orchestrator was not invoked for issue #777 (got: $output)"
+
+	local summary
+	summary=$(find "$PWD/logs" -name summary.json | head -1)
+	[[ -n "$summary" ]] || fail "no summary.json was written"
+
+	run jq -r '.state' "$summary"
+	[ "$output" == "completed" ] \
+		|| fail "summary.json reported state='$output', not 'completed' — an early exit or skipped issue must fail this test"
+}
+
+# =============================================================================
+# TASK 7 (#891): an end-to-end circuit-breaker case
+# =============================================================================
+#
+# AC4: with an always-failing inner orchestrator and 4 issues, the run must
+# exit 2, status.json.state must be "circuit_breaker", the 4th issue must
+# still be "pending" (never attempted), and the fake inner orchestrator must
+# have been invoked exactly 3 times — MAX_CONSECUTIVE_FAILURES (batch-
+# orchestrator.sh:224) trips the breaker on the 3rd consecutive failure and
+# `break`s the driver loop before a 4th issue is ever started.
+#
+# Overwrites the copy's implement-issue-orchestrator.sh with a fake that
+# unconditionally reports state=error — unlike _install_fake_inner_orchestrator
+# above (which always reports completed), this drives every issue through
+# process_issue()'s failure arm so consecutive_failures actually climbs.
+_install_fake_inner_orchestrator_always_fails() {
+	cat > "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh" << 'FAKE_ORCH'
+#!/usr/bin/env bash
+set -uo pipefail
+issue_num=""
+status_file=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--issue) issue_num="$2"; shift 2 ;;
+		--status-file) status_file="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+
+if [[ -n "${FAKE_INNER_ORCH_CALL_LOG:-}" ]]; then
+	printf '%s\n' "$issue_num" >> "$FAKE_INNER_ORCH_CALL_LOG"
+fi
+
+jq -n '{
+	state: "error",
+	cost_summary: {total_cost_usd: 0}
+}' > "$status_file"
+FAKE_ORCH
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh"
+}
+
+@test "real batch-orchestrator.sh: circuit breaker trips on the 3rd consecutive failure, exits 2, leaves the 4th issue pending" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_always_fails
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	# No PR is ever created by the always-failing fake, so there is nothing
+	# to wait for — but set this anyway, matching the completed-path test,
+	# so a future regression that does leave a PR open can't turn this into
+	# a real sleep loop.
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "801,802,803,804" --branch main
+
+	[ "$status" -eq 2 ] \
+		|| fail "batch-orchestrator.sh exited $status, expected 2 (circuit breaker): $output"
+
+	[[ -f "$FAKE_INNER_ORCH_CALL_LOG" ]] \
+		|| fail "the inner orchestrator was never invoked at all"
+	local invocation_count
+	invocation_count=$(wc -l < "$FAKE_INNER_ORCH_CALL_LOG" | tr -d ' ')
+	[ "$invocation_count" -eq 3 ] \
+		|| fail "inner orchestrator was invoked $invocation_count time(s), expected exactly 3 (log: $(cat "$FAKE_INNER_ORCH_CALL_LOG"))"
+
+	local status_file="$PWD/status.json"
+	[[ -f "$status_file" ]] || fail "no status.json was written"
+
+	run jq -r '.state' "$status_file"
+	[ "$output" == "circuit_breaker" ] \
+		|| fail "status.json reported state='$output', not 'circuit_breaker'"
+
+	run jq -r '.issues[] | select(.number == "804") | .status' "$status_file"
+	[ "$output" == "pending" ] \
+		|| fail "issue #804 (the 4th) reported status='$output', expected 'pending' — it must never have been attempted"
 }

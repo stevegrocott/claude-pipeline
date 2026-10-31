@@ -186,6 +186,74 @@ teardown() {
 	[[ "$line" == *'2 failed'* ]]
 }
 
+@test "_format_task_summary_line reports the reconciled count (issue #913)" {
+	# .reconciled_count is written by the merge-gate reconciliation pass;
+	# merge-blocked comments splice this line, so the count must appear as
+	# a "(K reconciled)" suffix, mirroring the "(N failed)" suffix.
+	jq '.tasks = [
+		{"id":1,"description":"A","status":"completed"},
+		{"id":2,"description":"B","status":"completed",
+		 "reconciled_from":"failed"},
+		{"id":3,"description":"C","status":"failed"}
+	] | .reconciled_count = 1' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	local line
+	line=$(_format_task_summary_line)
+
+	[[ "$line" == '**Task summary:** 2/3 tasks completed (1 failed) (1 reconciled).' ]]
+}
+
+@test "_format_task_summary_line appends reconciled suffix with no failures" {
+	jq '.tasks = [
+		{"id":1,"description":"A","status":"completed",
+		 "reconciled_from":"failed"},
+		{"id":2,"description":"B","status":"completed"}
+	] | .reconciled_count = 1' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	local line
+	line=$(_format_task_summary_line)
+
+	[[ "$line" == '**Task summary:** 2/2 tasks completed (1 reconciled).' ]]
+}
+
+@test "_format_task_summary_line omits reconciled note when count is zero" {
+	jq '.tasks = [
+		{"id":1,"description":"A","status":"completed"}
+	] | .reconciled_count = 0' "$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+	local line
+	line=$(_format_task_summary_line)
+
+	[[ "$line" == '**Task summary:** 1/1 tasks completed.' ]]
+}
+
+@test "every merge-blocked comment is built after the merge-gate recheck" {
+	# The summary line must be computed after
+	# revalidate_partial_block_against_branch() at the merge gate so its
+	# reconciled count includes that pass; and each blocked PR comment
+	# (manual, e2e, partial, convergence) must splice it.
+	local main_def after_gate
+	main_def=$(declare -f main)
+	after_gate="${main_def#*'local merge_blocked_reason'}"
+	local before_gate="${main_def%%'local merge_blocked_reason'*}"
+	[[ "$before_gate" == *'revalidate_partial_block_against_branch'* ]]
+	[[ "$after_gate" == *'_task_summary_line=$(_format_task_summary_line)'* ]]
+
+	local title rest
+	for title in 'Merge Held — Manual Review Required' \
+		'Merge Blocked — E2E Verification Did Not Run' \
+		'Merge Blocked — Partial Delivery' \
+		'Merge Blocked — Unresolved Quality Feedback'; do
+		rest="${after_gate#*"$title"}"
+		[[ "$rest" != "$after_gate" ]]
+		rest="${rest%%comment_issue*}"
+		[[ "$rest" == *'$_task_summary_line'* ]]
+	done
+}
+
 @test "_format_task_summary_line is empty when there are no tasks" {
 	# init_status leaves .tasks absent/empty
 	local line
@@ -388,21 +456,34 @@ teardown() {
 	[[ "$persisted" == "Quality loop convergence failure" ]]
 }
 
-@test "all three pr_review degradation sites also persist a merge_blocked_reason" {
+@test "every pr_review degradation site also persists a merge_blocked_reason" {
 	# Static wiring guard: each DEGRADED_STAGES+=("pr_review:...") append in the
 	# PR review loop must be paired with a persist_merge_blocked_reason call so
-	# the block is durable across a resume. Extract the three-guard region and
-	# assert one persist call per pr_review append.
-	local script_content
-	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	# the block is durable across a resume.
+	#
+	# This used to assert a hard count of exactly three appends. The count was
+	# never the invariant — the PAIRING is — and it went stale as soon as more
+	# sites were added (there are five now: 3× max_iterations, 2× wall_timeout).
+	# It had been failing ever since, invisibly on bash 3.2, which swallows a
+	# bare [[ ]] failure that is not the last command in a function.
+	#
+	# Asserting the pairing directly means a newly added site is covered
+	# automatically, instead of turning this test red for the wrong reason.
+	local unpaired
+	unpaired=$(awk '
+		/DEGRADED_STAGES\+=\("pr_review:/ { site = NR; next }
+		site && /persist_merge_blocked_reason/ { site = 0; next }
+		site && NR > site + 8 { print site; site = 0 }
+		END { if (site) print site }
+	' "$ORCHESTRATOR_SCRIPT")
 
-	local pr_appends persist_calls
-	pr_appends=$(grep -c 'DEGRADED_STAGES+=("pr_review:' <<< "$script_content")
-	# Persist calls that name a pr_review cause.
-	persist_calls=$(grep -c 'persist_merge_blocked_reason' <<< "$script_content")
+	expect_ok "each pr_review degradation site persists a reason (unpaired at lines: ${unpaired:-none})" \
+		test -z "$unpaired"
 
-	# Three pr_review appends (2× wall_timeout, 1× max_iterations).
-	[[ "$pr_appends" -eq 3 ]]
-	# At least three persist calls exist (the three pr_review sites).
-	[[ "$persist_calls" -ge 3 ]]
+	# Guard against the awk above matching nothing at all: if the append
+	# spelling ever changes, the check would otherwise pass vacuously.
+	local pr_appends
+	pr_appends=$(grep -c 'DEGRADED_STAGES+=("pr_review:' "$ORCHESTRATOR_SCRIPT")
+	expect_ok "pr_review degradation sites still exist (found: $pr_appends)" \
+		test "$pr_appends" -ge 3
 }

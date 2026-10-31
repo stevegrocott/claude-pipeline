@@ -612,7 +612,13 @@ teardown() {
     local main_def
     main_def=$(declare -f main)
 
-    [[ "$main_def" == *"git push origin"* ]]
+    # Since #878 the loop defers the push: each accepted fix marks the branch
+    # and one flush at the loop exit performs the single `git push`. Both
+    # halves must be present — a mark with no flush would never push at all.
+    [[ "$main_def" == *"mark_review_push_pending"* ]] || \
+        fail "the review loop no longer records that a fix needs pushing"
+    [[ "$main_def" == *"flush_review_push"* ]] || \
+        fail "the review loop never flushes its deferred push"
 }
 
 @test "PR review loop uses comment_pr" {
@@ -694,6 +700,128 @@ teardown() {
     [[ "$main_def" == *'set_final_state "max_iterations_pr_review"'* ]]
     [[ "$main_def" == *"DEGRADED_STAGES"* ]]
     [[ "$main_def" == *"break"* ]]
+}
+
+@test "orchestrator does not count false-absence PR review verdicts toward max iterations (issue #839)" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # A changes_requested verdict citing a file the branch's diff actually
+    # contains must be detected and its iteration undone rather than
+    # counted toward the max-iterations block.
+    [[ "$main_def" == *"false_absence_files"* ]]
+    [[ "$main_def" == *'.pr_review_iterations = ([.pr_review_iterations - 1, 0] | max)'* ]]
+    [[ "$main_def" == *"not counting this iteration toward the max-iterations budget"* ]]
+}
+
+# Extract the false-absence classifier's jq program out of the live `main`
+# body so the tests below exercise the real filter. Grepping for literal
+# text only fails when the text is deleted; running the filter fails when
+# its logic is wrong.
+_false_absence_jq_filter() {
+    # `declare -f` is a DEPARSER, not a source echo: it re-renders the body
+    # with its own indentation, a trailing `;` on the closing line, and —
+    # version-dependently — its own spacing around redirection operators.
+    # bash 3.2 emits `2>/dev/null`; bash 5 emits `2> /dev/null`. The end
+    # anchor below must tolerate both, or on bash 5 awk never exits and
+    # returns the whole of `main` (23KB) as the supposed jq program.
+    # Anchor on surrounding tokens, never on operator spacing.
+    declare -f main | awk '
+        /--arg files "\$changed_files_nl"/ { capture = 1; next }
+        capture && /2> ?\/dev\/null\);?$/ { exit }
+        capture { print }
+    '
+}
+
+# Run the extracted filter over a synthetic review_result / changed-files pair
+# exactly as the orchestrator does, and echo the comma-joined file list.
+_classify_false_absence() {
+    local review_result="$1" changed_files_nl="$2"
+    printf '%s' "$review_result" \
+        | jq -r --arg files "$changed_files_nl" "$(_false_absence_jq_filter)"
+}
+
+@test "false-absence classifier flags verdicts claiming a diffed file does not exist (issue #839)" {
+    [[ -n "$(_false_absence_jq_filter)" ]]
+
+    local result
+    result='{"output":{"issues":[
+        {"file":"src/auth.ts","description":"The file src/auth.ts does not exist on this branch."},
+        {"file":"src/user.ts","description":"src/user.ts was never added to this PR."},
+        {"file":"src/db.ts","description":"This change is missing from the branch entirely."}
+    ]}}'
+
+    run _classify_false_absence "$result" $'src/auth.ts\nsrc/user.ts\nsrc/db.ts'
+    [ "$status" -eq 0 ]
+    [ "$output" = "src/auth.ts, src/db.ts, src/user.ts" ]
+}
+
+@test "false-absence classifier ignores genuine findings that merely say something is missing (issue #839)" {
+    local result
+    result='{"output":{"issues":[
+        {"file":"src/api.ts","description":"Missing input validation on the request body."},
+        {"file":"src/api.ts","description":"Error handling is missing for the fetch call."},
+        {"file":"src/api.ts","description":"The response schema is not present for POST /users."},
+        {"file":"src/api.ts","description":"This route does not include an auth guard."}
+    ]}}'
+
+    run _classify_false_absence "$result" $'src/api.ts'
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "false-absence classifier ignores absence claims about files outside the diff (issue #839)" {
+    local result
+    result='{"output":{"issues":[
+        {"file":"src/other.ts","description":"The file src/other.ts does not exist."}
+    ]}}'
+
+    run _classify_false_absence "$result" $'src/auth.ts'
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "task-level review pins merge-base and falls back to three-dot semantics (issue #839)" {
+    local func_def
+    func_def=$(declare -f run_quality_loop)
+
+    [[ "$func_def" == *"review_base_commit"* ]]
+    [[ "$func_def" == *'merge-base "$BASE_BRANCH" HEAD'* ]]
+    # Merge-base failure must keep three-dot diff semantics in the fallback,
+    # not compare directly against the branch tip.
+    [[ "$func_def" == *'diff "$BASE_BRANCH"...HEAD --name-only'* ]]
+}
+
+@test "PR review truncation note reports binary files as binary, not '+-/-- lines' (issue #839)" {
+    # Drive the orchestrator's numstat rendering loop over real `git diff
+    # --numstat` output containing a binary file, so a regression in the
+    # rendering produces a failing string rather than merely deleted text.
+    local numstat pr_diff_file_stats="" ns_added ns_removed ns_path
+    numstat=$'12\t3\tsrc/app.ts\n-\t-\tassets/logo.png'
+
+    # Two traps in extracting a live loop out of `declare -f`:
+    #  1. bash normalises ANSI-C quoting, so the source's `IFS=$'\t'` is
+    #     re-rendered as `IFS='<literal TAB>'` on BOTH 3.2 and 5. Matching
+    #     the `$'\t'` source form finds nothing, `render` is empty, the eval
+    #     is a no-op and every assertion below passes vacuously — which is
+    #     how this test sat hollow. Anchor on the variable names instead;
+    #     `ns_added ns_removed ns_path` is unique within `main`.
+    #  2. The old `sed '$d'` deleted the whole final line, taking `done` with
+    #     it and leaving an unterminated loop. Strip only the redirection.
+    local render
+    render=$(declare -f main | sed -n '/while IFS=.*read -r ns_added ns_removed ns_path; do/,/^[[:space:]]*done </p' \
+        | sed '$s/^\([[:space:]]*done\) <.*$/\1/')
+    [[ -n "$render" ]]
+    # Non-emptiness alone is far too weak a gate — 23KB of unrelated bash is
+    # also non-empty. Require the loop to be intact and plausibly small.
+    [[ "$render" == *"ns_path"* && "$render" == *"done"* ]]
+    [[ "$(printf '%s\n' "$render" | wc -l)" -lt 30 ]]
+
+    eval "$render" < <(printf '%s\n' "$numstat")
+
+    [[ "$pr_diff_file_stats" == *"- src/app.ts: +12/-3 lines"* ]]
+    [[ "$pr_diff_file_stats" == *"- assets/logo.png: binary"* ]]
+    [[ "$pr_diff_file_stats" != *"+-/-- lines"* ]]
 }
 
 # =============================================================================
@@ -1377,8 +1505,13 @@ _simulate_resume_merge() {
     # plain assignment keeps intent obvious.
     ISSUE_ARRAY=(100 101)
 
-    # Simulate a prior launch: 100 finished, 101 never ran.
+    # Simulate a prior launch of THIS batch: 100 finished, 101 never ran.
+    # The fingerprint is what init_status would itself have written on that
+    # launch (issue #781): "<base branch>:<sorted issue numbers>". Without it
+    # the file looks like it came from an older pipeline-core and resume is
+    # declined — covered separately by the legacy-file test below.
     jq -n '{
+        batch_fingerprint: "main:100,101,",
         issues: [
             {number: "100", status: "completed"},
             {number: "101", status: "pending"}
@@ -1523,4 +1656,56 @@ BATCH_STUB
             && fail "orchestrator pgid $orch_pgid respawned after teardown"
     done
     return 0
+}
+
+# A status.json written before #781 carries no batch_fingerprint. That is not
+# evidence of a different batch — it is evidence of an older pipeline-core —
+# so it must not be reported as a "mismatch". It still declines to resume,
+# deliberately: resetting reprocesses an already-done issue (wasteful, safe),
+# whereas preserving on unverifiable provenance is the #781 defect itself
+# (silently skipping work that should run). Costs one non-resumed batch per
+# consumer, once, on the upgrade that introduces fingerprints.
+@test "resume functional: a pre-#781 status.json with no fingerprint declines to resume and says why" {
+    source_batch_function init_status
+
+    # source_batch_function installs `log() { :; }`, so log lines are dropped.
+    # Capture them: the distinction between "absent fingerprint" and
+    # "fingerprint mismatch" IS the behaviour under test.
+    LOG_CAPTURE="$TEST_TMP/log_capture"
+    log() { printf '%s\n' "$*" >> "$LOG_CAPTURE"; }
+    : > "$LOG_CAPTURE"
+
+    export BRANCH="main"
+    export STATUS_FILE="$TEST_TMP/resume-legacy-status.json"
+    ISSUE_ARRAY=(100 101)
+
+    # No batch_fingerprint key at all — exactly what an older version wrote.
+    jq -n '{
+        issues: [
+            {number: "100", status: "completed"},
+            {number: "101", status: "pending"}
+        ]
+    }' > "$STATUS_FILE"
+
+    init_status
+
+    local st100
+    st100=$(jq -r '.issues[] | select(.number=="100") | .status' "$STATUS_FILE")
+    [ "$st100" = "pending" ] \
+        || fail "unverifiable provenance must reset, not preserve; got: $st100"
+
+    # The log must name the real reason. Calling this a fingerprint "mismatch"
+    # would assert something unknowable about a file that recorded nothing.
+    grep -q "no batch fingerprint" "$LOG_CAPTURE" \
+        || fail "must report the absent fingerprint; log: $(< "$LOG_CAPTURE")"
+    # `grep -q ... && fail` would be wrong here: when grep does NOT match —
+    # the outcome we want — the && list returns 1 and errexit fails the test.
+    if grep -q "fingerprint mismatch" "$LOG_CAPTURE"; then
+        fail "must NOT call an absent fingerprint a mismatch"
+    fi
+
+    # The new fingerprint is written, so the NEXT relaunch can resume.
+    local written
+    written=$(jq -r '.batch_fingerprint // empty' "$STATUS_FILE")
+    [ -n "$written" ] || fail "init_status must record a fingerprint for next time"
 }

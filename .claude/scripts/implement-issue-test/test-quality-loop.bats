@@ -22,6 +22,28 @@ setup() {
     mkdir -p "$LOG_BASE/stages" "$LOG_BASE/context"
     mkdir -p "$SCHEMA_DIR"
 
+    # run_quality_loop shells out to git against its loop_dir — notably
+    # `review_base_commit=$(git -C "$loop_dir" merge-base "$BASE_BRANCH" HEAD
+    # 2>/dev/null)`, a command substitution with no `|| true`. Under errexit a
+    # non-repo path makes that exit 128 and the whole function dies before any
+    # assertion runs. These tests previously passed the literal "$QUALITY_LOOP_DIR",
+    # which is not a repository (and on a clean machine does not exist at all),
+    # so 21 of them failed for that reason alone rather than for anything they
+    # were testing (issue #855).
+    #
+    # Give the loop a real repository with BASE_BRANCH present, so merge-base
+    # and diff resolve and the tests exercise the logic they were written for.
+    QUALITY_LOOP_DIR="$TEST_TMP/worktree"
+    mkdir -p "$QUALITY_LOOP_DIR"
+    git -C "$QUALITY_LOOP_DIR" init -q
+    # symbolic-ref rather than `init -b`: it does not depend on git >= 2.28,
+    # and it puts the first commit directly on BASE_BRANCH.
+    git -C "$QUALITY_LOOP_DIR" symbolic-ref HEAD "refs/heads/$BASE_BRANCH"
+    git -C "$QUALITY_LOOP_DIR" config user.email "test@example.com"
+    git -C "$QUALITY_LOOP_DIR" config user.name "test"
+    git -C "$QUALITY_LOOP_DIR" commit -q --allow-empty -m "init"
+    export QUALITY_LOOP_DIR
+
     # Create required schemas
     for schema in implement-issue-implement implement-issue-test implement-issue-review implement-issue-fix implement-issue-simplify; do
         echo '{"type":"object"}' > "$SCHEMA_DIR/${schema}.json"
@@ -72,7 +94,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     local iterations
     iterations=$(jq -r '.quality_iterations' "$STATUS_FILE")
@@ -101,7 +123,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     local stage_iteration
     stage_iteration=$(jq -r '.stages.quality_loop.iteration' "$STATUS_FILE")
@@ -145,7 +167,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Should eventually succeed after retrying past the error
@@ -308,7 +330,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Should succeed after retry
@@ -381,7 +403,7 @@ teardown() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Verify we went through multiple review iterations
     local final_count
@@ -576,7 +598,7 @@ HIST_EOF
     }
     export -f run_stage
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # The captured prompt from the second iteration must include PRIOR ITERATION FINDINGS
     [[ -f "$prompt_capture" ]]
@@ -610,7 +632,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # History file should exist
     [[ -f "$history_file" ]]
@@ -671,7 +693,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # History file should have 2 entries (one per iteration)
     [[ -f "$history_file" ]]
@@ -991,7 +1013,7 @@ _setup_git_repo_with_diff() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Should succeed after retrying past the timeout
@@ -1044,7 +1066,7 @@ _setup_git_repo_with_diff() {
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Fix should NOT have been called (timeout should skip to next iteration)
     local was_fix_called
@@ -1108,7 +1130,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Loop should exit 0 (convergence triggers loop_approved=true, not exit 2)
@@ -1187,7 +1209,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     [ "$exit_status" -eq 0 ]
@@ -1240,7 +1262,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Simplify should have been called only ONCE:
     # iter 1: simplify runs (no changes → skip_simplify=true); review times out → continue
@@ -1316,7 +1338,7 @@ FAKE_EOF
     chmod +x "$fake_script_dir/decide-action.sh"
     SCRIPT_DIR="$fake_script_dir"
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Simplify should be called at least twice: iter1 (no changes), iter3 (after fix reset)
     local simplify_call_count
@@ -1407,7 +1429,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     # Fix prompt must exist
     [[ -f "$fix_prompt_file" ]] || fail "Fix prompt was not captured"
@@ -1463,7 +1485,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     [[ -f "$fix_prompt_file" ]]
     local captured
@@ -1525,7 +1547,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     [[ -f "$fix_prompt_file" ]]
     local captured
@@ -1577,7 +1599,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
 
     [[ -f "$fix_prompt_file" ]]
     local captured
@@ -1628,7 +1650,7 @@ HIST_EOF
     # Pass complexity "M" as arg 6 to run_quality_loop.
     # Run in a subshell for isolation. Max iterations uses soft-fail
     # (DEGRADED_STAGES + break) so the complexity file is written.
-    ( run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "M" ) || true
+    ( run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test" "" 1 "M" ) || true
 
     [[ -f "$complexity_file" ]] || fail "fix-review stage was not called"
     local captured_complexity
@@ -1659,7 +1681,7 @@ HIST_EOF
     export -f comment_issue
 
     # Pass complexity "L" as arg 6 to run_quality_loop
-    run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "L"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test" "" 1 "L"
 
     [[ -f "$simplify_complexity_file" ]] || fail "simplify stage was not called"
     local captured_complexity
@@ -1690,7 +1712,7 @@ HIST_EOF
     export -f comment_issue
 
     # Pass complexity "S" as arg 6 to run_quality_loop
-    run_quality_loop "/tmp/worktree" "test-branch" "test" "" 1 "S"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test" "" 1 "S"
 
     [[ -f "$review_complexity_file" ]] || fail "review stage was not called"
     local captured_complexity
@@ -1724,7 +1746,7 @@ HIST_EOF
     comment_issue() { :; }
     export -f comment_issue
 
-    run_quality_loop "/tmp/worktree" "test-branch" "test"
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
     local exit_status=$?
 
     # Should succeed without override
@@ -1935,9 +1957,9 @@ _install_fix_stage_stubs() {
         fail "committed fix must post its success comment, got: $comments"
 }
 
-@test "main pushes to the PR only when the fix stage result is accepted" {
-    # The push lives in main's review loop; the guard's return code gates it,
-    # so an uncommitted fix can no longer trigger a no-op push.
+@test "main defers the PR push only when the fix stage result is accepted" {
+    # The deferral lives in main's review loop; the guard's return code gates
+    # it, so an uncommitted fix can no longer schedule a no-op push.
     local main_def
     main_def=$(declare -f main)
 
@@ -1945,10 +1967,139 @@ _install_fix_stage_stubs() {
     fix_block=$(printf '%s' "$main_def" \
         | awk '/if _handle_fix_stage_result/,/^ *fi$/')
 
-    [[ "$fix_block" == *"git push origin"* ]] || \
-        fail "push must sit inside the _handle_fix_stage_result success branch"
+    [[ "$fix_block" == *"mark_review_push_pending"* ]] || \
+        fail "the push marker must sit inside the _handle_fix_stage_result success branch"
     [[ "$fix_block" == *"did not land its changes"* ]] || \
         fail "the failure branch must log that the changes did not land"
+}
+
+# =============================================================================
+# ISSUE #878 — one push per review loop, not one per iteration
+#
+# Each push is a full CI run on the consumer. The review loop diffs LOCAL git
+# (`git diff "$BASE_BRANCH"...HEAD`), so nothing inside the loop needs origin
+# to be current, and only the final head is ever merged — N intermediate
+# pushes buy no signal. The push moves to the loop exit, with the EXIT trap as
+# the safety net for a run halted mid-loop (batch-orchestrator recovers that
+# as "PR exists" and hands the PR to a standalone /process-pr, which merges
+# whatever is on origin — an unpushed fix would be silently dropped).
+# =============================================================================
+
+@test "#878: the review loop no longer pushes inside its fix branch" {
+    local main_def
+    main_def=$(declare -f main)
+
+    local fix_block
+    fix_block=$(printf '%s' "$main_def" \
+        | awk '/if _handle_fix_stage_result/,/^ *fi$/')
+
+    if [[ "$fix_block" == *"git push origin"* ]]; then
+        fail "the fix branch still pushes per iteration: $fix_block"
+    fi
+}
+
+@test "#878: the loop flushes the deferred push before the pr_review stage completes" {
+    local main_def
+    main_def=$(declare -f main)
+
+    # The tail of the pr_review stage: everything between the loop marker and
+    # the stage-completed call that closes it.
+    local tail_block
+    tail_block=$(printf '%s' "$main_def" \
+        | awk '/if _handle_fix_stage_result/,/set_stage_completed "pr_review"/')
+
+    [[ "$tail_block" == *"flush_review_push"* ]] || \
+        fail "the loop never flushes its deferred push: $tail_block"
+
+    # ...and the flush must precede the stage completion, or the complete and
+    # merge stages run against a remote head missing the last fix.
+    local before_completion
+    before_completion=${tail_block%%set_stage_completed \"pr_review\"*}
+    [[ "$before_completion" == *"flush_review_push"* ]] || \
+        fail "flush runs after the stage completes, so merge-mr.sh could merge a stale remote head"
+}
+
+@test "#878: three review iterations result in exactly one push" {
+    local push_log="$TEST_TMP/git-push.log"
+    git() {
+        if [[ "$1" == "push" ]]; then
+            printf '%s\n' "$*" >> "$push_log"
+            return 0
+        fi
+        command git "$@"
+    }
+
+    mark_review_push_pending "fix/issue-878"
+    mark_review_push_pending "fix/issue-878"
+    mark_review_push_pending "fix/issue-878"
+    flush_review_push
+
+    assert_file_exists "$push_log"
+    local pushes
+    pushes=$(grep -c . "$push_log")
+    [[ "$pushes" -eq 1 ]] || \
+        fail "expected exactly 1 push for 3 iterations, got $pushes: $(< "$push_log")"
+    assert_file_contains "$push_log" "push origin fix/issue-878"
+}
+
+@test "#878: a loop that committed nothing pushes nothing" {
+    local push_log="$TEST_TMP/git-push.log"
+    git() {
+        if [[ "$1" == "push" ]]; then
+            printf '%s\n' "$*" >> "$push_log"
+            return 0
+        fi
+        command git "$@"
+    }
+
+    flush_review_push
+
+    if [[ -f "$push_log" ]]; then
+        fail "pushed with no fix committed: $(< "$push_log")"
+    fi
+}
+
+@test "#878: the flush is idempotent — the loop exit and the EXIT trap push once between them" {
+    local push_log="$TEST_TMP/git-push.log"
+    git() {
+        if [[ "$1" == "push" ]]; then
+            printf '%s\n' "$*" >> "$push_log"
+            return 0
+        fi
+        command git "$@"
+    }
+
+    mark_review_push_pending "fix/issue-878"
+    flush_review_push
+    # Second call stands in for the EXIT trap firing after the loop flushed.
+    flush_review_push
+
+    local pushes
+    pushes=$(grep -c . "$push_log")
+    [[ "$pushes" -eq 1 ]] || \
+        fail "flush is not idempotent — expected 1 push, got $pushes"
+}
+
+@test "#878: the EXIT trap flushes a pending push so a halted run cannot leave the fix unpushed" {
+    local trap_line
+    trap_line=$(grep -n "^trap '" "$ORCHESTRATOR_SCRIPT" | grep "EXIT$")
+    [[ -n "$trap_line" ]] || fail "no EXIT trap registered in the orchestrator"
+    [[ "$trap_line" == *"flush_review_push"* ]] || \
+        fail "EXIT trap does not flush the deferred push: $trap_line"
+}
+
+@test "#878: flush_review_push is defined before the EXIT trap registers it" {
+    # The trap can fire from any exit after registration; a helper defined
+    # further down the file would be a "command not found" at that point.
+    local def_line trap_reg_line
+    def_line=$(grep -n '^flush_review_push() {' "$ORCHESTRATOR_SCRIPT" \
+        | cut -d: -f1)
+    trap_reg_line=$(grep -n "^trap '.*' EXIT$" "$ORCHESTRATOR_SCRIPT" \
+        | cut -d: -f1)
+    [[ -n "$def_line" && -n "$trap_reg_line" ]] || \
+        fail "could not locate flush_review_push ($def_line) or the EXIT trap ($trap_reg_line)"
+    (( def_line < trap_reg_line )) || \
+        fail "flush_review_push (line $def_line) is defined after the EXIT trap (line $trap_reg_line)"
 }
 
 @test "_handle_fix_stage_result accepts a clean no-op without failing the stage" {

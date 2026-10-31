@@ -15,6 +15,9 @@
 #   * AC4: fails if either skill loses the rule
 #   * AC5: runs as part of `bats tests/*.bats` in the Decision Script BATS job
 #
+# Also guards issue #828 AC2: fails if the two skills' Red Flags table rows
+# for the same bundle-regen temptation diverge in wording.
+#
 
 bats_require_minimum_version 1.5.0
 
@@ -30,6 +33,13 @@ ENRICH_SKILL="$REPO_ROOT/plugins/pipeline-core/skills/enrich-issue/SKILL.md"
 # own diagnostic `if` check runs.
 rule_line() {
 	grep -v '^\s*|' "$1" | grep -i 'sync\.sh bundle' | grep -i 'standalone' || true
+}
+
+# The Red Flags table row describing the same bundle-regen temptation,
+# scoped to the "## Red Flags" section (the last section in both files, so
+# an unmatched closing pattern falls through to EOF, which is fine here).
+red_flags_bundle_row() {
+	sed -n '/^## Red Flags/,/^## /p' "$1" | grep '^\s*|' | grep -i 'bundle' || true
 }
 
 @test "explore SKILL.md exists" {
@@ -76,15 +86,8 @@ rule_line() {
 }
 
 @test "explore Red Flags table has a row for standalone bundle-regen naming worktree isolation" {
-	local table row
-	table=$(sed -n '/^## Red Flags/,/^## /p' "$EXPLORE_SKILL")
-
-	if [[ -z "$table" ]]; then
-		echo "explore/SKILL.md has no ## Red Flags section"
-		return 1
-	fi
-
-	row=$(echo "$table" | grep '^\s*|' | grep -i 'bundle' || true)
+	local row
+	row=$(red_flags_bundle_row "$EXPLORE_SKILL")
 
 	if [[ -z "$row" ]]; then
 		echo "explore Red Flags table has no row mentioning bundle regeneration"
@@ -95,4 +98,24 @@ rule_line() {
 		echo "explore Red Flags bundle-regen row doesn't name worktree isolation as the failure reason: $row"
 		return 1
 	}
+}
+
+@test "explore and enrich-issue Red Flags bundle-regen rows match" {
+	local explore_row enrich_row
+	explore_row=$(red_flags_bundle_row "$EXPLORE_SKILL")
+	enrich_row=$(red_flags_bundle_row "$ENRICH_SKILL")
+
+	[[ -n "$explore_row" ]] || skip "explore Red Flags bundle-regen row missing — covered by the preceding test"
+
+	if [[ -z "$enrich_row" ]]; then
+		echo "enrich-issue Red Flags table has no row mentioning bundle regeneration"
+		return 1
+	fi
+
+	if [[ "$explore_row" != "$enrich_row" ]]; then
+		echo "explore and enrich-issue Red Flags bundle-regen rows have drifted:"
+		echo "  explore:      $explore_row"
+		echo "  enrich-issue: $enrich_row"
+		return 1
+	fi
 }

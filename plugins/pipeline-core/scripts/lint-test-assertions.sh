@@ -192,6 +192,84 @@ _scan_mock_timing_perf() {
 }
 
 # -----------------------------------------------------------------------
+# _scan_bats_negated_assertion <file> <tmpdir>
+# Flag `! cmd ...` inside a bats @test body when it is NOT the body's last
+# command.
+#
+# Bash exempts a `!`-negated pipeline from errexit:
+#
+#     bash -c 'set -e; ! true; echo REACHED'   # prints REACHED
+#
+# bats takes a test's exit status from the LAST command in its body, so a
+# negated assertion anywhere else cannot fail the test no matter what it
+# finds — it is a hollow assertion that reports coverage it does not have.
+# Found in #847, where an acceptance test written this way passed against
+# code known to be broken; fixed and generalised in #854.
+#
+# The correct form is:
+#
+#     if grep -q 'thing' "$file"; then fail "thing must not appear"; fi
+#
+# Only .bats files are scanned: outside a test body the idiom is ordinary
+# control flow, not an assertion.
+# -----------------------------------------------------------------------
+_scan_bats_negated_assertion() {
+	local file="$1" tmpdir="$2"
+	local rawline lineno snippet
+
+	[[ "$file" == *.bats ]] || return 0
+
+	while IFS=$'\t' read -r lineno snippet; do
+		[[ -n "$lineno" ]] || continue
+		_emit_finding "$tmpdir" "$file" "$lineno" \
+			"bats-negated-assertion" "$snippet" "major"
+	done < <(awk '
+		# A test body opens with `@test "name" {` and closes with `}` in
+		# column 0 — the same shape bats itself parses.
+		/^@test[[:space:]].*\{[[:space:]]*$/ {
+			in_test = 1; ncand = 0; last = 0; buf = ""; next
+		}
+		in_test && buf == "" && /^\}[[:space:]]*$/ {
+			# Everything except the final command is unreachable as a
+			# failure signal, so report it.
+			for (i = 1; i <= ncand; i++)
+				if (cand_line[i] != last)
+					printf "%d\t%s\n", cand_line[i], cand_snip[i]
+			in_test = 0; ncand = 0; next
+		}
+		in_test {
+			s = $0
+			sub(/^[[:space:]]+/, "", s)
+			sub(/[[:space:]]+$/, "", s)
+			# Blank lines and comments are not commands, so they do not
+			# displace a trailing assertion from the last position.
+			if (buf == "" && (s == "" || s ~ /^#/)) next
+
+			if (buf == "") start = NR
+			# Join backslash continuations into one LOGICAL command before
+			# judging it. Without this, `! grep ... \` on its own line looks
+			# like a bare negation when the next line carries an `|| fail`
+			# that makes it perfectly sound.
+			cont = (s ~ /\\$/)
+			if (cont) sub(/\\$/, "", s)
+			buf = (buf == "" ? s : buf " " s)
+			if (cont) next
+
+			last = start
+			# `! cmd || fail ...` is NOT hollow: when cmd succeeds the
+			# negation yields 1 and the `||` handler runs, failing the test
+			# explicitly. Only an unhandled negation is unreachable.
+			if (buf ~ /^![[:space:]]/ && buf !~ /\|\|/) {
+				ncand++
+				cand_line[ncand] = start
+				cand_snip[ncand] = buf
+			}
+			buf = ""
+		}
+	' "$file" 2>/dev/null)
+}
+
+# -----------------------------------------------------------------------
 # main
 # -----------------------------------------------------------------------
 main() {
@@ -226,6 +304,7 @@ main() {
 		_scan_constant_arithmetic "$file" "$tmpdir"
 		_scan_self_referential    "$file" "$tmpdir"
 		_scan_mock_timing_perf    "$file" "$tmpdir"
+		_scan_bats_negated_assertion "$file" "$tmpdir"
 	done
 
 	if [[ ! -s "$tmpdir/findings.jsonl" ]]; then

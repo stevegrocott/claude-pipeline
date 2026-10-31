@@ -17,9 +17,34 @@ GIT_CLI="${GIT_CLI:-gh}"                  # gh | glab
 # Merge strategy
 MERGE_STYLE="${MERGE_STYLE:-squash}"      # squash | merge | rebase
 # AUTO_MERGE: set to 1 to automatically merge the PR after all checks pass.
-# Set to 0 to leave the PR open for manual review and merging.
 # MERGE_STYLE (above) controls the merge method used when AUTO_MERGE=1.
+#
+# AUTO_MERGE=0 does NOT hold a PR open under implement-issue or handle-issues.
+# Those run merge_pr as an unconditional pipeline stage, so a PR can merge
+# with AUTO_MERGE=0 set. Use REQUIRE_MANUAL_MERGE below to require review.
 AUTO_MERGE="${AUTO_MERGE:-0}"             # 0 = manual merge | 1 = auto-merge when checks pass
+
+# REQUIRE_MANUAL_MERGE: set to 1 to hold every PR open for a human.
+# The merge_pr stage then reports merge_blocked, comments on the PR and the
+# issue saying why, and exits 0 — a held PR is not counted as a failure.
+# Use it where unreviewed code reaching the base branch is unacceptable,
+# for example a repository whose code writes to a production system.
+REQUIRE_MANUAL_MERGE="${REQUIRE_MANUAL_MERGE:-0}"   # 0 = pipeline may merge | 1 = human merges
+
+# PR_REVIEW_MODEL: model for the PR review stage. Defaults to sonnet at every
+# diff-size tier. Set to opus for a stronger reviewer.
+# This is the only lever: the value used to be hard-coded in
+# get_pr_review_config(), and model-config.sh does not govern this stage.
+# Note the review also runs under an --agent, and that agent's own `model:`
+# frontmatter (.claude/agents/code-reviewer.md) takes precedence, so change
+# both if you want the review on opus.
+PR_REVIEW_MODEL="${PR_REVIEW_MODEL:-sonnet}"        # sonnet | opus | haiku
+# MERGE_MR_NON_BLOCKING_CHECKS: comma-separated CI check names whose failure must
+# NOT block the merge (informational jobs — `continue-on-error`, a known-red
+# baseline being burned down). GitHub reports such a PR as UNSTABLE; without
+# this the merge gate refuses it even when every blocking check is green
+# (issue #861). Matched exactly against the check-run name. Empty = none.
+MERGE_MR_NON_BLOCKING_CHECKS="${MERGE_MR_NON_BLOCKING_CHECKS:-}"  # e.g. "frontend-unit-tests"
 
 # Test commands (set during /adapt based on project stack)
 TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpunit", "pytest"
@@ -79,6 +104,31 @@ RTK_ENABLED="${RTK_ENABLED:-0}"
 # e.g., "src/components/*|src/pages/*|tests/e2e/*"
 FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 
+# E2E spec path patterns — pipe-separated globs used by
+# _diff_includes_e2e_spec_paths() to decide whether a branch changes a
+# Playwright/Cypress spec.  A match runs the e2e_verify stage on its own,
+# independent of FRONTEND_PATH_PATTERNS: a PR whose only relevant change is a
+# brand-new spec matches no frontend path, so without this the spec's first
+# real execution is the repo's own CI after merge (issue #872).
+# Defaults to "tests/e2e/*" in the orchestrator when unset here.
+# e.g., "tests/e2e/*|e2e/*.spec.ts|cypress/e2e/*"
+TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
+
+# Test path patterns — pipe-separated globs used by _undeclared_test_edits()
+# to recognise test files.  An implement stage that modifies a PRE-EXISTING
+# file matching one of these, which the task never declared, is recorded in
+# DEGRADED_STAGES as implement:undeclared_test_edit:<path> (issue #969): the
+# commonest way to force a green test loop is rewriting the failing assertion.
+# Set to your repo's layout; empty disables the guard.
+# e.g., "tests/*|*/tests/*|*.test.ts|*.spec.ts|*_test.py"
+TEST_PATH_PATTERNS="${TEST_PATH_PATTERNS:-tests/*|test/*|*/tests/*|*/test/*|*/__tests__/*|*.test.*|*.spec.*|*_test.*|test_*|*.bats}"
+
+# E2E_VERIFY_BLOCKING — when 1 (default), a PR that changes a file matching
+# TEST_E2E_PATH_PATTERNS is not auto-merged while e2e_verify is degraded
+# (no run on the branch reported a single test executing).  Set to 0 for a
+# repo with no local stack, where e2e_verify can never measure anything.
+E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
+
 # Migration path patterns — pipe-separated globs used by _select_deploy_cmd()
 # to detect when a branch touches database migrations (schema changes, seeders,
 # data fixes).  Matching files promote a Tier-3 backend deploy to Tier 2
@@ -86,11 +136,15 @@ FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 # e.g., "migrations/*|db/migrate/*|prisma/migrations/*"
 MIGRATION_PATH_PATTERNS="${MIGRATION_PATH_PATTERNS:-}"
 
-# Extra commit paths — pipe-separated globs of additional files that agents
-# should stage and commit beyond the files a task explicitly modifies (e.g.,
-# generated lockfiles, build manifests, or config snapshots that must travel
-# with the change).  Empty by default so nothing extra is staged.
-# e.g., "package-lock.json|dist/manifest.json|.claude/config/*.lock"
+# Extra commit paths — pipe-separated globs of additional files that
+# guard_commit_path_allowlist() (implement-issue-orchestrator.sh) admits
+# beyond its built-in allowlist (tests/, docs/**, recognised source-code
+# extensions, root-level markdown). Nested markdown outside docs/ — e.g. a
+# project that keeps documentation in context/ or adr/ — falls through to
+# the default arm and is rejected unless listed here, as are generated
+# lockfiles, build manifests, or config snapshots that must travel with
+# the change. Empty by default so nothing extra is staged.
+# e.g., "context/**|package-lock.json|.claude/config/*.lock"
 EXTRA_COMMIT_PATHS="${EXTRA_COMMIT_PATHS:-}"
 
 # Change-aware deploy tiers — _select_deploy_cmd() selects the deploy command

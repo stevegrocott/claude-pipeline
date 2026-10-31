@@ -49,9 +49,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install bats and jq
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y bats jq
+        uses: ./.github/actions/install-bats
+        with:
+          jq: 'true'
 
       - name: Run orchestrator timeout drift guards
         run: bats .claude/scripts/implement-issue-test/test-timeout-escalation.bats tests/timeout-budget.bats

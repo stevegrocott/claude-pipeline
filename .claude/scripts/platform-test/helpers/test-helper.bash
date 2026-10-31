@@ -46,8 +46,9 @@ setup_test_env() {
     mkdir -p "$TEST_TMP/scripts/platform"
     mkdir -p "$TEST_TMP/config"
 
-    # Copy all platform scripts to the temp location
-    cp "$SCRIPT_DIR"/*.sh "$TEST_TMP/scripts/platform/"
+    # Copy all platform scripts to the temp location (.sh wrappers plus the
+    # .py helpers they shell out to, e.g. read-issue.sh -> adf-to-markdown.py)
+    cp "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/*.py "$TEST_TMP/scripts/platform/"
 
     # The resolver library the platform scripts source (one level up)
     cp "$SCRIPT_DIR/../resolve-pipeline-root.sh" "$TEST_TMP/scripts/"
@@ -248,6 +249,16 @@ case "$1" in
       list-issues)
         echo "${MOCK_ACLI_ISSUES_JSON}"
         ;;
+      workitem)
+        case "$3" in
+          view)
+            echo "${MOCK_ACLI_ISSUE_JSON}"
+            ;;
+          transition)
+            # succeed silently
+            ;;
+        esac
+        ;;
     esac
     ;;
 esac
@@ -290,6 +301,23 @@ assert_mock_called_with() {
     local log
     log=$(mock_calls)
     if [[ "$log" != *"$pattern"* ]]; then
+        echo "FAIL: $msg"
+        echo "  Call log:"
+        echo "  $log"
+        return 1
+    fi
+    return 0
+}
+
+# Check that a specific command was NOT called (substring match in call log).
+# Do not call this via `! assert_mock_called_with ...` — bash exempts `!`-negated
+# commands from `set -e`, so a real invocation would silently pass under bats.
+assert_mock_not_called_with() {
+    local pattern="$1"
+    local msg="${2:-Mock should NOT have been called with: $pattern}"
+    local log
+    log=$(mock_calls)
+    if [[ "$log" == *"$pattern"* ]]; then
         echo "FAIL: $msg"
         echo "  Call log:"
         echo "  $log"

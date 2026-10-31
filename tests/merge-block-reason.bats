@@ -10,7 +10,7 @@
 # every task still "failed" after reconciliation is a genuine gap, but that
 # invariant is false whenever tests_green=0: reconciliation short-circuits
 # before ever checking branch evidence, so a task whose files ARE on the
-# branch is still reported as "lacking file evidence" — blaming the wrong
+# branch is still reported as "lacking evidence" — blaming the wrong
 # cause and sending the operator to investigate a missing-work problem that
 # does not exist.
 #
@@ -71,7 +71,7 @@ teardown() {
 # genuine gap.
 # =============================================================================
 
-@test "AC1: red full-suite (jest) marker — reason names the red suite, not lacking file evidence" {
+@test "AC1: red full-suite (jest) marker — reason names the red suite, not lacking evidence" {
 	local tasks_json
 	tasks_json=$(jq -n '[
 		{id: 1, description: "task one", status: "failed", affected_files: ["src/one.sh"]}
@@ -99,12 +99,12 @@ teardown() {
 	expect_glob "$reason" 'Partial implementation: 0/1 tasks completed*' \
 		"reason must keep the Partial implementation: prefix with the branch-verified count"
 	expect_ok "reason must not blame missing file evidence when the cause is a red suite" \
-		bash -c '[[ "$1" != *"lacking file evidence"* ]]' _ "$reason"
+		bash -c '[[ "$1" != *"lacking evidence"* ]]' _ "$reason"
 	expect_ok "reason must name the red test suite as the cause" \
 		bash -c '[[ "$1" == *[Tt]est*[Ss]uite*[Rr]ed* || "$1" == *[Rr]ed*[Tt]est*[Ss]uite* ]]' _ "$reason"
 }
 
-@test "AC1: red full-suite (bats) marker — reason names the red suite, not lacking file evidence" {
+@test "AC1: red full-suite (bats) marker — reason names the red suite, not lacking evidence" {
 	local tasks_json
 	tasks_json=$(jq -n '[
 		{id: 1, description: "task one", status: "failed", affected_files: ["src/one.sh"]},
@@ -125,7 +125,7 @@ teardown() {
 	local reason
 	reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE")
 	expect_ok "reason must not blame missing file evidence when the cause is a red BATS suite" \
-		bash -c '[[ "$1" != *"lacking file evidence"* ]]' _ "$reason"
+		bash -c '[[ "$1" != *"lacking evidence"* ]]' _ "$reason"
 	expect_ok "reason must name the red test suite as the cause" \
 		bash -c '[[ "$1" == *[Tt]est*[Ss]uite*[Rr]ed* || "$1" == *[Rr]ed*[Tt]est*[Ss]uite* ]]' _ "$reason"
 }
@@ -144,16 +144,16 @@ teardown() {
 	local reason
 	reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE")
 	expect_ok "a red suite is the reported cause even when the task also lacks evidence" \
-		bash -c '[[ "$1" != *"lacking file evidence"* ]]' _ "$reason"
+		bash -c '[[ "$1" != *"lacking evidence"* ]]' _ "$reason"
 }
 
 # =============================================================================
 # AC2: tests green + a genuine gap — the reason still names the specific task
-# lacking file evidence (regression guard: the AC1 fix must not blank out the
+# lacking evidence (regression guard: the AC1 fix must not blank out the
 # real-gap wording it needs to keep).
 # =============================================================================
 
-@test "AC2: tests green, one task genuinely missing evidence — reason still reads lacking file evidence: task N" {
+@test "AC2: tests green, one task genuinely missing evidence — reason still names the task and its evidence kind" {
 	local tasks_json
 	tasks_json=$(jq -n '[
 		{id: 1, description: "version field", status: "failed", affected_files: ["marketplace.json"]},
@@ -180,8 +180,8 @@ teardown() {
 	reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE")
 	expect_glob "$reason" 'Partial implementation: 1/2 tasks completed*' \
 		"reason must lead with the branch-verified count"
-	expect_glob "$reason" '*lacking file evidence: task 2 (README install section)*' \
-		"a genuine gap with tests green must still be reported as lacking file evidence"
+	expect_glob "$reason" '*lacking evidence: task 2 (README install section) \[file evidence: README.md\]*' \
+		"a genuine gap with tests green must still name the task and the evidence kind applied (#840 AC3)"
 }
 
 # =============================================================================

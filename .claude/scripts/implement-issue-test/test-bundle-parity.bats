@@ -148,6 +148,7 @@ PLUGIN_HOOKS_JSON="$REPO_ROOT/plugins/pipeline-core/hooks/hooks.json"
 # not merely by comment, because a comment is what let scope drift last time.
 PARITY_BUNDLE_HOOKS=(
 	block-gh-issue-create.sh
+	block-gh-pr-merge.sh
 	pipeline-status-inject.sh
 	post-pr-simplify.sh
 	pre-commit-skill-validate.sh

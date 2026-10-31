@@ -70,7 +70,13 @@ EOF
 _validate_file() {
 	local skill_file="$1"
 
-	ruby - "$skill_file" "$SKILL_SCHEMA" 2>&1 <<'RUBYEOF'
+	# -E UTF-8 pins the external/internal encoding. Ruby otherwise derives it
+	# from the locale, and with LANG/LC_ALL unset (cron, CI containers, a bare
+	# login shell) that is US-ASCII — every SKILL.md containing an em dash then
+	# dies in `match` with "invalid byte sequence in US-ASCII", blocking edits
+	# to a perfectly valid file. The skills are UTF-8 by definition, so state it
+	# rather than inheriting it (issue #853).
+	ruby -E UTF-8 - "$skill_file" "$SKILL_SCHEMA" 2>&1 <<'RUBYEOF'
 require 'yaml'
 require 'json'
 

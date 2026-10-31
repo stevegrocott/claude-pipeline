@@ -241,17 +241,51 @@ teardown() {
 }
 
 @test "script uses documented exit codes with soft-fail for max iterations" {
-    local script_content
-    script_content=$(cat "$ORCHESTRATOR_SCRIPT")
-
     # Verify script uses the documented exit codes:
     # 0 = success, 1 = error, 3 = usage
     # Max iterations uses soft-fail (DEGRADED_STAGES + break) instead of exit 2
-    [[ "$script_content" == *"exit 0"* ]]
-    [[ "$script_content" == *"exit 1"* ]]
-    [[ "$script_content" != *"exit 2"* ]]
-    [[ "$script_content" == *"exit 3"* ]]
-    [[ "$script_content" == *"DEGRADED_STAGES"* ]]
+    # Grep the file rather than substring-matching the slurped content:
+    # bash 3.2's ${var/pat/} on a ~530KB string does not complete in any
+    # useful time (measured: a single substitution had not returned after
+    # seven minutes, while [[ == *pat* ]] is instant). expect_ok needs a
+    # COMMAND, and `[[` is a keyword that cannot be passed as one, so grep
+    # is both the fast and the natural fit here.
+    expect_ok "exit 0 is used" grep -q 'exit 0' "$ORCHESTRATOR_SCRIPT"
+    expect_ok "exit 1 is used" grep -q 'exit 1' "$ORCHESTRATOR_SCRIPT"
+    expect_ok "exit 3 is used" grep -q 'exit 3' "$ORCHESTRATOR_SCRIPT"
+    expect_ok "soft-fail machinery is present" \
+        grep -q 'DEGRADED_STAGES' "$ORCHESTRATOR_SCRIPT"
+
+    # This assertion used to be a blanket `!= *"exit 2"*`. That over-stated
+    # the rule: #577 and #583 added two DELIBERATE exit-2 terminal states
+    # (budget ceiling, and partial delivery with merge blocked), so the
+    # blanket form has been failing ever since — invisibly on bash 3.2,
+    # which swallows a bare [[ ]] failure that is not the last command in a
+    # function. The real invariant is the narrower one the comment above
+    # states: the max-iterations path soft-fails instead of exiting 2.
+    #
+    # So assert that directly — no `exit 2` may appear inside a
+    # max_iterations degradation block — and let the sanctioned terminal
+    # states alone.
+    local max_iter_exit2
+    max_iter_exit2=$(awk '
+        /DEGRADED_STAGES\+=\("[a-z_]*:max_iterations/ { block = NR }
+        block && NR <= block + 12 && /^[[:space:]]*exit 2([[:space:]]|$)/ {
+            print NR
+        }
+        block && NR > block + 12 { block = 0 }
+    ' "$ORCHESTRATOR_SCRIPT")
+    expect_ok "max-iterations paths soft-fail, never exit 2 (offending lines: ${max_iter_exit2:-none})" \
+        test -z "$max_iter_exit2"
+
+    # Guard the awk above against matching nothing at all: if the
+    # max_iterations degradation sites are ever renamed, this test would
+    # otherwise pass vacuously forever.
+    local max_iter_sites
+    max_iter_sites=$(grep -c 'DEGRADED_STAGES+=("[a-z_]*:max_iterations' \
+        "$ORCHESTRATOR_SCRIPT")
+    expect_ok "max_iterations degradation sites still exist (found: $max_iter_sites)" \
+        test "$max_iter_sites" -ge 1
 }
 
 # =============================================================================
@@ -312,6 +346,53 @@ teardown() {
     local result
     result=$(get_max_review_attempts "")
     [ "$result" -eq 3 ]
+}
+
+# ---------------------------------------------------------------------------
+# Issue #886: platform.sh is consumer-owned and seeded once (sync.sh:7), so a
+# repo that adopted the pipeline before CLAUDE_CLI was added to the template
+# (2026-03-01) has no assignment for it. Under `set -u` the orchestrator then
+# dies on the first stage that shells out.
+# ---------------------------------------------------------------------------
+
+@test "#886: CLAUDE_CLI is defaulted, so a pre-2026-03 consumer platform.sh still runs" {
+	# Reproduce that consumer: a platform.sh with no CLAUDE_CLI assignment.
+	local legacy="$TEST_TMP/legacy-platform.sh"
+	printf '%s\n' 'TRACKER="github"' 'GIT_HOST="github"' > "$legacy"
+	refute grep -q 'CLAUDE_CLI' "$legacy"
+
+	# Take the orchestrator's own default line and apply it after that config,
+	# under the same `set -u` the script runs with.
+	local default_line
+	default_line=$(grep -m1 '^CLAUDE_CLI=' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$default_line" ]] \
+		|| fail "orchestrator has no CLAUDE_CLI default — #886 would recur"
+
+	run /bin/bash -c "set -euo pipefail; source '$legacy'; $default_line; printf '%s' \"\$CLAUDE_CLI\""
+	[[ "$status" -eq 0 ]] \
+		|| fail "unbound CLAUDE_CLI under set -u with a legacy platform.sh: $output"
+	[[ "$output" == "claude" ]] \
+		|| fail "expected the PATH default 'claude', got '$output'"
+}
+
+@test "#886: an explicit CLAUDE_CLI still wins over the default" {
+	local default_line
+	default_line=$(grep -m1 '^CLAUDE_CLI=' "$ORCHESTRATOR_SCRIPT")
+	run /bin/bash -c "set -euo pipefail; CLAUDE_CLI=/custom/claude; $default_line; printf '%s' \"\$CLAUDE_CLI\""
+	[[ "$output" == "/custom/claude" ]] \
+		|| fail "the default overrode an explicit setting, got '$output'"
+}
+
+@test "#886: the default is applied after platform.sh is sourced, not before" {
+	# Before the source, platform.sh would overwrite it and the bug returns.
+	local content src_line def_line
+	content=$(cat "$ORCHESTRATOR_SCRIPT")
+	src_line=$(grep -n '^source "\$PLATFORM_SH_FILE"' "$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	def_line=$(grep -n '^CLAUDE_CLI=' "$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	[[ -n "$src_line" && -n "$def_line" ]] \
+		|| fail "could not locate both the source and the default"
+	(( def_line > src_line )) \
+		|| fail "CLAUDE_CLI default at line $def_line precedes the platform.sh source at $src_line"
 }
 
 @test "get_max_review_attempts returns 3 for unrecognised size (safe default)" {

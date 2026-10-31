@@ -35,4 +35,9 @@ case "$GIT_HOST" in
       --title "$TITLE" --description "$BODY" --squash-on-merge --no-editor \
       2>/dev/null | grep -oE '![0-9]+' | tr -d '!'
     ;;
+  *)
+    echo "ERROR: unrecognised GIT_HOST '$GIT_HOST'" \
+      "(accepted: github, gitlab)" >&2
+    exit 1
+    ;;
 esac

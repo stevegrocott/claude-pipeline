@@ -216,3 +216,79 @@ _count_invocations() {
     done <<< "$(grep -n '^ *verify_on_feature_branch .* || true' "$src")"
     [ "$found" = true ]
 }
+
+# ---------------------------------------------------------------------------
+# Issue #890: both checkouts discarded stderr and ignored the exit status, so a
+# refused `git checkout -b` left parse-issue "complete" with NO branch. Every
+# parallel worktree then failed with `not a valid object name`, the batch fell
+# back to serial, and the real cause was never logged.
+# ---------------------------------------------------------------------------
+
+@test "#890: a refused checkout -b fails the stage instead of continuing" {
+    cd "$TEST_TMP"
+    git init -q repo && cd repo
+    git config user.email t@t && git config user.name t
+    echo a > a.txt && git add a.txt && git commit -qm init
+    BASE_BRANCH=main; export BASE_BRANCH
+    git branch -M main
+
+    # A dirty tree whose changes the checkout would overwrite.
+    git checkout -q -b other && echo other > a.txt && git commit -qam other
+    git checkout -q main && echo dirty > a.txt
+
+    # Make checkout refuse, the way git does on a conflicting local change.
+    git() { if [[ "$1" == "checkout" ]]; then
+                printf 'error: Your local changes would be overwritten\n' >&2; return 1
+            fi; command git "$@"; }
+
+    run setup_feature_branch "feature/issue-6041"
+    [[ "$status" -ne 0 ]] \
+        || fail "stage continued despite a refused checkout — #890 regression"
+    assert_contains "$output" "Failed to create branch"
+}
+
+@test "#890: the refusal names the blocking uncommitted files" {
+    cd "$TEST_TMP"
+    git init -q repo2 && cd repo2
+    git config user.email t@t && git config user.name t
+    echo a > blocking-file.txt && git add blocking-file.txt && git commit -qm init
+    git branch -M main; BASE_BRANCH=main; export BASE_BRANCH
+    echo changed > blocking-file.txt
+
+    git() { if [[ "$1" == "checkout" ]]; then
+                printf 'error: would be overwritten\n' >&2; return 1
+            fi; command git "$@"; }
+
+    run setup_feature_branch "feature/issue-6041"
+    [[ "$status" -ne 0 ]] || fail "expected failure"
+    assert_contains "$output" "blocking-file.txt"
+}
+
+@test "#890: a checkout that reports success but leaves no ref still fails" {
+    cd "$TEST_TMP"
+    git init -q repo3 && cd repo3
+    git config user.email t@t && git config user.name t
+    echo a > a.txt && git add a.txt && git commit -qm init
+    git branch -M main; BASE_BRANCH=main; export BASE_BRANCH
+
+    # checkout "succeeds" but creates nothing — the verify step must catch it.
+    git() { if [[ "$1" == "checkout" ]]; then return 0; fi; command git "$@"; }
+
+    run setup_feature_branch "feature/issue-6041"
+    [[ "$status" -ne 0 ]] \
+        || fail "trusted a checkout that left no ref"
+    assert_contains "$output" "does not exist after checkout"
+}
+
+@test "#890: a successful creation leaves HEAD on the new branch" {
+    cd "$TEST_TMP"
+    git init -q repo4 && cd repo4
+    git config user.email t@t && git config user.name t
+    echo a > a.txt && git add a.txt && git commit -qm init
+    git branch -M main; BASE_BRANCH=main; export BASE_BRANCH
+
+    run setup_feature_branch "feature/issue-6041"
+    [[ "$status" -eq 0 ]] || fail "clean creation failed: $output"
+    [[ "$(command git -C "$TEST_TMP/repo4" rev-parse --abbrev-ref HEAD)" == "feature/issue-6041" ]] \
+        || fail "HEAD is not on the new branch"
+}

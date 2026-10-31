@@ -177,6 +177,17 @@ _PREFLIGHT_SKIPPED=false
 # rather than implemented in a single expensive pass. Empty when not epic.
 _EPIC_SCOPE=""
 
+# Out-of-band terminal-status signal set by process_issue() (issue #809),
+# mirroring the _PREFLIGHT_SKIPPED pattern above. process_issue() returns 0
+# for several non-success terminal states (already_implemented,
+# merge_blocked, budget_exceeded) so they stay out of consecutive_failures
+# / the circuit breaker, but callers still need to tell those apart from a
+# genuine success when emitting telemetry. Reset to "" at the top of every
+# process_issue() call, set at each non-success return, and read by the
+# caller immediately after process_issue() returns — before any other
+# process_issue() invocation overwrites it.
+_TERMINAL_STATUS=""
+
 # Skip reason + merged-PR number set by check_issue_resolved_upstream();
 # read by the batch loop immediately after the call. Kept separate from
 # _SKIP_REASON (owned by validate_issue_for_processing()) so the two
@@ -520,6 +531,19 @@ emit_event() {
 # =============================================================================
 
 init_status() {
+    # Batch fingerprint (issue #781): scope resume preservation to the exact
+    # batch that produced the prior status.json — same base branch and same
+    # issue set. Without this, terminal state (completed/already_implemented)
+    # was preserved for ANY matching issue number in a prior status.json, so
+    # e.g. issue #42 completed in one batch and reopened into a later,
+    # unrelated batch would silently inherit "completed" and get skipped.
+    # Sorting the issue numbers makes the fingerprint independent of launch
+    # order, so relaunching the same set in a different order still matches.
+    local sorted_issues
+    sorted_issues=$(printf '%s\n' "${ISSUE_ARRAY[@]}" \
+        | sort -n -u | tr '\n' ',')
+    local batch_fingerprint="${BRANCH}:${sorted_issues}"
+
     # Resume-awareness: when a status.json from a prior launch of this batch
     # exists, preserve per-issue terminal state (completed/already_implemented)
     # instead of resetting every issue to pending. Without this the
@@ -527,17 +551,41 @@ init_status() {
     # would reset status to pending and re-run already-finished issues.
     local prior_status="{}"
     if [[ -f "$STATUS_FILE" ]]; then
-        # Build a {number: status} map of issues whose prior status was
-        # terminal. Non-terminal (pending/failed/in_progress) issues are
-        # intentionally omitted so they re-run on resume.
-        prior_status=$(jq -c '
-            [.issues[]?
-             | select(.status == "completed"
-                      or .status == "already_implemented")]
-            | map({(.number): .status})
-            | add // {}' "$STATUS_FILE" 2>/dev/null) || prior_status="{}"
-        if [[ -z "$prior_status" ]]; then
-            prior_status="{}"
+        local prior_fingerprint
+        prior_fingerprint=$(jq -r '.batch_fingerprint // empty' \
+            "$STATUS_FILE" 2>/dev/null)
+        if [[ "$prior_fingerprint" == "$batch_fingerprint" ]]; then
+            # Build a {number: status} map of issues whose prior status was
+            # terminal. Non-terminal (pending/failed/in_progress) issues are
+            # intentionally omitted so they re-run on resume.
+            prior_status=$(jq -c '
+                [.issues[]?
+                 | select(.status == "completed"
+                          or .status == "already_implemented")]
+                | map({(.number): .status})
+                | add // {}' "$STATUS_FILE" 2>/dev/null) || prior_status="{}"
+            if [[ -z "$prior_status" ]]; then
+                prior_status="{}"
+            fi
+        elif [[ -z "$prior_fingerprint" ]]; then
+            # An ABSENT fingerprint is not evidence of a different batch — it
+            # is a status.json written by a pipeline-core older than #781,
+            # which recorded none. Reporting it as a "mismatch" would state
+            # something unknowable, so it gets its own line.
+            #
+            # It still resets rather than preserving, and deliberately so: the
+            # failure modes are asymmetric. Resetting reprocesses an issue that
+            # was already done (wasteful, safe). Preserving on unverifiable
+            # provenance is exactly the #781 defect — silently skipping work
+            # that should run. This costs one non-resumed batch per consumer,
+            # once, on the upgrade that introduces fingerprints.
+            log "Prior status.json carries no batch fingerprint (written" \
+                "before #781); cannot verify it belongs to this batch, so" \
+                "resetting all issues to pending instead of resuming"
+        else
+            log "Batch fingerprint mismatch: prior status.json is from a" \
+                "different batch (base branch or issue set changed);" \
+                "resetting all issues to pending instead of resuming"
         fi
     fi
 
@@ -585,9 +633,11 @@ init_status() {
         --argjson completed "$completed_count" \
         --argjson issues "$issues_json" \
         --arg log_dir "$LOG_BASE" \
+        --arg fingerprint "$batch_fingerprint" \
         '{
             state: $state,
             base_branch: $branch,
+            batch_fingerprint: $fingerprint,
             current_issue: null,
             progress: {
                 total: $total,
@@ -1049,17 +1099,24 @@ revalidate_issue_after_enrich() {
 # any other host is treated as "not resolved" (returns 1).
 #
 # A merged PR on "feature/issue-<num>" is NOT, by itself, treated as
-# resolution while the issue is still open. The pipeline closes an issue
-# when its PR merges, so an open issue with a merged PR on its branch is
-# evidence the merge did *not* resolve it — reopened, partially
-# implemented, reverted, or the branch name reused. Skipping on that
-# evidence silently drops open work with no supported way to re-run it
-# (see #771). Instead, a warning is logged and the issue proceeds to
-# normal processing, where the orchestrator's own checks act as the
-# safety net.
+# resolution while the issue is still open — reopened, partially
+# implemented, reverted, or the branch name reused are all possible.
+# Skipping on that evidence alone would silently drop open work with no
+# supported way to re-run it (see #771), so a warning is logged and the
+# issue proceeds to normal processing instead.
 #
 # Opt-in override: SKIP_ON_MERGED_PR=1 (any non-empty value) restores the
 # pre-#771 skip-on-merged-PR-alone behavior, for operators who rely on it.
+#
+# stateReason is fetched too: a REOPENED issue bypasses the grace window
+# below entirely — a deliberate reopen means partial work, not a
+# propagation lag, regardless of merge recency (#781).
+#
+# #781: a merged PR younger than MERGED_PR_GRACE_SECONDS (default 120s)
+# still skips, since the pipeline closes an issue on PR merge and a very
+# recent merge is likely just awaiting that close webhook. An older merge
+# is stale evidence per #771 and the issue proceeds; a missing or
+# unparseable mergedAt also proceeds — unknown age is never fresh.
 #
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the orchestrator's own
@@ -1068,7 +1125,8 @@ revalidate_issue_after_enrich() {
 # Returns:
 #   0 — issue is already resolved; caller should skip processing. Sets
 #       _UPFRONT_SKIP_REASON. _UPFRONT_SKIP_PR is set to the merged PR
-#       number under SKIP_ON_MERGED_PR, otherwise empty.
+#       number under SKIP_ON_MERGED_PR or the grace window, otherwise
+#       empty.
 #   1 — not resolved upstream; proceed with processing.
 check_issue_resolved_upstream() {
 	local issue_num="$1"
@@ -1077,19 +1135,31 @@ check_issue_resolved_upstream() {
 
 	[[ "${GIT_HOST:-github}" == "github" ]] || return 1
 
-	local issue_state=""
-	issue_state=$(gh issue view "$issue_num" --json state \
-		--jq '.state' 2>/dev/null) || true
+	local issue_meta=""
+	issue_meta=$(gh issue view "$issue_num" --json state,stateReason \
+		--jq '(.state // "") + "\t" + (.stateReason // "")' \
+		2>/dev/null) || true
+
+	local issue_state="" issue_state_reason=""
+	IFS=$'\t' read -r issue_state issue_state_reason <<< "$issue_meta"
+
 	if [[ "$issue_state" == "CLOSED" ]]; then
 		_UPFRONT_SKIP_REASON="already closed on GitHub"
 		return 0
 	fi
 
-	local merged_pr=""
-	merged_pr=$(gh pr list --state merged \
+	# number,mergedAt fetched together; tab-joined output, same pattern
+	# as issue_meta above.
+	local pr_meta=""
+	pr_meta=$(gh pr list --state merged \
 		--head "feature/issue-$issue_num" \
-		--json number --jq '.[0].number // empty' \
+		--json number,mergedAt \
+		--jq '(.[0].number // "" | tostring) + "\t" + (.[0].mergedAt // "")' \
 		2>/dev/null) || true
+
+	local merged_pr="" merged_at=""
+	IFS=$'\t' read -r merged_pr merged_at <<< "$pr_meta"
+
 	if [[ -n "$merged_pr" ]]; then
 		if [[ -n "${SKIP_ON_MERGED_PR:-}" ]]; then
 			log "Issue #$issue_num: SKIP_ON_MERGED_PR is set" \
@@ -1099,11 +1169,144 @@ check_issue_resolved_upstream() {
 			_UPFRONT_SKIP_PR="$merged_pr"
 			return 0
 		fi
+
+		if [[ "$issue_state_reason" == "REOPENED" ]]; then
+			log "Issue #$issue_num is open (stateReason:" \
+				"REOPENED) with merged PR #$merged_pr on" \
+				"feature/issue-$issue_num — processing" \
+				"anyway instead of skipping (#771)"
+			return 1
+		fi
+
+		local grace_seconds="${MERGED_PR_GRACE_SECONDS:-120}"
+		local merged_epoch="" merge_age="" now_epoch=""
+		merged_epoch=$(_iso_to_epoch "$merged_at") || merged_epoch=""
+		if [[ -n "$merged_epoch" ]]; then
+			# EPOCHSECONDS (bash 5+) preferred; date +%s covers
+			# macOS system bash 3.2, matching _epoch_ms's fallback
+			# pattern elsewhere in the pipeline.
+			now_epoch="${EPOCHSECONDS:-$(date +%s)}"
+			merge_age=$((now_epoch - merged_epoch))
+		fi
+
+		if [[ -n "$merge_age" ]] \
+			&& ((merge_age >= 0 && merge_age < grace_seconds)); then
+			log "Issue #$issue_num is open but PR #$merged_pr" \
+				"merged ${merge_age}s ago on" \
+				"feature/issue-$issue_num — within the" \
+				"${grace_seconds}s grace window, skipping" \
+				"pending close propagation (#781)"
+			_UPFRONT_SKIP_REASON="PR #$merged_pr merged"
+			_UPFRONT_SKIP_REASON+=" ${merge_age}s ago, pending close"
+			_UPFRONT_SKIP_PR="$merged_pr"
+			return 0
+		fi
+
 		log "Issue #$issue_num is open but PR #$merged_pr" \
 			"already merged on feature/issue-$issue_num" \
 			"— processing anyway instead of skipping (#771)"
 	fi
 
+	return 1
+}
+
+# _iso_to_epoch <iso8601-timestamp>
+#
+# Normalise an ISO-8601 timestamp to epoch seconds on stdout. Both forms in
+# play here are handled: GitHub's UTC "2026-08-13T20:44:24Z" and the
+# local-offset "2026-08-17T14:01:41+10:00" that `date -Iseconds` writes into
+# status.json. Converting both to a common epoch is what makes them
+# comparable — string-comparing the two ISO forms silently orders a "Z"
+# stamp against a "+10:00" one by its printed digits, not its instant.
+#
+# GNU date parses ISO-8601 directly; BSD date (macOS) has no -d and wants an
+# explicit format with a colon-less offset, so try GNU first and fall back to
+# `date -j -f` — the same pattern the pipeline uses elsewhere.
+#
+# Prints nothing and returns 1 when the value is absent or unparseable, so a
+# caller can tell "unknown" apart from "old".
+_iso_to_epoch() {
+	local ts="$1"
+	[[ -n "$ts" && "$ts" != "null" ]] || return 1
+
+	# Both "…Z" and "…+10:00" become "…+1000" for BSD date's %z.
+	case "$ts" in
+		*Z) ts="${ts%Z}+0000" ;;
+	esac
+	case "$ts" in
+		*[+-][0-9][0-9]:[0-9][0-9])
+			ts="${ts%:*}${ts##*:}"
+			;;
+	esac
+
+	local epoch=""
+	epoch=$(date -d "$ts" +%s 2>/dev/null) \
+		|| epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$ts" +%s \
+			2>/dev/null) \
+		|| epoch=""
+
+	case "$epoch" in
+		'' | *[!0-9]*) return 1 ;;
+	esac
+	printf '%s\n' "$epoch"
+}
+
+# _merged_pr_within_run <issue_num> <merged_at>
+#
+# #817: bound failure-site reconciliation by merge time. #740's rationale
+# holds only for a PR merged during the run that just executed. A PR merged
+# days earlier is stale evidence about *prior* work, and accepting it records
+# `completed` for a run that did nothing — silently skipping the real work in
+# exactly the artefact an operator checks.
+#
+# The window opens at the issue's own `started_at` (written to status.json
+# when the issue entered processing), less RECONCILE_SKEW_SECS of tolerance
+# for clock skew between GitHub and the runner. That tolerance is generous
+# against skew and still orders of magnitude tighter than the multi-day gaps
+# observed on the failing batches.
+#
+# A missing or unparseable timestamp on either side accepts and logs a WARN:
+# reconciliation must degrade toward #740's safety, never away from it, so a
+# parse failure can never re-arm the circuit breaker #740 fixed.
+#
+# Returns:
+#   0 — the merge falls inside this run's window, or is unknown; reconcile
+#   1 — the merge predates this run; the reported failure stands
+_merged_pr_within_run() {
+	local issue_num="$1"
+	local merged_at="$2"
+	local tolerance="${RECONCILE_SKEW_SECS:-120}"
+
+	local started_at=""
+	if [[ -n "${STATUS_FILE:-}" && -f "${STATUS_FILE:-}" ]]; then
+		started_at=$(jq -r --arg num "$issue_num" \
+			'(.issues[] | select(.number == $num)
+				| .started_at) // empty' \
+			"$STATUS_FILE" 2>/dev/null) || started_at=""
+	fi
+
+	local started_epoch=""
+	started_epoch=$(_iso_to_epoch "$started_at") || started_epoch=""
+	if [[ -z "$started_epoch" ]]; then
+		log_warn "issue #$issue_num has no parseable started_at" \
+			"(\"$started_at\") — accepting the merged-PR" \
+			"reconciliation unbounded (#817)"
+		return 0
+	fi
+
+	local merged_epoch=""
+	merged_epoch=$(_iso_to_epoch "$merged_at") || merged_epoch=""
+	if [[ -z "$merged_epoch" ]]; then
+		log_warn "issue #$issue_num merged PR has no parseable" \
+			"mergedAt (\"$merged_at\") — accepting the merged-PR" \
+			"reconciliation unbounded (#817)"
+		return 0
+	fi
+
+	local cutoff=$((started_epoch - tolerance))
+	if ((merged_epoch >= cutoff)); then
+		return 0
+	fi
 	return 1
 }
 
@@ -1122,6 +1325,14 @@ check_issue_resolved_upstream() {
 # issue-close propagated, leaving an OPEN issue with a merged branch PR.
 # Requiring a CLOSED issue here would record `failed`, increment
 # consecutive_failures and re-arm the circuit breaker #740 fixed.
+#
+# #817 bounds that evidence in time without reversing #740. "The run that
+# just executed" was always the intent of the comment above; the code never
+# enforced it, so a PR merged days ago reconciled a failure from a run that
+# did nothing. The most recently merged PR is now selected (by mergedAt,
+# rather than whichever the API happened to list first) and it reconciles
+# only when it merged at or after this issue's `started_at` — see
+# _merged_pr_within_run for the tolerance and the accept-on-unknown rule.
 #
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the reported failure stands.
@@ -1145,15 +1356,32 @@ check_issue_pr_merged() {
 		return 0
 	fi
 
-	local merged_pr=""
-	merged_pr=$(gh pr list --state merged \
+	# "<number> <mergedAt>" for the most recently merged PR on the branch.
+	local merged_row=""
+	merged_row=$(gh pr list --state merged \
 		--head "feature/issue-$issue_num" \
-		--json number --jq '.[0].number // empty' \
+		--json number,mergedAt \
+		--jq 'if length == 0 then empty else
+			(sort_by(.mergedAt // "") | last
+			| "\(.number) \(.mergedAt // "")") end' \
 		2>/dev/null) || true
-	if [[ -n "$merged_pr" ]]; then
-		_RECONCILE_REASON="PR #$merged_pr already merged"
-		_RECONCILE_PR="$merged_pr"
-		return 0
+	if [[ -n "$merged_row" ]]; then
+		local merged_pr="${merged_row%% *}"
+		local merged_at=""
+		if [[ "$merged_row" == *" "* ]]; then
+			merged_at="${merged_row#* }"
+		fi
+
+		if _merged_pr_within_run "$issue_num" "$merged_at"; then
+			_RECONCILE_REASON="PR #$merged_pr already merged"
+			_RECONCILE_PR="$merged_pr"
+			return 0
+		fi
+
+		log "Issue #$issue_num: most recently merged PR" \
+			"#$merged_pr merged at $merged_at, before this run" \
+			"began — stale evidence, the reported failure" \
+			"stands (#817)"
 	fi
 
 	return 1
@@ -1370,6 +1598,78 @@ validate_issue_for_processing() {
 	return 0
 }
 
+# pr_recovery_allowed <stuck_stage>
+#
+# Gate for the PR-exists recovery heuristic in process_issue().  That
+# heuristic was written for one thing: the orchestrator being killed or
+# crashing *after* PR creation but before set_final_state.  There, an
+# existing PR really is evidence the work got far enough to be credited.
+#
+# At the merge stages the premise inverts (issue #848).  PR existence was
+# never in doubt at merge_pr — the PR is precisely what the merge was refused
+# *for*.  merge-mr.sh declines to merge a PR whose required check concluded in
+# failure (platform/merge-mr.sh:107) and exits non-zero without ever calling
+# `gh pr merge`; the orchestrator then sets state=error while current_stage is
+# still merge_pr.  Recovering that as success hands off to /process-pr, which
+# merges — laundering an explicit refusal into a merge, which is how a PR with
+# a failing E2E check reached main.  merge_pr_timeout (set by
+# _handle_merge_pr_timeout) is the same class: the merge was never confirmed
+# either way, so an existing PR says nothing about whether it landed.
+#
+# Returns:
+#   0 — the heuristic may upgrade this error exit to success
+#   1 — recovery is declined; the caller must leave impl_status at "error"
+# perform_scripted_merge <issue_num> <pr_number>
+#
+# Merges an approved PR from SHELL, via the platform wrapper, rather than
+# leaving the merge to a model following a SKILL.md instruction (issue #853).
+#
+# process-pr used to merge internally: SKILL.md Step 4b told the model to run
+# merge-mr.sh, but nothing bound it, so the guard that refuses a PR whose
+# required check concluded in failure applied only if the model chose to go
+# through it. #848 showed the cost — merge-mr.sh refused at 13:51 and the PR
+# merged at 13:54 with a failing e2e check. Performing the merge here removes
+# the model from the decision: merge-mr.sh is the only path, and its refusal
+# is this function's failure.
+#
+# Globals:
+#   PLATFORM_DIR
+# Returns:
+#   0 when merge-mr.sh merged the PR, 1 on any refusal or error
+perform_scripted_merge() {
+	local issue_num="$1" pr_number="$2"
+
+	local merge_script="$PLATFORM_DIR/merge-mr.sh"
+	if [[ ! -x "$merge_script" ]]; then
+		log_error "Issue #$issue_num: merge wrapper not executable:" \
+			"$merge_script — refusing to merge PR #$pr_number by any" \
+			"other means"
+		return 1
+	fi
+
+	log "Issue #$issue_num: merging PR #$pr_number via merge-mr.sh"
+	if "$merge_script" "$pr_number"; then
+		return 0
+	fi
+
+	# merge-mr.sh already explained itself on stderr (a failed check, a
+	# conflict, or a mergeability timeout). Do not retry and do not fall back
+	# to a direct merge — a refusal is a decision, not a transient error.
+	log_error "Issue #$issue_num: merge-mr.sh declined to merge PR" \
+		"#$pr_number — leaving it open"
+	return 1
+}
+
+pr_recovery_allowed() {
+	local stuck_stage="$1"
+
+	case "$stuck_stage" in
+		merge_pr|merge_pr_*) return 1 ;;
+	esac
+
+	return 0
+}
+
 process_issue() {
     local issue_num="$1"
     local issue_log="$LOG_BASE/issue-$issue_num.log"
@@ -1378,6 +1678,12 @@ process_issue() {
     # must read _PREFLIGHT_SKIPPED immediately after process_issue()
     # returns, before any other process_issue() invocation overwrites it.
     _PREFLIGHT_SKIPPED=false
+
+    # Reset the out-of-band terminal-status signal for this call (issue
+    # #809). Callers must read _TERMINAL_STATUS immediately after
+    # process_issue() returns, before any other process_issue()
+    # invocation overwrites it.
+    _TERMINAL_STATUS=""
 
     log "=========================================="
     log "Starting issue #$issue_num"
@@ -1544,6 +1850,8 @@ process_issue() {
         # stages.pr.pr_number was already written (PR created before crash),
         # treat it as recoverable success. Handles the case where the script is
         # killed or crashes after PR creation but before set_final_state("completed").
+        # pr_recovery_allowed() withholds that credit at the stages where an
+        # existing PR is not evidence the work landed (issue #848).
         if [[ "$impl_status" == "error" ]]; then
             local recovered_pr stuck_stage
             recovered_pr=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
@@ -1552,10 +1860,27 @@ process_issue() {
             stuck_stage=$(jq -r '.current_stage // "unknown"' "$issue_status_file" 2>/dev/null)
             [[ -n "$stuck_stage" ]] || stuck_stage="unknown"
             if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
-                log_warn "Orchestrator exited with state='$state' (stuck at: $stuck_stage) but PR #$recovered_pr exists — recovering as success"
-                impl_status="success"
-                pr_number="$recovered_pr"
-                impl_error=""
+                if pr_recovery_allowed "$stuck_stage"; then
+                    log_warn "Orchestrator exited with state='$state' (stuck at: $stuck_stage) but PR #$recovered_pr exists — recovering as success"
+                    impl_status="success"
+                    pr_number="$recovered_pr"
+                    impl_error=""
+                else
+                    # Issue #848: the merge itself was declined, so PR
+                    # existence is not evidence the work landed. Keep
+                    # impl_status at "error" — the !=success arm below
+                    # reconciles against GitHub and records the issue as
+                    # failed, which lands it in progress.failed and reports
+                    # completed_with_errors rather than a false green. It also
+                    # returns before the /process-pr dispatch, so nothing
+                    # downstream gets a second chance to merge the PR.
+                    log_error \
+                        "Orchestrator exited with state='$state' (stuck at:" \
+                        "$stuck_stage) — PR #$recovered_pr exists but the" \
+                        "merge was declined; refusing PR-exists recovery"
+                    pr_number="$recovered_pr"
+                    impl_error="Merge declined at stage '$stuck_stage' for PR #$recovered_pr (state: $state) — not recovered as success"
+                fi
             fi
         fi
     else
@@ -1661,6 +1986,7 @@ process_issue() {
         update_issue_field "$issue_num" "status" "already_done"
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
+        _TERMINAL_STATUS="already_done"
         return 0
     fi
 
@@ -1672,6 +1998,7 @@ process_issue() {
         fi
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
+        _TERMINAL_STATUS="merge_blocked"
         return 0
     fi
 
@@ -1689,6 +2016,7 @@ process_issue() {
         fi
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
+        _TERMINAL_STATUS="budget_exceeded"
         return 0
     fi
 
@@ -1707,6 +2035,14 @@ process_issue() {
         fi
         update_issue_field "$issue_num" "status" "failed"
         update_issue_field "$issue_num" "error" "${impl_error:-implement-issue failed with status: $impl_status}"
+        # Issue #870: a merge_pr-stage failure leaves the PR OPEN, but this arm
+        # historically recorded only status+error. wait_for_pr_merged() keys off
+        # .issues[].pr, so the batch forked the next issue on top of an open PR
+        # — the exact conflict #861 was filed to stop. Record it here, as the
+        # merge_blocked arm already does.
+        if [[ -n "$pr_number" ]]; then
+            update_issue_field "$issue_num" "pr" "$pr_number" "true"
+        fi
         update_progress
         git checkout "$BRANCH" 2>/dev/null || true
         return 1
@@ -1822,6 +2158,36 @@ process_issue() {
     log "process-pr status: $proc_status"
 
     case "$proc_status" in
+        approved)
+            # The review passed and the skill deliberately did NOT merge
+            # (issue #853). We perform the merge here, in shell, so the
+            # concluded-check-failure guard inside merge-mr.sh is on the only
+            # path to the base branch rather than on a path the model may or
+            # may not take.
+            if ! perform_scripted_merge "$issue_num" "$pr_number"; then
+                # A declined merge is a real failure: record it as such so it
+                # lands in progress.failed and the batch reports
+                # completed_with_errors instead of a false green (#847).
+                update_issue_field "$issue_num" "status" "failed"
+                update_issue_field "$issue_num" "error" \
+                    "PR #${pr_number:-?} approved but the merge was declined — see merge-mr.sh output"
+                update_issue_field "$issue_num" "follow_ups" "$follow_ups" "true"
+                update_progress
+                git checkout "$BRANCH" 2>/dev/null || true
+                return 1
+            fi
+            log "Issue #$issue_num completed. PR #$pr_number merged."
+            update_issue_field "$issue_num" "status" "completed"
+            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            update_issue_field "$issue_num" "follow_ups" "$follow_ups" "true"
+            # The issue is closed here rather than by the skill: the skill no
+            # longer knows whether the merge succeeded.
+            "$PLATFORM_DIR/transition-issue.sh" "$issue_num" 2>/dev/null || \
+                log_warn "Issue #$issue_num: merged PR #$pr_number but could not close the issue"
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+            ;;
         merged)
             log "Issue #$issue_num completed. PR #$pr_number merged."
             update_issue_field "$issue_num" "status" "completed"
@@ -1832,11 +2198,40 @@ process_issue() {
             git checkout "$BRANCH" 2>/dev/null || true
             ;;
         changes_requested)
-            # process-pr handles re-implementation internally by calling implement-issue again
-            # If we get here with changes_requested, it means the re-implementation cycle completed
+            # process-pr handles re-implementation internally by calling
+            # implement-issue again, so reaching here does mean the
+            # re-implementation cycle completed — but a completed cycle is not
+            # a merged PR (#847). The review fix gets pushed, the push
+            # restarts CI, and the PR is legitimately mid-flight. Crediting
+            # completion here reported a clean batch over an OPEN PR and an
+            # OPEN issue, and nothing merged it.
+            #
+            # Reconcile against GitHub with check_issue_pr_merged — the same
+            # helper the error arm below already uses for exactly this — so
+            # both arms agree on what "the work landed" means.
             log "Issue #$issue_num: changes were requested and addressed"
-            update_issue_field "$issue_num" "status" "completed"
-            update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+            if check_issue_pr_merged "$issue_num"; then
+                log "Issue #$issue_num: merge confirmed — $_RECONCILE_REASON"
+                update_issue_field "$issue_num" "status" "completed"
+                update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+                if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
+                    update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
+                fi
+                update_progress
+                git checkout "$BRANCH" 2>/dev/null || true
+                return 0
+            fi
+            # Unresolved, not merely late: record it as a failure so it lands
+            # in progress.failed and the batch reports completed_with_errors
+            # rather than a false green. The error text names the merge, not
+            # process-pr, since process-pr itself behaved correctly.
+            log_error "Issue #$issue_num: PR #${pr_number:-?} not merged after changes were addressed"
+            update_issue_field "$issue_num" "status" "failed"
+            update_issue_field "$issue_num" "error" \
+                "Changes requested and addressed, but PR #${pr_number:-?} is not merged"
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            return 1
             ;;
         error|rate_limit|*)
             log_error "process-pr failed for #$issue_num: ${proc_error:-status was $proc_status}"
@@ -2123,6 +2518,169 @@ sweep_implement_followups() {
 }
 
 # =============================================================================
+# WAIT FOR THE PREVIOUS PR TO MERGE (issue #861)
+# =============================================================================
+#
+# "Sequential" used to mean sequential pipeline stages, not sequential merges:
+# the loop advanced the moment process_issue returned, so issue N+1 forked its
+# branch from a main that did not yet contain PR N. In beegee-farm-3 that
+# produced same-file conflicts (#5980 vs #5979, #5992 vs #5991) and, once a PR
+# went DIRTY, GitHub stopped running pull_request workflows on it at all — CI
+# silently halted until a human noticed.
+#
+# So the loop now parks after each issue until that issue's PR reports MERGED.
+# The park is bounded and legible while it waits:
+#
+#   * BATCH_WAIT_FOR_MERGE_MAX      seconds to wait (default 7200).
+#                                   0 disables the wait entirely and restores
+#                                   the pre-#861 immediate continuation.
+#   * BATCH_WAIT_FOR_MERGE_INTERVAL poll interval in seconds (default 30).
+#   * status.json                   state "paused_on_pr" plus .paused_on_pr
+#                                   carrying the PR number.
+#   * one comment                   posted on issue N when the park begins,
+#                                   never once per poll.
+
+# Current platform state of a PR: MERGED, CLOSED, OPEN, or UNKNOWN when the
+# lookup fails. Data-returning — every diagnostic belongs in the caller's log,
+# so nothing else may be written to stdout here.
+pr_merge_state() {
+	local pr="$1"
+	local state=""
+
+	state=$(timeout 30 gh pr view "$pr" --json state --jq '.state' \
+		2>/dev/null) || state=""
+	if [[ -z "$state" ]]; then
+		state="UNKNOWN"
+	fi
+
+	printf '%s\n' "$state"
+}
+
+# Records (or clears, when passed an empty PR) the PR the batch is parked on.
+set_paused_on_pr() {
+	local pr="$1"
+	local pr_json="null"
+
+	if [[ -n "$pr" ]]; then
+		pr_json="\"$pr\""
+	fi
+
+	jq --argjson pr "$pr_json" \
+		'.paused_on_pr = $pr | .last_update = (now | todate)' \
+		"$STATUS_FILE" > "${STATUS_FILE}.tmp" \
+		&& mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+}
+
+# Posts the single "batch is parked" comment on the issue whose PR is open.
+# Called exactly once per park, before the poll loop. A comment failure is a
+# warning, never a batch failure.
+comment_paused_on_pr() {
+	local issue_num="$1" pr="$2" max="$3"
+	local commenter="$PLATFORM_DIR/comment-issue.sh"
+
+	if [[ ! -x "$commenter" ]]; then
+		log_warn "Issue #$issue_num: $commenter is not executable —" \
+			"skipping the paused_on_pr comment"
+		return 0
+	fi
+
+	# Stamp with the attribution line comment_issue() uses so read-issue.sh's
+	# chatter filter classifies this as pipeline status, not discussion.
+	local body
+	body=$'## Batch Paused\n###### *Posted by `batch-orchestrator`*\n\n'
+	body+="Batch paused: waiting for PR #$pr to merge before the next issue"
+	body+=" in this batch forks its branch. The batch waits up to"
+	body+=" ${max}s, then stops with the remaining issues left pending."
+	body+=" Set BATCH_WAIT_FOR_MERGE_MAX=0 to continue immediately"
+	body+=" instead of waiting."
+
+	"$commenter" "$issue_num" "$body" >/dev/null 2>&1 \
+		|| log_warn "Issue #$issue_num: failed to post the" \
+			"paused_on_pr comment (non-fatal)"
+}
+
+# Globals:
+#   STATUS_FILE, PLATFORM_DIR
+# Returns:
+#   0 when the PR merged, was closed, or there was nothing to wait for
+#   1 on timeout — the caller halts the batch like the circuit breaker does
+wait_for_pr_merged() {
+	local issue_num="$1"
+	local max="${BATCH_WAIT_FOR_MERGE_MAX:-7200}"
+	local interval="${BATCH_WAIT_FOR_MERGE_INTERVAL:-30}"
+	local elapsed=0
+	local pr="" state=""
+
+	if [[ "$max" == "0" ]]; then
+		return 0
+	fi
+
+	pr=$(jq -r --arg num "$issue_num" \
+		'.issues[] | select(.number == $num) | .pr // empty' \
+		"$STATUS_FILE" 2>/dev/null) || pr=""
+	# Defence in depth (#870): .pr is written by the arms that expect to leave
+	# a PR open, so any path that misses that write would silently disable the
+	# park. The orchestrator always records the PR it created in its own stage
+	# file, so consult that before concluding there is nothing to wait for.
+	if [[ -z "$pr" || "$pr" == "null" ]]; then
+		pr=$(jq -r '.stages.pr.pr_number // empty' \
+			"$LOG_BASE/issue-$issue_num-status.json" 2>/dev/null) || pr=""
+	fi
+	if [[ -z "$pr" || "$pr" == "null" ]]; then
+		return 0
+	fi
+
+	state=$(pr_merge_state "$pr")
+	case "$state" in
+		MERGED)
+			return 0
+			;;
+		CLOSED)
+			log_warn "Issue #$issue_num: PR #$pr is CLOSED without a" \
+				"merge — not waiting for it"
+			return 0
+			;;
+	esac
+
+	set_state "paused_on_pr"
+	set_paused_on_pr "$pr"
+	log "Issue #$issue_num: PR #$pr is still open (state: $state) —" \
+		"pausing the batch for up to ${max}s before the next issue"
+	comment_paused_on_pr "$issue_num" "$pr" "$max"
+
+	while ((elapsed < max)); do
+		sleep "$interval"
+		elapsed=$((elapsed + interval))
+		state=$(pr_merge_state "$pr")
+		case "$state" in
+			MERGED)
+				log "Issue #$issue_num: PR #$pr merged after" \
+					"${elapsed}s — resuming the batch"
+				set_paused_on_pr ""
+				set_state "running"
+				return 0
+				;;
+			CLOSED)
+				log_warn "Issue #$issue_num: PR #$pr was CLOSED" \
+					"without merging after ${elapsed}s —" \
+					"resuming the batch"
+				set_paused_on_pr ""
+				set_state "running"
+				return 0
+				;;
+		esac
+		log "Waiting for PR #$pr to merge (state: $state," \
+			"${elapsed}s/${max}s elapsed)"
+	done
+
+	# Leave state paused_on_pr and .paused_on_pr set: the batch is stopping
+	# BECAUSE of this PR, and the operator needs to see which one.
+	log_error "WAIT-FOR-MERGE TIMEOUT: PR #$pr for issue #$issue_num is" \
+		"still open after ${max}s. Stopping batch."
+	return 1
+}
+
+# =============================================================================
 # MAIN LOOP
 # =============================================================================
 
@@ -2212,6 +2770,12 @@ for issue in "${ISSUE_ARRAY[@]}"; do
         if [[ "$_PREFLIGHT_SKIPPED" == true ]]; then
             log "Issue #$issue skipped (preflight): ${_SKIP_REASON:-unknown reason}"
             emit_event "issue_end" "issue_num=$issue" "outcome=skipped"
+        elif [[ -n "$_TERMINAL_STATUS" ]]; then
+            # already_done, merge_blocked, budget_exceeded (#809) — process_issue
+            # returns 0 for these to keep them out of consecutive_failures, but
+            # they are not a genuine success and must not be reported as one.
+            log "Issue #$issue ended: $_TERMINAL_STATUS"
+            emit_event "issue_end" "issue_num=$issue" "outcome=$_TERMINAL_STATUS"
         else
             log "Issue #$issue processed successfully"
             emit_event "issue_end" "issue_num=$issue" "outcome=success"
@@ -2229,6 +2793,16 @@ for issue in "${ISSUE_ARRAY[@]}"; do
             exit_code=2
             break
         fi
+    fi
+
+    # Do not fork the next issue while this issue's PR is still open (issue
+    # #861). Applies to failures too: a merge_blocked issue leaves exactly
+    # the open PR the next branch would conflict with. A timeout halts the
+    # batch the way the circuit breaker does — exit_code=2, remaining issues
+    # untouched and still `pending` in the manifest.
+    if ! wait_for_pr_merged "$issue"; then
+        exit_code=2
+        break
     fi
 
     # Per-batch token/cost budget breaker (issue #583).  Checked after every

@@ -64,8 +64,47 @@ _extract_readonly_array_guards() {
 
 # Create isolated test environment
 setup_test_env() {
+    # Both orchestrators export their re-exec guard (and the temp-copy path
+    # alongside it) once they've re-exec'd themselves from a private copy
+    # (issue #775). When bats itself runs inside such an orchestrator's own
+    # process tree, these vars leak into every test's environment: a test
+    # that then launches the real script inherits an already-set guard, the
+    # script skips its re-exec, and any assertion expecting a fresh private
+    # copy sees none. Scrub them here so each test starts from a clean
+    # re-exec state regardless of the ancestry bats was launched from; a
+    # test that specifically wants an inherited guard sets it explicitly in
+    # its own body (see test-reexec.bats's "inherited guard" test). The
+    # carried-over SCRIPT_DIR is scrubbed too: a leaked value repoints a
+    # launched script's siblings at the ancestor's (e.g. plugin-cache) tree.
+    #
+    # Issue #922 bisect: a leaked _SCRIPT_DIR would repoint an
+    # extracted-function suite at the plugin cache (e.g. "Schema file not
+    # found: .../pipeline-core/0.8.10/..."), and a leaked _SCRIPT_PATH
+    # together with the guard would make usage() name the ancestor's
+    # script. The issue's single-variable probes ruled out each of these
+    # alone; whether the two together explain any of AC6's remaining 9
+    # failures is an unverified hypothesis, not a confirmed finding -- no
+    # reproduction has tied this combination to those specific cases.
+    # Scrub both here anyway, not just in source_orchestrator_functions(),
+    # so no suite depends on which extractor it happens to use.
+    unset _BATCH_ORCHESTRATOR_REEXECED _BATCH_ORCHESTRATOR_REEXEC_COPY \
+        _BATCH_ORCHESTRATOR_SCRIPT_DIR
+    unset _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXECED \
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_REEXEC_COPY \
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR \
+        _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_PATH
+
     TEST_TMP=$(mktemp -d)
     export TEST_TMP
+
+    # e2e_verify's direct-execution path (issue #872) runs TEST_E2E_CMD for
+    # real. Every existing suite sets TEST_E2E_CMD to a placeholder like
+    # "npx playwright test" purely to get past the stage's skip guard, so
+    # leaving the executor enabled would have those tests shell out to a
+    # package manager — slow, network-dependent, and machine-dependent.
+    # Default it off here so a suite exercises the agent path unless it
+    # explicitly opts in (export E2E_DIRECT_EXEC=1) with a stub command.
+    export E2E_DIRECT_EXEC=0
 
     # Create minimal directory structure
     mkdir -p "$TEST_TMP/logs"
@@ -168,12 +207,28 @@ teardown_test_env() {
 # PORTABLE TIMEOUT (macOS does not ship GNU timeout)
 # =============================================================================
 
+#
+# This stub must stay behaviourally identical to _timeout_perl_fallback() in
+# implement-issue-orchestrator.sh, INCLUDING its exit-125 rejection of an
+# empty / non-numeric duration. Without that rejection the stub silently runs
+# with no alarm at all, so a config variable the extractor fails to carry into
+# the harness (see source_orchestrator_functions) produces a green macOS run
+# and exit 125 in Linux CI — issue #859.
+
 if ! command -v timeout &>/dev/null; then
     timeout() {
         local duration="$1"; shift
+        local _duration_re='^[0-9]+(\.[0-9]+)?[smhd]?$'
+        if [[ ! "$duration" =~ $_duration_re ]]; then
+            printf "timeout: invalid time interval '%s'\n" "$duration" >&2
+            return 125
+        fi
         perl -e '
             use POSIX ":sys_wait_h";
-            alarm shift @ARGV;
+            my $d = shift @ARGV;
+            my %mult = (s => 1, m => 60, h => 3600, d => 86400);
+            $d = $1 * $mult{$2} if $d =~ /^([0-9.]+)([smhd])$/;
+            alarm $d;
             $SIG{ALRM} = sub { kill 15, $pid; waitpid($pid, 0); exit 124 };
             $pid = fork // die "fork: $!";
             if ($pid == 0) { exec @ARGV; die "exec: $!" }
@@ -469,6 +524,27 @@ fail() {
     return 1
 }
 
+# refute <command> [args...]
+#
+# Asserts the command FAILS. Use this instead of `! cmd` (issue #854).
+#
+# Bash exempts a `!`-negated pipeline from errexit:
+#
+#     bash -c 'set -e; ! true; echo REACHED'   # prints REACHED
+#
+# bats takes a test's status from the LAST command in its body, so `! cmd`
+# anywhere else cannot fail the test regardless of what it finds — a hollow
+# assertion. refute reports the failure explicitly, so it bites wherever it
+# appears.
+#
+# `! cmd || fail "..."` is also sound and does not need converting: the `||`
+# handler runs when the negation yields 1.
+refute() {
+    if "$@"; then
+        fail "expected to fail, but it succeeded: $*"
+    fi
+}
+
 # Assert string not empty
 assert_not_empty() {
     local value="$1"
@@ -484,20 +560,27 @@ assert_not_empty() {
 # =============================================================================
 # HARD ASSERTIONS (expect_*)
 #
-# BATS does not abort a test body on a bare failing command — only the FINAL
-# command's exit status decides pass/fail.  Verified with bats 1.13:
+# A bare failing `[[ ... ]]` mid-body is NOT inert — bats runs test bodies
+# under `set -e`, so a failing `[[ ... ]]` statement aborts the test via
+# errexit the same as any other failing command. Measured on bats 1.13.0:
 #
 #     @test "intermediate failing assertion" {
-#         [[ "abc" == "xyz" ]]   # <- returns 1, silently ignored
+#         [[ "abc" == "xyz" ]]   # <- aborts the test here via errexit
 #         [[ "abc" == "abc" ]]
-#     }                          # -> reported "ok"
+#     }                          # -> reported "not ok"
 #
-# So every assertion except the last is inert when written as a bare
-# `[[ ... ]]`, and the `return 1`-style assert_* helpers above have the same
-# problem for the same reason.  The expect_* helpers below `exit 1` instead,
-# which terminates the test's subshell and is reported as a failure, so a test
-# can assert as many times as it needs without any of them being dropped.
-# Prefer these over bare `[[ ... ]]` in any test that asserts more than once.
+# errexit IS suppressed, and a failing `[[ ... ]]` there IS genuinely inert,
+# inside a function invoked via `run`, or inside an `if`/`&&`/`||` condition —
+# those contexts intentionally swallow the exit status. A negated command
+# (`! cmd`) mid-body is also genuinely inert for the same reason and is
+# caught separately by the `bats-negated-assertion` lint rule.
+#
+# The real advantage of the expect_* helpers below is not inertness — it's
+# that they print a diagnostic message on failure (actual vs. expected),
+# where a bare `[[ ... ]]` failure just reports "not ok" with no context.
+# Prefer these over bare `[[ ... ]]` when a diagnostic would help debug a
+# failure, and always inside `run`/conditional contexts where a bare
+# `[[ ... ]]` would be silently swallowed.
 # =============================================================================
 
 # expect_glob <actual> <pattern> [label]
@@ -545,6 +628,15 @@ expect_not_ok() {
 
 # Source only the functions from the orchestrator (not main execution)
 source_orchestrator_functions() {
+    # The real orchestrator exports _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR
+    # when it re-execs from a private copy (issue #778). If a developer ran
+    # it directly in this shell before invoking bats, the value leaks in via
+    # inherited environment and the extracted SCRIPT_DIR= line below resolves
+    # to that stale path instead of falling back to TEST_TMP, which every
+    # test in this file that reads $SCRIPT_DIR depends on. Unset it so this
+    # harness's SCRIPT_DIR is deterministic regardless of ambient shell state.
+    unset _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR
+
     # Extract just the functions, not the main execution or argument parsing
     local func_file="$TEST_TMP/orchestrator_functions.bash"
 
@@ -563,6 +655,33 @@ HEADER
         # Extract configurable limit declarations (MAX_* and ORCHESTRATOR_START_EPOCH)
         /^MAX_[A-Z_]+=/ { print; next }
         /^ORCHESTRATOR_START_EPOCH=/ { print; next }
+
+        # Extract module-level config defaults of the exact shape
+        #
+        #     NAME="${NAME:-<literal>}"
+        #
+        # These are the env-overridable knobs (timeouts, budgets, slacks,
+        # kill-switches). Without this rule only the MAX_* subset survived
+        # extraction and every other one was EMPTY inside the harness, so a
+        # call like `timeout "$TEST_LOOP_GIT_TIMEOUT" git ...` became
+        # `timeout "" git ...` — which GNU timeout rejects with exit 125 on
+        # Linux while the perl fallback silently ran with no alarm on macOS
+        # (issue #859). Re-sourcing is safe because the :- form preserves a
+        # value a test already set.
+        #
+        # The pattern is deliberately narrow. It requires the default to be
+        # a literal: no dollar sign, backtick, or embedded double quote, and
+        # the assignment must CLOSE on the same line ("}" then the quote then
+        # end-of-line). That is what keeps SCRIPT_DIR= and SCRIPT_PATH= out
+        # of it. SCRIPT_DIR spans several lines and its default is a $(...)
+        # command substitution; SCRIPT_PATH defaults to $0. Both contain a
+        # dollar sign, so neither can match, and SCRIPT_DIR keeps its own
+        # dedicated multi-line rule further down (the resume tests depend on
+        # SCRIPT_DIR being extracted and clobbered to TEST_TMP).
+        #
+        # NOTE: this awk program is inside a single-quoted shell string, so
+        # no comment here may contain an apostrophe.
+        /^[A-Z_][A-Z_0-9]*="\$\{[A-Z_][A-Z_0-9]*:-[^$`"]*\}"$/ { print; next }
 
         # Extract array declarations (DEGRADED_STAGES)
         /^declare -a [A-Z_]+=/ { print; next }
@@ -737,4 +856,70 @@ _extract_function_body() {
 			if (depth <= 0) capture = 0
 		}
 	' "$script_file"
+}
+
+# =============================================================================
+# WHOLE-SCRIPT RUNNER
+# =============================================================================
+
+# run_whole_script <log_file> <gh_stub_body> <script> [args...]
+#
+# Runs <script> end-to-end through bats `run` — not through a function
+# extracted out of it and called through `run`. That distinction is the
+# whole point of this helper: `run` captures the exit status of whatever it
+# invokes directly, so a bare command inside <script> that aborts under its
+# own `set -e` shows up here as a non-zero $status. An extracted-function
+# test can never observe that: `run some_extracted_function` traps the
+# abort at the function-call boundary bats itself installed, not at the
+# real top-level `set -e` the production script runs under. That gap is
+# exactly how the #876 regression shipped green — see the #876 regression
+# case in test-scripted-merge.bats, the first caller of this helper and the
+# reason it exists.
+#
+# Writes a `gh` stub to $TEST_TMP/bin/gh so <script> can call `gh` without
+# touching the network or GitHub, appends one line per invocation
+# ("$*") to <log_file> for call-count/content assertions, and prepends
+# $TEST_TMP/bin to PATH for the duration of the run only (PATH is restored
+# once this function returns, since the modified PATH is local to the `run`
+# command's own environment, not exported here).
+#
+# <gh_stub_body> is the stub's body ONLY — the part after the shebang and
+# the call-logging line. Callers write just the behaviour specific to their
+# scenario (matching on "$1 $2", a fixed payload, a scripted per-call
+# sequence, …) and never repeat the logging boilerplate. It is spliced into
+# the generated script verbatim, so it must be valid bash once written to
+# file; pass it single-quoted at the call site so "$@"/"$1"/"$*" reach the
+# generated stub literally instead of expanding against this function's own
+# arguments.
+#
+# Any env vars <script> itself must see (e.g. GIT_HOST=bitbucket) have to be
+# exported BEFORE calling this helper — PATH is the only variable this
+# helper sets. Sets $status/$output/$lines exactly as `run` does; <log_file>
+# remains on disk afterward.
+#
+# Usage:
+#   run_whole_script "$TEST_TMP/gh-e2e.log" '
+#       case "$1 $2" in
+#         "pr merge") printf "merged\n"; exit 0 ;;
+#       esac
+#       printf "{}\n"
+#   ' "$MERGE_MR" 5979
+#   [[ "$status" -eq 0 ]] || fail "aborted: $output"
+#   grep -q "pr merge" "$TEST_TMP/gh-e2e.log" || fail "never merged"
+run_whole_script() {
+	local log_file="$1"
+	local gh_stub_body="$2"
+	shift 2
+
+	mkdir -p "$TEST_TMP/bin"
+	: > "$log_file"
+
+	{
+		printf '#!/usr/bin/env bash\n'
+		printf 'printf '\''%%s\n'\'' "$*" >> %q\n' "$log_file"
+		printf '%s\n' "$gh_stub_body"
+	} > "$TEST_TMP/bin/gh"
+	chmod +x "$TEST_TMP/bin/gh"
+
+	PATH="$TEST_TMP/bin:$PATH" run "$@"
 }

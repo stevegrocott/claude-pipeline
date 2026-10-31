@@ -31,4 +31,9 @@ case "$GIT_HOST" in
     glab mr list --source-branch "$BRANCH" --output json 2>/dev/null \
       | jq -r '.[0].iid // empty'
     ;;
+  *)
+    echo "ERROR: unrecognised GIT_HOST '$GIT_HOST'" \
+      "(accepted: github, gitlab)" >&2
+    exit 1
+    ;;
 esac

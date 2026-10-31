@@ -37,6 +37,21 @@
 #     3. tags unmerged commits as salvage/issue-<n>-task<m> before delete
 #     4. does not create a salvage tag when branch has no unmerged commits
 #
+#   delete_merged_local_branch (issue #950):
+#     1. deletes a squash-merged branch judged against the merged tip
+#     2. deletes a merge-committed branch with no merged tip
+#     3. keeps and salvages a branch with commits absent from the merge
+#     4. squash merge without a merged tip keeps the branch
+#     5. keeps a branch still checked out in a worktree
+#     6. absent branch is a no-op
+#
+#   stale-branch salvage (issue #838):
+#     1. cleanup_stale_worktrees tags a stale branch's unmerged commits
+#     2. cleanup_stale_worktrees leaves a merged stale branch untagged
+#     3. create_task_worktree tags a prior-run branch's unmerged commits
+#     4. create_task_worktree leaves a merged prior-run branch untagged
+#     5. the git-worktree-add rollback still deletes without tagging
+#
 #   execute_batch_serial:
 #     1. returns completed array with task IDs (mocked run_stage)
 #     2. returns failed array when run_stage fails
@@ -394,7 +409,7 @@ teardown() {
 
 	# Verify worktree and branch are gone
 	[[ ! -d "${wt_base}/task-20" ]]
-	! git rev-parse --verify "wt-task-20" 2>/dev/null
+	refute git rev-parse --verify "wt-task-20" 2>/dev/null
 
 	git checkout -q main
 	git branch -D feature/cleanup-test 2>/dev/null || true
@@ -430,7 +445,7 @@ teardown() {
 
 	# Branch and worktree are gone
 	[[ ! -d "${wt_base}/task-7" ]]
-	! git rev-parse --verify "$wt_branch" 2>/dev/null
+	refute git rev-parse --verify "$wt_branch" 2>/dev/null
 
 	# Salvage tag exists and points at the unmerged commit
 	run git rev-parse "salvage/issue-42-task7"
@@ -459,6 +474,260 @@ teardown() {
 
 	git checkout -q main
 	git branch -D feature/no-salvage-test 2>/dev/null || true
+}
+
+# =============================================================================
+# delete_merged_local_branch (issue #950)
+# =============================================================================
+
+# Build feature/issue-950 with one commit, squash-merge it into main and
+# print the branch tip (the PR head that was merged).
+_i950_squash_merged_branch() {
+	git checkout -q -b feature/issue-950 main
+	printf 'feature\n' > feature.txt
+	git add feature.txt
+	git commit -q -m "feature work"
+	git checkout -q main
+	git merge -q --squash feature/issue-950 >/dev/null
+	git commit -q -m "squash: feature work"
+	git rev-parse feature/issue-950
+}
+
+@test "#950 delete_merged_local_branch: deletes a squash-merged branch" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tip
+	tip=$(_i950_squash_merged_branch)
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	run git show-ref --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -ne 0 ]
+	run git show-ref --verify --quiet refs/tags/salvage/issue-99-merged
+	[ "$status" -ne 0 ]
+	grep -qF "Deleted local branch feature/issue-950" "$LOG_FILE"
+}
+
+@test "#950 delete_merged_local_branch: deletes a merge-committed branch with no merged tip" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/issue-950 main
+	printf 'feature\n' > feature.txt
+	git add feature.txt
+	git commit -q -m "feature work"
+	git checkout -q main
+	git merge -q --no-ff -m "merge" feature/issue-950
+
+	run delete_merged_local_branch feature/issue-950 main ""
+	[ "$status" -eq 0 ]
+
+	run git show-ref --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -ne 0 ]
+}
+
+@test "#950 delete_merged_local_branch: keeps and salvages a branch with commits absent from the merge" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tip extra_sha
+	tip=$(_i950_squash_merged_branch)
+
+	# A commit made locally after the PR head was pushed and merged.
+	git checkout -q feature/issue-950
+	printf 'late\n' > late.txt
+	git add late.txt
+	git commit -q -m "late local work"
+	extra_sha=$(git rev-parse HEAD)
+	git checkout -q main
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	run git rev-parse --verify refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+	run git rev-parse refs/tags/salvage/issue-99-merged
+	[ "$status" -eq 0 ]
+	[ "$output" = "$extra_sha" ]
+	grep -qF "Keeping local branch feature/issue-950: 1 commit(s)" \
+		"$LOG_FILE"
+}
+
+@test "#950 delete_merged_local_branch: squash merge without a merged tip keeps the branch" {
+	cd "$TEST_TMP/repo" || exit 1
+	_i950_squash_merged_branch >/dev/null
+
+	run delete_merged_local_branch feature/issue-950 main ""
+	[ "$status" -eq 0 ]
+
+	run git show-ref --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 0 ]
+	grep -qF "Keeping local branch feature/issue-950" "$LOG_FILE"
+}
+
+@test "#950 delete_merged_local_branch: reclaims a branch still checked out in a worktree" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tip
+	tip=$(_i950_squash_merged_branch)
+	git worktree add -q "$TEST_TMP/wt-950" feature/issue-950
+
+	run delete_merged_local_branch feature/issue-950 main "$tip"
+	[ "$status" -eq 0 ]
+
+	run git show-ref --verify --quiet refs/heads/feature/issue-950
+	[ "$status" -eq 1 ]
+	[[ ! -d "$TEST_TMP/wt-950" ]]
+	grep -qF "reclaiming it" "$LOG_FILE"
+}
+
+@test "#950 delete_merged_local_branch: absent branch is a no-op" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	run delete_merged_local_branch feature/issue-nope main ""
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+# =============================================================================
+# cleanup_stale_worktrees / create_task_worktree stale-branch salvage
+# (issue #838)
+# =============================================================================
+
+@test "cleanup_stale_worktrees: salvage-tags a stale branch's unmerged commits" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# A branch left behind by a crashed prior run: it committed, never
+	# merged, and no worktree is registered for it any more.
+	git checkout -q -b wt-i42-t7 main
+	printf 'crashed run work\n' > stale-work.txt
+	git add stale-work.txt
+	git commit -q -m "work from a prior run"
+	local orphan_sha
+	orphan_sha=$(git rev-parse wt-i42-t7)
+	git checkout -q main
+
+	cleanup_stale_worktrees
+
+	# Branch is gone...
+	refute git rev-parse --verify --quiet refs/heads/wt-i42-t7
+
+	# ...but the commit is still addressable via the salvage tag.
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task7"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$orphan_sha" ]
+
+	# And the salvage is logged.
+	run grep -F "Salvaged unmerged commits on wt-i42-t7 as tag salvage/issue-42-task7" \
+		"$LOG_FILE"
+	[ "$status" -eq 0 ]
+}
+
+@test "cleanup_stale_worktrees: merged stale branch deleted with no tag, no noise" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	# Same shape, except the work did reach main before the crash.
+	git checkout -q -b wt-i42-t8 main
+	printf 'landed work\n' > landed.txt
+	git add landed.txt
+	git commit -q -m "work that landed"
+	git checkout -q main
+	git merge -q --no-edit wt-i42-t8
+
+	cleanup_stale_worktrees
+
+	refute git rev-parse --verify --quiet refs/heads/wt-i42-t8
+
+	# No tag for work that is already reachable...
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task8"
+	[ "$status" -ne 0 ]
+
+	# ...and no salvage line in the log either.
+	refute grep -q "Salvaged unmerged commits" "$LOG_FILE"
+}
+
+@test "create_task_worktree: salvage-tags a prior-run branch's unmerged commits" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/prior-run main
+
+	# A prior run's branch for the same issue/task, holding a commit that
+	# never reached the feature branch. create_task_worktree deletes it to
+	# make room for the new worktree.
+	git checkout -q -b wt-i42-t9 main
+	printf 'prior run work\n' > prior.txt
+	git add prior.txt
+	git commit -q -m "prior run commit"
+	local orphan_sha
+	orphan_sha=$(git rev-parse wt-i42-t9)
+	git checkout -q feature/prior-run
+
+	local wt_base="$TEST_TMP/worktrees"
+	create_task_worktree "$wt_base" "feature/prior-run" "9" "42" \
+		>/dev/null
+
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task9"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$orphan_sha" ]
+
+	run grep -F "as tag salvage/issue-42-task9" "$LOG_FILE"
+	[ "$status" -eq 0 ]
+
+	git worktree remove --force "${wt_base}/task-9" 2>/dev/null || true
+	git checkout -q main
+	git branch -D wt-i42-t9 2>/dev/null || true
+	git branch -D feature/prior-run 2>/dev/null || true
+	git tag -d "salvage/issue-42-task9" 2>/dev/null || true
+}
+
+@test "create_task_worktree: no tag when the prior-run branch is fully merged" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/prior-merged main
+
+	git checkout -q -b wt-i42-t10 feature/prior-merged
+	printf 'merged prior work\n' > prior-merged.txt
+	git add prior-merged.txt
+	git commit -q -m "prior run commit"
+	git checkout -q feature/prior-merged
+	git merge -q --no-edit wt-i42-t10
+
+	local wt_base="$TEST_TMP/worktrees"
+	create_task_worktree "$wt_base" "feature/prior-merged" "10" "42" \
+		>/dev/null
+
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task10"
+	[ "$status" -ne 0 ]
+
+	refute grep -q "Salvaged unmerged commits" "$LOG_FILE"
+
+	git worktree remove --force "${wt_base}/task-10" 2>/dev/null || true
+	git checkout -q main
+	git branch -D wt-i42-t10 2>/dev/null || true
+	git branch -D feature/prior-merged 2>/dev/null || true
+}
+
+@test "create_task_worktree: worktree-add rollback deletes the branch untagged" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/rollback main
+
+	# Force `git worktree add` to fail: the target path already exists and
+	# is not empty. The branch it rolls back was just created at the
+	# feature branch tip, so it carries nothing to salvage — the rollback
+	# must stay a plain delete.
+	local wt_base="$TEST_TMP/worktrees"
+	mkdir -p "${wt_base}/task-30"
+	printf 'in the way\n' > "${wt_base}/task-30/occupied.txt"
+
+	run create_task_worktree "$wt_base" "feature/rollback" "30" "42"
+	[ "$status" -ne 0 ]
+
+	refute git rev-parse --verify --quiet refs/heads/wt-i42-t30
+
+	run git rev-parse --verify --quiet \
+		"refs/tags/salvage/issue-42-task30"
+	[ "$status" -ne 0 ]
+
+	git checkout -q main
+	git branch -D feature/rollback 2>/dev/null || true
 }
 
 # =============================================================================
@@ -1528,9 +1797,19 @@ _setup_parallel_stage_mocks() {
 
 	mkdir -p "$LOG_BASE/stages"
 
-	# Mock run_stage to succeed
+	# Mock run_stage to succeed. Two contract requirements, both of which
+	# this mock predated and neither of which it was migrated to (see the
+	# sibling mock in "execute_batch_serial runs tasks sequentially"):
+	#  - #536: run_stage nests structured fields under .output, and
+	#    execute_batch_serial reads .output.status — a bare top-level
+	#    {"status":"success"} reads as null and the task is marked failed.
+	#  - #790: the silent no-op guard treats an unmoved HEAD as a failure,
+	#    so the mock must actually commit.
 	run_stage() {
-		printf '%s' '{"status":"success","commit":"retry123","summary":"retried"}'
+		printf 'retry output\n' > task-15-out.txt
+		git add task-15-out.txt
+		git commit -q -m "task 15"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"retry123","summary":"retried"}}'
 	}
 	should_run_quality_loop() { return 1; }
 	get_max_review_attempts() { printf '%s' "1"; }
@@ -1550,11 +1829,17 @@ _setup_parallel_stage_mocks() {
 	# Must complete successfully (same as if it ran in first pass)
 	local comp_len
 	comp_len=$(printf '%s' "$retry_result" | jq '.completed | length')
-	[[ "$comp_len" -eq 1 ]]
+	# expect_ok, not a bare [[ ]]: these assertions are not the last command
+	# in the function, so bash 3.2 absorbs a bare failure and reports green.
+	# That is exactly how the stale mock above hid — the task was landing in
+	# .failed on every platform, and only bash 5 said so.
+	expect_ok "retried task completes (got $comp_len)" \
+		test "$comp_len" -eq 1
 
 	local comp_id
 	comp_id=$(printf '%s' "$retry_result" | jq '.completed[0]')
-	[[ "$comp_id" -eq 15 ]]
+	expect_ok "completed task is id 15 (got $comp_id)" \
+		test "$comp_id" -eq 15
 
 	git checkout -q main
 	git branch -D feature/conf-retry 2>/dev/null || true
@@ -1574,9 +1859,14 @@ _setup_parallel_stage_mocks() {
 	git add myfile.ts
 	git commit -q -m "add myfile"
 
-	# Mock for serial path
+	# Mock for serial path. Must use the #536 .output envelope and actually
+	# commit to clear the #790 silent-no-op guard — see the sibling mock in
+	# "execute_batch_serial runs tasks sequentially".
 	run_stage() {
-		printf '%s' '{"status":"success","commit":"sha1","summary":"done"}'
+		printf 'serial change\n' > task-20-out.ts
+		git add task-20-out.ts
+		git commit -q -m "task 20"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"sha1","summary":"done"}}'
 	}
 	should_run_quality_loop() { return 1; }
 	get_max_review_attempts() { printf '%s' "1"; }
@@ -1628,10 +1918,16 @@ _setup_parallel_stage_mocks() {
 	par_fail=$(printf '%s' "$par_result" | jq '.failed | length')
 
 	# Both paths should report 1 completed, 0 failed
-	[[ "$serial_comp" -eq 1 ]]
-	[[ "$serial_fail" -eq 0 ]]
-	[[ "$par_comp" -eq 1 ]]
-	[[ "$par_fail" -eq 0 ]]
+	# expect_ok, not bare [[ ]]: only the last of these four would ever be
+	# reported on bash 3.2, which is how the stale mock above stayed hidden.
+	expect_ok "serial completes the task (got $serial_comp)" \
+		test "$serial_comp" -eq 1
+	expect_ok "serial fails nothing (got $serial_fail)" \
+		test "$serial_fail" -eq 0
+	expect_ok "parallel completes the task (got $par_comp)" \
+		test "$par_comp" -eq 1
+	expect_ok "parallel fails nothing (got $par_fail)" \
+		test "$par_fail" -eq 0
 
 	git worktree prune 2>/dev/null || true
 	git checkout -q main 2>/dev/null || true
@@ -2253,7 +2549,7 @@ _setup_parallel_stage_mocks() {
 	[ $? -eq 0 ]
 
 	# run_stage should never have been called (both skipped)
-	! grep -q "^run_stage_called" "$calls_file"
+	refute grep -q "^run_stage_called" "$calls_file"
 
 	# Both stages should have been marked started and completed
 	grep -q "started:e2e_verify" "$calls_file"
@@ -2638,4 +2934,583 @@ _setup_status_634() {
 	s2=$(jq -r '.tasks[1].status' "$STATUS_FILE")
 	expect_glob "$s1" 'failed' "task 1 untouched"
 	expect_glob "$s2" 'completed' "task 2 untouched"
+}
+
+# =============================================================================
+# #795 — verify_task_deliverable resolves file: artefacts against the tree the
+# task actually ran in.
+#
+# The parallel no-op guard runs in the MAIN checkout after the worktree task
+# has finished, so a `deliverable:file:` artefact written inside the worktree
+# and never committed was invisible to it and reported as "never produced".
+# It still cannot be CREDITED — cleanup_worktree removes the worktree and
+# reconcile_noncommit_tasks_with_deliverables re-verifies against the main
+# checkout later in the run — but the operator must be told which of the two
+# failures it is.
+# =============================================================================
+
+@test "#795 verify_task_deliverable: a relative file: path resolves against the supplied base dir" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	mkdir -p "$TEST_TMP/other-tree/docs"
+	printf 'ruling\n' > "$TEST_TMP/other-tree/docs/ruling-795.md"
+
+	# Absent from the cwd the guard runs in...
+	expect_not_ok "artefact is not in the main checkout" \
+		verify_task_deliverable "file:docs/ruling-795.md"
+
+	# ...but present in the tree the task actually ran in.
+	expect_ok "artefact resolves against the supplied base dir" \
+		verify_task_deliverable "file:docs/ruling-795.md" \
+		"$TEST_TMP/other-tree"
+}
+
+@test "#795 verify_task_deliverable: an absolute file: path ignores the base dir" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	mkdir -p "$TEST_TMP/abs-tree"
+	printf 'report\n' > "$TEST_TMP/abs-tree/report-795.json"
+
+	# A base dir must never be prefixed onto an already-absolute artefact
+	# path — that would turn a working declaration into a missing file.
+	expect_ok "absolute artefact path still verifies" \
+		verify_task_deliverable \
+		"file:$TEST_TMP/abs-tree/report-795.json" \
+		"$TEST_TMP/no-such-base"
+}
+
+@test "#795 verify_task_deliverable: a missing artefact still fails with a base dir supplied" {
+	cd "$TEST_TMP/repo" || exit 1
+
+	mkdir -p "$TEST_TMP/empty-tree"
+
+	expect_not_ok "base dir does not make a missing artefact verify" \
+		verify_task_deliverable "file:docs/never-written.md" \
+		"$TEST_TMP/empty-tree"
+}
+
+@test "#795 execute_batch_parallel: a file deliverable written only in the worktree is reported as uncommitted, not as never produced" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/deliverable-file-wt 2>/dev/null || true
+	git branch -D wt-task-75 2>/dev/null || true
+	git checkout -q -b feature/deliverable-file-wt main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'base\n' > base.ts
+	git add base.ts
+	git commit -q -m "add base"
+
+	# The task writes its declared artefact inside the worktree and never
+	# commits it — the exact case issue #795 reports.
+	run_task_in_worktree() {
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		mkdir -p docs
+		printf 'findings\n' > docs/audit-795.md
+		printf '{"status":"success","review_attempts":1,"commit":"none","summary":"wrote the audit file"}' \
+			> "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":75,"description":"Audit the thing `deliverable:file:docs/audit-795.md`","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/deliverable-file-wt" "main" \
+		2>/dev/null) || true
+
+	local failed_count completed_count
+	failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/deliverable-file-wt 2>/dev/null || true
+	git branch -D wt-task-75 2>/dev/null || true
+	rm -rf "$TEST_TMP/repo/docs"
+
+	# An artefact that dies with the worktree is still not credited.
+	expect_ok "worktree-only artefact does not pass the guard" \
+		test "$failed_count" -eq 1
+	expect_ok "worktree-only artefact is not counted completed" \
+		test "$completed_count" -eq 0
+
+	# But the guard now says WHICH failure it is: the artefact existed, it
+	# was just never committed.
+	expect_ok "guard names the uncommitted worktree artefact" \
+		grep -q 'artefact exists only' "$LOG_FILE"
+}
+
+@test "#795 execute_batch_parallel: a file deliverable that was never written anywhere keeps the generic unverified error" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/deliverable-file-absent 2>/dev/null || true
+	git branch -D wt-task-76 2>/dev/null || true
+	git checkout -q -b feature/deliverable-file-absent main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'base\n' > base.ts
+	git add base.ts
+	git commit -q -m "add base"
+
+	# Claims the deliverable, writes nothing anywhere.
+	run_task_in_worktree() {
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf '{"status":"success","review_attempts":1,"commit":"none","summary":"claimed a file deliverable"}' \
+			> "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":76,"description":"Audit the thing `deliverable:file:docs/audit-796-absent.md`","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/deliverable-file-absent" "main" \
+		2>/dev/null) || true
+
+	local failed_count
+	failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/deliverable-file-absent 2>/dev/null || true
+	git branch -D wt-task-76 2>/dev/null || true
+
+	expect_ok "unwritten artefact fails the guard" test "$failed_count" -eq 1
+	expect_ok "generic unverified error is used" \
+		grep -q 'but it could not be verified' "$LOG_FILE"
+	refute grep -q 'artefact exists only' "$LOG_FILE"
+}
+
+# =============================================================================
+# #796 — clean-tree escape hatch on the task no-op guards
+#
+# verify_fix_stage_commit accepts every clean tree because "the findings were
+# already addressed" is a routine outcome for a fix stage.  A planned
+# implementation task is different: "claimed success, committed nothing, tree
+# clean" is exactly the silent no-op issue #790 exists to catch, and the tree
+# alone cannot tell that apart from a legitimately idempotent task.  So the
+# hatch here keeps the dirty-vs-clean distinction — only a DIRTY tree with no
+# commit is a lost fix — and gates the clean-tree accept on the stage's own
+# already_done claim, which is the schema's positive signal for "this had
+# already landed".
+# =============================================================================
+
+@test "#796 execute_batch_serial: an idempotent task with no commit, a clean tree and already_done is completed" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-clean-noop 2>/dev/null || true
+	git checkout -q -b feature/serial-clean-noop main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# The change this task describes already landed via an earlier task on
+	# the same branch, so the stage reports already_done and commits nothing.
+	run_stage() {
+		printf '%s' '{"status":"success","output":{"status":"success","already_done":true,"commit":"none","summary":"change was already present"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "3"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks result comp_len fail_len
+	tasks='[{"id":96,"description":"Make the idempotent change","agent":"default"}]'
+	result=$(execute_batch_serial "$tasks" \
+		"feature/serial-clean-noop" "main")
+	comp_len=$(printf '%s' "$result" | jq '.completed | length')
+	fail_len=$(printf '%s' "$result" | jq '.failed | length')
+
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-clean-noop 2>/dev/null || true
+
+	expect_ok "genuine no-op is completed" test "$comp_len" -eq 1
+	expect_ok "genuine no-op is not failed" test "$fail_len" -eq 0
+}
+
+@test "#796 execute_batch_serial: a task that leaves work uncommitted still fails and the error names the paths" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-dirty-noop 2>/dev/null || true
+	git checkout -q -b feature/serial-dirty-noop main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# already_done is claimed AND the tree is dirty: the escape hatch must
+	# key off the TREE, so this is a lost fix, not a no-op.
+	run_stage() {
+		printf 'lost work\n' > lost-796.ts
+		printf '%s' '{"status":"success","output":{"status":"success","already_done":true,"commit":"none","summary":"did the work"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks result comp_len fail_len
+	tasks='[{"id":97,"description":"Change the thing","agent":"default"}]'
+	result=$(execute_batch_serial "$tasks" \
+		"feature/serial-dirty-noop" "main")
+	comp_len=$(printf '%s' "$result" | jq '.completed | length')
+	fail_len=$(printf '%s' "$result" | jq '.failed | length')
+
+	rm -f "$TEST_TMP/repo/lost-796.ts"
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-dirty-noop 2>/dev/null || true
+
+	expect_ok "uncommitted work fails the task" test "$fail_len" -eq 1
+	expect_ok "uncommitted work is not completed" test "$comp_len" -eq 0
+	expect_ok "the error names the uncommitted path" \
+		grep -q 'Uncommitted paths: lost-796.ts' "$LOG_FILE"
+}
+
+@test "#796 execute_batch_serial: a clean tree with no already_done claim still fails (the #790 guard is intact)" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-silent-noop 2>/dev/null || true
+	git checkout -q -b feature/serial-silent-noop main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# Claims success, commits nothing, leaves a clean tree, and never says
+	# the work was already done — the silent no-op of issue #790.
+	run_stage() {
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"none","summary":"claimed done but changed nothing"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks result comp_len fail_len
+	tasks='[{"id":98,"description":"Change the thing","agent":"default"}]'
+	result=$(execute_batch_serial "$tasks" \
+		"feature/serial-silent-noop" "main")
+	comp_len=$(printf '%s' "$result" | jq '.completed | length')
+	fail_len=$(printf '%s' "$result" | jq '.failed | length')
+
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-silent-noop 2>/dev/null || true
+
+	expect_ok "silent no-op still fails" test "$fail_len" -eq 1
+	expect_ok "silent no-op is not completed" test "$comp_len" -eq 0
+}
+
+@test "#796 execute_batch_parallel: a clean worktree with an already_done claim is completed, not failed" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/parallel-clean-noop 2>/dev/null || true
+	git branch -D wt-task-99 2>/dev/null || true
+	git checkout -q -b feature/parallel-clean-noop main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'base\n' > base.ts
+	git add base.ts
+	git commit -q -m "add base"
+
+	run_task_in_worktree() {
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf '{"status":"success","review_attempts":1,"commit":"none","already_done":true,"files_changed":[],"summary":"already present on the branch"}' \
+			> "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":99,"description":"Make the idempotent change","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/parallel-clean-noop" "main" \
+		2>/dev/null) || true
+
+	local completed_count failed_count
+	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+	failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/parallel-clean-noop 2>/dev/null || true
+	git branch -D wt-task-99 2>/dev/null || true
+
+	expect_ok "genuine no-op is completed" test "$completed_count" -eq 1
+	expect_ok "genuine no-op is not failed" test "$failed_count" -eq 0
+}
+
+@test "#796 execute_batch_parallel: a dirty worktree with no commit fails and the error names the paths" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/parallel-dirty-noop 2>/dev/null || true
+	git branch -D wt-task-100 2>/dev/null || true
+	git checkout -q -b feature/parallel-dirty-noop main
+
+	mkdir -p "$LOG_BASE/stages"
+	mkdir -p "$LOG_BASE/worktrees"
+
+	printf 'base\n' > base.ts
+	git add base.ts
+	git commit -q -m "add base"
+
+	# Does the work, claims it is already done, and never commits it.
+	run_task_in_worktree() {
+		local wt_path="$5"
+		local result_file="$8"
+		cd "$wt_path" || {
+			printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+			return 1
+		}
+		printf 'lost\n' > lost-parallel-796.ts
+		printf '{"status":"success","review_attempts":1,"commit":"none","already_done":true,"summary":"did the work"}' \
+			> "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree
+	export -f extract_task_size
+
+	local tasks
+	tasks='[
+		{"id":100,"description":"Change the thing","agent":"default","batch":1}
+	]'
+
+	local result
+	result=$(execute_batch_parallel 1 "$tasks" \
+		"feature/parallel-dirty-noop" "main" \
+		2>/dev/null) || true
+
+	local completed_count failed_count
+	completed_count=$(printf '%s' "$result" | jq '.completed | length' 2>/dev/null)
+	failed_count=$(printf '%s' "$result" | jq '.failed | length' 2>/dev/null)
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/parallel-dirty-noop 2>/dev/null || true
+	git branch -D wt-task-100 2>/dev/null || true
+
+	expect_ok "lost work fails the task" test "$failed_count" -eq 1
+	expect_ok "lost work is not completed" test "$completed_count" -eq 0
+	expect_ok "the error names the uncommitted worktree path" \
+		grep -q 'Uncommitted paths: lost-parallel-796.ts' "$LOG_FILE"
+}
+
+# =============================================================================
+# #794 — a task accepted without a commit is recorded honestly
+#
+# Both result-file writers derived files_changed from `git diff HEAD~1 HEAD`.
+# When the task committed nothing that range names the PREVIOUS commit on the
+# branch, so the task's result file credited it with files it never touched —
+# and .commit carried whatever the subagent claimed. #796 widens what reaches
+# these writers with no commit, so both are now short-circuited.
+# =============================================================================
+
+@test "#794 execute_batch_serial: an accepted no-commit deliverable is not credited with the previous task's files" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-attribution 2>/dev/null || true
+	git checkout -q -b feature/serial-attribution main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# An earlier task's commit is what HEAD~1..HEAD names once this task
+	# commits nothing of its own.
+	printf 'prior\n' > earlier-task-794.ts
+	git add earlier-task-794.ts
+	git commit -q -m "earlier task on the same branch"
+
+	# Reports success and even names a commit, but commits nothing.
+	run_stage() {
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"deadbee","summary":"posted the ruling as a comment"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+	_fetch_issue_comment_bodies() {
+		printf '%s\n' "Ruling posted. marker:task94-ruling"
+	}
+
+	local tasks result comp_len
+	tasks='[
+		{"id":94,"description":"Rule on the thing `deliverable:comment:task94-ruling`","agent":"default"}
+	]'
+	result=$(execute_batch_serial "$tasks" \
+		"feature/serial-attribution" "main")
+	comp_len=$(printf '%s' "$result" | jq '.completed | length')
+
+	local rf files commit
+	rf="$LOG_BASE/stages/task-94-serial.log"
+	files=$(jq -c '.files_changed' "$rf" 2>/dev/null)
+	commit=$(jq -r '.commit' "$rf" 2>/dev/null)
+
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/serial-attribution 2>/dev/null || true
+
+	expect_ok "the deliverable task is still accepted" test "$comp_len" -eq 1
+	expect_ok "result file was written" test -f "$rf"
+	# The previous task's file must not appear anywhere in this task's record.
+	refute grep -q 'earlier-task-794.ts' "$rf"
+	expect_ok "files_changed is empty" test "$files" = "[]"
+	expect_ok "commit is recorded as none" test "$commit" = "none"
+}
+
+@test "#794 run_task_in_worktree: a task that commits nothing is not credited with the branch's previous commit" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/wt-attribution 2>/dev/null || true
+	git branch -D wt-task-95 2>/dev/null || true
+	git checkout -q -b feature/wt-attribution main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	printf 'prior\n' > earlier-task-795.ts
+	git add earlier-task-795.ts
+	git commit -q -m "earlier task on the same branch"
+
+	local wt_path="$TEST_TMP/wt-95"
+	rm -rf "$wt_path"
+	git worktree add -q -b wt-task-95 "$wt_path" feature/wt-attribution
+
+	# The stage reports success and names a commit, but the worktree head
+	# never moves.
+	run_stage() {
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"deadbee","summary":"nothing to change"}}'
+	}
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	load_skill() { printf '%s' ""; }
+	sanitize_worktree_commits() { return 0; }
+	guard_commit_path_allowlist() { return 0; }
+	should_run_quality_loop() { return 1; }
+
+	local rf="$LOG_BASE/stages/task-95-worktree.log"
+	rm -f "$rf"
+	(
+		run_task_in_worktree 95 "Do the thing" "default" "S" \
+			"$wt_path" "wt-task-95" "feature/wt-attribution" \
+			"$rf" "main"
+	) >/dev/null 2>&1 || true
+
+	cd "$TEST_TMP/repo" || exit 1
+
+	local files commit
+	files=$(jq -c '.files_changed' "$rf" 2>/dev/null)
+	commit=$(jq -r '.commit' "$rf" 2>/dev/null)
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/wt-attribution 2>/dev/null || true
+	git branch -D wt-task-95 2>/dev/null || true
+
+	expect_ok "result file was written" test -f "$rf"
+	refute grep -q 'earlier-task-795.ts' "$rf"
+	expect_ok "files_changed is empty" test "$files" = "[]"
+	expect_ok "commit is recorded as none" test "$commit" = "none"
+}
+
+@test "#794 run_task_in_worktree: a task that DOES commit still records its own files" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/wt-attribution-ok 2>/dev/null || true
+	git branch -D wt-task-93 2>/dev/null || true
+	git checkout -q -b feature/wt-attribution-ok main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	printf 'prior\n' > earlier-task-793.ts
+	git add earlier-task-793.ts
+	git commit -q -m "earlier task on the same branch"
+
+	local wt_path="$TEST_TMP/wt-93"
+	rm -rf "$wt_path"
+	git worktree add -q -b wt-task-93 "$wt_path" feature/wt-attribution-ok
+
+	# This stage really commits, so the short-circuit must NOT engage.
+	run_stage() {
+		printf 'new\n' > "$TEST_TMP/wt-93/task-93-out.ts"
+		git -C "$TEST_TMP/wt-93" add task-93-out.ts
+		git -C "$TEST_TMP/wt-93" commit -q -m "task 93"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
+	}
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	load_skill() { printf '%s' ""; }
+	sanitize_worktree_commits() { return 0; }
+	guard_commit_path_allowlist() { return 0; }
+	should_run_quality_loop() { return 1; }
+
+	local rf="$LOG_BASE/stages/task-93-worktree.log"
+	rm -f "$rf"
+	(
+		run_task_in_worktree 93 "Do the thing" "default" "S" \
+			"$wt_path" "wt-task-93" "feature/wt-attribution-ok" \
+			"$rf" "main"
+	) >/dev/null 2>&1 || true
+
+	cd "$TEST_TMP/repo" || exit 1
+
+	local files commit
+	files=$(jq -c '.files_changed' "$rf" 2>/dev/null)
+	commit=$(jq -r '.commit' "$rf" 2>/dev/null)
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/wt-attribution-ok 2>/dev/null || true
+	git branch -D wt-task-93 2>/dev/null || true
+
+	expect_ok "committing task records its own file" \
+		test "$files" = '["task-93-out.ts"]'
+	expect_ok "committing task records its commit" test "$commit" = "abc123"
 }

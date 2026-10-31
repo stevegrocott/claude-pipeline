@@ -1,0 +1,30 @@
+name: Install bats
+description: >
+  Install a pinned bats-core version so CI semantics match local development
+  instead of drifting with whatever the runner image's apt repo ships
+  (issue #909). This file is the single source of truth for the CI bats
+  version — bump BATS_VERSION here to upgrade every workflow at once.
+inputs:
+  jq:
+    description: Also install jq
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Install bats (pinned)
+      shell: bash
+      env:
+        BATS_VERSION: 1.13.0
+      run: |
+        git clone https://github.com/bats-core/bats-core.git --branch "v${BATS_VERSION}" --depth 1 /tmp/bats-core
+        sudo /tmp/bats-core/install.sh /usr/local
+        rm -rf /tmp/bats-core
+        bats --version
+
+    - name: Install jq
+      if: inputs.jq == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y jq

@@ -406,6 +406,8 @@ GIT_HOST="github"        # github | gitlab
 GIT_CLI="gh"             # gh | glab
 JIRA_PROJECT="PROJ"      # Jira project key
 MERGE_STYLE="squash"     # squash | merge | rebase
+MERGE_MR_NON_BLOCKING_CHECKS=""   # CI check names whose failure must not block the merge, e.g. "frontend-unit-tests" (#861)
+EXTRA_COMMIT_PATHS=""     # Extra glob patterns admitted by the commit allowlist beyond docs/**, tests/, etc., e.g. "context/**" (#835)
 ```
 
 **Jira users:** Install [ACLI](https://bobswift.atlassian.net/wiki/spaces/ACLI) and configure authentication before using the pipeline.
@@ -557,6 +559,31 @@ cd .claude/scripts/implement-issue-test
 cd .claude/scripts/platform-test
 ./run-tests.sh
 ```
+
+### Shell version: run tests under bash 5
+
+CI runs `ubuntu-latest` with bash 5. macOS ships **bash 3.2**, which silently
+absorbs several failure modes that bash 5 reports — so a suite can pass locally
+and fail in CI for reasons that are invisible on the developer's machine.
+Issue #859 catalogued four:
+
+| | bash 3.2 / BSD | bash 5 / GNU |
+|---|---|---|
+| `((x++))` when the value is 0 | swallowed | exits 1 under `set -e` |
+| `timeout ""` | `alarm 0` — no timeout at all | exit 125 |
+| a bare `[[ ]]` inside a function | swallowed | aborts the test |
+| `stat -f` | `--format` (intended) | `--file-system` — wrong, and *succeeds* |
+
+**Install bash 5 (`brew install bash`) and run the suites under it.** A stock
+macOS `bash` is not a useful signal for this repo: an assertion that cannot fail
+looks identical to one that passes.
+
+To cross-check what a consumer on stock macOS would see, invoke `/bin/bash`
+explicitly — that path stays 3.2 regardless of what is on `PATH`.
+
+New assertions should use the hard `expect_ok` / `expect_not_ok` / `refute`
+helpers in `implement-issue-test/helpers/test-helper.bash`, which `exit 1`
+rather than `return 1` and therefore fire on both versions.
 
 Decision skill tests use a golden-fixture harness (`skill-golden-lib.sh`) with mock Claude to verify escalation-policy, retry-policy, model-fallback, and triage-classify outputs without live API calls.
 

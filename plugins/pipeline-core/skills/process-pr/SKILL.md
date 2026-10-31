@@ -262,19 +262,19 @@ fi
 
 **If a merge block is set:** Leave the PR open, post the explanatory comment, and output `merge_blocked` status (see Output section). Do not proceed to close the issue or delete the branch.
 
-### Step 4b: Merge PR/MR
+### Step 4b: Do NOT merge — return `approved`
 
-```bash
-PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
-"$PLATFORM_DIR/merge-mr.sh" "$PR_NUMBER"
-```
+**You do not perform the merge.** The orchestrator merges in shell via `merge-mr.sh` after you return (issue #853).
 
-**IMPORTANT — do NOT check `mergeStateStatus` directly.** The `UNKNOWN` value is transient (can persist 2–30 s while GitHub recomputes merge status) and is not a reliable signal. `merge-mr.sh` handles all mergeability polling internally — it retries until the state resolves or a hard failure is confirmed. Attempting to read `mergeStateStatus` yourself and treating `UNKNOWN` as a failure will cause spurious aborts on perfectly mergeable PRs.
+Do the remaining review work below (Step 4f/4g — parse comments, create follow-up issues), then output status **`approved`**. Skip Step 4c (the "Completed" comment) and Step 4d (closing the issue): both are the orchestrator's job now, because only it knows whether the merge actually succeeded.
 
-**If merge fails:**
-- Log error with reason
-- Stop - do not proceed to close issue or create follow-ups
-- Return failure status
+**Why this changed.** The merge used to be performed here, by you, following an instruction to run `merge-mr.sh`. An instruction is not a gate: a run that shelled out to `gh pr merge` directly bypassed the check-failure refusal inside `merge-mr.sh` and put a PR with a failing `e2e` check onto the base branch (#848). On repos that cannot enable branch protection, that refusal is the only gate there is. Moving the merge into the orchestrator puts it on the single path that always runs it.
+
+A PreToolUse hook now hard-blocks direct `gh pr merge` / `glab mr merge`, so attempting the merge yourself will fail regardless.
+
+**Do NOT check `mergeStateStatus` yourself.** The `UNKNOWN` value is transient (can persist 2–30 s while GitHub recomputes merge status) and is not a reliable signal. Mergeability polling belongs to `merge-mr.sh`, which the orchestrator invokes.
+
+**If the review did not pass:** return `changes_requested` or `merge_blocked` as described elsewhere — not `approved`.
 
 ### Step 4c: Comment on Issue
 
@@ -606,7 +606,7 @@ The `batch-orchestrator.sh` uses this JSON schema to extract results:
 {
   "type": "object",
   "properties": {
-    "status": {"enum": ["merged", "changes_requested", "merge_blocked", "error", "rate_limit"]},
+    "status": {"enum": ["approved", "merged", "changes_requested", "merge_blocked", "error", "rate_limit"]},
     "follow_up_issues": {"type": "array", "items": {"type": "string"}},
     "error": {"type": "string"}
   },

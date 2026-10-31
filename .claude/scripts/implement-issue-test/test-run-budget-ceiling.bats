@@ -468,3 +468,49 @@ _write_stub_response() {
 	calls=$(grep -c 'call' "$CLAUDE_CALL_LOG" 2>/dev/null || printf '0')
 	[ "$calls" -eq 1 ] || fail "escalation was not suppressed: expected 1 CLI call, got $calls"
 }
+
+@test "INTEGRATION: hard breach in the retry_same path skips the uncapped retry call (issue #900 AC5)" {
+	# Mirrors the escalate test above, but for the OTHER cap-lift path (#637/
+	# #900): a max_turns_exhausted error at a non-ceiling model routes to
+	# retry_same with uncapped:true, not escalate. That branch has its own
+	# check_run_budget pre-check (implement-issue-orchestrator.sh, the
+	# retry_same case) — this proves it actually fires BEFORE the retry's CLI
+	# call rather than only after, the coverage gap #900 called out.
+	_setup_run_stage_harness
+	export MAX_RUN_TOKENS=1000
+	export MAX_RUN_COST_USD=0
+	_seed_status 2000 0
+	# subtype=error_max_turns at a non-ceiling model (haiku, pinned via arg 7)
+	# classifies as error_kind=max_turns_exhausted, which decide-action.sh
+	# routes to retry_same/uncapped rather than escalate (a model at the opus
+	# ceiling would classify as max_turns_exhausted_at_ceiling and bail instead).
+	jq -n '{
+		type: "result",
+		subtype: "error_max_turns",
+		is_error: false,
+		result: "Hit max turns",
+		total_cost_usd: 0.01,
+		usage: {
+			input_tokens: 50,
+			output_tokens: 50,
+			cache_creation_input_tokens: 0,
+			cache_read_input_tokens: 0
+		}
+	}' > "$CLAUDE_RESPONSE_FILE"
+
+	set +e
+	(
+		rA=$(run_stage "stageA" "prompt A" "budget-int.json" "default" "" "" "haiku")
+		_halt_if_budget_exceeded
+	)
+	local rc=$?
+	set -e
+
+	[ "$rc" -eq 2 ] || fail "expected exit 2 (budget halt), got $rc"
+	assert_json_field "$STATUS_FILE" '.state' 'budget_exceeded'
+	# Only the primary attempt spent — the uncapped retry was suppressed.
+	local calls
+	calls=$(grep -c 'call' "$CLAUDE_CALL_LOG" 2>/dev/null || printf '0')
+	[ "$calls" -eq 1 ] || \
+		fail "uncapped retry was not suppressed: expected 1 CLI call, got $calls"
+}

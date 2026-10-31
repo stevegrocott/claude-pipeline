@@ -51,11 +51,11 @@ teardown() {
     echo "$output" | jq -e '.status == "In Progress"'
 }
 
-@test "read-issue jira: calls acli jira get-issue with correct issue key" {
+@test "read-issue jira: calls acli jira workitem view with correct issue key" {
     export TRACKER="jira"
     run run_platform_script read-issue.sh TEST-456
     [ "$status" -eq 0 ]
-    assert_mock_called_with "acli jira get-issue --issue TEST-456"
+    assert_mock_called_with "acli jira workitem view TEST-456"
 }
 
 # =============================================================================
