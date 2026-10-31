@@ -38,6 +38,12 @@ _load_full_suite_block() {
 	} > "$TEST_TMP/block.sh"
 	# shellcheck disable=SC1091
 	source "$TEST_TMP/block.sh"
+	# Real helpers the block calls, extracted from the orchestrator.
+	local fn
+	for fn in _full_suite_runner_crashed _full_suite_cause_lines; do
+		# shellcheck disable=SC1090
+		source <(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{" {g=1} g {print} g && /^}/ {exit}' "$orch")
+	done
 
 	log() { :; }
 	log_warn() { :; }
@@ -84,7 +90,7 @@ exit 134'
 	_load_full_suite_block
 	_full_suite_block || true
 	[[ " ${DEGRADED_STAGES[*]} " != *" test:full_suite_red "* ]]
-	! grep -q 'RED' "$COMMENT_FILE" || false
+	! grep -qw 'RED' "$COMMENT_FILE" || false
 	! grep -qi 'review before merge' "$COMMENT_FILE" || false
 	grep -qi 'unmeasured' "$COMMENT_FILE"
 	grep -q 'FATAL ERROR' "$COMMENT_FILE"
