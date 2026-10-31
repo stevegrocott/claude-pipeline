@@ -469,6 +469,26 @@ fi
 # BOUNDED PROCESS-GROUP RUNNER (issue #926 AC5)
 # =============================================================================
 #
+# _full_suite_runner_crashed OUTPUT
+#
+# Returns 0 when a non-zero full-suite exit was a runner CRASH rather than
+# failing tests: the process died before reporting (V8 OOM, stack overflow),
+# so nothing failed and there is nothing to review. A crash is either a known
+# fatal signature in the output or the absence of any parseable Jest summary
+# ("Tests:" / "Suites:" count line). Callers invoke this only for rc != 0.
+_full_suite_runner_crashed() {
+	local output="$1"
+	if printf '%s\n' "$output" \
+		| grep -qE 'FATAL ERROR|heap out of memory|Maximum call stack size exceeded'; then
+		return 0
+	fi
+	if printf '%s\n' "$output" \
+		| grep -qE '^[[:space:]]*(Tests|Test Suites):[[:space:]]+[0-9]'; then
+		return 1
+	fi
+	return 0
+}
+
 # _run_bounded_process_group BUDGET GRACE OUTFILE CMD [ARGS...]
 #
 # Runs CMD in its own process group with stdout+stderr sent to OUTFILE and
@@ -13266,6 +13286,30 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
                     "${FULL_SUITE_NPM_TIMEOUT:-2700}s — treating as" \
                     "unmeasured, not red (non-blocking)"
                 DEGRADED_STAGES+=("test:full_suite_timeout")
+            elif (( full_scope_rc != 0 )) \
+                && _full_suite_runner_crashed "$full_scope_output"; then
+                # The runner died before reporting (OOM / stack overflow /
+                # no Jest summary): nothing failed, so this is unmeasured,
+                # not RED. Same vocabulary as e2e-verify's unmeasured case
+                # and the full_suite_timeout marker above; the marker does
+                # not match test:*full_suite_red so it never trips the
+                # branch-evidence "tests are red" reconciliation.
+                local full_scope_crash_detail
+                full_scope_crash_detail=$(printf '%s' "$full_scope_output" | tail -40)
+                DEGRADED_STAGES+=("test:full_suite_crashed")
+                log_warn "Full-suite check: runner crashed (exit" \
+                    "$full_scope_rc) with no parseable test summary —" \
+                    "treating as unmeasured, not red (non-blocking)"
+                comment_issue "Full-Suite Check: test suite UNMEASURED (runner crashed)" \
+                    "⚠️ The full \`${TEST_UNIT_CMD:-npm test}\` run exited $full_scope_rc without reporting a test summary — the runner crashed (e.g. out of memory), so no tests were reported failing and the suite's state on this branch is **unmeasured**, not red. There are no test failures to review from this run.
+
+<details>
+<summary>Crash output (last 40 lines)</summary>
+
+\`\`\`
+$full_scope_crash_detail
+\`\`\`
+</details>" "default"
             elif (( full_scope_rc != 0 )); then
                 local full_scope_failures
                 full_scope_failures=$(printf '%s' "$full_scope_output" | tail -40)
