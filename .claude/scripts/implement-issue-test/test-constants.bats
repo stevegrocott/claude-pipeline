@@ -395,6 +395,88 @@ teardown() {
 		|| fail "CLAUDE_CLI default at line $def_line precedes the platform.sh source at $src_line"
 }
 
+# ---------------------------------------------------------------------------
+# Issue #987: TEST_PATH_PATTERNS drives #969's undeclared-test-edit guard, but
+# it was defaulted ONLY in the consumer-owned platform.sh, which sync.sh seeds
+# once and never updates (sync.sh:7). Every consumer that adopted the pipeline
+# before #969 therefore has no assignment for it, and all three read sites
+# return early on an unset value — so the guard was a silent no-op for all of
+# them, indistinguishable from a guard that ran and found nothing.
+#
+# Defaulted with ${VAR-...} (no colon) rather than the ${VAR:-...} used by the
+# neighbouring knobs: platform.sh documents an EMPTY value as the way to turn
+# the guard off, and the colon form substitutes the default over an empty
+# string — which would silently override a consumer's deliberate opt-out while
+# fixing a different silent-config bug.
+# ---------------------------------------------------------------------------
+
+@test "#987: TEST_PATH_PATTERNS is defaulted, so a pre-#969 consumer platform.sh still guards" {
+	# Reproduce that consumer: a platform.sh with no TEST_PATH_PATTERNS.
+	local legacy="$TEST_TMP/legacy-platform-969.sh"
+	printf '%s\n' 'TRACKER="github"' 'GIT_HOST="github"' > "$legacy"
+	refute grep -q 'TEST_PATH_PATTERNS' "$legacy"
+
+	local default_line
+	default_line=$(grep -m1 '^TEST_PATH_PATTERNS=' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$default_line" ]] \
+		|| fail "orchestrator has no TEST_PATH_PATTERNS default — #987 would recur"
+
+	run /bin/bash -c "set -euo pipefail; source '$legacy'; $default_line; printf '%s' \"\$TEST_PATH_PATTERNS\""
+	[[ "$status" -eq 0 ]] \
+		|| fail "unbound TEST_PATH_PATTERNS under set -u with a legacy platform.sh: $output"
+	[[ -n "$output" ]] \
+		|| fail "expected a non-empty default pattern list, got an empty one"
+}
+
+@test "#987: the guard is live when platform.sh omits TEST_PATH_PATTERNS entirely" {
+	# source_orchestrator_functions() sources a copy of the CANONICAL
+	# platform.sh (test-helper.bash:792), which always carries the current key
+	# set — so merely calling the function here cannot reproduce a pre-#969
+	# consumer, and would pass even with no default in the orchestrator at all.
+	# Unset it and apply only the orchestrator's own default line, which is
+	# exactly what such a consumer gets.
+	local default_line
+	default_line=$(grep -m1 '^TEST_PATH_PATTERNS=' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$default_line" ]] \
+		|| fail "orchestrator has no TEST_PATH_PATTERNS default — #987 would recur"
+
+	unset TEST_PATH_PATTERNS
+	eval "$default_line"
+
+	expect_ok "a plain test path must be recognised, or #969's guard is inert" \
+		_matches_test_path_pattern "tests/foo.bats"
+	expect_ok "a nested test path must be recognised" \
+		_matches_test_path_pattern "src/__tests__/unit.test.ts"
+	refute _matches_test_path_pattern "src/app.ts"
+}
+
+@test "#987: an explicit empty TEST_PATH_PATTERNS still disables the guard" {
+	local default_line
+	default_line=$(grep -m1 '^TEST_PATH_PATTERNS=' "$ORCHESTRATOR_SCRIPT")
+	run /bin/bash -c "set -euo pipefail; TEST_PATH_PATTERNS=''; $default_line; printf '[%s]' \"\$TEST_PATH_PATTERNS\""
+	[[ "$output" == "[]" ]] \
+		|| fail "an explicit empty value was overridden by the default, got '$output'"
+}
+
+@test "#987: an explicit TEST_PATH_PATTERNS still wins over the default" {
+	local default_line
+	default_line=$(grep -m1 '^TEST_PATH_PATTERNS=' "$ORCHESTRATOR_SCRIPT")
+	run /bin/bash -c "set -euo pipefail; TEST_PATH_PATTERNS='custom/*'; $default_line; printf '%s' \"\$TEST_PATH_PATTERNS\""
+	[[ "$output" == "custom/*" ]] \
+		|| fail "the default overrode an explicit setting, got '$output'"
+}
+
+@test "#987: the default is applied after platform.sh is sourced, not before" {
+	# Before the source, platform.sh would overwrite it and the bug returns.
+	local src_line def_line
+	src_line=$(grep -n '^source "\$PLATFORM_SH_FILE"' "$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	def_line=$(grep -n '^TEST_PATH_PATTERNS=' "$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	[[ -n "$src_line" && -n "$def_line" ]] \
+		|| fail "could not locate both the source and the default"
+	(( def_line > src_line )) \
+		|| fail "TEST_PATH_PATTERNS default at line $def_line precedes the platform.sh source at $src_line"
+}
+
 @test "get_max_review_attempts returns 3 for unrecognised size (safe default)" {
     local result
     result=$(get_max_review_attempts "XL")
