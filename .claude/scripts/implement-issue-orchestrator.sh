@@ -7800,7 +7800,7 @@ sanitize_worktree_commits() {
 #   - recognised source-code extensions:
 #       .ts .tsx .js .jsx .mjs .cjs .sh .bats
 #       .py .go .rb .java .rs .c .cpp .h .hpp
-#       .css .scss .sass .less
+#       .css .scss .sass .less .styl
 #
 # Any path outside the allowlist causes the function to return non-zero
 # and emit a clear error, which the caller must treat as a stage failure.
@@ -7872,7 +7872,7 @@ guard_commit_path_allowlist() {
 			# Stylesheets are source, not config: they cannot execute or
 			# alter runtime behaviour outside the rendered page, and the
 			# commit is still reviewed on the PR (issue #978).
-			*.css | *.scss | *.sass | *.less) continue ;;
+			*.css | *.scss | *.sass | *.less | *.styl) continue ;;
 			*)
 				for ep in "${_extra[@]+"${_extra[@]}"}"; do
 					# shellcheck disable=SC2254
