@@ -10782,7 +10782,7 @@ rebuild_and_health_check() {
 
 	# Step 2: Start containers
 	log "Starting containers..."
-	if ! docker-compose up -d frontend backend 2>&1; then
+	if ! docker-compose up -d frontend backend >&2; then
 		log_error "Container start failed"
 		rebuild_status="failed"
 		local elapsed=$(( $(date +%s) - start_ts ))
