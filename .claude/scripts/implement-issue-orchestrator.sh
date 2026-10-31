@@ -10771,7 +10771,7 @@ rebuild_and_health_check() {
 	# Step 1: Rebuild containers
 	log "Rebuilding frontend + backend containers (--no-cache)..."
 	if ! docker-compose build --no-cache frontend backend 2>&1 \
-		| tail -5; then
+		| tail -5 >&2; then
 		log_error "Container rebuild failed"
 		rebuild_status="failed"
 		local elapsed=$(( $(date +%s) - start_ts ))
