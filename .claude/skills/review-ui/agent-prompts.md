@@ -1,6 +1,6 @@
 # Agent Prompts for Parallel UI Review
 
-When executing `/review-ui`, use these prompts to dispatch parallel `bulletproof-frontend-developer` agents. Each agent focuses on one domain.
+When executing `/review-ui`, use these prompts to dispatch parallel `react-frontend-developer` agents. Each agent focuses on one domain.
 
 ## Dispatch Pattern
 
@@ -19,7 +19,7 @@ Task("Colors Review", colorsPrompt);
 ```markdown
 You are reviewing CSS/HTML for **Grid & Spacing** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/grid-and-spacing.md
 
 **Files to review:**
@@ -72,7 +72,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Typography** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/typography.md
 
 **Files to review:**
@@ -127,7 +127,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Colors** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/colors.md
 
 **Files to review:**
@@ -178,7 +178,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Buttons** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/buttons.md
 
 **Files to review:**
@@ -231,7 +231,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Forms** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/forms.md
 
 **Files to review:**
@@ -280,7 +280,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Cards** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/cards.md
 
 **Files to review:**
@@ -328,7 +328,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Navigation** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/navigation.md
 
 **Files to review:**
@@ -377,7 +377,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Hero Sections** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/hero-sections.md
 
 **Files to review:**
@@ -431,7 +431,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Modals & Dropdowns** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/modals-and-dropdowns.md
 
 **Files to review:**
@@ -480,7 +480,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Search** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/search.md
 
 **Files to review:**
@@ -528,7 +528,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Shadows & Depth** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/shadows-and-depth.md
 
 **Files to review:**
@@ -579,7 +579,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Pricing Sections** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/pricing.md
 
 **Files to review:**
@@ -627,7 +627,7 @@ SUGGESTION (could improve):
 ```markdown
 You are reviewing CSS/HTML for **Style Consistency** compliance.
 
-**Agent:** bulletproof-frontend-developer
+**Agent:** react-frontend-developer
 **Reference:** .claude/skills/ui-design-fundamentals/style-guides.md
 
 **Files to review:**
