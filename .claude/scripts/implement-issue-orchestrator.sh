@@ -8189,6 +8189,19 @@ guard_commit_path_allowlist() {
 			"(unrecognised extension: ${exts//|/, })" \
 			"— to allow, set EXTRA_COMMIT_PATHS='${suggest}'" \
 			"(pipe-separated glob patterns)"
+		# Revert the denied commit rather than only logging it (issue
+		# #961): reset the branch to the commit before it so the denied
+		# paths cannot ride along into later stages or the PR. Only when
+		# inspecting HEAD and it has a parent; any other ref is left alone.
+		if [[ "$ref" == "HEAD" ]] \
+			&& git -C "$git_dir" rev-parse --verify -q \
+				"HEAD^" >/dev/null 2>&1; then
+			if git -C "$git_dir" reset --hard "HEAD^" >/dev/null 2>&1; then
+				log_warn "Reverted denied commit: branch reset to prior commit"
+			else
+				log_error "Failed to reset branch after denied commit"
+			fi
+		fi
 		return 1
 	fi
 	return 0
