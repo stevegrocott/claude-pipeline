@@ -6544,9 +6544,13 @@ reconcile_failed_tasks_with_branch_evidence() {
 			"no failed task will be promoted regardless of file evidence."
 	fi
 
+	# Issue #961: a task whose own commit the path guard rejected is never
+	# credited — a declared file differing from base may have been landed
+	# by another stage, and the evidence test cannot attribute it.
 	local recon_ids
-	recon_ids=$(jq -r '(.tasks // [])[] | select(.status == "failed") | .id' \
-		"$STATUS_FILE" 2>/dev/null)
+	recon_ids=$(jq -r '(.tasks // [])[]
+		| select(.status == "failed" and (.commit_rejected // false) != true)
+		| .id' "$STATUS_FILE" 2>/dev/null)
 
 	# Pre-resolve every failed task's declared files up front so the
 	# containment check below can compare a task against its siblings before
@@ -7925,6 +7929,7 @@ Commit your changes with a descriptive message."
 				"outside the code/tests allowlist"
 			printf '%s' \
 				"{\"status\":\"failed\"," \
+				"\"commit_rejected\":true," \
 				"\"review_attempts\":$review_attempts}" \
 				> "$result_file"
 			return 1
@@ -13178,6 +13183,25 @@ $impl_summary" "$tagent"
                     | jq -r ".failed[$fi_idx]")
                 log_error "Task $tid failed ($src_label)"
                 update_task "$tid" "failed" "0"
+
+                # Issue #961: record that this task's own commit was
+                # rejected by the path guard, so branch-evidence
+                # reconciliation cannot credit it for a declared file
+                # another stage landed.
+                local frf=""
+                if [[ -f "${LOG_BASE}/stages/task-${tid}-worktree.log" ]]; then
+                    frf="${LOG_BASE}/stages/task-${tid}-worktree.log"
+                elif [[ -f "${LOG_BASE}/stages/task-${tid}-serial.log" ]]; then
+                    frf="${LOG_BASE}/stages/task-${tid}-serial.log"
+                fi
+                if [[ -n "$frf" ]] && [[ "$(jq -r \
+                    '.commit_rejected // false' "$frf" 2>/dev/null)" \
+                    == "true" ]]; then
+                    status_json_write --argjson id "$tid" \
+                        '(.tasks[] | select(.id == $id)).commit_rejected = true |
+                         .last_update = (now | todate)' \
+                        && sync_status_to_log
+                fi
             done
         }
 
