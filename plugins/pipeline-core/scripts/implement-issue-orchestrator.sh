@@ -6544,9 +6544,13 @@ reconcile_failed_tasks_with_branch_evidence() {
 			"no failed task will be promoted regardless of file evidence."
 	fi
 
+	# Issue #961: a task whose own commit the path guard rejected is never
+	# credited — a declared file differing from base may have been landed
+	# by another stage, and the evidence test cannot attribute it.
 	local recon_ids
-	recon_ids=$(jq -r '(.tasks // [])[] | select(.status == "failed") | .id' \
-		"$STATUS_FILE" 2>/dev/null)
+	recon_ids=$(jq -r '(.tasks // [])[]
+		| select(.status == "failed" and (.commit_rejected // false) != true)
+		| .id' "$STATUS_FILE" 2>/dev/null)
 
 	# Pre-resolve every failed task's declared files up front so the
 	# containment check below can compare a task against its siblings before
@@ -7925,6 +7929,7 @@ Commit your changes with a descriptive message."
 				"outside the code/tests allowlist"
 			printf '%s' \
 				"{\"status\":\"failed\"," \
+				"\"commit_rejected\":true," \
 				"\"review_attempts\":$review_attempts}" \
 				> "$result_file"
 			return 1
@@ -8095,7 +8100,7 @@ guard_commit_path_allowlist() {
 	local git_dir="${1:-.}"
 	local ref="${2:-HEAD}"
 	local path ep
-	local -a bad=() _extra=() _raw=()
+	local -a bad=() hard=() _extra=() _raw=()
 	# Hoist the EXTRA_COMMIT_PATHS split outside the per-path loop.
 	# Trim whitespace around each pipe-separated entry so values like
 	# 'package.json | package-lock.json' work correctly.
@@ -8123,7 +8128,7 @@ guard_commit_path_allowlist() {
 		esac
 		case "$path" in
 			# Hard denylist — not overridable by EXTRA_COMMIT_PATHS.
-			.github/workflows/**) bad+=("$path") ;;
+			.github/workflows/**) bad+=("$path"); hard+=("$path") ;;
 			tests/*) continue ;;
 			prisma/** | */prisma/**) continue ;;
 			docker-compose*.yml) continue ;;
@@ -8165,11 +8170,18 @@ guard_commit_path_allowlist() {
 	)
 
 	if (( ${#bad[@]} > 0 )); then
-		# Name each unrecognised extension and build a ready-to-paste
-		# EXTRA_COMMIT_PATHS value (dir/*.ext per path, or the exact path
-		# for extensionless files and dotfiles), deduplicated (issue #978).
-		local bp base dir ext pat exts="" suggest=""
+		# Hard-denied paths are never overridable, so they must not be
+		# offered the EXTRA_COMMIT_PATHS remedy (issue #961). Only the
+		# overridable paths get a suggestion, built as a ready-to-paste
+		# value (dir/*.ext per path, or the exact path for extensionless
+		# files and dotfiles), deduplicated (issue #978).
+		local bp base dir ext pat exts="" suggest="" hp
+		local -a soft=()
 		for bp in "${bad[@]}"; do
+			for hp in "${hard[@]+"${hard[@]}"}"; do
+				[[ "$bp" == "$hp" ]] && continue 2
+			done
+			soft+=("$bp")
 			base="${bp##*/}"
 			dir=""
 			[[ "$bp" == */* ]] && dir="${bp%/*}/"
@@ -8183,12 +8195,32 @@ guard_commit_path_allowlist() {
 			[[ "|$exts|" == *"|$ext|"* ]] || exts+="${exts:+|}$ext"
 			[[ "|$suggest|" == *"|$pat|"* ]] || suggest+="${suggest:+|}$pat"
 		done
-		log_error \
-			"commit $ref touches paths outside the" \
-			"code/tests allowlist: ${bad[*]}" \
-			"(unrecognised extension: ${exts//|/, })" \
-			"— to allow, set EXTRA_COMMIT_PATHS='${suggest}'" \
-			"(pipe-separated glob patterns)"
+		if (( ${#hard[@]} > 0 )); then
+			log_error \
+				"commit $ref touches hard-denied paths:" \
+				"${hard[*]} — not overridable by EXTRA_COMMIT_PATHS"
+		fi
+		if (( ${#soft[@]} > 0 )); then
+			log_error \
+				"commit $ref touches paths outside the" \
+				"code/tests allowlist: ${soft[*]}" \
+				"(unrecognised extension: ${exts//|/, })" \
+				"— to allow, set EXTRA_COMMIT_PATHS='${suggest}'" \
+				"(pipe-separated glob patterns)"
+		fi
+		# Revert the denied commit rather than only logging it (issue
+		# #961): reset the branch to the commit before it so the denied
+		# paths cannot ride along into later stages or the PR. Only when
+		# inspecting HEAD and it has a parent; any other ref is left alone.
+		if [[ "$ref" == "HEAD" ]] \
+			&& git -C "$git_dir" rev-parse --verify -q \
+				"HEAD^" >/dev/null 2>&1; then
+			if git -C "$git_dir" reset --hard "HEAD^" >/dev/null 2>&1; then
+				log_warn "Reverted denied commit: branch reset to prior commit"
+			else
+				log_error "Failed to reset branch after denied commit"
+			fi
+		fi
 		return 1
 	fi
 	return 0
@@ -10877,9 +10909,26 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             verify_on_feature_branch "$loop_branch" || true
 
+            local _test_fix_head_before _test_fix_head_after
+            _test_fix_head_before=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
             local fix_result
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
+
+            _test_fix_head_after=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
+            if [[ "$_test_fix_head_after" != "$_test_fix_head_before" ]]; then
+                if ! guard_commit_path_allowlist "$loop_dir"; then
+                    log_error \
+                        "fix-tests-iter-$test_iteration: committed paths outside" \
+                        "the code/tests allowlist — aborting test loop"
+                    set_final_state "test_fix_commit_guard"
+                    DEGRADED_STAGES+=("test:commit_guard:iter=$test_iteration")
+                    loop_complete=true
+                    break
+                fi
+            fi
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
@@ -10941,9 +10990,26 @@ Output a summary of fixes applied."
 
             # Pass loop_complexity so run_stage can route model selection by
             # task size: S→haiku, M→sonnet, L→opus (via resolve_model).
+            local _test_fix_head_before _test_fix_head_after
+            _test_fix_head_before=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
+
+            _test_fix_head_after=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
+            if [[ "$_test_fix_head_after" != "$_test_fix_head_before" ]]; then
+                if ! guard_commit_path_allowlist "$loop_dir"; then
+                    log_error \
+                        "fix-test-quality-iter-$test_iteration: committed paths outside" \
+                        "the code/tests allowlist — aborting test loop"
+                    set_final_state "test_fix_commit_guard"
+                    DEGRADED_STAGES+=("test:commit_guard:iter=$test_iteration")
+                    loop_complete=true
+                    break
+                fi
+            fi
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
@@ -13117,6 +13183,25 @@ $impl_summary" "$tagent"
                     | jq -r ".failed[$fi_idx]")
                 log_error "Task $tid failed ($src_label)"
                 update_task "$tid" "failed" "0"
+
+                # Issue #961: record that this task's own commit was
+                # rejected by the path guard, so branch-evidence
+                # reconciliation cannot credit it for a declared file
+                # another stage landed.
+                local frf=""
+                if [[ -f "${LOG_BASE}/stages/task-${tid}-worktree.log" ]]; then
+                    frf="${LOG_BASE}/stages/task-${tid}-worktree.log"
+                elif [[ -f "${LOG_BASE}/stages/task-${tid}-serial.log" ]]; then
+                    frf="${LOG_BASE}/stages/task-${tid}-serial.log"
+                fi
+                if [[ -n "$frf" ]] && [[ "$(jq -r \
+                    '.commit_rejected // false' "$frf" 2>/dev/null)" \
+                    == "true" ]]; then
+                    status_json_write --argjson id "$tid" \
+                        '(.tasks[] | select(.id == $id)).commit_rejected = true |
+                         .last_update = (now | todate)' \
+                        && sync_status_to_log
+                fi
             done
         }
 
