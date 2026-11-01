@@ -10907,11 +10907,12 @@ $pr_failures
 
 Fix the issues and commit. Output a summary of fixes applied."
 
-            verify_on_feature_branch "$loop_branch" || true
-
             local _test_fix_head_before _test_fix_head_after
             _test_fix_head_before=$(git -C "$loop_dir" rev-parse HEAD \
                 2>/dev/null || true)
+
+            verify_on_feature_branch "$loop_branch" || true
+
             local fix_result
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
@@ -10986,13 +10987,14 @@ SCOPE CONSTRAINT: Only fix quality issues in test files that correspond to PR-ch
 Fix the test quality issues (add missing assertions, remove TODOs, add edge case tests, etc.) and commit.
 Output a summary of fixes applied."
 
-            verify_on_feature_branch "$loop_branch" || true
-
             # Pass loop_complexity so run_stage can route model selection by
             # task size: S→haiku, M→sonnet, L→opus (via resolve_model).
             local _test_fix_head_before _test_fix_head_after
             _test_fix_head_before=$(git -C "$loop_dir" rev-parse HEAD \
                 2>/dev/null || true)
+
+            verify_on_feature_branch "$loop_branch" || true
+
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
