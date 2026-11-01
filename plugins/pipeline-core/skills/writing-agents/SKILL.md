@@ -430,7 +430,7 @@ You are a senior PHP/Laravel backend developer with deep expertise in Laravel 11
 You can help with anything.
 
 # GOOD: Clear boundaries with deferral
-**Not in scope** (defer to bulletproof-frontend-developer):
+**Not in scope** (defer to react-frontend-developer):
 - CSS, Tailwind, styling
 - JavaScript, Alpine.js
 - Blade template layout
