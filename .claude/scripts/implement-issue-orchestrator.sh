@@ -10877,9 +10877,26 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             verify_on_feature_branch "$loop_branch" || true
 
+            local _test_fix_head_before _test_fix_head_after
+            _test_fix_head_before=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
             local fix_result
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
+
+            _test_fix_head_after=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
+            if [[ "$_test_fix_head_after" != "$_test_fix_head_before" ]]; then
+                if ! guard_commit_path_allowlist "$loop_dir"; then
+                    log_error \
+                        "fix-tests-iter-$test_iteration: committed paths outside" \
+                        "the code/tests allowlist — aborting test loop"
+                    set_final_state "test_fix_commit_guard"
+                    DEGRADED_STAGES+=("test:commit_guard:iter=$test_iteration")
+                    loop_complete=true
+                    break
+                fi
+            fi
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
@@ -10941,9 +10958,26 @@ Output a summary of fixes applied."
 
             # Pass loop_complexity so run_stage can route model selection by
             # task size: S→haiku, M→sonnet, L→opus (via resolve_model).
+            local _test_fix_head_before _test_fix_head_after
+            _test_fix_head_before=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
+
+            _test_fix_head_after=$(git -C "$loop_dir" rev-parse HEAD \
+                2>/dev/null || true)
+            if [[ "$_test_fix_head_after" != "$_test_fix_head_before" ]]; then
+                if ! guard_commit_path_allowlist "$loop_dir"; then
+                    log_error \
+                        "fix-test-quality-iter-$test_iteration: committed paths outside" \
+                        "the code/tests allowlist — aborting test loop"
+                    set_final_state "test_fix_commit_guard"
+                    DEGRADED_STAGES+=("test:commit_guard:iter=$test_iteration")
+                    loop_complete=true
+                    break
+                fi
+            fi
 
             local fix_summary
             fix_summary=$(printf '%s' "$fix_result" | jq -r '.output.summary // "Fixes applied"')
