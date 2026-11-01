@@ -8095,7 +8095,7 @@ guard_commit_path_allowlist() {
 	local git_dir="${1:-.}"
 	local ref="${2:-HEAD}"
 	local path ep
-	local -a bad=() _extra=() _raw=()
+	local -a bad=() hard=() _extra=() _raw=()
 	# Hoist the EXTRA_COMMIT_PATHS split outside the per-path loop.
 	# Trim whitespace around each pipe-separated entry so values like
 	# 'package.json | package-lock.json' work correctly.
@@ -8123,7 +8123,7 @@ guard_commit_path_allowlist() {
 		esac
 		case "$path" in
 			# Hard denylist — not overridable by EXTRA_COMMIT_PATHS.
-			.github/workflows/**) bad+=("$path") ;;
+			.github/workflows/**) bad+=("$path"); hard+=("$path") ;;
 			tests/*) continue ;;
 			prisma/** | */prisma/**) continue ;;
 			docker-compose*.yml) continue ;;
@@ -8165,11 +8165,18 @@ guard_commit_path_allowlist() {
 	)
 
 	if (( ${#bad[@]} > 0 )); then
-		# Name each unrecognised extension and build a ready-to-paste
-		# EXTRA_COMMIT_PATHS value (dir/*.ext per path, or the exact path
-		# for extensionless files and dotfiles), deduplicated (issue #978).
-		local bp base dir ext pat exts="" suggest=""
+		# Hard-denied paths are never overridable, so they must not be
+		# offered the EXTRA_COMMIT_PATHS remedy (issue #961). Only the
+		# overridable paths get a suggestion, built as a ready-to-paste
+		# value (dir/*.ext per path, or the exact path for extensionless
+		# files and dotfiles), deduplicated (issue #978).
+		local bp base dir ext pat exts="" suggest="" hp
+		local -a soft=()
 		for bp in "${bad[@]}"; do
+			for hp in "${hard[@]+"${hard[@]}"}"; do
+				[[ "$bp" == "$hp" ]] && continue 2
+			done
+			soft+=("$bp")
 			base="${bp##*/}"
 			dir=""
 			[[ "$bp" == */* ]] && dir="${bp%/*}/"
@@ -8183,12 +8190,19 @@ guard_commit_path_allowlist() {
 			[[ "|$exts|" == *"|$ext|"* ]] || exts+="${exts:+|}$ext"
 			[[ "|$suggest|" == *"|$pat|"* ]] || suggest+="${suggest:+|}$pat"
 		done
-		log_error \
-			"commit $ref touches paths outside the" \
-			"code/tests allowlist: ${bad[*]}" \
-			"(unrecognised extension: ${exts//|/, })" \
-			"— to allow, set EXTRA_COMMIT_PATHS='${suggest}'" \
-			"(pipe-separated glob patterns)"
+		if (( ${#hard[@]} > 0 )); then
+			log_error \
+				"commit $ref touches hard-denied paths:" \
+				"${hard[*]} — not overridable by EXTRA_COMMIT_PATHS"
+		fi
+		if (( ${#soft[@]} > 0 )); then
+			log_error \
+				"commit $ref touches paths outside the" \
+				"code/tests allowlist: ${soft[*]}" \
+				"(unrecognised extension: ${exts//|/, })" \
+				"— to allow, set EXTRA_COMMIT_PATHS='${suggest}'" \
+				"(pipe-separated glob patterns)"
+		fi
 		# Revert the denied commit rather than only logging it (issue
 		# #961): reset the branch to the commit before it so the denied
 		# paths cannot ride along into later stages or the PR. Only when

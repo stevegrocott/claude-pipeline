@@ -108,6 +108,26 @@ run_guard() {
         fail "Expected workflow path still flagged. Got: $output"
 }
 
+@test "hard-denied path message does not advertise EXTRA_COMMIT_PATHS remedy" {
+    commit_paths .github/workflows/ci.yml
+    run_guard
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not overridable"* ]] || \
+        fail "Expected not-overridable notice. Got: $output"
+    [[ "$output" != *"EXTRA_COMMIT_PATHS='"* ]] || \
+        fail "Hard-denied path advertised a remedy. Got: $output"
+}
+
+@test "mixed commit suggests EXTRA_COMMIT_PATHS only for the overridable path" {
+    commit_paths .github/workflows/ci.yml data/x.csv
+    run_guard
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"EXTRA_COMMIT_PATHS='data/*.csv'"* ]] || \
+        fail "Expected csv suggestion. Got: $output"
+    [[ "$output" != *"workflows/*.yml"* ]] || \
+        fail "Suggestion leaked the hard-denied path. Got: $output"
+}
+
 @test "rejects a workflow file even when the extension is otherwise allowlisted" {
     commit_paths .github/workflows/deploy.js
     run_guard '*'
