@@ -230,6 +230,57 @@ valid_body() {
 	[[ "$output" != *"unresolved path: README.md"* ]]
 }
 
+# --- Issue #895: plugins/pipeline-core/scripts/** is a generated artefact
+# (overwritten by ./sync.sh bundle); plugins/pipeline-core/skills/** and
+# .claude/scripts/** are canonical. Path existence is not the test — the
+# validator must reject only the generated scripts tree. ---
+
+@test "assert_issue_valid: a generated plugins/pipeline-core/scripts/ task path is rejected and names the .claude/scripts/ equivalent" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts"
+	touch "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts/demo-orchestrator.sh"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Edit the orchestrator — \`plugins/pipeline-core/scripts/demo-orchestrator.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"plugins/pipeline-core/scripts/demo-orchestrator.sh"* ]]
+	[[ "$output" == *".claude/scripts/demo-orchestrator.sh"* ]]
+}
+
+@test "assert_issue_valid: a plugins/pipeline-core/skills/ task path is still accepted" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/skills/explore"
+	touch "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/skills/explore/SKILL.md"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Update the skill — \`plugins/pipeline-core/skills/explore/SKILL.md\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: a canonical .claude/scripts/ task path is unaffected by the generated-tree rule" {
+	touch "$ISSUE_BODY_REPO_ROOT/.claude/scripts/demo-orchestrator.sh"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Edit the orchestrator — \`.claude/scripts/demo-orchestrator.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+}
+
 @test "assert_issue_valid: a separator-less filename alone does NOT satisfy the >=1-path requirement" {
 	# Mirrors the bare /word rule (#600): demoting the token to prose means a
 	# task whose only path-like token is a separator-less filename must still
@@ -356,8 +407,13 @@ valid_body() {
 	local body
 	body=$(cat "$fixtures_dir/issue-678-rejected-body.md")
 	run assert_issue_valid "$body"
-	[ "$status" -eq 0 ]
+	# #895: the fixture's regen task cites the generated
+	# plugins/pipeline-core/scripts/ tree, which is now (correctly) refused.
+	# What #689 pins is only that the bare-basename tokens no longer raise
+	# 'unresolved path', so assert that and that nothing else is reported.
 	[[ "$output" != *"unresolved path"* ]]
+	[[ "$output" == *"generated-tree path"* ]]
+	[[ "$output" != *"task has no file path"* ]]
 }
 
 @test "assert_issue_valid: accepts a new file in a not-yet-existing subdir when an ancestor exists" {
@@ -1684,4 +1740,36 @@ _run_create_issue_906() {
 		--body "## Implementation Tasks" --skip-validation
 	[ "$status" -eq 0 ]
 	[ -s "$GH_CALLS" ]
+}
+
+# =============================================================================
+# assert_issue_valid() — generated-tree paths (#895)
+# =============================================================================
+
+_body_citing() {
+	printf '## Implementation Tasks\n\n- [ ] `[bash-script-craftsman]` **(S)** Fix — `%s`\n\n## Acceptance Criteria\n\n- [ ] done\n' "$1"
+}
+
+@test "#895: a plugins/pipeline-core/scripts/ task path is rejected naming the canonical path" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts"
+	touch "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts/orch.sh"
+	run assert_issue_valid "$(_body_citing plugins/pipeline-core/scripts/orch.sh)"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"generated-tree path"* ]]
+	[[ "$output" == *".claude/scripts/orch.sh"* ]]
+}
+
+@test "#895: a plugins/pipeline-core/skills/ task path stays accepted" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/skills/explore"
+	touch "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/skills/explore/SKILL.md"
+	run assert_issue_valid "$(_body_citing plugins/pipeline-core/skills/explore/SKILL.md)"
+	[ "$status" -eq 0 ]
+}
+
+@test "#895: a bare scripts/ task path is rejected with the .claude/ suggestion" {
+	touch "$ISSUE_BODY_REPO_ROOT/.claude/scripts/orch.sh"
+	run assert_issue_valid "$(_body_citing scripts/orch.sh)"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"unresolved path: scripts/orch.sh"* ]]
+	[[ "$output" == *"did you mean .claude/scripts/orch.sh"* ]]
 }

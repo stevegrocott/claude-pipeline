@@ -119,3 +119,42 @@ red_flags_bundle_row() {
 		return 1
 	fi
 }
+
+# The cite-the-canonical-tree rule (issue #895): task paths for pipeline
+# scripts must name `.claude/scripts/**`, never the generated
+# `plugins/pipeline-core/scripts/**`. Same grep-level approach as above — a
+# non-table prose line naming "canonical tree" and both path prefixes.
+canonical_tree_line() {
+	grep -v '^\s*|' "$1" | grep -i 'canonical tree' \
+		| grep -F 'plugins/pipeline-core/scripts/' | grep -F '.claude/scripts/' || true
+}
+
+@test "explore SKILL.md states task paths must cite .claude/scripts/, not the generated plugins tree" {
+	local line
+	line=$(canonical_tree_line "$EXPLORE_SKILL")
+
+	if [[ -z "$line" ]]; then
+		echo "explore/SKILL.md is missing the canonical-tree rule (expected a line mentioning 'canonical tree', 'plugins/pipeline-core/scripts/' and '.claude/scripts/')"
+		return 1
+	fi
+}
+
+@test "enrich-issue SKILL.md mirrors the same canonical-tree rule wording as explore" {
+	local explore_line enrich_line
+	explore_line=$(canonical_tree_line "$EXPLORE_SKILL")
+	enrich_line=$(canonical_tree_line "$ENRICH_SKILL")
+
+	[[ -n "$explore_line" ]] || skip "explore/SKILL.md canonical-tree rule missing — covered by the preceding test"
+
+	if [[ -z "$enrich_line" ]]; then
+		echo "enrich-issue/SKILL.md is missing the canonical-tree rule (expected a line mentioning 'canonical tree', 'plugins/pipeline-core/scripts/' and '.claude/scripts/')"
+		return 1
+	fi
+
+	if [[ "$explore_line" != "$enrich_line" ]]; then
+		echo "explore and enrich-issue canonical-tree rule wording has drifted:"
+		echo "  explore:      $explore_line"
+		echo "  enrich-issue: $enrich_line"
+		return 1
+	fi
+}
