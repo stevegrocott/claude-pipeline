@@ -28,7 +28,7 @@ failure_modes:
 
 ## Overview
 
-Reviews frontend code against the complete UI design fundamentals specification using parallel `bulletproof-frontend-developer` agents. Each agent focuses on one design domain, producing a comprehensive, multi-perspective review.
+Reviews frontend code against the complete UI design fundamentals specification using parallel `react-frontend-developer` agents. Each agent focuses on one design domain, producing a comprehensive, multi-perspective review.
 
 ## Usage
 
@@ -124,7 +124,7 @@ Review the following files for **{DOMAIN}** compliance:
        │
        ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  2. Dispatch parallel bulletproof-frontend-developer agents  │
+│  2. Dispatch parallel react-frontend-developer agents  │
 ├──────────────────────────────────────────────────────────────┤
 │  Task 1: Grid & Spacing review                               │
 │  Task 2: Typography review                                   │

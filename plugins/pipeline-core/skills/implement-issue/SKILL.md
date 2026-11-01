@@ -62,7 +62,7 @@ IMPL="$(command -v pipeline-core-implement || echo .claude/scripts/implement-iss
 "$IMPL" \
   --issue $ISSUE_NUMBER \
   --branch $BASE_BRANCH \
-  --agent bulletproof-frontend-developer
+  --agent react-frontend-developer
 ```
 
 ## Monitoring

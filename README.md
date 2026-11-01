@@ -167,6 +167,7 @@ Shipped in the `pipeline-core` plugin bundle:
 Supplied by your repo, never overwritten:
 
 - **Specialist agents** in `.claude/agents/` (this repo ships 9 as reference templates)
+- **A `code-reviewer` agent** in `.claude/agents/code-reviewer.md` — required. The pipeline hard-codes it (`--agent code-reviewer`) for all three review stages: the quality-loop review, the PR review, and `process-pr`. Your repo must supply it; the pipeline does not ship one for you.
 - **Platform config** in `.claude/config/` — tracker, git host, test and deploy commands
 
 Tested by **82 BATS files / 2,403 tests** across the orchestrator, platform wrappers, and consumer-facing marketplace suites.

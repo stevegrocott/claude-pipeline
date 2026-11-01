@@ -65,6 +65,8 @@ The orchestrator uses specialized agents via `--agent` flag to ensure the right 
 | implement-issue | (default) | General implementation |
 | process-pr | `code-reviewer` | **Always** - reviews PR/MR for quality and standards |
 
+`code-reviewer` is a required consumer-supplied agent: the plugin ships no `agents/` directory, so your repo must define `.claude/agents/code-reviewer.md`. The pipeline hard-codes it for three stages — the implement-issue quality-loop `review`, the PR `code-review`, and `process-pr` — and does not check that it exists first.
+
 **Determine agent based on issue content:**
 - Check which agents are configured in `.claude/agents/` for this project
 - Match the issue's domain to the appropriate agent
@@ -495,7 +497,7 @@ nohup "$BATCH" --manifest "$MANIFEST" \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 # Or with explicit agent override:
-# nohup "$BATCH" --manifest "$MANIFEST" --agent bulletproof-frontend-developer \
+# nohup "$BATCH" --manifest "$MANIFEST" --agent react-frontend-developer \
 #   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 ORCHESTRATOR_PID=$!
@@ -508,7 +510,7 @@ echo "Logs: logs/batch-*/"
 
 The orchestrator will:
 - Use the specified agent for `implement-issue` stage
-- Always use `code-reviewer` agent for `process-pr` stage
+- Always use `code-reviewer` agent for `process-pr` stage (it must exist in `.claude/agents/`; see Agent Selection)
 
 ### Step 6: Monitor Progress
 
