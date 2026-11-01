@@ -495,7 +495,7 @@ nohup "$BATCH" --manifest "$MANIFEST" \
   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 # Or with explicit agent override:
-# nohup "$BATCH" --manifest "$MANIFEST" --agent bulletproof-frontend-developer \
+# nohup "$BATCH" --manifest "$MANIFEST" --agent react-frontend-developer \
 #   > "logs/handle-issues/orchestrator-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
 
 ORCHESTRATOR_PID=$!
