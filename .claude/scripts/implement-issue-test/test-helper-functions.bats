@@ -1300,3 +1300,58 @@ WRAPPER
             fail "guard rejected .${ext}, which intake accepts. Got: $output"
     done
 }
+
+# ---------------------------------------------------------------------------
+# Every committing stage guards, and a denied commit is reverted (issue #961)
+# ---------------------------------------------------------------------------
+
+# Prints the body of top-level function $1 from the orchestrator.
+_orchestrator_function_body() {
+    awk -v fn="$1" '
+        index($0, fn "() {") == 1 { on = 1; start = NR }
+        on { print }
+        on && NR > start && /^[a-z_0-9]+\(\) *\{/ { exit }
+    ' "$ORCHESTRATOR_SCRIPT"
+}
+
+@test "every function that commits stage output calls guard_commit_path_allowlist" {
+    # The functions in which an agent stage may leave a commit on the branch.
+    # run_test_loop was missing from this set before #961, so its fix-tests
+    # stage could land .github/workflows/** that the task path refused.
+    local fn body
+    for fn in run_task_in_worktree run_quality_loop run_test_loop; do
+        body=$(_orchestrator_function_body "$fn")
+        [[ -n "$body" ]] || fail "$fn not found in $ORCHESTRATOR_SCRIPT"
+        grep -q 'guard_commit_path_allowlist' <<< "$body" || \
+            fail "$fn commits stage output but never calls guard_commit_path_allowlist"
+    done
+}
+
+@test "a denied commit is reverted: the branch returns to the prior commit" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-961-revert
+    local prior
+    prior=$(git rev-parse HEAD)
+    mkdir -p .github/workflows
+    echo "name: ci" > .github/workflows/ci.yml
+    git add .github/workflows/ci.yml
+    git commit -q -m "touch workflow"
+
+    local wrapper="$TEST_TMP/guard_revert_wrapper.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+set -uo pipefail
+source "$TEST_TMP/orchestrator_functions.bash"
+unset EXTRA_COMMIT_PATHS
+export LOG_FILE="$LOG_FILE"
+guard_commit_path_allowlist "$TEST_TMP/repo" HEAD
+WRAPPER
+    chmod +x "$wrapper"
+
+    run "$wrapper"
+    [ "$status" -eq 1 ]
+    [ "$(git -C "$TEST_TMP/repo" rev-parse HEAD)" = "$prior" ] || \
+        fail "denied commit still on the branch; HEAD != $prior"
+    [ ! -e "$TEST_TMP/repo/.github/workflows/ci.yml" ] || \
+        fail "denied file still present in the worktree"
+}
