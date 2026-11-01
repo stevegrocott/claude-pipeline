@@ -1685,3 +1685,35 @@ _run_create_issue_906() {
 	[ "$status" -eq 0 ]
 	[ -s "$GH_CALLS" ]
 }
+
+# =============================================================================
+# assert_issue_valid() — generated-tree paths (#895)
+# =============================================================================
+
+_body_citing() {
+	printf '## Implementation Tasks\n\n- [ ] `[bash-script-craftsman]` **(S)** Fix — `%s`\n\n## Acceptance Criteria\n\n- [ ] done\n' "$1"
+}
+
+@test "#895: a plugins/pipeline-core/scripts/ task path is rejected naming the canonical path" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts"
+	touch "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts/orch.sh"
+	run assert_issue_valid "$(_body_citing plugins/pipeline-core/scripts/orch.sh)"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"generated-tree path"* ]]
+	[[ "$output" == *".claude/scripts/orch.sh"* ]]
+}
+
+@test "#895: a plugins/pipeline-core/skills/ task path stays accepted" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/skills/explore"
+	touch "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/skills/explore/SKILL.md"
+	run assert_issue_valid "$(_body_citing plugins/pipeline-core/skills/explore/SKILL.md)"
+	[ "$status" -eq 0 ]
+}
+
+@test "#895: a bare scripts/ task path is rejected with the .claude/ suggestion" {
+	touch "$ISSUE_BODY_REPO_ROOT/.claude/scripts/orch.sh"
+	run assert_issue_valid "$(_body_citing scripts/orch.sh)"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"unresolved path: scripts/orch.sh"* ]]
+	[[ "$output" == *"did you mean .claude/scripts/orch.sh"* ]]
+}
