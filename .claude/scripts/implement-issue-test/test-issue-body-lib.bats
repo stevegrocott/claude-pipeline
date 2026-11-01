@@ -356,8 +356,13 @@ valid_body() {
 	local body
 	body=$(cat "$fixtures_dir/issue-678-rejected-body.md")
 	run assert_issue_valid "$body"
-	[ "$status" -eq 0 ]
+	# #895: the fixture's regen task cites the generated
+	# plugins/pipeline-core/scripts/ tree, which is now (correctly) refused.
+	# What #689 pins is only that the bare-basename tokens no longer raise
+	# 'unresolved path', so assert that and that nothing else is reported.
 	[[ "$output" != *"unresolved path"* ]]
+	[[ "$output" == *"generated-tree path"* ]]
+	[[ "$output" != *"task has no file path"* ]]
 }
 
 @test "assert_issue_valid: accepts a new file in a not-yet-existing subdir when an ancestor exists" {
