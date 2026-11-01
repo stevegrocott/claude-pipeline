@@ -1308,9 +1308,9 @@ WRAPPER
 # Prints the body of top-level function $1 from the orchestrator.
 _orchestrator_function_body() {
     awk -v fn="$1" '
-        $0 ~ "^"fn"\\(\\) *\\{" { on = 1 }
+        index($0, fn "() {") == 1 { on = 1; start = NR }
         on { print }
-        on && /^}/ { exit }
+        on && NR > start && /^[a-z_0-9]+\(\) *\{/ { exit }
     ' "$ORCHESTRATOR_SCRIPT"
 }
 
