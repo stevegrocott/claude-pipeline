@@ -3514,3 +3514,32 @@ _setup_status_634() {
 		test "$files" = '["task-93-out.ts"]'
 	expect_ok "committing task records its commit" test "$commit" = "abc123"
 }
+
+# =============================================================================
+# reconcile_failed_tasks_with_branch_evidence: rejected-commit tasks (#961)
+# =============================================================================
+
+@test "#961 reconcile: a task whose own commit was rejected is not reconciled to completed" {
+	export STATUS_FILE="$TEST_TMP/status.json"
+	DEGRADED_STAGES=()
+	jq -n '{tasks: [
+		{id: 1, description: "wire CI", status: "failed", commit_rejected: true,
+		 affected_files: [".github/workflows/bats-suite.yml"]},
+		{id: 2, description: "unrelated", status: "completed", affected_files: []}
+	]}' > "$STATUS_FILE"
+
+	# A different stage lands the denied path on the branch: the declared file
+	# now differs from base, which is the evidence reconciliation keys on.
+	git checkout -q -b feature
+	mkdir -p .github/workflows
+	printf 'name: ci\n' > .github/workflows/bats-suite.yml
+	git add .github
+	git commit -q -m "other stage lands the denied path"
+
+	local count status
+	count=$(reconcile_failed_tasks_with_branch_evidence main 2>/dev/null)
+	status=$(jq -r '(.tasks[] | select(.id == 1)).status' "$STATUS_FILE")
+
+	expect_ok "no task is credited" test "$count" = "0"
+	expect_ok "the rejected-commit task stays failed" test "$status" = "failed"
+}
