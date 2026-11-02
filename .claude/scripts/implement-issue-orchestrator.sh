@@ -149,6 +149,12 @@ CLAUDE_CLI="${CLAUDE_CLI:-claude}"
 
 PLATFORM_DIR="$SCRIPT_DIR/platform"
 
+# Like CLAUDE_CLI above, platform.sh is consumer-owned and seeded once, so a
+# consumer whose copy predates PLATFORM_CONTEXT_FILE has no assignment and the
+# project-patterns context would be silently skipped (issue #894). Default it
+# at the config-source site; an explicit setting still wins.
+PLATFORM_CONTEXT_FILE="${PLATFORM_CONTEXT_FILE:-.claude/config/context.md}"
+
 # Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work
 # regardless of CWD. Anchor against the CONSUMER repo root (git toplevel,
 # falling back to $PWD), matching resolve_consumer_file()'s own anchor —
