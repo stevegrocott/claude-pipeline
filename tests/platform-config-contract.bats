@@ -22,6 +22,12 @@
 # those. The cost is that a guard in an unrelated earlier function also clears
 # later reads — an accepted approximation; reads BEFORE any guard are caught.
 #
+# Silent-disable rule: a platform.sh variable with a NON-EMPTY template default
+# must be mirrored in the orchestrator — a top-level `VAR="${VAR:-x}"`, or only
+# inline non-empty defaults at each read. An empty fallback (bare read, `${V:-}`,
+# `-n`/`-z` guard) turns the feature off for consumers whose seeded platform.sh
+# predates the variable.
+#
 # The check is an awk scan rather than a line-number list on purpose: the
 # orchestrator grows constantly, so enumerated sites drift on the next edit.
 
@@ -111,6 +117,51 @@ run_crash_rule() {
 	platform_vars "$2" >"$TEST_TMP/vars"
 	required_names >"$TEST_TMP/required"
 	run unguarded_reads "$1" "$TEST_TMP/vars" "$TEST_TMP/required"
+}
+
+# nonempty_default_vars FILE — names whose template default is non-empty
+# (`VAR="${VAR:-x}"`, `VAR="${VAR-x}"`), one per line.
+nonempty_default_vars() {
+	grep -vE '^[[:space:]]*#' "$1" \
+		| grep -oE '(^|[[:space:];&|])[A-Z][A-Z0-9_]*="?\$\{[A-Z][A-Z0-9_]*:?-[^}"]' \
+		| sed -E 's/^[^A-Z]*//; s/=.*//' \
+		| sort -u
+}
+
+# silent_disables ORCHESTRATOR NONEMPTY_VARS_FILE
+# A consumer platform.sh seeded before a variable existed leaves it unset. If the
+# template default is non-empty (e.g. AUTO_MERGE-style "on" switches), an
+# orchestrator read that falls back to empty — bare, `${V:-}`, or an -n/-z/-v
+# test — silently disables the feature for those consumers. Prints "NAME:LINE"
+# for each such read when the orchestrator has no top-level non-empty default.
+silent_disables() {
+	awk -v varsfile="$2" '
+		BEGIN { while ((getline v < varsfile) > 0) vars[v] = 1 }
+		FNR == NR {
+			for (v in vars)
+				if ($0 ~ ("(^|[^A-Za-z0-9_])" v "=\"?\\$\\{" v ":?-[^}]"))
+					mirrored[v] = 1
+			next
+		}
+		/^[[:space:]]*#/ { next }
+		{
+			for (v in vars) {
+				if (v in mirrored) continue
+				b = "(^|[^A-Za-z0-9_])"
+				e = "([^A-Za-z0-9_]|$)"
+				if ($0 ~ ("\\$\\{" v ":?-\\}") ||
+				    $0 ~ ("-[nzv][[:space:]]+\"?(\\$\\{?)?" v e) ||
+				    $0 ~ ("\\$" v e) || $0 ~ ("\\$\\{" v "\\}"))
+					print v ":" FNR
+			}
+		}
+	' "$1" "$1"
+}
+
+# run_silent_disable ORCHESTRATOR PLATFORM — sets $output/$status via bats `run`.
+run_silent_disable() {
+	nonempty_default_vars "$2" >"$TEST_TMP/nonempty"
+	run silent_disables "$1" "$TEST_TMP/nonempty"
 }
 
 # ---------------------------------------------------------------------------
@@ -242,4 +293,58 @@ PLAT
 	for entry in ${REQUIRED_VARS[@]+"${REQUIRED_VARS[@]}"}; do
 		[[ "$entry" =~ ^[A-Z][A-Z0-9_]*\|.+ ]]
 	done
+}
+
+# ---------------------------------------------------------------------------
+# Silent-disable rule
+# ---------------------------------------------------------------------------
+
+@test "silent-disable: passes on the real orchestrator" {
+	run_silent_disable "$ORCHESTRATOR" "$PLATFORM_SH"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ] || {
+		echo "non-empty platform.sh defaults not mirrored: $output" >&2
+		return 1
+	}
+}
+
+@test "silent-disable: nonempty_default_vars finds non-empty defaults only" {
+	printf 'ON_VAR="${ON_VAR:-1}"  # c\nEMPTY_VAR="${EMPTY_VAR:-}"\n' >"$TEST_TMP/platform.sh"
+	run nonempty_default_vars "$TEST_TMP/platform.sh"
+	[ "$output" = "ON_VAR" ]
+}
+
+@test "silent-disable: flags an empty-fallback read with no mirrored default" {
+	printf 'ON_VAR="${ON_VAR:-1}"\n' >"$TEST_TMP/platform.sh"
+	printf 'f() {\n  [[ "${ON_VAR:-}" == 1 ]]\n}\n' >"$TEST_TMP/orch.sh"
+	run_silent_disable "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
+	[ "$output" = "ON_VAR:2" ]
+}
+
+@test "silent-disable: flags a -n guard with no mirrored default" {
+	printf 'ON_VAR="${ON_VAR:-1}"\n' >"$TEST_TMP/platform.sh"
+	printf 'f() {\n  [[ -n "$ON_VAR" ]]\n}\n' >"$TEST_TMP/orch.sh"
+	run_silent_disable "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
+	[ "$output" = "ON_VAR:2" ]
+}
+
+@test "silent-disable: a top-level non-empty default clears it" {
+	printf 'ON_VAR="${ON_VAR:-1}"\n' >"$TEST_TMP/platform.sh"
+	printf 'ON_VAR="${ON_VAR:-1}"\nf() {\n  [[ -n "$ON_VAR" ]]\n}\n' >"$TEST_TMP/orch.sh"
+	run_silent_disable "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
+	[ -z "$output" ]
+}
+
+@test "silent-disable: an inline non-empty default is fine" {
+	printf 'ON_VAR="${ON_VAR:-1}"\n' >"$TEST_TMP/platform.sh"
+	printf 'f() {\n  [[ "${ON_VAR:-1}" == 1 ]]\n}\n' >"$TEST_TMP/orch.sh"
+	run_silent_disable "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
+	[ -z "$output" ]
+}
+
+@test "silent-disable: variables with an empty template default are ignored" {
+	printf 'EMPTY_VAR="${EMPTY_VAR:-}"\n' >"$TEST_TMP/platform.sh"
+	printf 'f() {\n  [[ -n "${EMPTY_VAR:-}" ]]\n}\n' >"$TEST_TMP/orch.sh"
+	run_silent_disable "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
+	[ -z "$output" ]
 }
