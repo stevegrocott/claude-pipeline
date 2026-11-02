@@ -2337,7 +2337,7 @@ _setup_parallel_stage_mocks() {
 	}
 }
 
-@test "run_parallel_post_task_stages: captures timing showing parallel execution (partial overlap)" {
+@test "run_parallel_post_task_stages: logs stage timing for both stages" {
 	cd "$TEST_TMP/repo" || exit 1
 
 	export TEST_E2E_CMD="true"
