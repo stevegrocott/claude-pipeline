@@ -137,7 +137,22 @@ PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
 # shellcheck disable=SC1090  # path resolved at runtime by resolve_consumer_file
 source "$PLATFORM_SH_FILE"
 
-# platform.sh is CONSUMER-OWNED and seeded once (sync.sh:7), so a repo that
+# platform.sh is CONSUMER-OWNED and seeded once (sync.sh:7), so a new key added
+# to the template never reaches a consumer whose copy predates it. Reading such
+# a key from here fails in one of two shapes, and BOTH need an orchestrator-
+# level default:
+#   1. CRASH: a bare read ("$VAR") under `set -u` dies with "unbound variable"
+#      before any real work (#886, CLAUDE_CLI). Default it below.
+#   2. SILENT DISABLE: a guarded read ([[ -n "${VAR:-}" ]]) never crashes, but
+#      when the template default is NON-empty and the read treats empty as
+#      "feature off", the missing key quietly disables the feature with no
+#      warning (#987 TEST_PATH_PATTERNS, #894 PLATFORM_CONTEXT_FILE). Mirror
+#      the template default here; use ${VAR-...} where an explicit empty value
+#      is a documented opt-out.
+# Enforced by tests/platform-config-contract.bats. Do not rely on platform.sh
+# edits propagating: it is never overwritten after the first seed.
+#
+# A repo that
 # adopted the pipeline before CLAUDE_CLI was added to the template (2026-03-01,
 # fa5f870f) has no assignment for it. The orchestrator runs under `set -u` and
 # reads "$CLAUDE_CLI" at five stage-dispatch sites, so such a consumer dies with
@@ -148,6 +163,12 @@ source "$PLATFORM_SH_FILE"
 CLAUDE_CLI="${CLAUDE_CLI:-claude}"
 
 PLATFORM_DIR="$SCRIPT_DIR/platform"
+
+# Like CLAUDE_CLI above, platform.sh is consumer-owned and seeded once, so a
+# consumer whose copy predates PLATFORM_CONTEXT_FILE has no assignment and the
+# project-patterns context would be silently skipped (issue #894). Default it
+# at the config-source site; an explicit setting still wins.
+PLATFORM_CONTEXT_FILE="${PLATFORM_CONTEXT_FILE:-.claude/config/context.md}"
 
 # Resolve PLATFORM_CONTEXT_FILE to an absolute path so file checks work
 # regardless of CWD. Anchor against the CONSUMER repo root (git toplevel,
