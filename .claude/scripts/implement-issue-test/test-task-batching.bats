@@ -2598,10 +2598,23 @@ _setup_parallel_stage_mocks() {
 	comment_issue()      { :; }
 	run_stage() {
 		local stage="$1"
-		local start_ns=$(date +%s%N)
-		printf "stage=%s,start=%s\n" "$stage" "$start_ns" >> "$timing_file"
-		# Simulate 0.5 second work per stage
-		sleep 0.5
+		local start_ns end_ns
+		start_ns=$(date +%s%N)
+		# Rendezvous: announce start, then hold (bounded) until the
+		# other stage has also started. Concurrent stages meet almost
+		# at once; serial stages never meet and the hold times out,
+		# so the recorded intervals cannot overlap.
+		: > "$timing_file.started.$stage"
+		local waited=0
+		while ((waited < 60)) \
+			&& [[ "$(printf '%s' "$timing_file".started.* | wc -w)" \
+				-lt 2 ]]; do
+			sleep 0.05
+			((waited++))
+		done
+		end_ns=$(date +%s%N)
+		printf "stage=%s,start=%s,end=%s\n" \
+			"$stage" "$start_ns" "$end_ns" >> "$timing_file"
 		printf '{"status":"success","result":"passed","summary":"ok"}'
 	}
 	log()     { :; }
@@ -2616,21 +2629,48 @@ _setup_parallel_stage_mocks() {
 	export -f _build_targeted_e2e_cmd
 	export timing_file
 
-	local global_start_ns=$(date +%s%N)
 	run_parallel_post_task_stages \
 		"feature/parallel-timing-test" "frontend" "" "S" 2>/dev/null
-	local global_end_ns=$(date +%s%N)
-	local global_elapsed_ns=$(( global_end_ns - global_start_ns ))
-	local global_elapsed_ms=$(( global_elapsed_ns / 1000000 ))
 
-	# Subshell startup and git diff add a few hundred ms of fixed overhead.
-	# With both stages sleeping 0.5s in parallel, total ≈ 500ms + overhead
-	# (~800ms); serially it would be ≈ 1000ms + overhead (>1200ms).
-	# Threshold of 1000ms separates the two.
-	[[ "$global_elapsed_ms" -lt 1000 ]] || {
-		echo "Stages appear to have run serially (took ${global_elapsed_ms}ms)"
+	# Interval-overlap assertion: both stages must have recorded a
+	# start AND end, and each stage must start before the other ends.
+	# This is independent of fixed overhead, unlike a wall-clock budget.
+	local -a stages=() starts=() ends=()
+	local rec stage_name start_v end_v
+	while IFS= read -r rec; do
+		[[ -n "$rec" ]] || continue
+		stage_name="${rec#stage=}"
+		stage_name="${stage_name%%,*}"
+		start_v="${rec#*,start=}"
+		start_v="${start_v%%,*}"
+		end_v="${rec##*,end=}"
+		stages+=("$stage_name")
+		starts+=("$start_v")
+		ends+=("$end_v")
+	done < "$timing_file"
+
+	[[ "${#stages[@]}" -eq 2 ]] || {
+		echo "Expected timings for 2 stages, got ${#stages[@]}"
 		cat "$timing_file"
-		exit 1
+		return 1
+	}
+	[[ "${stages[0]}" != "${stages[1]}" ]] || {
+		echo "Both timings are for the same stage: ${stages[0]}"
+		return 1
+	}
+	local k
+	for k in 0 1; do
+		[[ "${starts[k]}" =~ ^[0-9]+$ && "${ends[k]}" =~ ^[0-9]+$ ]] || {
+			echo "Non-numeric timing for ${stages[k]}"
+			cat "$timing_file"
+			return 1
+		}
+	done
+
+	[[ "${starts[0]}" -lt "${ends[1]}" && "${starts[1]}" -lt "${ends[0]}" ]] || {
+		echo "Stage intervals do not overlap (ran serially)"
+		cat "$timing_file"
+		return 1
 	}
 }
 
