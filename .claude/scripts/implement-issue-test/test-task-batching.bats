@@ -2565,10 +2565,24 @@ _setup_parallel_stage_mocks() {
 	# Without this, acceptance short-circuits (no route files) and only e2e sleeps,
 	# making serial vs parallel indistinguishable.
 	git checkout -q -b feature/parallel-timing-test main
-	mkdir -p routes
-	printf 'export const handler = () => {}\n' > routes/api.ts
-	git add routes/api.ts
+	# The acceptance pathspec is '*/routes/*.ts', so the file must live
+	# under a parent directory (src/routes), not a top-level routes/.
+	mkdir -p src/routes
+	printf 'export const handler = () => {}\n' > src/routes/api.ts
+	git add src/routes/api.ts
 	git commit -q -m "add route"
+
+	# Stub docker (acceptance skips when neither docker nor docker-compose
+	# is on PATH) and read-issue.sh (called via $PLATFORM_DIR).
+	local stub_bin="$TEST_TMP/timing-stubs"
+	mkdir -p "$stub_bin"
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_bin/docker"
+	printf '#!/usr/bin/env bash\nprintf %%s %s\n' \
+		"'{\"body\":\"## Acceptance Criteria\\n- ok\"}'" \
+		> "$stub_bin/read-issue.sh"
+	chmod +x "$stub_bin/docker" "$stub_bin/read-issue.sh"
+	export PATH="$stub_bin:$PATH"
+	export PLATFORM_DIR="$stub_bin"
 
 	export TEST_E2E_CMD="true"
 	export BASE_BRANCH=main
@@ -2586,8 +2600,8 @@ _setup_parallel_stage_mocks() {
 		local stage="$1"
 		local start_ns=$(date +%s%N)
 		printf "stage=%s,start=%s\n" "$stage" "$start_ns" >> "$timing_file"
-		# Simulate 0.15 second work per stage
-		sleep 0.15
+		# Simulate 0.5 second work per stage
+		sleep 0.5
 		printf '{"status":"success","result":"passed","summary":"ok"}'
 	}
 	log()     { :; }
@@ -2609,10 +2623,11 @@ _setup_parallel_stage_mocks() {
 	local global_elapsed_ns=$(( global_end_ns - global_start_ns ))
 	local global_elapsed_ms=$(( global_elapsed_ns / 1000000 ))
 
-	# With both stages sleeping 0.15s in parallel, total time ≈ 150ms + overhead.
-	# If they ran serially, total would be ≈ 300ms + overhead.
-	# Threshold of 400ms: passes parallel (~270ms), fails serial (~500ms).
-	[[ "$global_elapsed_ms" -lt 400 ]] || {
+	# Subshell startup and git diff add a few hundred ms of fixed overhead.
+	# With both stages sleeping 0.5s in parallel, total ≈ 500ms + overhead
+	# (~800ms); serially it would be ≈ 1000ms + overhead (>1200ms).
+	# Threshold of 1000ms separates the two.
+	[[ "$global_elapsed_ms" -lt 1000 ]] || {
 		echo "Stages appear to have run serially (took ${global_elapsed_ms}ms)"
 		cat "$timing_file"
 		exit 1
