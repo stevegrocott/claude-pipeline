@@ -74,7 +74,9 @@ required_names() {
 
 # unguarded_reads ORCHESTRATOR VARS_FILE REQUIRED_FILE
 # Prints "NAME:LINE" for each bare read that is not defaulted, not preceded by
-# an -n/-z/-v guard in the same function, and not required.
+# a default-bearing -n/-z or a -v guard anywhere earlier in the file, and not
+# required. Guards carry file-wide, not per-function: an early gating function
+# protects later helpers (asserted below).
 unguarded_reads() {
 	awk -v varsfile="$2" -v reqfile="$3" '
 		BEGIN {
@@ -82,6 +84,9 @@ unguarded_reads() {
 			while ((getline v < reqfile) > 0) req[v] = 1
 		}
 		function boundary(v) { return v "([^A-Za-z0-9_]|$)" }
+		# Comments provide nothing in either pass, so the skip precedes the
+		# pass-1 rule: a commented-out default is not a default (issue #894).
+		/^[[:space:]]*#/ { next }
 		# Pass 1: orchestrator-level defaults — VAR="${VAR:-x}", VAR="${VAR-x}",
 		# or : "${VAR:=x}".
 		FNR == NR {
@@ -92,13 +97,14 @@ unguarded_reads() {
 			next
 		}
 		# Pass 2: bare reads.
-		/^[[:space:]]*#/ { next }
 		{
 			line = $0
 			for (v in vars) {
-				# Guard tests read the variable by definition — record the guard,
-				# then blank it so it is not counted as a bare read.
-				g1 = "-[nz][[:space:]]+\"?\\$\\{?" boundary(v)
+				# Only a default-bearing operand is a guard: `-n "${V:-}"`
+				# cannot crash, but `-n "$V"` reads V bare and dies under
+				# `set -u` exactly like any other bare read, so it protects
+				# nothing and is itself reported (issue #894).
+				g1 = "-[nz][[:space:]]+\"?\\$\\{" v ":?-"
 				g2 = "-v[[:space:]]+" boundary(v)
 				if (line ~ g1) { guarded[v] = 1; gsub(g1, " ", line) }
 				if (line ~ g2) { guarded[v] = 1; gsub(g2, " ", line) }
@@ -137,13 +143,15 @@ nonempty_default_vars() {
 silent_disables() {
 	awk -v varsfile="$2" '
 		BEGIN { while ((getline v < varsfile) > 0) vars[v] = 1 }
+		# Skip comments in both passes: a commented-out mirror is not a
+		# mirror (issue #894).
+		/^[[:space:]]*#/ { next }
 		FNR == NR {
 			for (v in vars)
 				if ($0 ~ ("(^|[^A-Za-z0-9_])" v "=\"?\\$\\{" v ":?-[^}]"))
 					mirrored[v] = 1
 			next
 		}
-		/^[[:space:]]*#/ { next }
 		{
 			for (v in vars) {
 				if (v in mirrored) continue
@@ -223,20 +231,46 @@ run_silent_disable() {
 	[ -z "$output" ]
 }
 
-@test "crash rule: an earlier -n/-z guard protects bare reads (AC7)" {
-	printf 'A_VAR="${A_VAR:-}"\nB_VAR="${B_VAR:-}"\nC_VAR="${C_VAR:-}"\n' >"$TEST_TMP/platform.sh"
+@test "crash rule: an earlier default-bearing -n/-z guard protects bare reads (AC7)" {
+	printf 'A_VAR="${A_VAR:-}"\nC_VAR="${C_VAR:-}"\n' >"$TEST_TMP/platform.sh"
 	cat >"$TEST_TMP/orch.sh" <<'ORCH'
 f() {
   [[ -z "${A_VAR-}" ]] && return 0
   echo "$A_VAR"
-  if [[ -n "$B_VAR" ]]; then
-    echo "${B_VAR}"
-  fi
   [[ -n "${C_VAR:-}" && -f "$C_VAR" ]] || return 0
 }
 ORCH
 	run_crash_rule "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
 	[ -z "$output" ]
+}
+
+@test "crash rule: a bare-operand -n guard is a crash, not protection (AC7)" {
+	printf 'B_VAR="${B_VAR:-}"\n' >"$TEST_TMP/platform.sh"
+	cat >"$TEST_TMP/orch.sh" <<'ORCH'
+f() {
+  if [[ -n "$B_VAR" ]]; then
+    echo "${B_VAR}"
+  fi
+}
+ORCH
+	run_crash_rule "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
+	# `[[ -n "$B_VAR" ]]` dies with "B_VAR: unbound variable" under `set -u`
+	# when a consumer platform.sh predates the variable, so the guard line is
+	# itself a bare read — and it cannot protect the body read either.
+	grep -qx 'B_VAR:2' <<<"$output"
+	grep -qx 'B_VAR:3' <<<"$output"
+}
+
+@test "crash rule: a commented-out default is not a default (AC7)" {
+	printf 'NEW_VAR="${NEW_VAR:-x}"\n' >"$TEST_TMP/platform.sh"
+	cat >"$TEST_TMP/orch.sh" <<'ORCH'
+# NEW_VAR="${NEW_VAR:-x}"
+f() {
+  echo "$NEW_VAR"
+}
+ORCH
+	run_crash_rule "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
+	[ "$output" = "NEW_VAR:3" ]
 }
 
 @test "crash rule: a guard in an earlier gating function protects later helpers" {
@@ -326,6 +360,18 @@ PLAT
 	printf 'f() {\n  [[ -n "$ON_VAR" ]]\n}\n' >"$TEST_TMP/orch.sh"
 	run_silent_disable "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
 	[ "$output" = "ON_VAR:2" ]
+}
+
+@test "silent-disable: a commented-out mirror is not a mirror" {
+	printf 'FEATURE="${FEATURE:-on}"\n' >"$TEST_TMP/platform.sh"
+	cat >"$TEST_TMP/orch.sh" <<'ORCH'
+# FEATURE="${FEATURE:-on}"
+f() {
+  echo "${FEATURE:-}"
+}
+ORCH
+	run_silent_disable "$TEST_TMP/orch.sh" "$TEST_TMP/platform.sh"
+	[ "$output" = "FEATURE:3" ]
 }
 
 @test "silent-disable: a top-level non-empty default clears it" {
