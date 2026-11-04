@@ -10605,7 +10605,7 @@ For each modified implementation file that warrants testing, identify the corres
 4. Check for mock abuse patterns
 
 INTEGRATION TEST REQUIREMENT FOR API ROUTES (claude-pipeline#25):
-- If ANY changed file is an API route file (matches */routes/*.ts or */routes/*.js), there MUST be
+- If ANY changed file is an API route file (a file under a top-level or nested routes/ directory with a ts, tsx, js, mjs or cjs extension, e.g. routes/b.ts or src/routes/d.tsx, or any file matching API_ROUTE_PATH_PATTERNS), there MUST be
   an integration test that verifies the actual HTTP response shape (not just unit tests of service methods).
 - Unit tests that mock the service layer are NOT sufficient for route changes — the Fastify response schema
   can silently strip fields via fast-json-stringify, which unit tests cannot catch.
