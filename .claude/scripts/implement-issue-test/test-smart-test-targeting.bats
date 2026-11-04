@@ -194,7 +194,7 @@ teardown() {
     [ "$scope" = "typescript" ]
 }
 
-@test "detect_change_scope returns 'typescript' for unknown code extensions like .css" {
+@test "detect_change_scope returns 'unknown-code' for unknown code extensions like .css" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-css
     echo "body { color: red; }" > style.css
@@ -203,10 +203,10 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    [ "$scope" = "typescript" ]
+    [ "$scope" = "unknown-code" ]
 }
 
-@test "detect_change_scope returns 'typescript' for .sql files" {
+@test "detect_change_scope returns 'unknown-code' for .sql files" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-sql
     echo "SELECT 1;" > query.sql
@@ -215,10 +215,10 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    [ "$scope" = "typescript" ]
+    [ "$scope" = "unknown-code" ]
 }
 
-@test "detect_change_scope returns 'typescript' for extensionless files like Makefile" {
+@test "detect_change_scope returns 'unknown-code' for extensionless files like Makefile" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-makefile
     echo "all: build" > Makefile
@@ -227,10 +227,10 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    [ "$scope" = "typescript" ]
+    [ "$scope" = "unknown-code" ]
 }
 
-@test "detect_change_scope returns 'typescript' for extensionless files like Dockerfile" {
+@test "detect_change_scope returns 'unknown-code' for extensionless files like Dockerfile" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-dockerfile
     echo "FROM node:18" > Dockerfile
@@ -239,7 +239,7 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    [ "$scope" = "typescript" ]
+    [ "$scope" = "unknown-code" ]
 }
 
 @test "detect_change_scope returns 'config' when no files changed" {
@@ -3709,4 +3709,308 @@ STUB
     # specs) when the command survived intact, 2 if the newline split it.
     expect_glob "$(printf '%s' "$json" | jq -r '.output.tests_run')" "3" \
         "every changed spec must reach the runner in one invocation"
+}
+
+# =============================================================================
+# Issue #965 — the blocking test loop must run the repo's real test command,
+# and a runner that never started must not be laundered into "pre-existing"
+# =============================================================================
+#
+# The reported shape: a Python consumer whose platform.sh sets
+# TEST_UNIT_CMD="uv run pytest" had `npx jest --passWithNoTests
+# --changedSince=main` run as its BLOCKING gate, because a .py-only diff
+# classified as scope "typescript". Jest could not start, the failure was
+# counted pre-existing (no changed *.test.ts files were found, which is
+# always true on a Python PR), and the loop exited reporting success. The
+# configured pytest ran only at the non-blocking full-suite check, whose red
+# result does not block a merge — so those PRs merged with nothing behind
+# them but code review.
+#
+# Helper: commit $1, run the real run_test_loop at scope $2, and leave the
+# test-stage prompt in $prompt_file so the command under test is observable.
+_capture_loop_prompt_for() {
+    local changed_file="$1" scope="$2"
+    cd "$TEST_TMP/repo" || return 1
+
+    git checkout -q -b "feature-965-$$-$RANDOM" main
+    mkdir -p "$(dirname "$changed_file")"
+    printf 'x\n' > "$changed_file"
+    git add "$changed_file"
+    git commit -q -m "add $changed_file"
+
+    prompt_file="$TEST_TMP/loop_prompt_965"
+    export prompt_file
+
+    run_stage() {
+        case "$1" in
+            test-iter-*)
+                printf '%s' "$2" > "$prompt_file"
+                echo '{"status":"success","output":{"result":"passed","summary":"ok","validation_result":"passed","validation_summary":"ok"}}'
+                ;;
+            *) echo '{"status":"success","output":{"result":"passed","summary":"ok"}}' ;;
+        esac
+    }
+    export -f run_stage
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "$(git branch --show-current)" "" "$scope"
+}
+
+@test "#965 AC1: unknown-code scope with TEST_UNIT_CMD runs that command as the blocking gate" {
+    export TEST_UNIT_CMD="uv run pytest"
+    _capture_loop_prompt_for "src/app/main.py" "unknown-code"
+
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"uv run pytest"* ]] || fail \
+        "the blocking test command must be TEST_UNIT_CMD for unclassified" \
+        "code; prompt did not mention 'uv run pytest'"
+    [[ "$captured" != *"npx jest"* ]] || fail \
+        "Jest must not drive the blocking gate on a Python repo"
+}
+
+@test "#965 AC1: a .py-only diff classifies as unknown-code, not typescript" {
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-965-pyscope main
+    mkdir -p src
+    echo "print(1)" > src/app.py
+    git add src/app.py
+    git commit -q -m "add python"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "unknown-code" ] || fail \
+        "a Python-only diff must not report 'typescript' — that is what" \
+        "routed it to Jest (#965); got '$scope'"
+}
+
+@test "#965 AC3: a TypeScript scope without TEST_UNIT_CMD keeps incremental Jest" {
+    unset TEST_UNIT_CMD
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"npx jest --passWithNoTests"* ]] || fail \
+        "TS consumers must keep the incremental Jest command unchanged"
+    [[ "$captured" == *"--changedSince="* ]] || fail \
+        "the --changedSince fallback must be retained for TS scopes"
+}
+
+@test "#965 AC4: a TypeScript scope WITH TEST_UNIT_CMD still keeps incremental Jest" {
+    # The fix must not change loop behaviour for a TS consumer who happens
+    # to configure TEST_UNIT_CMD for the non-blocking full-suite check. The
+    # incremental path passes explicit changed test files, and the
+    # pre-existing filter depends on that explicit mode to decide which
+    # failures the PR owns; a full-suite substitution would lose it.
+    export TEST_UNIT_CMD="npm test"
+    _capture_loop_prompt_for "src/lib/other.ts" "typescript"
+
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"npx jest --passWithNoTests"* ]] || fail \
+        "setting TEST_UNIT_CMD must not take a TS consumer off the" \
+        "incremental Jest path (#965 AC4)"
+}
+
+@test "#965: unknown-code with TEST_UNIT_CMD unset falls back to Jest and warns" {
+    unset TEST_UNIT_CMD
+    _capture_loop_prompt_for "src/app/other.py" "unknown-code"
+
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"npx jest"* ]] || fail \
+        "with no configured runner the historical Jest command must remain," \
+        "so behaviour is unchanged for repos that set nothing"
+}
+
+@test "#965 AC2/AC5: a runner that cannot start is blocking, not pre-existing" {
+    # The exact reported failure text. Detection IS attempted for this scope
+    # and finds no changed *.test.ts files, so both halves of the
+    # pre-existing skip's condition hold — this is the shape that used to
+    # exit the loop reporting success.
+    unset TEST_UNIT_CMD
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-965-nostart main
+    mkdir -p src
+    echo "print(1)" > src/app.py
+    git add src/app.py
+    git commit -q -m "add python"
+
+    run_stage() {
+        case "$1" in
+            test-iter-*)
+                echo '{"status":"success","output":{"result":"failed","summary":"jest could not start","failures":[{"test":"suite","message":"Could not find a config file based on provided values"}]}}'
+                ;;
+            *) echo '{"status":"success","output":{"result":"passed","summary":"ok"}}' ;;
+        esac
+    }
+    export -f run_stage
+
+    local msgs_file="$TEST_TMP/nostart-comments.txt"
+    : > "$msgs_file"
+    export msgs_file
+    comment_issue() { printf '%s\n' "$*" >> "$msgs_file"; }
+    export -f comment_issue
+
+    local -a DEGRADED_STAGES=()
+
+    run_test_loop "$TEST_TMP/repo" "feature-965-nostart" "" "typescript" || true
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -q '^test:runner_not_started:' || fail \
+        "a runner that never started must record test:runner_not_started so" \
+        "Gate A can block the merge; got:" \
+        "${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+
+    # The skip path posts a title containing "Pre-existing Failures"; the
+    # new path's own text says "not a pre-existing failure", so match the
+    # title rather than the bare word.
+    grep -qi 'Pre-existing Failures' "$msgs_file" && fail \
+        "a non-starting runner must never be reported via the pre-existing" \
+        "skip path; comments: $(cat "$msgs_file")"
+    grep -qi 'Runner Did Not Start' "$msgs_file" || fail \
+        "the failure must be surfaced on the issue; comments:" \
+        "$(cat "$msgs_file")"
+}
+
+@test "#965 AC2: a genuine assertion failure is still treated as a test failure" {
+    # Negative control. The startup classifier must be narrow enough that a
+    # real failing test does not trip it, or every red suite would become a
+    # merge-blocking "runner not started".
+    local -a DEGRADED_STAGES=()
+    _failures_indicate_runner_not_started \
+        '[{"test":"adds two numbers","message":"expected 4 but received 5"}]' \
+        && fail "a plain assertion failure must not be classified as a" \
+                "runner-startup fault"
+    return 0
+}
+
+@test "#965 AC2: the startup classifier matches the reported phrasings" {
+    _failures_indicate_runner_not_started \
+        '[{"test":"s","message":"Could not find a config file based on provided values"}]' \
+        || fail "jest's missing-config message must be recognised"
+    _failures_indicate_runner_not_started \
+        '[{"test":"s","message":"/bin/sh: uv: command not found"}]' \
+        || fail "a missing runner binary must be recognised"
+    _failures_indicate_runner_not_started \
+        '[{"test":"s","message":"ERROR: no tests ran in 0.01s"}]' \
+        || fail "a zero-test run must be recognised"
+    _failures_indicate_runner_not_started '[]' \
+        && fail "an empty failures array must not be classified"
+    return 0
+}
+
+@test "#965 AC2: the classifier does not fire on failures that merely mention files" {
+    # Guards the deliberate narrowing: these are real assertion failures a
+    # filesystem, module-resolution or CLI test produces, and classifying
+    # any of them as a startup fault would block a merge on a suite that
+    # genuinely ran. Each phrasing was explicitly dropped from the pattern.
+    _failures_indicate_runner_not_started \
+        '[{"test":"reads a missing file","message":"ENOENT: no such file or directory, open \u0027/tmp/x\u0027"}]' \
+        && fail "an ENOENT assertion must not be read as a startup fault"
+    _failures_indicate_runner_not_started \
+        '[{"test":"rejects a bad import","message":"Cannot find module \u0027./missing\u0027"}]' \
+        && fail "a module-resolution assertion must not be read as a startup fault"
+    _failures_indicate_runner_not_started \
+        '[{"test":"rejects a bad flag","message":"unrecognized option --nope"}]' \
+        && fail "a CLI-parsing assertion must not be read as a startup fault"
+    return 0
+}
+
+@test "#965 AC6: a failure with an empty failures array is unverified, not green" {
+    unset TEST_UNIT_CMD
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-965-empty main
+    mkdir -p src
+    echo "export const x = 1;" > src/x.ts
+    git add src/x.ts
+    git commit -q -m "add ts"
+
+    run_stage() {
+        case "$1" in
+            test-iter-*)
+                echo '{"status":"success","output":{"result":"failed","summary":"something went wrong","failures":[]}}'
+                ;;
+            *) echo '{"status":"success","output":{"result":"passed","summary":"ok"}}' ;;
+        esac
+    }
+    export -f run_stage
+
+    local msgs_file="$TEST_TMP/empty-comments.txt"
+    : > "$msgs_file"
+    export msgs_file
+    comment_issue() { printf '%s\n' "$*" >> "$msgs_file"; }
+    export -f comment_issue
+
+    local -a DEGRADED_STAGES=()
+
+    run_test_loop "$TEST_TMP/repo" "feature-965-empty" "" "typescript" || true
+
+    printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}" \
+        | grep -q '^test:failed_without_failures:' || fail \
+        "a failed stage that lists no failures must be recorded, not" \
+        "silently accepted; got: ${DEGRADED_STAGES[*]+"${DEGRADED_STAGES[*]}"}"
+
+    [[ -s "$msgs_file" ]] || fail \
+        "the silent path must now say something on the issue"
+}
+
+@test "#965 AC5: Gate A blocks on both new markers" {
+    # Guards the wiring rather than the loop: a marker nothing blocks on is
+    # just a log line. Asserts the literal case arm, since that is the only
+    # place the mapping from marker to merge block exists.
+    local orch="$ORCHESTRATOR_SCRIPT"
+    [[ -f "$orch" ]] || fail "orchestrator source not found at '$orch'"
+    local gate_line
+    gate_line=$(grep -n 'test:wall_timeout:\*|test:wall_timeout_budget:\*' "$orch" \
+        | head -1)
+    [[ -n "$gate_line" ]] || fail "could not locate the Gate A case arm"
+    [[ "$gate_line" == *"test:runner_not_started:*"* ]] || fail \
+        "test:runner_not_started must be in Gate A's blocking case; got:" \
+        "$gate_line"
+    [[ "$gate_line" == *"test:failed_without_failures:*"* ]] || fail \
+        "test:failed_without_failures must be in Gate A's blocking case;" \
+        "got: $gate_line"
+}
+
+@test "#965 AC7/AC8: the full-suite check is scope-gated and says so" {
+    # AC8: the comment claimed the check "runs unconditionally in main()",
+    # which is how the .py + .sh gap stayed invisible.
+    local orch="$ORCHESTRATOR_SCRIPT"
+    [[ -f "$orch" ]] || fail "orchestrator source not found at '$orch'"
+    local npm_comment
+    npm_comment=$(awk '/informational full-suite npm/,/^FULL_SUITE_NPM_TIMEOUT=/' \
+        "$orch")
+    [[ -n "$npm_comment" ]] || fail \
+        "could not locate the FULL_SUITE_NPM_TIMEOUT comment block"
+    [[ "$npm_comment" != *"runs unconditionally in"* ]] || fail \
+        "the full-suite npm check comment must no longer claim it is" \
+        "unconditional — it is gated on branch_scope (#965 AC8)"
+    [[ "$npm_comment" == *"branch_scope"* ]] || fail \
+        "the comment must name the gate it is actually subject to (AC8)"
+
+    # AC7: the .py + .sh shape classifies as bash, so the check must be
+    # reachable for bash scope when a runner is explicitly configured.
+    grep -q 'typescript|mixed|ts-frontend|unknown-code)' "$orch" || fail \
+        "unknown-code must still reach the full-suite check, which is the" \
+        "only place a Python repo's TEST_UNIT_CMD ran before #965"
+}
+
+@test "#965 AC7: a .py plus .sh diff still classifies as bash" {
+    # Records the shape the AC7 decision is about: has_bash wins, so the
+    # blocking loop runs bats and the Python half relies on the full-suite
+    # check being reachable for bash scope.
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-965-pysh main
+    mkdir -p src
+    echo "print(1)" > src/app.py
+    echo "echo hi" > run.sh
+    git add src/app.py run.sh
+    git commit -q -m "add python and shell"
+
+    local scope
+    scope=$(detect_change_scope "." "main")
+    [ "$scope" = "bash" ] || fail \
+        "expected 'bash' for a .py + .sh diff (has_bash wins); got '$scope'"
 }

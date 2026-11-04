@@ -370,8 +370,10 @@ E2E_DIRECT_EXEC_TIMEOUT="${E2E_DIRECT_EXEC_TIMEOUT:-900}"
 E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 
 # Wall-clock cap (seconds) on the informational full-suite BATS check
-# (`bash "$bats_runner" --ci`) that runs unconditionally in main() after
-# run_test_loop (issue #799 notes the suite takes ~20-35 minutes). That check
+# (`bash "$bats_runner" --ci`) that main() runs after run_test_loop for every
+# scope, when run-tests.sh is present (issue #799 notes the suite takes
+# ~20-35 minutes). Unlike its npm sibling below it is not scope-gated, but it
+# is not unconditional either, as this comment used to say (#965 AC8). That check
 # is already non-blocking — a red run only records a degraded-stage signal —
 # but nothing previously bounded its OWN runtime, so a hang there (e.g. a
 # wedged suite per test-stage-runner.bats) stalled the orchestrator
@@ -387,8 +389,14 @@ E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"
 
 # Wall-clock cap (seconds) on the informational full-suite npm/test-runner
-# check (`bash -c "${TEST_UNIT_CMD:-npm test}"`) that runs unconditionally in
-# main() right before its BATS sibling above. That check is already
+# check (`bash -c "${TEST_UNIT_CMD:-npm test}"`) that main() runs right
+# before its BATS sibling above. NOT unconditional, despite what this
+# comment claimed until #965: it is gated on branch_scope — typescript,
+# mixed, ts-frontend and unknown-code always, plus bash when TEST_UNIT_CMD
+# is explicitly set. config and frontend scopes skip it entirely. The wrong
+# comment is how the gap went unnoticed: a .py + .sh diff classifies as
+# bash, and both this check and the blocking loop's Jest command left the
+# Python tests unrun. That check is already
 # non-blocking — a red run only records a degraded-stage signal — but
 # nothing previously bounded its OWN runtime, so the same class of hang
 # that stalled the BATS arm (issue #926) could stall this arm too, and the
@@ -10059,8 +10067,23 @@ detect_change_scope() {
     elif [[ "$has_bash" == "true" ]]; then
         echo "bash"
     elif [[ "$has_other_code" == "true" ]]; then
-        # Unknown code files — run full test suite to be safe
-        echo "typescript"
+        # Code in a language this function cannot classify: py, rb, go, rs,
+        # sql, extensionless files, and so on. Reported as its own scope
+        # since #965. It used to report "typescript", which made a Python
+        # repo indistinguishable from a real TS repo, so the BLOCKING test
+        # loop built `npx jest` for it; Jest could not start, and the
+        # "Could not find a config file" failure was laundered into
+        # "pre-existing" by the skip in run_test_loop. The repo's configured
+        # TEST_UNIT_CMD only ran at the non-blocking full-suite check, whose
+        # red result cannot block a merge — so those PRs merged with no test
+        # gate behind them.
+        #
+        # Every consumer of this value treats unknown-code exactly as it
+        # treats typescript, with two deliberate exceptions in run_test_loop:
+        # the changed-test-file pattern (no arm, so detection is not
+        # attempted and failures cannot be called pre-existing) and the
+        # test-command builder (prefers TEST_UNIT_CMD).
+        echo "unknown-code"
     else
         echo "config"
     fi
@@ -10107,6 +10130,69 @@ all_failures_environment_related() {
 			)] | length
 		' 2>/dev/null || echo 1)
 	(( non_env_count == 0 ))
+}
+
+# Checks whether the reported failures mean the test RUNNER never started,
+# as opposed to tests that ran and failed.
+#
+# Those are opposite signals that arrive in the same "failures" array, and
+# before #965 both were eligible for the pre-existing-failure skip in
+# run_test_loop. So `npx jest` on a repo with no Jest config reported
+# "Could not find a config file", the skip counted it pre-existing, and the
+# loop exited satisfied having executed zero tests. A runner that cannot
+# start is not a pre-existing failure — it is the absence of a result, and
+# the branch is unverified rather than green.
+#
+# Deliberately narrow: only phrasings a genuine assertion failure cannot
+# produce. A test whose own name or assertion text mentions a missing module
+# would be a false positive, so the message field alone is matched (same
+# reasoning as all_failures_environment_related above), and the patterns
+# describe startup faults, not test outcomes.
+#
+# ANY matching failure is enough. Unlike the environment check, which needs
+# every failure to be infrastructural before it skips the fix agent, one
+# startup fault already means the suite did not run.
+#
+# Arguments:
+#   $1 - JSON array of failure objects with "test" and "message" fields
+# Returns:
+#   0 if any failure indicates the runner never started
+#   1 otherwise (including an empty or unparseable array)
+_failures_indicate_runner_not_started() {
+	local failures_json="$1"
+	local count
+	count=$(printf '%s' "$failures_json" \
+		| jq 'length // 0' 2>/dev/null || echo 0)
+	if (( count == 0 )); then
+		return 1
+	fi
+	# Narrow on purpose. Every pattern dropped below was considered and
+	# rejected because a GENUINE test failure can produce it, and a false
+	# positive here blocks a merge on a suite that really did run:
+	#   "no such file or directory" — any filesystem test asserting ENOENT
+	#   "cannot find module"        — any test asserting a resolution error
+	#   "unrecognized option"       — any test asserting CLI arg handling
+	#   ": not found"               — dash's phrasing for a missing binary,
+	#                                 but too short to anchor safely; bash
+	#                                 and zsh both say "command not found",
+	#                                 which is matched.
+	# The cost of missing a startup fault is the pre-#965 behaviour for that
+	# one phrasing; the cost of a false positive is blocking a good merge.
+	local startup_pattern
+	startup_pattern='could not find a config file|no config file found'
+	startup_pattern+='|configuration file .* not found'
+	startup_pattern+='|command not found'
+	startup_pattern+='|no tests ran|no tests were found|no tests collected'
+	startup_pattern+='|zero tests collected|found no collectors'
+	local startup_count
+	startup_count=$(printf '%s' "$failures_json" \
+		| jq --arg pat "$startup_pattern" '
+			[.[] | select(
+				((.message // ""))
+				| test($pat; "i")
+			)] | length
+		' 2>/dev/null || echo 0)
+	(( startup_count > 0 ))
 }
 
 # Build the bash test command for a given loop directory.
@@ -10302,7 +10388,7 @@ run_test_loop() {
     local change_scope
     if [[ -n "${4:-}" ]]; then
         case "${4}" in
-            typescript|bash|config|mixed|frontend|ts-frontend) change_scope="$4" ;;
+            typescript|bash|config|mixed|frontend|ts-frontend|unknown-code) change_scope="$4" ;;
             *) log_warn "Invalid pre-computed scope '${4}'; recomputing"
                change_scope=$(detect_change_scope "$loop_dir" "$BASE_BRANCH") ;;
         esac
@@ -10422,6 +10508,36 @@ run_test_loop() {
     case "$change_scope" in
         bash)
             test_command="cd $safe_dir && $bash_test_command"
+            ;;
+        unknown-code)
+            # Code this pipeline cannot classify, so Jest is a guess and
+            # TEST_UNIT_CMD is the only runner the consumer has actually
+            # vouched for. Give the BLOCKING gate that command (#965 AC1):
+            # on a Python repo this is the difference between `uv run pytest`
+            # deciding the stage and `npx jest` failing to start.
+            #
+            # Note this arm is reached ONLY for the unclassified-code scope.
+            # A genuine typescript/ts-frontend/mixed scope keeps the
+            # incremental Jest path below even when TEST_UNIT_CMD is set
+            # (#965 AC3, AC4): that path passes explicit changed test files
+            # and the pre-existing filter depends on that explicit mode to
+            # decide which failures the PR owns. Swapping in a full-suite
+            # command there would both lose that attribution and run the
+            # whole suite on every iteration.
+            if [[ -n "${TEST_UNIT_CMD:-}" ]]; then
+                test_command="cd $safe_dir && ${TEST_UNIT_CMD}"
+                log "Unclassified-code scope — blocking test loop runs" \
+                    "TEST_UNIT_CMD: $TEST_UNIT_CMD"
+            else
+                # No configured runner. Keep the historical Jest command
+                # rather than running nothing, but say plainly that it is a
+                # guess — this is the case that silently passed before #965.
+                test_command="cd $safe_dir && $jest_command"
+                log_warn "Unclassified-code scope and TEST_UNIT_CMD is unset" \
+                    "— falling back to Jest, which this repo may not have." \
+                    "Set TEST_UNIT_CMD in .claude/config/platform.sh to the" \
+                    "command that runs this repo's tests."
+            fi
             ;;
         *)
             # typescript, ts-frontend, frontend, mixed: run Jest.
@@ -10824,6 +10940,25 @@ $test_summary" "default"
             # An unpopulated changed_test_files on a scope we never scanned means
             # "unknown", NOT "no PR-owned failures" — inferring the latter is what
             # made every bash-scope failure vanish (#636).
+            # A runner that never started must be judged BEFORE the skip
+            # below, because the skip would otherwise call it pre-existing
+            # and exit the loop reporting success (#965 AC2). Recorded as a
+            # degraded stage so Gate A blocks the merge (#965 AC5) — the
+            # established pattern for "the loop stopped without validating
+            # this PR", same as max_iterations and wall_timeout above.
+            if _failures_indicate_runner_not_started "$failures"; then
+                log_error "Test runner did not start — no tests were" \
+                    "executed, so this is a blocking failure, not a" \
+                    "pre-existing one"
+                set_final_state "test_runner_not_started"
+                DEGRADED_STAGES+=("test:runner_not_started:iter=$test_iteration")
+                comment_issue "Test Loop: Runner Did Not Start" \
+                    "🚫 The blocking test command ran no tests — the runner failed to start (scope: \`$change_scope\`). This is **not** a pre-existing failure: nothing was executed, so this branch is **unverified**. If this repo's tests are not run by the default command, set \`TEST_UNIT_CMD\` in \`.claude/config/platform.sh\` to the command that runs them." \
+                    "default"
+                loop_complete=true
+                break
+            fi
+
             local pr_failures skipped_count
             pr_failures="$failures"
             skipped_count=0
@@ -10841,11 +10976,26 @@ $test_summary" "default"
             local pr_failure_count
             pr_failure_count=$(printf '%s' "$pr_failures" | jq 'length // 0' 2>/dev/null || echo 0)
             if (( pr_failure_count == 0 )); then
-                log "INFO: All test failures are pre-existing. Skipping fix-agent dispatch."
-                if (( skipped_count > 0 )); then
-                    comment_issue "Test Loop: Pre-existing Failures ($test_iteration/$max_test_iter)" \
-                        "ℹ️ $skipped_count pre-existing failure(s) detected (not from PR-changed test files). Skipping fix-agent." "default"
+                if (( skipped_count == 0 )); then
+                    # Nothing was skipped, so nothing was pre-existing: the
+                    # stage reported failure while listing no failing tests.
+                    # That is not evidence of a green branch, but before #965
+                    # it broke here with loop_complete=true and posted no
+                    # comment at all, because the skipped count it reports on
+                    # was zero — a completely silent pass (#965 AC6).
+                    log_error "Test stage reported failure but listed no" \
+                        "failing tests — recording as unverified, not green"
+                    set_final_state "test_failed_without_failures"
+                    DEGRADED_STAGES+=("test:failed_without_failures:iter=$test_iteration")
+                    comment_issue "Test Loop: Unverified" \
+                        "⚠️ The test stage reported a failure but listed no failing tests, so nothing could be attributed to this PR and nothing could be called pre-existing. This branch is **unverified**, not green." \
+                        "default"
+                    loop_complete=true
+                    break
                 fi
+                log "INFO: All test failures are pre-existing. Skipping fix-agent dispatch."
+                comment_issue "Test Loop: Pre-existing Failures ($test_iteration/$max_test_iter)" \
+                    "ℹ️ $skipped_count pre-existing failure(s) detected (not from PR-changed test files). Skipping fix-agent." "default"
                 loop_complete=true
                 break
             fi
@@ -13656,7 +13806,39 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
         # AND recorded in DEGRADED_STAGES so they show up in the pipeline summary
         # instead of being silently reported green.
         # ---------------------------------------------------------------------
-        if [[ "$branch_scope" == "typescript" || "$branch_scope" == "mixed" || "$branch_scope" == "ts-frontend" ]]; then
+        # Which scopes get this check. unknown-code is included because it
+        # was previously reported as "typescript" and so already ran here —
+        # splitting the value out in #965 must not quietly remove the only
+        # place a Python repo's TEST_UNIT_CMD runs.
+        #
+        # #965 AC7, the .py + .sh shape: a diff touching both a shell script
+        # and unclassified code classifies as `bash` (has_bash wins in
+        # detect_change_scope), so the loop runs bats and this check used to
+        # be skipped outright — the unclassified half's tests ran NOWHERE,
+        # neither blocking nor advisory. The decision: run the check for
+        # `bash` scope too, but only when TEST_UNIT_CMD is explicitly
+        # configured. The default is `npm test`, and firing that on every
+        # bash-scope PR in a repo that has no npm suite (this one leaves
+        # TEST_UNIT_CMD empty at .claude/config/platform.sh:50) would add a
+        # guaranteed-red advisory check to every pipeline change — which is
+        # why `bash` was excluded in the first place. Gating on an explicit
+        # value closes the gap for repos that configured a runner without
+        # inflicting a bogus failure on repos that did not.
+        local run_full_suite_check=false
+        case "$branch_scope" in
+            typescript|mixed|ts-frontend|unknown-code)
+                run_full_suite_check=true
+                ;;
+            bash)
+                if [[ -n "${TEST_UNIT_CMD:-}" ]]; then
+                    run_full_suite_check=true
+                    log "bash scope with TEST_UNIT_CMD configured — running" \
+                        "the full-suite check so non-bash code in this diff" \
+                        "is not left untested (#965)"
+                fi
+                ;;
+        esac
+        if [[ "$run_full_suite_check" == true ]]; then
             log "Running informational full-suite check (non-blocking)..."
             local full_scope_output full_scope_rc
             # No `|| true` here: it makes the command list succeed, so the
@@ -14777,7 +14959,12 @@ $complete_summary
                             ;;
                         # Test-loop degradation: the test loop gave up without
                         # converging, so the tests never validated this PR.
-                        test:wall_timeout:*|test:wall_timeout_budget:*|test:max_iterations:*|test:bats_incomplete:*|test:oscillation:*)
+                        # runner_not_started and failed_without_failures join
+                        # the list in #965: both mean zero tests were executed
+                        # and the branch is unverified, which is the same
+                        # merge hazard as never converging — and both used to
+                        # exit the loop looking green.
+                        test:wall_timeout:*|test:wall_timeout_budget:*|test:max_iterations:*|test:bats_incomplete:*|test:oscillation:*|test:runner_not_started:*|test:failed_without_failures:*)
                             merge_blocked_reason="Test loop convergence failure recorded in degraded_stages: $_ds"
                             merge_block_kind="convergence"
                             break
