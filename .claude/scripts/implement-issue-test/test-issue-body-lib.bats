@@ -713,9 +713,9 @@ Some prose but no task checkboxes.
 	[[ "$output" != *"Deploy Verification"* ]]
 }
 
-@test "assert_issue_valid: DEPLOY_VERIFY_CMD empty string + section present fails" {
+@test "assert_issue_valid: DEPLOY_VERIFY_CMD empty string + section present passes" {
 	# platform.sh defaults DEPLOY_VERIFY_CMD to "" (set-but-empty), which must
-	# behave like unset: a Deploy Verification section is rejected.
+	# behave like unset: a Deploy Verification section is tolerated (#984).
 	export DEPLOY_VERIFY_CMD=""
 	local body
 	body="## Implementation Tasks
@@ -732,8 +732,8 @@ Some prose but no task checkboxes.
 bats .claude/scripts/implement-issue-test/test-issue-body.bats
 \`\`\`"
 	run assert_issue_valid "$body"
-	[ "$status" -ne 0 ]
-	[[ "$output" == *"'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset"* ]]
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"Deploy Verification"* ]]
 }
 
 @test "assert_issue_valid: DEPLOY_VERIFY_CMD empty string + no section passes" {
@@ -742,7 +742,7 @@ bats .claude/scripts/implement-issue-test/test-issue-body.bats
 	[ "$status" -eq 0 ]
 }
 
-@test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + ### Deploy Verification heading fails" {
+@test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + ### Deploy Verification heading passes" {
 	unset DEPLOY_VERIFY_CMD
 	local body
 	body="## Implementation Tasks
@@ -757,8 +757,8 @@ bats .claude/scripts/implement-issue-test/test-issue-body.bats
 
 **Verification command:** curl -fsS https://example/health"
 	run assert_issue_valid "$body"
-	[ "$status" -ne 0 ]
-	[[ "$output" == *"'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset"* ]]
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"Deploy Verification"* ]]
 }
 
 @test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + no section passes" {
