@@ -116,12 +116,14 @@ FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
 
 # API route path patterns — pipe-separated globs used to recognise files that
-# define HTTP API routes/endpoints (e.g. to decide whether a branch changes an
-# API surface).  Matched against repo-relative paths.  Set to your repo's
-# layout; empty disables API-route detection.
-# Default: "*/api/*|*/routes/*|*/controllers/*" (common framework layouts).
-# e.g., "app/api/*|src/routes/*|pages/api/*"
-API_ROUTE_PATH_PATTERNS="${API_ROUTE_PATH_PATTERNS-*/api/*|*/routes/*|*/controllers/*}"
+# define HTTP API routes/endpoints; a match runs the acceptance-test stage.
+# Each repo-relative path is matched with a leading "/" prepended, so patterns
+# need a leading "*/" (e.g. "*/routes/*", not "src/routes/*").  Empty or unset
+# falls back to this default (it never disables detection).
+# Default mirrors _default_api_route_patterns() in the orchestrator: routes/
+# files with a ts, tsx, js, mjs or cjs extension.
+# e.g., "*/app/api/*.ts|*/pages/api/*.ts|*/routes/*.ts"
+API_ROUTE_PATH_PATTERNS="${API_ROUTE_PATH_PATTERNS:-*/routes/*.ts|*/routes/*.tsx|*/routes/*.js|*/routes/*.mjs|*/routes/*.cjs}"
 
 # Test path patterns — pipe-separated globs used by _undeclared_test_edits()
 # to recognise test files.  An implement stage that modifies a PRE-EXISTING

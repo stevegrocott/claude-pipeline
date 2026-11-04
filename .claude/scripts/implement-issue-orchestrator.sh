@@ -11211,6 +11211,14 @@ execution would be the repo's own CI after merge."
 #   $4 - max_task_size   (S|M|L)
 # =============================================================================
 
+# _default_api_route_patterns — the single definition of the default
+# API_ROUTE_PATH_PATTERNS (routes/ files with a ts/tsx/js/mjs/cjs extension).
+# platform.sh mirrors this value for consumers; keep the two in step.
+_default_api_route_patterns() {
+	printf '%s' '*/routes/*.ts|*/routes/*.tsx|*/routes/*.js'
+	printf '%s' '|*/routes/*.mjs|*/routes/*.cjs'
+}
+
 run_parallel_post_task_stages() {
 	local branch="$1"
 	local branch_scope="$2"
@@ -11573,17 +11581,14 @@ $e2e_verify_summary" "playwright-test-developer"
 			# from API_ROUTE_PATH_PATTERNS (pipe-separated globs, as in
 			# platform.sh); an unset/empty value falls back to the default so
 			# it never means "match nothing". Each path is matched with a
-			# leading "/" so "*/routes/*" also covers a top-level routes/ dir.
-			local route_patterns_default
+			# leading "/" so "*/routes/*" also covers a top-level routes/ dir;
+			# consumer patterns therefore need a leading "*/" (not "src/*").
 			local route_patterns
 			local -a route_globs
 			local changed_route_files=""
 			local all_changed_files
 			local changed_file route_glob
-			route_patterns_default='*/routes/*.ts|*/routes/*.tsx'
-			route_patterns_default+='|*/routes/*.js|*/routes/*.mjs'
-			route_patterns_default+='|*/routes/*.cjs'
-			route_patterns="${API_ROUTE_PATH_PATTERNS:-$route_patterns_default}"
+			route_patterns="${API_ROUTE_PATH_PATTERNS:-$(_default_api_route_patterns)}"
 			IFS='|' read -ra route_globs <<< "$route_patterns"
 			all_changed_files=$(git diff "$BASE_BRANCH"...HEAD \
 				--name-only 2>/dev/null || true)
