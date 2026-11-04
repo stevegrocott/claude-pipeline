@@ -694,6 +694,15 @@ Some prose but no task checkboxes.
 	[[ "$output" == *"no 'Deploy Verification' section"* ]]
 }
 
+@test "assert_issue_valid: the Deploy Verification diagnostic names platform.sh (#984 AC4)" {
+	# Naming the variable alone leaves the reader hunting for where it is set,
+	# so the diagnostic must point at the file that sets it.
+	export DEPLOY_VERIFY_CMD="deploy && verify"
+	run assert_issue_valid "$(valid_body)"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *".claude/config/platform.sh"* ]]
+}
+
 @test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + section present passes" {
 	unset DEPLOY_VERIFY_CMD
 	local body

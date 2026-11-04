@@ -973,11 +973,18 @@ assert_issue_valid() {
 	fi
 
 	# Criterion 5: Deploy Verification required when DEPLOY_VERIFY_CMD set.
-	# An unexpected section with DEPLOY_VERIFY_CMD unset is tolerated: the
-	# orchestrator simply skips the deploy-verify stage.
+	# Three shapes, one decision each (issue #984):
+	#   set   + section present -> valid; the deploy-verify stage will run
+	#   set   + section missing -> error; a configured deploy would go unverified
+	#   unset + section present -> tolerated; the orchestrator skips the stage,
+	#                              so the section is inert and a body written
+	#                              for a deployable repo stays portable to one
+	#                              that cannot deploy
+	# The diagnostic names the config file, not just the variable: a reader who
+	# sees only "DEPLOY_VERIFY_CMD" has to go looking for where it is set.
 	if [[ -n "${DEPLOY_VERIFY_CMD:-}" ]]; then
 		if ! grep -qE '^##+ Deploy Verification' <<< "$body"; then
-			errors+=("DEPLOY_VERIFY_CMD set but no 'Deploy Verification' section")
+			errors+=("DEPLOY_VERIFY_CMD set in .claude/config/platform.sh but no 'Deploy Verification' section")
 		fi
 	fi
 
