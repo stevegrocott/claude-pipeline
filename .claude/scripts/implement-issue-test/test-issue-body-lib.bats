@@ -713,6 +713,54 @@ Some prose but no task checkboxes.
 	[[ "$output" == *"'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset"* ]]
 }
 
+@test "assert_issue_valid: DEPLOY_VERIFY_CMD empty string + section present fails" {
+	# platform.sh defaults DEPLOY_VERIFY_CMD to "" (set-but-empty), which must
+	# behave like unset: a Deploy Verification section is rejected.
+	export DEPLOY_VERIFY_CMD=""
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(M)** Build — \`.claude/scripts/x.sh\`
+
+## Acceptance Criteria
+
+- [ ] done
+
+## Deploy Verification
+
+\`\`\`bash
+bats .claude/scripts/implement-issue-test/test-issue-body.bats
+\`\`\`"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset"* ]]
+}
+
+@test "assert_issue_valid: DEPLOY_VERIFY_CMD empty string + no section passes" {
+	export DEPLOY_VERIFY_CMD=""
+	run assert_issue_valid "$(valid_body)"
+	[ "$status" -eq 0 ]
+}
+
+@test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + ### Deploy Verification heading fails" {
+	unset DEPLOY_VERIFY_CMD
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(M)** Build — \`.claude/scripts/x.sh\`
+
+## Acceptance Criteria
+
+- [ ] done
+
+### Deploy Verification
+
+**Verification command:** curl -fsS https://example/health"
+	run assert_issue_valid "$body"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset"* ]]
+}
+
 @test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + no section passes" {
 	unset DEPLOY_VERIFY_CMD
 	run assert_issue_valid "$(valid_body)"
