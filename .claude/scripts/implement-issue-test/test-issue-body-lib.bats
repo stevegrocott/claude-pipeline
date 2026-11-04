@@ -694,7 +694,7 @@ Some prose but no task checkboxes.
 	[[ "$output" == *"no 'Deploy Verification' section"* ]]
 }
 
-@test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + section present fails" {
+@test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + section present passes" {
 	unset DEPLOY_VERIFY_CMD
 	local body
 	body="## Implementation Tasks
@@ -709,8 +709,8 @@ Some prose but no task checkboxes.
 
 **Verification command:** curl -fsS https://example/health"
 	run assert_issue_valid "$body"
-	[ "$status" -ne 0 ]
-	[[ "$output" == *"'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset"* ]]
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"Deploy Verification"* ]]
 }
 
 @test "assert_issue_valid: DEPLOY_VERIFY_CMD unset + no section passes" {

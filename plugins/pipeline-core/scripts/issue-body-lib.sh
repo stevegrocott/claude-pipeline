@@ -21,8 +21,8 @@
 #         3. every file path referenced in a task resolves (file exists or
 #            its parent directory exists)
 #         4. an "Acceptance Criteria" section is present (any heading depth)
-#         5. a "Deploy Verification" section exists if and only if (any heading depth)
-#            DEPLOY_VERIFY_CMD is set
+#         5. a "Deploy Verification" section exists (any heading depth) when
+#            DEPLOY_VERIFY_CMD is set (an extra section when unset is allowed)
 #         6. task granularity — no M/L task references more than two distinct
 #            file paths (decomposable tasks must be split into S sub-tasks)
 #         7. every open task references at least one file path (a task with
@@ -797,7 +797,8 @@ lint_task_lines() {
 #   2. every task agent resolves to a known agent (or "default")
 #   3. every referenced file path resolves (file exists or parent dir exists)
 #   4. an "Acceptance Criteria" section is present
-#   5. a "Deploy Verification" section iff DEPLOY_VERIFY_CMD is set
+#   5. a "Deploy Verification" section when DEPLOY_VERIFY_CMD is set (an
+#      unexpected section when unset is tolerated)
 #   6. task granularity — no M/L task references more than two distinct file
 #      paths (a decomposable task that should be split into S sub-tasks)
 #   7. every open task references at least one file path — a task whose
@@ -971,17 +972,13 @@ assert_issue_valid() {
 		errors+=("missing 'Acceptance Criteria' section")
 	fi
 
-	# Criterion 5: Deploy Verification iff DEPLOY_VERIFY_CMD set.
-	local has_deploy=false
-	if grep -qE '^##+ Deploy Verification' <<< "$body"; then
-		has_deploy=true
-	fi
+	# Criterion 5: Deploy Verification required when DEPLOY_VERIFY_CMD set.
+	# An unexpected section with DEPLOY_VERIFY_CMD unset is tolerated: the
+	# orchestrator simply skips the deploy-verify stage.
 	if [[ -n "${DEPLOY_VERIFY_CMD:-}" ]]; then
-		if [[ "$has_deploy" == false ]]; then
+		if ! grep -qE '^##+ Deploy Verification' <<< "$body"; then
 			errors+=("DEPLOY_VERIFY_CMD set but no 'Deploy Verification' section")
 		fi
-	elif [[ "$has_deploy" == true ]]; then
-		errors+=("'Deploy Verification' section present but DEPLOY_VERIFY_CMD unset")
 	fi
 
 	if ((${#errors[@]} > 0)); then
