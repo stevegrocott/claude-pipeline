@@ -2323,22 +2323,22 @@ _run_acceptance_for_route_file() {
 
 @test "acceptance route detection: nested src/routes/a.ts control is detected" {
 	_run_acceptance_for_route_file "src/routes/a.ts"
-	grep -q "^run_stage:acceptance_test" "$calls_file"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
 }
 
 @test "acceptance route detection: top-level routes/b.ts is detected" {
 	_run_acceptance_for_route_file "routes/b.ts"
-	grep -q "^run_stage:acceptance_test" "$calls_file"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
 }
 
 @test "acceptance route detection: nested src/routes/d.tsx (.tsx) is detected" {
 	_run_acceptance_for_route_file "src/routes/d.tsx"
-	grep -q "^run_stage:acceptance_test" "$calls_file"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
 }
 
 @test "acceptance route detection: top-level routes/e.tsx is detected" {
 	_run_acceptance_for_route_file "routes/e.tsx"
-	grep -q "^run_stage:acceptance_test" "$calls_file"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
 }
 
 # =============================================================================
