@@ -11569,19 +11569,48 @@ $e2e_verify_summary" "playwright-test-developer"
 	if $run_acceptance; then
 		acceptance_start=$(date +%s)
 		(
-			# Check if any changed files are API route files
+			# Check if any changed files are API route files. Patterns come
+			# from API_ROUTE_PATH_PATTERNS (space-separated pathspecs); an
+			# unset/empty value falls back to the default so it never means
+			# "match nothing". Globbing is off so the patterns reach git
+			# literally instead of expanding against the cwd.
+			local route_patterns_default
+			local route_patterns
+			local -a route_pathspec
 			local changed_route_files
+			local all_changed_files
+			route_patterns_default='routes/*.ts routes/*.tsx routes/*.js'
+			route_patterns_default+=' routes/*.mjs routes/*.cjs'
+			route_patterns_default+=' */routes/*.ts */routes/*.tsx'
+			route_patterns_default+=' */routes/*.js */routes/*.mjs'
+			route_patterns_default+=' */routes/*.cjs'
+			route_patterns="${API_ROUTE_PATH_PATTERNS:-$route_patterns_default}"
+			set -f
+			read -ra route_pathspec <<< "$route_patterns"
+			set +f
 			changed_route_files=$(git diff "$BASE_BRANCH"...HEAD \
 				--name-only \
-				-- '*/routes/*.ts' '*/routes/*.js' \
+				-- "${route_pathspec[@]}" \
 				2>/dev/null || true)
+			all_changed_files=$(git diff "$BASE_BRANCH"...HEAD \
+				--name-only 2>/dev/null || true)
 
 			if [[ -z "$changed_route_files" ]]; then
-				log "No API route files changed" \
-					"— skipping acceptance test"
-				comment_issue "Acceptance Test: Skipped" \
-					"⏭️ No API route files changed. Skipping endpoint verification." \
-					"default"
+				# Two distinct skip reasons: nothing changed at all, versus
+				# files changed but none matched the configured patterns
+				# (routes may exist that the patterns cannot see).
+				if [[ -z "$all_changed_files" ]]; then
+					log "No files changed — skipping acceptance test"
+					comment_issue "Acceptance Test: Skipped" \
+						"⏭️ No files changed. Skipping endpoint verification." \
+						"default"
+				else
+					log_warn "No changed file matched API_ROUTE_PATH_PATTERNS" \
+						"($route_patterns) — skipping acceptance test"
+					comment_issue "Acceptance Test: Skipped" \
+						"⏭️ Changed files did not match the API route patterns (\`$route_patterns\`). Skipping endpoint verification. If this change touches API routes, set \`API_ROUTE_PATH_PATTERNS\` in \`.claude/config/platform.sh\`." \
+						"default"
+				fi
 			elif ! command -v docker &>/dev/null \
 				&& ! command -v docker-compose &>/dev/null; then
 				log_warn \
