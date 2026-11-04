@@ -11570,37 +11570,41 @@ $e2e_verify_summary" "playwright-test-developer"
 		acceptance_start=$(date +%s)
 		(
 			# Check if any changed files are API route files. Patterns come
-			# from API_ROUTE_PATH_PATTERNS (space-separated pathspecs); an
-			# unset/empty value falls back to the default so it never means
-			# "match nothing". Globbing is off so the patterns reach git
-			# literally instead of expanding against the cwd.
+			# from API_ROUTE_PATH_PATTERNS (pipe-separated globs, as in
+			# platform.sh); an unset/empty value falls back to the default so
+			# it never means "match nothing". Each path is matched with a
+			# leading "/" so "*/routes/*" also covers a top-level routes/ dir.
 			local route_patterns_default
 			local route_patterns
-			local -a route_pathspec
-			local changed_route_files
+			local -a route_globs
+			local changed_route_files=""
 			local all_changed_files
-			route_patterns_default='routes/*.ts routes/*.tsx routes/*.js'
-			route_patterns_default+=' routes/*.mjs routes/*.cjs'
-			route_patterns_default+=' */routes/*.ts */routes/*.tsx'
-			route_patterns_default+=' */routes/*.js */routes/*.mjs'
-			route_patterns_default+=' */routes/*.cjs'
+			local changed_file route_glob
+			route_patterns_default='*/routes/*.ts|*/routes/*.tsx'
+			route_patterns_default+='|*/routes/*.js|*/routes/*.mjs'
+			route_patterns_default+='|*/routes/*.cjs'
 			route_patterns="${API_ROUTE_PATH_PATTERNS:-$route_patterns_default}"
-			set -f
-			read -ra route_pathspec <<< "$route_patterns"
-			set +f
-			changed_route_files=$(git diff "$BASE_BRANCH"...HEAD \
-				--name-only \
-				-- "${route_pathspec[@]}" \
-				2>/dev/null || true)
+			IFS='|' read -ra route_globs <<< "$route_patterns"
 			all_changed_files=$(git diff "$BASE_BRANCH"...HEAD \
 				--name-only 2>/dev/null || true)
+			while IFS= read -r changed_file; do
+				[[ -n "$changed_file" ]] || continue
+				for route_glob in "${route_globs[@]}"; do
+					# shellcheck disable=SC2053
+					if [[ "/$changed_file" == $route_glob ]]; then
+						changed_route_files+="${changed_route_files:+$'\n'}$changed_file"
+						break
+					fi
+				done
+			done <<< "$all_changed_files"
 
 			if [[ -z "$changed_route_files" ]]; then
 				# Two distinct skip reasons: nothing changed at all, versus
 				# files changed but none matched the configured patterns
 				# (routes may exist that the patterns cannot see).
 				if [[ -z "$all_changed_files" ]]; then
-					log "No files changed — skipping acceptance test"
+					log "No API route files changed (no files changed)" \
+						"— skipping acceptance test"
 					comment_issue "Acceptance Test: Skipped" \
 						"⏭️ No files changed. Skipping endpoint verification." \
 						"default"
