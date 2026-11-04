@@ -172,7 +172,10 @@ teardown() {
     [ "$scope" = "config" ]
 }
 
-@test "detect_change_scope returns 'typescript' for unknown code files (.py)" {
+# Retargeted in #965. This test asserted the defect: reporting a .py-only
+# diff as "typescript" is exactly what routed it to `npx jest`, which could
+# not start, whose startup failure was then counted a pre-existing failure.
+@test "detect_change_scope returns 'unknown-code' for unknown code files (.py)" {
     cd "$TEST_TMP/repo"
     git checkout -q -b feature-python
     echo "x = 1" > script.py
@@ -181,7 +184,7 @@ teardown() {
 
     local scope
     scope=$(detect_change_scope "." "main")
-    [ "$scope" = "typescript" ]
+    [ "$scope" = "unknown-code" ]
 }
 
 @test "detect_change_scope returns 'mixed' for ts + sh + config files" {
