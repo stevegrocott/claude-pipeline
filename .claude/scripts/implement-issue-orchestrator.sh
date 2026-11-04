@@ -10605,7 +10605,7 @@ For each modified implementation file that warrants testing, identify the corres
 4. Check for mock abuse patterns
 
 INTEGRATION TEST REQUIREMENT FOR API ROUTES (claude-pipeline#25):
-- If ANY changed file is an API route file (matches */routes/*.ts or */routes/*.js), there MUST be
+- If ANY changed file is an API route file (a file under a top-level or nested routes/ directory with a ts, tsx, js, mjs or cjs extension, e.g. routes/b.ts or src/routes/d.tsx, or any file matching API_ROUTE_PATH_PATTERNS), there MUST be
   an integration test that verifies the actual HTTP response shape (not just unit tests of service methods).
 - Unit tests that mock the service layer are NOT sufficient for route changes — the Fastify response schema
   can silently strip fields via fast-json-stringify, which unit tests cannot catch.
@@ -11211,6 +11211,14 @@ execution would be the repo's own CI after merge."
 #   $4 - max_task_size   (S|M|L)
 # =============================================================================
 
+# _default_api_route_patterns — the single definition of the default
+# API_ROUTE_PATH_PATTERNS (routes/ files with a ts/tsx/js/mjs/cjs extension).
+# platform.sh mirrors this value for consumers; keep the two in step.
+_default_api_route_patterns() {
+	printf '%s' '*/routes/*.ts|*/routes/*.tsx|*/routes/*.js'
+	printf '%s' '|*/routes/*.mjs|*/routes/*.cjs'
+}
+
 run_parallel_post_task_stages() {
 	local branch="$1"
 	local branch_scope="$2"
@@ -11569,19 +11577,49 @@ $e2e_verify_summary" "playwright-test-developer"
 	if $run_acceptance; then
 		acceptance_start=$(date +%s)
 		(
-			# Check if any changed files are API route files
-			local changed_route_files
-			changed_route_files=$(git diff "$BASE_BRANCH"...HEAD \
-				--name-only \
-				-- '*/routes/*.ts' '*/routes/*.js' \
-				2>/dev/null || true)
+			# Check if any changed files are API route files. Patterns come
+			# from API_ROUTE_PATH_PATTERNS (pipe-separated globs, as in
+			# platform.sh); an unset/empty value falls back to the default so
+			# it never means "match nothing". Each path is matched with a
+			# leading "/" so "*/routes/*" also covers a top-level routes/ dir;
+			# consumer patterns therefore need a leading "*/" (not "src/*").
+			local route_patterns
+			local -a route_globs
+			local changed_route_files=""
+			local all_changed_files
+			local changed_file route_glob
+			route_patterns="${API_ROUTE_PATH_PATTERNS:-$(_default_api_route_patterns)}"
+			IFS='|' read -ra route_globs <<< "$route_patterns"
+			all_changed_files=$(git diff "$BASE_BRANCH"...HEAD \
+				--name-only 2>/dev/null || true)
+			while IFS= read -r changed_file; do
+				[[ -n "$changed_file" ]] || continue
+				for route_glob in "${route_globs[@]}"; do
+					# shellcheck disable=SC2053
+					if [[ "/$changed_file" == $route_glob ]]; then
+						changed_route_files+="${changed_route_files:+$'\n'}$changed_file"
+						break
+					fi
+				done
+			done <<< "$all_changed_files"
 
 			if [[ -z "$changed_route_files" ]]; then
-				log "No API route files changed" \
-					"— skipping acceptance test"
-				comment_issue "Acceptance Test: Skipped" \
-					"⏭️ No API route files changed. Skipping endpoint verification." \
-					"default"
+				# Two distinct skip reasons: nothing changed at all, versus
+				# files changed but none matched the configured patterns
+				# (routes may exist that the patterns cannot see).
+				if [[ -z "$all_changed_files" ]]; then
+					log "No API route files changed (no files changed)" \
+						"— skipping acceptance test"
+					comment_issue "Acceptance Test: Skipped" \
+						"⏭️ No files changed. Skipping endpoint verification." \
+						"default"
+				else
+					log_warn "No changed file matched API_ROUTE_PATH_PATTERNS" \
+						"($route_patterns) — skipping acceptance test"
+					comment_issue "Acceptance Test: Skipped" \
+						"⏭️ Changed files did not match the API route patterns (\`$route_patterns\`). Skipping endpoint verification. If this change touches API routes, set \`API_ROUTE_PATH_PATTERNS\` in \`.claude/config/platform.sh\`." \
+						"default"
+				fi
 			elif ! command -v docker &>/dev/null \
 				&& ! command -v docker-compose &>/dev/null; then
 				log_warn \

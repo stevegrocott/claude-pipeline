@@ -98,7 +98,27 @@ setup() {
 }
 
 teardown() {
+	_restore_acceptance_env
 	teardown_test_env
+}
+
+# Undo the exports/stubs _run_acceptance_for_route_file installs so they
+# cannot leak into the next test (no-op when the helper never ran).
+_restore_acceptance_env() {
+	if [[ -n "${_ACC_ORIG_PATH+x}" ]]; then
+		export PATH="$_ACC_ORIG_PATH"
+		unset _ACC_ORIG_PATH
+	fi
+	if [[ -n "${_ACC_ORIG_PLATFORM_DIR+x}" ]]; then
+		export PLATFORM_DIR="$_ACC_ORIG_PLATFORM_DIR"
+		unset _ACC_ORIG_PLATFORM_DIR
+	elif [[ -n "${_ACC_HELPER_RAN:-}" ]]; then
+		unset PLATFORM_DIR
+	fi
+	unset -f set_stage_started set_stage_completed comment_issue \
+		run_stage log log_warn log_error is_stage_completed 2>/dev/null
+	unset API_ROUTE_PATH_PATTERNS _ACC_HELPER_RAN
+	return 0
 }
 
 # =============================================================================
@@ -2273,6 +2293,135 @@ _setup_parallel_stage_mocks() {
 
 	# run_stage must NOT have been called — no route files changed
 	! grep -q "^run_stage:" "$calls_file"
+}
+
+# Helper: commit $1 on a feature branch, run the real acceptance stage, and
+# leave the stage names run_stage was invoked for in $calls_file.
+_run_acceptance_for_route_file() {
+	local route_file="$1"
+	cd "$TEST_TMP/repo" || return 1
+
+	git checkout -q -b "feature/route-detect-$$-$RANDOM" main
+	mkdir -p "$(dirname "$route_file")"
+	printf 'export const handler = () => {}\n' > "$route_file"
+	git add "$route_file"
+	git commit -q -m "add route"
+
+	local stub_bin="$TEST_TMP/route-detect-stubs"
+	mkdir -p "$stub_bin"
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$stub_bin/docker"
+	printf '#!/usr/bin/env bash\nprintf %%s %s\n' \
+		"'{\"body\":\"## Acceptance Criteria\\n- ok\"}'" \
+		> "$stub_bin/read-issue.sh"
+	chmod +x "$stub_bin/docker" "$stub_bin/read-issue.sh"
+	_ACC_HELPER_RAN=1
+	_ACC_ORIG_PATH="$PATH"
+	if [[ -n "${PLATFORM_DIR+x}" ]]; then
+		_ACC_ORIG_PLATFORM_DIR="$PLATFORM_DIR"
+	fi
+	export PATH="$stub_bin:$PATH"
+	export PLATFORM_DIR="$stub_bin"
+
+	export TEST_E2E_CMD="npm run test:e2e"
+	export BASE_BRANCH=main
+	unset RESUME_MODE
+
+	calls_file="$TEST_TMP/route-detect-calls.txt"
+	msgs_file="$TEST_TMP/route-detect-msgs.txt"
+	: > "$calls_file"
+	: > "$msgs_file"
+	export calls_file msgs_file
+
+	is_stage_completed() { return 1; }
+	set_stage_started()  { :; }
+	set_stage_completed(){ :; }
+	comment_issue()      { printf 'comment:%s\n' "$*" >> "$msgs_file"; }
+	run_stage()          { printf 'run_stage:%s\n' "$1" >> "$calls_file";
+	                       printf '{"status":"success","result":"passed","summary":"ok"}'; }
+	log()                { :; }
+	log_warn()           { printf 'warn:%s\n' "$*" >> "$msgs_file"; }
+	log_error()          { :; }
+	export -f set_stage_started set_stage_completed comment_issue
+	export -f run_stage log log_warn log_error
+
+	mkdir -p "$LOG_BASE/stages"
+	run_parallel_post_task_stages "main" "backend" "" "S"
+}
+
+@test "acceptance route detection: nested src/routes/a.ts control is detected" {
+	_run_acceptance_for_route_file "src/routes/a.ts"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
+}
+
+@test "acceptance route detection: top-level routes/b.ts is detected" {
+	_run_acceptance_for_route_file "routes/b.ts"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
+}
+
+@test "acceptance route detection: nested src/routes/d.tsx (.tsx) is detected" {
+	_run_acceptance_for_route_file "src/routes/d.tsx"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
+}
+
+@test "acceptance route detection: top-level routes/e.tsx is detected" {
+	_run_acceptance_for_route_file "routes/e.tsx"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
+}
+
+@test "acceptance route detection: non-route file is skipped with pattern-mismatch message" {
+	_run_acceptance_for_route_file "src/util.ts"
+	if grep -q "^run_stage:acceptance-test" "$calls_file"; then
+		return 1
+	fi
+	grep -q "did not match the API route patterns" "$msgs_file"
+	grep -q "^warn:No changed file matched API_ROUTE_PATH_PATTERNS" \
+		"$msgs_file"
+}
+
+@test "acceptance route detection: non-script file under routes/ is skipped" {
+	_run_acceptance_for_route_file "routes/README.md"
+	if grep -q "^run_stage:acceptance-test" "$calls_file"; then
+		return 1
+	fi
+	grep -q "did not match the API route patterns" "$msgs_file"
+}
+
+@test "acceptance route detection: empty diff reports no files changed" {
+	_run_acceptance_for_route_file "routes/b.ts"
+	: > "$msgs_file"
+	: > "$calls_file"
+	# Branch now equals base: nothing differs
+	git checkout -q main
+	git checkout -q -b "feature/empty-diff-$$-$RANDOM"
+	run_parallel_post_task_stages "main" "backend" "" "S"
+	if grep -q "^run_stage:acceptance-test" "$calls_file"; then
+		return 1
+	fi
+	grep -q "No files changed" "$msgs_file"
+	if grep -q "did not match" "$msgs_file"; then
+		return 1
+	fi
+}
+
+@test "acceptance route detection: custom API_ROUTE_PATH_PATTERNS is honoured" {
+	export API_ROUTE_PATH_PATTERNS="*/handlers/*.go"
+	_run_acceptance_for_route_file "svc/handlers/user.go"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
+}
+
+@test "acceptance route detection: custom patterns replace the default" {
+	export API_ROUTE_PATH_PATTERNS="*/handlers/*.go"
+	_run_acceptance_for_route_file "src/routes/a.ts"
+	if grep -q "^run_stage:acceptance-test" "$calls_file"; then
+		return 1
+	fi
+	grep -q '\*/handlers/\*.go' "$msgs_file"
+}
+
+@test "acceptance route detection: empty API_ROUTE_PATH_PATTERNS uses the default" {
+	export API_ROUTE_PATH_PATTERNS=""
+	_run_acceptance_for_route_file "src/routes/a.ts"
+	grep -q "^run_stage:acceptance-test" "$calls_file"
 }
 
 # =============================================================================

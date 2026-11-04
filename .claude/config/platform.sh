@@ -115,6 +115,16 @@ FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"
 # e.g., "tests/e2e/*|e2e/*.spec.ts|cypress/e2e/*"
 TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
 
+# API route path patterns — pipe-separated globs used to recognise files that
+# define HTTP API routes/endpoints; a match runs the acceptance-test stage.
+# Each repo-relative path is matched with a leading "/" prepended, so patterns
+# need a leading "*/" (e.g. "*/routes/*", not "src/routes/*").  Empty or unset
+# falls back to this default (it never disables detection).
+# Default mirrors _default_api_route_patterns() in the orchestrator: routes/
+# files with a ts, tsx, js, mjs or cjs extension.
+# e.g., "*/app/api/*.ts|*/pages/api/*.ts|*/routes/*.ts"
+API_ROUTE_PATH_PATTERNS="${API_ROUTE_PATH_PATTERNS:-*/routes/*.ts|*/routes/*.tsx|*/routes/*.js|*/routes/*.mjs|*/routes/*.cjs}"
+
 # Test path patterns — pipe-separated globs used by _undeclared_test_edits()
 # to recognise test files.  An implement stage that modifies a PRE-EXISTING
 # file matching one of these, which the task never declared, is recorded in
