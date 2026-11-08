@@ -593,7 +593,7 @@ _full_suite_cause_lines() {
 _run_bounded_process_group() {
     local budget="$1" grace="$2" outfile="$3"
     shift 3
-    local pid rc=0 waited=0 monitor_was_off=0
+    local pid rc=0 deadline monitor_was_off=0
     [[ $- == *m* ]] || monitor_was_off=1
 
     # Job control makes the background job a process-group leader
@@ -605,9 +605,13 @@ _run_bounded_process_group() {
         set +m
     fi
 
-    while kill -0 "$pid" 2>/dev/null && (( waited < budget )); do
+    # Deadline-based, not a sleep counter: a counter undercounts whenever
+    # `sleep 1` takes longer than a second (loaded host, suspended laptop),
+    # so the budget would overrun wall-clock time. Measured from
+    # `date +%s` the same way check_wall_timeout does.
+    deadline=$(( $(date +%s) + budget ))
+    while kill -0 "$pid" 2>/dev/null && (( $(date +%s) < deadline )); do
         sleep 1
-        waited=$(( waited + 1 ))
     done
 
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -616,10 +620,9 @@ _run_bounded_process_group() {
     fi
 
     kill -TERM -- "-$pid" 2>/dev/null
-    waited=0
-    while kill -0 -- "-$pid" 2>/dev/null && (( waited < grace )); do
+    deadline=$(( $(date +%s) + grace ))
+    while kill -0 -- "-$pid" 2>/dev/null && (( $(date +%s) < deadline )); do
         sleep 1
-        waited=$(( waited + 1 ))
     done
     # Unconditional: a descendant that ignored TERM must not survive even
     # if the group leader itself already exited.
