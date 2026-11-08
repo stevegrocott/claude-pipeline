@@ -3102,6 +3102,72 @@ EOF
 }
 
 # =============================================================================
+# _run_bounded_process_group — DEADLINE IS WALL-CLOCK, NOT A SLEEP COUNT (#996)
+#
+# The budget used to be a count of completed `sleep 1` iterations, so any stall
+# that suspended the loop (laptop sleep, SIGSTOP, swap) stopped the budget
+# advancing while real time kept moving. These tests make `sleep` under-count
+# (each call burns ~0.05s instead of 1s) — the same effect as a suspended
+# loop — and assert the budget is still measured against the real clock.
+# =============================================================================
+
+@test "_run_bounded_process_group returns 124 only after the real budget elapsed when sleeps under-count (#996 AC3/AC5)" {
+	# RED against the iteration-counting implementation: 2 stubbed sleeps
+	# take ~0.1s, so the old loop declared the budget spent and killed the
+	# child almost immediately.
+	sleep() { command sleep 0.05; }
+
+	local out="$TEST_TMP/bounded-undercount.out"
+	local start_epoch end_epoch elapsed rc=0
+	start_epoch=$(date +%s)
+	_run_bounded_process_group 2 1 "$out" bash -c 'while :; do :; done' || rc=$?
+	end_epoch=$(date +%s)
+	elapsed=$(( end_epoch - start_epoch ))
+	unset -f sleep
+
+	[ "$rc" -eq 124 ] || fail "Expected 124 on overrun; got rc=$rc"
+	(( elapsed >= 2 )) || \
+		fail "Budget of 2s must be measured on the real clock; function returned after ${elapsed}s"
+	(( elapsed < 8 )) || \
+		fail "Budget of 2s was not enforced; took ${elapsed}s"
+}
+
+@test "_run_bounded_process_group TERM grace is wall-clock too when sleeps under-count (#996 AC2)" {
+	# The child ignores TERM, so only the post-grace KILL can end it. With
+	# budget 1 + grace 2 the real elapsed time must be >= 3s even though the
+	# stubbed sleeps account for only a fraction of that.
+	sleep() { command sleep 0.05; }
+
+	local out="$TEST_TMP/bounded-grace.out"
+	local start_epoch end_epoch elapsed rc=0
+	start_epoch=$(date +%s)
+	_run_bounded_process_group 1 2 "$out" \
+		bash -c 'trap "" TERM; while :; do :; done' || rc=$?
+	end_epoch=$(date +%s)
+	elapsed=$(( end_epoch - start_epoch ))
+	unset -f sleep
+
+	[ "$rc" -eq 124 ] || fail "Expected 124 on overrun; got rc=$rc"
+	(( elapsed >= 3 )) || \
+		fail "Grace of 2s after a 1s budget must be wall-clock; returned after ${elapsed}s"
+	(( elapsed < 10 )) || \
+		fail "Grace period was not enforced; took ${elapsed}s"
+}
+
+@test "_run_bounded_process_group returns the child's own exit code when it finishes within budget (#996 AC4)" {
+	local out="$TEST_TMP/bounded-rc.out"
+	local rc=0
+
+	_run_bounded_process_group 10 1 "$out" bash -c 'echo hello; exit 0' || rc=$?
+	[ "$rc" -eq 0 ] || fail "Expected child's exit 0; got rc=$rc"
+	[ "$(< "$out")" = "hello" ] || fail "Child output not captured in outfile"
+
+	rc=0
+	_run_bounded_process_group 10 1 "$out" bash -c 'exit 7' || rc=$?
+	[ "$rc" -eq 7 ] || fail "Expected child's exit 7 passed through unchanged; got rc=$rc"
+}
+
+# =============================================================================
 # BLOCKING BATS GATE — bash scope blocks merge on red suite (issue #535)
 #
 # .claude/scripts/ changes route to bash scope via detect_change_scope.
