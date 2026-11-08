@@ -292,3 +292,42 @@ _count_invocations() {
     [[ "$(command git -C "$TEST_TMP/repo4" rev-parse --abbrev-ref HEAD)" == "feature/issue-6041" ]] \
         || fail "HEAD is not on the new branch"
 }
+
+# ---------------------------------------------------------------------------
+# Issue #997: the denied-commit revert in guard_commit_path_allowlist must not
+# discard uncommitted tracked-file edits. `reset --hard` destroyed them (no
+# reflog entry for the content); `reset --keep` moves the branch but aborts
+# rather than discarding local modifications.
+# ---------------------------------------------------------------------------
+
+_make_denied_commit_repo() {
+    cd "$TEST_TMP"
+    git init -q "$1" && cd "$1"
+    git config user.email t@t && git config user.name t
+    echo base > tracked.txt && git add tracked.txt && git commit -qm init
+    PRIOR_SHA="$(command git rev-parse HEAD)"
+    mkdir -p .github/workflows
+    echo "on: push" > .github/workflows/ci.yml
+    git add .github/workflows/ci.yml && git commit -qm "denied: touches workflows"
+}
+
+@test "#997: clean tree — denied commit at HEAD is reverted to HEAD^ and guard returns 1" {
+    _make_denied_commit_repo repo997clean
+
+    run guard_commit_path_allowlist "$PWD" HEAD
+    [[ "$status" -eq 1 ]] || fail "guard should return 1 for a denied commit: $output"
+    [[ "$(command git rev-parse HEAD)" == "$PRIOR_SHA" ]] \
+        || fail "branch was not moved back to the commit before the denied one"
+    [[ ! -e .github/workflows/ci.yml ]] \
+        || fail "denied path still present after revert"
+}
+
+@test "#997: dirty tree — uncommitted tracked-file edit survives the revert" {
+    _make_denied_commit_repo repo997dirty
+    echo "uncommitted work" > tracked.txt
+
+    run guard_commit_path_allowlist "$PWD" HEAD
+    [[ "$status" -eq 1 ]] || fail "guard should still return 1: $output"
+    [[ "$(cat tracked.txt)" == "uncommitted work" ]] \
+        || fail "uncommitted edit to a tracked file was destroyed by the revert"
+}

@@ -8247,7 +8247,9 @@ guard_commit_path_allowlist() {
 		if [[ "$ref" == "HEAD" ]] \
 			&& git -C "$git_dir" rev-parse --verify -q \
 				"HEAD^" >/dev/null 2>&1; then
-			if git -C "$git_dir" reset --hard "HEAD^" >/dev/null 2>&1; then
+			# --keep (not --hard): aborts rather than discarding
+			# uncommitted local changes that would be overwritten.
+			if git -C "$git_dir" reset --keep "HEAD^" >/dev/null 2>&1; then
 				log_warn "Reverted denied commit: branch reset to prior commit"
 			else
 				log_error "Failed to reset branch after denied commit"
