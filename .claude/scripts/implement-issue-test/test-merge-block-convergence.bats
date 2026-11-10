@@ -880,6 +880,9 @@ run_gate_a() {
 		"validation_fix:max_iterations:iter=4" \
 		"test:commit_guard:iter=2"; do
 		DEGRADED_STAGES=("$marker")
+		# Gate A persists the first reason (first-write-wins); clear it so each
+		# marker is evaluated fresh rather than reading the prior iteration's.
+		jq 'del(.merge_blocked_reason)' "$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
 		run run_gate_a
 		[ "$status" -eq 0 ]
 		# Non-empty kind, and the reason names the exact marker.
