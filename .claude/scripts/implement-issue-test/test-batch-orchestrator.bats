@@ -6304,6 +6304,7 @@ _run_state_dispatch() {
 		issue_num=1017
 		runner() {
 			local impl_status="error" pr_number="" impl_error="" state
+			local allow_pr_recovery=true
 			state=$(jq -r '.state' "$issue_status_file")
 			# shellcheck disable=SC1090
 			source "$block"

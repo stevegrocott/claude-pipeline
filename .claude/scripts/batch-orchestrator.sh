@@ -1908,6 +1908,9 @@ process_issue() {
             *)
                 impl_status="error"
                 impl_error="Unknown state: $state"
+                # Fail closed: an unrecognised state is no evidence the
+                # work landed, so a stray PR number must not flip it.
+                allow_pr_recovery=false
                 ;;
         esac
 
