@@ -468,21 +468,56 @@ process_pr_dispatch_blocks() {
 	[ "$with_flag" -eq "$total" ]
 }
 
+# Source process_pr_allowed_tools and print its real output.
+allowed_tools_output() {
+	local func_file="$TEST_TMP/process_pr_allowed_tools.bash"
+	_extract_function_body process_pr_allowed_tools \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	# shellcheck disable=SC1090
+	source "$func_file"
+	process_pr_allowed_tools
+}
+
 @test "(e) allow-list uses version-agnostic plugin-cache platform pattern" {
-	# The cache folder name changes every release, so the pattern must
-	# wildcard the version segment rather than pin it.
-	grep -qF 'pipeline-core/*/scripts/platform/' "$BATCH_ORCHESTRATOR_SCRIPT"
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(*/pipeline-core/*/scripts/platform/*)'* ]]
 }
 
 @test "(e) allow-list does not pin a plugin version directory" {
-	run grep -E 'pipeline-core/[0-9]+\.[0-9]+' "$BATCH_ORCHESTRATOR_SCRIPT"
-	[ "$status" -eq 1 ]
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ ! "$out" =~ pipeline-core/[0-9]+\.[0-9]+ ]]
 }
 
 @test "(e) allow-list permits gh, platform-dir resolver, and jq" {
-	grep -qF 'Bash(gh *)' "$BATCH_ORCHESTRATOR_SCRIPT"
-	grep -qF 'Bash(pipeline-core-platform-dir' "$BATCH_ORCHESTRATOR_SCRIPT"
-	grep -qF 'Bash(jq *)' "$BATCH_ORCHESTRATOR_SCRIPT"
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(gh *)'* ]]
+	[[ "$out" == *'Bash(pipeline-core-platform-dir*)'* ]]
+	[[ "$out" == *'Bash(jq *)'* ]]
+}
+
+@test "(e) allow-list permits follow-up issue creation commands" {
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(pipeline-core-create-followup-issue*)'* ]]
+	[[ "$out" == *'Bash(*/pipeline-core/*/scripts/create-followup-issue.sh*)'* ]]
+	[[ "$out" == *'Bash(.claude/scripts/create-followup-issue.sh*)'* ]]
+}
+
+@test "(e) allow-list includes PLATFORM_DIR entry when set" {
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(/x/platform/*)'* ]]
+}
+
+@test "(e) allow-list omits Bash(/*) when PLATFORM_DIR is empty" {
+	local out
+	out=$(PLATFORM_DIR= allowed_tools_output)
+	[[ "$out" != *'Bash(/*)'* ]]
+	out=$(unset PLATFORM_DIR; allowed_tools_output)
+	[[ "$out" != *'Bash(/*)'* ]]
 }
 
 @test "(e) process-pr stays off --dangerously-skip-permissions" {

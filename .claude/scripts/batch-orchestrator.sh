@@ -1007,14 +1007,21 @@ dispatch_composition() {
 process_pr_allowed_tools() {
 	local -a tools=(
 		'Bash(gh *)'
-		"Bash($PLATFORM_DIR/*)"
 		'Bash(*/pipeline-core/*/scripts/platform/*)'
 		'Bash(pipeline-core-platform-dir*)'
+		'Bash(pipeline-core-create-followup-issue*)'
+		'Bash(*/pipeline-core/*/scripts/create-followup-issue.sh*)'
+		'Bash(.claude/scripts/create-followup-issue.sh*)'
 		'Bash(jq *)'
 		'Read'
 		'Grep'
 		'Glob'
 	)
+	# Guard: an empty PLATFORM_DIR would yield Bash(/*), allowing any
+	# absolute-path command.
+	if [[ -n "${PLATFORM_DIR:-}" ]]; then
+		tools+=("Bash($PLATFORM_DIR/*)")
+	fi
 	local IFS=,
 	printf '%s' "${tools[*]}"
 }

@@ -6244,3 +6244,9 @@ source_warn_permission_denials() {
 	[[ ! -s "$TEST_TMP/log.out" ]] \
 		|| fail "WARN logged without denials: $(cat "$TEST_TMP/log.out")"
 }
+
+@test "AC3(#1020): process_issue wires warn_permission_denials to process-pr result" {
+	local body
+	body=$(_extract_function_body process_issue "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" =~ (^|$'\n')[[:space:]]*warn_permission_denials[[:space:]]+\"\$proc_last_json\"[[:space:]]+\"process-pr\"[[:space:]]+\"\$issue_num\" ]]
+}
