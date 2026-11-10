@@ -266,3 +266,108 @@ teardown() {
 		return 1
 	}
 }
+
+# =============================================================================
+# Issue #1006: the batch's wait-for-merge park must not start for a PR held
+# open BY CONFIGURATION (merge_block_kind == "manual"), but must still start
+# for the incidental kinds (convergence | partial | e2e) — the #861 protection.
+#
+# These drive the real wait_for_pr_merged() extracted out of
+# batch-orchestrator.sh. merge_block_kind is seeded where the inner
+# orchestrator persists it — the per-issue status file the batch already reads
+# for .pr — rather than re-derived from log text.
+# =============================================================================
+
+_load_park_functions() {
+	local script="$BATS_TEST_DIRNAME/../.claude/scripts/batch-orchestrator.sh" fn body
+	for fn in set_state set_paused_on_pr comment_paused_on_pr \
+		pr_merge_state wait_for_pr_merged; do
+		body=$(_extract_function_body "$fn" "$script")
+		[[ -n "$body" ]] || fail "$fn() not defined in batch-orchestrator.sh"
+		eval "$body"
+	done
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	log_error() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	timeout() { shift; "$@"; }
+	# Count sleeps through a file: wait_for_pr_merged runs under `run` (a
+	# subshell), so a counter variable would not survive.
+	sleep() { printf 'x\n' >> "$TEST_TMP/sleeps.log"; }
+	: > "$TEST_TMP/batch.log"
+	: > "$TEST_TMP/sleeps.log"
+}
+
+# Seeds batch status.json (issue 1006 carrying PR 4321) and the per-issue
+# status file with the given merge_block_kind; the PR stays OPEN forever.
+_seed_blocked_issue() {
+	local kind="$1"
+	jq -n '{state: "running",
+		issues: [{number: "1006", status: "merge_blocked", pr: "4321"}],
+		progress: {total: 1, completed: 0, pending: 0, failed: 0}}' \
+		> "$STATUS_FILE"
+	jq -n --arg kind "$kind" '{state: "merge_blocked", merge_block_kind: $kind,
+		stages: {pr: {pr_number: "4321"}}}' \
+		> "$LOG_BASE/issue-1006-status.json"
+
+	mkdir -p "$TEST_TMP/bin" "$TEST_TMP/platform"
+	cat > "$TEST_TMP/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo OPEN
+STUB
+	chmod +x "$TEST_TMP/bin/gh"
+	PATH="$TEST_TMP/bin:$PATH"
+	export PLATFORM_DIR="$TEST_TMP/platform"
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$PLATFORM_DIR/comment-issue.sh"
+	chmod +x "$PLATFORM_DIR/comment-issue.sh"
+
+	export BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+}
+
+@test "#1006 AC1: a manual hold starts no wait-for-merge poll and never pauses the batch" {
+	_load_park_functions
+	_seed_blocked_issue manual
+
+	run wait_for_pr_merged 1006
+
+	local sleeps
+	sleeps=$(grep -c . "$TEST_TMP/sleeps.log" || true)
+	[[ "$sleeps" -eq 0 ]] \
+		|| fail "manual hold polled $sleeps time(s) — the park must not start"
+	if grep -q 'pausing the batch' "$TEST_TMP/batch.log"; then
+		fail "manual hold logged the park start: $(cat "$TEST_TMP/batch.log")"
+	fi
+	[[ "$(jq -r .state "$STATUS_FILE")" != "paused_on_pr" ]] \
+		|| fail "manual hold set state paused_on_pr"
+}
+
+@test "#1006 AC3: an incidental block (convergence) still parks and polls" {
+	_load_park_functions
+	_seed_blocked_issue convergence
+
+	run wait_for_pr_merged 1006
+
+	# PR never merges, so the park runs to its ceiling and reports timeout.
+	[[ "$status" -eq 1 ]] \
+		|| fail "convergence block did not run the park to timeout (rc=$status)"
+	local sleeps
+	sleeps=$(grep -c . "$TEST_TMP/sleeps.log" || true)
+	[[ "$sleeps" -gt 0 ]] || fail "convergence block never polled"
+	grep -q 'pausing the batch' "$TEST_TMP/batch.log" \
+		|| fail "convergence block did not log the park start"
+	[[ "$(jq -r .state "$STATUS_FILE")" == "paused_on_pr" ]] \
+		|| fail "convergence block did not set state paused_on_pr"
+}
+
+@test "#1006 AC3: partial and e2e blocks also still park exactly as before" {
+	local kind
+	for kind in partial e2e; do
+		_load_park_functions
+		_seed_blocked_issue "$kind"
+
+		run wait_for_pr_merged 1006
+		[[ "$status" -eq 1 ]] \
+			|| fail "$kind block did not run the park to timeout (rc=$status)"
+		grep -q 'pausing the batch' "$TEST_TMP/batch.log" \
+			|| fail "$kind block did not start the park"
+	done
+}
