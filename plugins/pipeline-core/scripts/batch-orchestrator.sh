@@ -1008,6 +1008,8 @@ process_pr_allowed_tools() {
 	local -a tools=(
 		'Bash(gh *)'
 		"Bash($PLATFORM_DIR/*)"
+		'Bash(*/pipeline-core/*/scripts/platform/*)'
+		'Bash(pipeline-core-platform-dir*)'
 		'Bash(jq *)'
 		'Read'
 		'Grep'
