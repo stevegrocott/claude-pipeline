@@ -338,6 +338,16 @@ if is_stage_completed fast_path_pr; then
 else
     set_stage_in_progress fast_path_pr
 
+    # Run the consumer's formatter before staging so formatting changes are
+    # included in the commit. Run via `bash -c` (not eval), like TEST_UNIT_CMD.
+    # A formatter failure is non-fatal: the pre-commit hook remains the gate.
+    if [[ -n "${FORMAT_CMD:-}" ]]; then
+        log "Running FORMAT_CMD before commit"
+        if ! bash -c "$FORMAT_CMD" >>"$LOG_FILE" 2>&1; then
+            log "WARNING: FORMAT_CMD failed — committing unformatted changes"
+        fi
+    fi
+
     if [[ ${#_changed_paths[@]} -gt 0 ]]; then
         git add -- "${_changed_paths[@]}" 2>>"$LOG_FILE"
     elif [[ "$_impl_resume" == "true" ]]; then
