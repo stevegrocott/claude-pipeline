@@ -14216,7 +14216,8 @@ Only the files listed above should be staged and committed."
     # in repos that do not own the generator.
     # -------------------------------------------------------------------------
     # Format first: formatter edits must exist before the bundle is regenerated
-    # and before the PR stage pushes (issue #1019).    run_format_cmd_if_needed "."
+    # and before the PR stage pushes (issue #1019).
+    run_format_cmd_if_needed "."
     regenerate_bundle_if_needed "." "$BASE_BRANCH"
 
     # -------------------------------------------------------------------------

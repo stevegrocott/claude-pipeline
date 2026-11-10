@@ -1641,3 +1641,37 @@ _init_pipeline_git_repo() {
 		return 1
 	}
 }
+
+# =============================================================================
+# run_format_cmd_if_needed (#1019)
+# =============================================================================
+
+@test "(#1019) run_format_cmd_if_needed commits formatter edits" {
+	local fn_file="$TEST_SCRATCH/fmt-fn.bash"
+
+	_init_pipeline_git_repo
+	_extract_orchestrator_fn run_format_cmd_if_needed "$fn_file" || return 1
+
+	run bash -c '
+		log() { :; }
+		log_warn() { :; }
+		FORMAT_CMD="echo formatted >> .claude/scripts/implement-issue-orchestrator.sh"
+		# shellcheck disable=SC1090
+		. "$1"
+		run_format_cmd_if_needed "$2"
+	' _ "$fn_file" "$TEST_TMP"
+	[[ "$status" -eq 0 ]]
+	[[ "$(git -C "$TEST_TMP" log -1 --format=%s)" == "style: format" ]]
+}
+
+@test "(#1019) run_format_cmd_if_needed is a real call before bundle regen" {
+	local fmt_line regen_line
+
+	fmt_line=$(grep -n '^[[:space:]]*run_format_cmd_if_needed "' \
+		"$ORCHESTRATOR" | head -1 | cut -d: -f1)
+	regen_line=$(grep -n '^[[:space:]]*regenerate_bundle_if_needed "' \
+		"$ORCHESTRATOR" | head -1 | cut -d: -f1)
+	[[ -n "$fmt_line" ]]
+	[[ -n "$regen_line" ]]
+	((fmt_line < regen_line))
+}
