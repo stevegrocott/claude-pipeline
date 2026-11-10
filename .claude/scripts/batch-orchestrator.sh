@@ -444,6 +444,22 @@ log_warn() {
     printf '%s\n' "$msg" >&2
 }
 
+# Log a WARN naming each tool denied in a claude result's permission_denials.
+# Usage: warn_permission_denials <result_json> <stage> <issue_num>
+warn_permission_denials() {
+    local result_json="$1"
+    local stage="$2"
+    local issue_num="$3"
+    local denials
+
+    denials=$(printf '%s' "$result_json" | jq -r '
+        (.permission_denials // [])
+        | map(.tool_name // "unknown") | join(", ")' 2>/dev/null) || denials=""
+    if [[ -n "$denials" ]]; then
+        log_warn "Issue #$issue_num: $stage had permission_denials: $denials"
+    fi
+}
+
 # =============================================================================
 # STRUCTURED EVENT EMISSION
 # =============================================================================
@@ -2176,6 +2192,8 @@ process_issue() {
     proc_error=$(printf '%s' "$proc_last_json" | jq -r '.structured_output.error // empty' 2>/dev/null)
 
     log "process-pr status: $proc_status"
+
+    warn_permission_denials "$proc_last_json" "process-pr" "$issue_num"
 
     case "$proc_status" in
         approved)

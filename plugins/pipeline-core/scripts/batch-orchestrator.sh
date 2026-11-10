@@ -444,6 +444,22 @@ log_warn() {
     printf '%s\n' "$msg" >&2
 }
 
+# Log a WARN naming each tool denied in a claude result's permission_denials.
+# Usage: warn_permission_denials <result_json> <stage> <issue_num>
+warn_permission_denials() {
+    local result_json="$1"
+    local stage="$2"
+    local issue_num="$3"
+    local denials
+
+    denials=$(printf '%s' "$result_json" | jq -r '
+        (.permission_denials // [])
+        | map(.tool_name // "unknown") | join(", ")' 2>/dev/null) || denials=""
+    if [[ -n "$denials" ]]; then
+        log_warn "Issue #$issue_num: $stage had permission_denials: $denials"
+    fi
+}
+
 # =============================================================================
 # STRUCTURED EVENT EMISSION
 # =============================================================================
@@ -981,6 +997,24 @@ dispatch_composition() {
 			run_composition_standard "$prompt" "${extra_args[@]+"${extra_args[@]}"}"
 			;;
 	esac
+}
+
+# process_pr_allowed_tools — print the --allowedTools value for process-pr.
+#
+# process-pr runs non-interactively; without an explicit allowlist, gh, the
+# platform scripts, and jq calls are blocked by the permission system.
+# Prints a single comma-separated string (stdout only, no logging).
+process_pr_allowed_tools() {
+	local -a tools=(
+		'Bash(gh *)'
+		"Bash($PLATFORM_DIR/*)"
+		'Bash(jq *)'
+		'Read'
+		'Grep'
+		'Glob'
+	)
+	local IFS=,
+	printf '%s' "${tools[*]}"
 }
 
 # context_mode_claude_args — print the claude(1) MCP flags for this arm.
@@ -2081,6 +2115,7 @@ process_issue() {
     printf '%s\n' "=== process-pr output ===" >> "$issue_log"
     dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
         --agent code-reviewer \
+        --allowedTools "$(process_pr_allowed_tools)" \
         --output-format json \
         --json-schema "$PROCESS_SCHEMA" \
         | tee -a "$issue_log"
@@ -2118,6 +2153,7 @@ process_issue() {
         printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
         dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
             --agent code-reviewer \
+            --allowedTools "$(process_pr_allowed_tools)" \
             --output-format json \
             --json-schema "$PROCESS_SCHEMA" \
             | tee -a "$issue_log"
@@ -2156,6 +2192,8 @@ process_issue() {
     proc_error=$(printf '%s' "$proc_last_json" | jq -r '.structured_output.error // empty' 2>/dev/null)
 
     log "process-pr status: $proc_status"
+
+    warn_permission_denials "$proc_last_json" "process-pr" "$issue_num"
 
     case "$proc_status" in
         approved)
