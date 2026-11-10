@@ -434,3 +434,114 @@ require_context_mode_args() {
 	count=$(grep -c "context_mode_claude_args" "$BATCH_ORCHESTRATOR_SCRIPT")
 	[ "$count" -ge 3 ]
 }
+
+# =============================================================================
+# (e) PROCESS-PR DISPATCH CARRIES --allowedTools (issue #1020)
+# =============================================================================
+#
+# run_composition_standard() omits --dangerously-skip-permissions, so in -p
+# mode process-pr only gets what is passed explicitly.  Without --allowedTools
+# gh and the plugin-cache platform scripts are denied in consumer repos.
+
+# Print every process-pr dispatch_composition invocation (the call line plus
+# its continuation lines, up to the closing tee) from batch-orchestrator.sh.
+process_pr_dispatch_blocks() {
+	awk '
+		/dispatch_composition "\/process-pr/ { inblk = 1 }
+		inblk { print }
+		inblk && /tee -a/ { inblk = 0; print "----" }
+	' "$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "(e) process-pr dispatch blocks are found (initial and resume)" {
+	local count
+	count=$(process_pr_dispatch_blocks | grep -c '^----$')
+	[ "$count" -eq 2 ]
+}
+
+@test "(e) every process-pr dispatch passes --allowedTools" {
+	local blocks total with_flag
+	blocks=$(process_pr_dispatch_blocks)
+	total=$(grep -c '^----$' <<< "$blocks")
+	with_flag=$(grep -c -- '--allowedTools' <<< "$blocks")
+	[ "$total" -eq 2 ]
+	[ "$with_flag" -eq "$total" ]
+}
+
+# Source process_pr_allowed_tools and print its real output.
+allowed_tools_output() {
+	local func_file="$TEST_TMP/process_pr_allowed_tools.bash"
+	_extract_function_body process_pr_allowed_tools \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	# shellcheck disable=SC1090
+	source "$func_file"
+	process_pr_allowed_tools
+}
+
+@test "(e) allow-list uses version-agnostic plugin-cache platform pattern" {
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(*/pipeline-core/*/scripts/platform/*)'* ]]
+}
+
+@test "(e) allow-list does not pin a plugin version directory" {
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ ! "$out" =~ pipeline-core/[0-9]+\.[0-9]+ ]]
+}
+
+@test "(e) allow-list permits gh, platform-dir resolver, and jq" {
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(gh *)'* ]]
+	[[ "$out" == *'Bash(pipeline-core-platform-dir*)'* ]]
+	[[ "$out" == *'Bash(jq *)'* ]]
+}
+
+@test "(e) allow-list permits follow-up issue creation commands" {
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(pipeline-core-create-followup-issue*)'* ]]
+	[[ "$out" == *'Bash(*/pipeline-core/*/scripts/create-followup-issue.sh*)'* ]]
+	[[ "$out" == *'Bash(.claude/scripts/create-followup-issue.sh*)'* ]]
+}
+
+@test "(e) allow-list includes PLATFORM_DIR entry when set" {
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(/x/platform/*)'* ]]
+}
+
+@test "(e) allow-list omits Bash(/*) when PLATFORM_DIR is empty" {
+	local out
+	out=$(PLATFORM_DIR= allowed_tools_output)
+	[[ "$out" != *'Bash(/*)'* ]]
+	out=$(unset PLATFORM_DIR; allowed_tools_output)
+	[[ "$out" != *'Bash(/*)'* ]]
+}
+
+@test "(e) process-pr stays off --dangerously-skip-permissions" {
+	local blocks
+	blocks=$(process_pr_dispatch_blocks)
+	[[ "$blocks" != *"--dangerously-skip-permissions"* ]]
+}
+
+@test "(e) standard path forwards extra --allowedTools args to claude" {
+	# Behavioural: run_composition_standard must pass "$@" through intact.
+	unset -f run_composition_standard
+	source_batch_dispatch_composition
+	context_mode_claude_args() { return 0; }
+	log() { :; }
+	ISSUE_TIMEOUT=5
+	local argv_file="$TEST_TMP/claude_argv"
+	mkdir -p "$TEST_TMP/bin"
+	cat > "$TEST_TMP/bin/claude" <<MOCK
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$argv_file"
+MOCK
+	chmod +x "$TEST_TMP/bin/claude"
+	PATH="$TEST_TMP/bin:$PATH" run_composition_standard "/process-pr 1 2 main" \
+		--allowedTools "Bash(gh *)" >/dev/null
+	grep -qxF -- '--allowedTools' "$argv_file"
+	grep -qxF 'Bash(gh *)' "$argv_file"
+}

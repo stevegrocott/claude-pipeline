@@ -6185,3 +6185,68 @@ FAKE_ORCH
 	[ "$output" == "pending" ] \
 		|| fail "issue #804 (the 4th) reported status='$output', expected 'pending' — it must never have been attempted"
 }
+
+# =============================================================================
+# #1020: process-pr result with permission_denials produces a WARN
+# =============================================================================
+
+source_warn_permission_denials() {
+	local func_file="$TEST_TMP/warn_permission_denials.bash"
+	_extract_function_body warn_permission_denials \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	grep -q 'warn_permission_denials' "$func_file" 2>/dev/null \
+		|| return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+@test "AC3(#1020): a result with permission_denials logs a WARN naming each tool" {
+	source_warn_permission_denials \
+		|| skip "warn_permission_denials() not yet present"
+	_capture_log
+
+	local result_json
+	result_json='{"result":"blocked","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"gh pr view 175 --comments"}},{"tool_name":"Read"}]}'
+
+	warn_permission_denials "$result_json" "process-pr" 174
+
+	grep -q 'WARN' "$TEST_TMP/log.out" \
+		|| fail "no WARN logged for a result with permission_denials"
+	grep -q 'process-pr' "$TEST_TMP/log.out" \
+		|| fail "the WARN does not name the stage"
+	grep -q 'Bash' "$TEST_TMP/log.out" \
+		|| fail "the WARN does not name the denied Bash tool"
+	grep -q 'Read' "$TEST_TMP/log.out" \
+		|| fail "the WARN does not name the denied Read tool"
+}
+
+@test "AC3(#1020): a result with empty permission_denials logs no WARN" {
+	source_warn_permission_denials \
+		|| skip "warn_permission_denials() not yet present"
+	_capture_log
+
+	warn_permission_denials \
+		'{"result":"ok","permission_denials":[]}' "process-pr" 174
+
+	[[ ! -s "$TEST_TMP/log.out" ]] \
+		|| fail "WARN logged without denials: $(cat "$TEST_TMP/log.out")"
+}
+
+@test "AC3(#1020): a result without permission_denials, or non-JSON, logs no WARN" {
+	source_warn_permission_denials \
+		|| skip "warn_permission_denials() not yet present"
+	_capture_log
+
+	warn_permission_denials '{"result":"ok"}' "process-pr" 174
+	warn_permission_denials 'not json at all' "process-pr" 174
+	warn_permission_denials '' "process-pr" 174
+
+	[[ ! -s "$TEST_TMP/log.out" ]] \
+		|| fail "WARN logged without denials: $(cat "$TEST_TMP/log.out")"
+}
+
+@test "AC3(#1020): process_issue wires warn_permission_denials to process-pr result" {
+	local body
+	body=$(_extract_function_body process_issue "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" =~ (^|$'\n')[[:space:]]*warn_permission_denials[[:space:]]+\"\$proc_last_json\"[[:space:]]+\"process-pr\"[[:space:]]+\"\$issue_num\" ]]
+}
