@@ -670,6 +670,36 @@ STUB
     grep -q "WARNING.*FORMAT_CMD" "$LOG_FILE"
 }
 
+@test "15d fast-path does not widen staging with 'git add -u' when FORMAT_CMD is unset" {
+    install_format_stub 0
+    unset FORMAT_CMD
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    [[ ! -f "$TEST_TMP/fmt-stub-ran" ]]
+    # No formatter ran, so nothing can have touched files outside the implement
+    # scope — the blanket `git add -u` must not run. Issue #1019 AC2: with
+    # FORMAT_CMD unset, behaviour is unchanged for every consumer.
+    run grep -qx -- '-u' "$TEST_TMP/git-add-args"
+    [ "$status" -ne 0 ]
+}
+
+@test "15e fast-path stages formatter edits outside the implement scope when FORMAT_CMD is set" {
+    install_format_stub 0
+    export FORMAT_CMD="$TEST_TMP/bin/fmt-stub"
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    [[ -f "$TEST_TMP/fmt-stub-ran" ]]
+    # The formatter may have reformatted tracked files the implement step never
+    # named, so those must still be staged when FORMAT_CMD is in play.
+    grep -qx -- '-u' "$TEST_TMP/git-add-args"
+}
+
 @test "16 fast-path bails on genuinely terminal merge states → no merge attempted" {
     # DIRTY, BLOCKED and BEHIND are genuinely terminal — no amount of
     # waiting resolves a real conflict, so the fast-path must bail

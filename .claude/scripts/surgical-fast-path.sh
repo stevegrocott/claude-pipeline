@@ -350,9 +350,13 @@ else
 
     if [[ ${#_changed_paths[@]} -gt 0 ]]; then
         git add -- "${_changed_paths[@]}" 2>>"$LOG_FILE"
-        # Also stage tracked files the formatter modified outside the
-        # implement scope, matching the orchestrator path (issue #1019).
-        git add -u 2>>"$LOG_FILE"
+        # Only a formatter run can have touched tracked files outside the
+        # implement scope, so scope the blanket stage to that case. With
+        # FORMAT_CMD unset, staging stays exactly as it was before issue
+        # #1019 — a consumer that configured no formatter sees no change.
+        if [[ -n "${FORMAT_CMD:-}" ]]; then
+            git add -u 2>>"$LOG_FILE"
+        fi
     elif [[ "$_impl_resume" == "true" ]]; then
         # Resume: implement ran in a prior invocation; stage current state.
         git add -A 2>>"$LOG_FILE"
