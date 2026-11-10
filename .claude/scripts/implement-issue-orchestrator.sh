@@ -4782,7 +4782,7 @@ Repeating issues:
                 log_warn "Quality loop oscillation detected: issues cycling A→B→A. Exiting loop."
                 comment_issue "Quality Loop: Oscillation Detected ($stage_prefix)" "⚠️ Quality loop oscillation detected: fix suggestions are cycling (A→B→A pattern). Breaking loop to prevent waste." "code-reviewer"
                 DEGRADED_STAGES+=("quality:oscillation:$stage_prefix:iter=$loop_iteration")
-                loop_approved=true
+                # Do not report approval: the cycling feedback was never resolved.
                 break
             fi
         fi
