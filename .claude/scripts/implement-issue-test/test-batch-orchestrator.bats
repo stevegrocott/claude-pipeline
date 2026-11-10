@@ -6250,3 +6250,158 @@ source_warn_permission_denials() {
 	body=$(_extract_function_body process_issue "$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ "$body" =~ (^|$'\n')[[:space:]]*warn_permission_denials[[:space:]]+\"\$proc_last_json\"[[:space:]]+\"process-pr\"[[:space:]]+\"\$issue_num\" ]]
 }
+
+# =============================================================================
+# ISSUE #1017: every terminal state is dispatched explicitly; unknown fails closed
+# =============================================================================
+#
+# These tests execute the REAL state-dispatch + PR-recovery block extracted
+# from process_issue (not a replica), so reverting the dispatch additions in
+# batch-orchestrator.sh makes them fail.
+
+# The 11 terminal states set_final_state writes that the dispatch once did not name.
+_I1017_STATES=(
+	convergence_failure_quality
+	max_iterations_test
+	max_iterations_validation_fix
+	test_convergence_soft_exit
+	test_failed_without_failures
+	test_fix_commit_guard
+	test_oscillation_soft_exit
+	test_runner_not_started
+	wall_timeout_pr_review
+	wall_timeout_quality
+	wall_timeout_test
+)
+
+# _run_state_dispatch <state> <pr_number|""> [current_stage]
+# Runs the real case/recovery block against a synthetic status file and sets
+# d_status, d_error, d_pr in the caller.
+_run_state_dispatch() {
+	local state="$1" pr="$2" stage="${3:-pr_review}"
+	local issue_status_file="$TEST_TMP/dispatch-status.json"
+	if [[ -n "$pr" ]]; then
+		jq -n --arg s "$state" --argjson pr "$pr" --arg cs "$stage" \
+			'{state: $s, current_stage: $cs, stages: {pr: {pr_number: $pr}}}' \
+			> "$issue_status_file"
+	else
+		jq -n --arg s "$state" --arg cs "$stage" \
+			'{state: $s, current_stage: $cs, stages: {}}' > "$issue_status_file"
+	fi
+
+	local block="$TEST_TMP/dispatch-block.sh"
+	awk '
+		/# Map script states to expected values/ { cap = 1 }
+		cap && /^    else$/ { exit }
+		cap { print }
+	' "$BATCH_ORCHESTRATOR_SCRIPT" > "$block"
+	[[ -s "$block" ]] || { echo "dispatch block not found" >&2; return 1; }
+
+	local out
+	out=$(
+		log() { :; }; log_warn() { :; }; log_error() { :; }
+		eval "$(_extract_function_body pr_recovery_allowed "$BATCH_ORCHESTRATOR_SCRIPT")"
+		issue_num=1017
+		runner() {
+			local impl_status="error" pr_number="" impl_error="" state
+			state=$(jq -r '.state' "$issue_status_file")
+			# shellcheck disable=SC1090
+			source "$block"
+			printf '%s|%s|%s\n' "$impl_status" "$impl_error" "$pr_number"
+		}
+		runner
+	) || return 1
+	# '|' is non-whitespace, so empty fields are preserved (a tab would collapse them).
+	IFS='|' read -r d_status d_error d_pr <<<"$out"
+}
+
+@test "i1017: each of the 11 newly handled states is a non-success outcome with a PR present" {
+	local s
+	for s in "${_I1017_STATES[@]}"; do
+		_run_state_dispatch "$s" 4242
+		[[ "$d_status" != "success" ]] || { echo "state $s reported success" >&2; return 1; }
+	done
+}
+
+@test "i1017: each of the 11 states is non-success without a PR too" {
+	local s
+	for s in "${_I1017_STATES[@]}"; do
+		_run_state_dispatch "$s" ""
+		[[ "$d_status" != "success" ]] || { echo "state $s reported success" >&2; return 1; }
+	done
+}
+
+@test "i1017: each of the 11 states has a non-empty impl_error naming the state" {
+	local s
+	for s in "${_I1017_STATES[@]}"; do
+		_run_state_dispatch "$s" 4242
+		[[ -n "$d_error" ]] || { echo "state $s: empty impl_error" >&2; return 1; }
+		[[ "$d_error" == *"$s"* ]] || { echo "state $s: impl_error '$d_error' omits state" >&2; return 1; }
+	done
+}
+
+@test "i1017: none of the 11 states reaches the unknown-state arm" {
+	local s
+	for s in "${_I1017_STATES[@]}"; do
+		# No PR: recovery cannot blank impl_error, so the arm taken is observable.
+		_run_state_dispatch "$s" ""
+		[[ "$d_error" != *"Unknown state"* ]] || { echo "state $s hit *) arm" >&2; return 1; }
+	done
+}
+
+@test "i1017: wall_timeout_quality with a PR is not reported as success (AC2)" {
+	_run_state_dispatch "wall_timeout_quality" 4242 "quality_loop"
+	[[ "$d_status" != "success" ]]
+	[[ -n "$d_error" ]]
+}
+
+@test "i1017: an unknown future state with a PR fails closed, not success (AC3)" {
+	_run_state_dispatch "some_future_state" 4242 "pr_review"
+	[[ "$d_status" != "success" ]]
+	[[ "$d_error" == *"some_future_state"* ]]
+}
+
+@test "i1017: an unknown future state without a PR fails closed" {
+	_run_state_dispatch "some_future_state" ""
+	[[ "$d_status" != "success" ]]
+	[[ "$d_error" == *"some_future_state"* ]]
+}
+
+@test "i1017: unknown state is not recovered even at every recoverable stage" {
+	local stage
+	for stage in pr_review run_tests quality_loop unknown; do
+		_run_state_dispatch "some_future_state" 99 "$stage"
+		[[ "$d_status" != "success" ]] || { echo "recovered at $stage" >&2; return 1; }
+	done
+}
+
+@test "i1017: completed still maps to success with its PR number (AC5)" {
+	_run_state_dispatch "completed" 77
+	[[ "$d_status" == "success" ]]
+	[[ "$d_pr" == "77" ]]
+}
+
+@test "i1017: already_implemented is unchanged (AC5)" {
+	_run_state_dispatch "already_implemented" ""
+	[[ "$d_status" == "already_implemented" ]]
+}
+
+@test "i1017: merge_blocked and completed_partial still map to merge_blocked (AC5)" {
+	local s
+	for s in merge_blocked completed_partial; do
+		_run_state_dispatch "$s" 55
+		[[ "$d_status" == "merge_blocked" ]] || { echo "$s -> $d_status" >&2; return 1; }
+		[[ "$d_pr" == "55" ]]
+	done
+}
+
+@test "i1017: budget_exceeded is unchanged and not recovered (AC5)" {
+	_run_state_dispatch "budget_exceeded" 55
+	[[ "$d_status" == "budget_exceeded" ]]
+}
+
+@test "i1017: plain error with a recoverable-stage PR still recovers (pre-existing behaviour kept)" {
+	_run_state_dispatch "error" 42 "pr_review"
+	[[ "$d_status" == "success" ]]
+	[[ "$d_pr" == "42" ]]
+}
