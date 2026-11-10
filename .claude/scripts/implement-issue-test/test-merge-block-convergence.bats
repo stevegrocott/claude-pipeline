@@ -868,6 +868,70 @@ run_gate_a() {
 }
 
 # =============================================================================
+# FUNCTIONAL: five previously-ungated degradation markers block merge (#1014)
+# =============================================================================
+
+@test "Gate A blocks merge for each of the five previously-ungated markers (#1014 AC1/AC2)" {
+	local marker
+	for marker in \
+		"quality:oscillation:main:iter=3" \
+		"quality:wall_timeout:iter=2" \
+		"quality:max_iterations:main:iter=5" \
+		"validation_fix:max_iterations:iter=4" \
+		"test:commit_guard:iter=2"; do
+		DEGRADED_STAGES=("$marker")
+		# Gate A persists the first reason (first-write-wins); clear it so each
+		# marker is evaluated fresh rather than reading the prior iteration's.
+		jq 'del(.merge_blocked_reason)' "$STATUS_FILE" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+		run run_gate_a
+		[ "$status" -eq 0 ]
+		# Non-empty kind, and the reason names the exact marker.
+		[[ "$output" == *"|"* ]]
+		[[ "${output%%|*}" == "convergence" ]]
+		[[ "${output#*|}" == *"$marker"* ]]
+	done
+}
+
+@test "Gate A: BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 overrides the five new markers (#1014)" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	local marker
+	for marker in \
+		"quality:oscillation:main:iter=3" \
+		"quality:wall_timeout:iter=2" \
+		"quality:max_iterations:main:iter=5" \
+		"validation_fix:max_iterations:iter=4" \
+		"test:commit_guard:iter=2"; do
+		DEGRADED_STAGES=("$marker")
+		run run_gate_a
+		[ "$status" -eq 0 ]
+		[[ "$output" == "|" ]]
+	done
+}
+
+@test "a run whose only degraded marker is test:commit_guard:iter=2 is blocked, not completed (#1014 AC4)" {
+	DEGRADED_STAGES=("test:commit_guard:iter=2")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == convergence\|* ]]
+	[[ "$output" != "|" ]]
+}
+
+@test "quality-loop oscillation bail exits the loop without setting loop_approved=true (#1014 AC3)" {
+	local block
+	block=$(awk '
+		/if \[\[ "\$oscillation_detected" == "true" \]\]; then/ { grab=1 }
+		grab { print }
+		grab && /^            fi$/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$block" ]]
+	[[ "$block" == *'quality:oscillation:'* ]]
+	# Still leaves the loop rather than iterating further.
+	[[ "$block" == *'break'* ]]
+	# ...but no longer reports approval on feedback it never resolved.
+	[[ "$block" != *'loop_approved=true'* ]]
+}
+
+# =============================================================================
 # FUNCTIONAL: undeclared pre-existing test edits are recorded (issue #969)
 # =============================================================================
 

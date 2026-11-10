@@ -4782,7 +4782,7 @@ Repeating issues:
                 log_warn "Quality loop oscillation detected: issues cycling A→B→A. Exiting loop."
                 comment_issue "Quality Loop: Oscillation Detected ($stage_prefix)" "⚠️ Quality loop oscillation detected: fix suggestions are cycling (A→B→A pattern). Breaking loop to prevent waste." "code-reviewer"
                 DEGRADED_STAGES+=("quality:oscillation:$stage_prefix:iter=$loop_iteration")
-                loop_approved=true
+                # Do not report approval: the cycling feedback was never resolved.
                 break
             fi
         fi
@@ -15079,6 +15079,17 @@ $complete_summary
                         test:wall_timeout:*|test:wall_timeout_budget:*|test:max_iterations:*|test:bats_incomplete:*|test:oscillation:*|test:runner_not_started:*|test:failed_without_failures:*)
                             merge_blocked_reason="Test loop convergence failure recorded in degraded_stages: $_ds"
                             merge_block_kind="convergence"
+                            break
+                            ;;
+                        # #1014: loops that gave up without converging but
+                        # matched no pattern above, so the PR auto-merged.
+                        # Each also persists its reason (mirroring the
+                        # quality:convergence_failure sibling) so a standalone
+                        # process-pr run refuses to merge too.
+                        quality:oscillation:*|quality:wall_timeout:*|quality:max_iterations:*|validation_fix:max_iterations:*|test:commit_guard:*)
+                            merge_blocked_reason="Loop gave up without converging, recorded in degraded_stages: $_ds"
+                            merge_block_kind="convergence"
+                            persist_merge_blocked_reason "$merge_blocked_reason"
                             break
                             ;;
                     esac
