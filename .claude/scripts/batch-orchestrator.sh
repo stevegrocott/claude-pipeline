@@ -983,6 +983,24 @@ dispatch_composition() {
 	esac
 }
 
+# process_pr_allowed_tools — print the --allowedTools value for process-pr.
+#
+# process-pr runs non-interactively; without an explicit allowlist, gh, the
+# platform scripts, and jq calls are blocked by the permission system.
+# Prints a single comma-separated string (stdout only, no logging).
+process_pr_allowed_tools() {
+	local -a tools=(
+		'Bash(gh *)'
+		"Bash($PLATFORM_DIR/*)"
+		'Bash(jq *)'
+		'Read'
+		'Grep'
+		'Glob'
+	)
+	local IFS=,
+	printf '%s' "${tools[*]}"
+}
+
 # context_mode_claude_args — print the claude(1) MCP flags for this arm.
 #
 # The ab-harness exports CONTEXT_MODE_ENABLED per arm (0 = control,
@@ -2081,6 +2099,7 @@ process_issue() {
     printf '%s\n' "=== process-pr output ===" >> "$issue_log"
     dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
         --agent code-reviewer \
+        --allowedTools "$(process_pr_allowed_tools)" \
         --output-format json \
         --json-schema "$PROCESS_SCHEMA" \
         | tee -a "$issue_log"
@@ -2118,6 +2137,7 @@ process_issue() {
         printf '%s\n' "=== process-pr resume output ===" >> "$issue_log"
         dispatch_composition "/process-pr $pr_number $issue_num $BRANCH" "false" \
             --agent code-reviewer \
+            --allowedTools "$(process_pr_allowed_tools)" \
             --output-format json \
             --json-schema "$PROCESS_SCHEMA" \
             | tee -a "$issue_log"
