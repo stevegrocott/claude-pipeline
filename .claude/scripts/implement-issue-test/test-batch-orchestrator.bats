@@ -4610,7 +4610,8 @@ _gh_call_count() {
 # merge. They are extracted from the script, not re-implemented here.
 _load_status_writers() {
 	local fn body
-	for fn in update_issue_field update_progress; do
+	for fn in update_issue_field update_progress \
+		mark_issue_completed_on_merge; do
 		body=$(_extract_function_body "$fn" "$BATCH_ORCHESTRATOR_SCRIPT")
 		[[ -n "$body" ]] \
 			|| fail "$fn() not defined in batch-orchestrator.sh"
