@@ -15081,6 +15081,17 @@ $complete_summary
                             merge_block_kind="convergence"
                             break
                             ;;
+                        # #1014: loops that gave up without converging but
+                        # matched no pattern above, so the PR auto-merged.
+                        # Each also persists its reason (mirroring the
+                        # quality:convergence_failure sibling) so a standalone
+                        # process-pr run refuses to merge too.
+                        quality:oscillation:*|quality:wall_timeout:*|quality:max_iterations:*|validation_fix:max_iterations:*|test:commit_guard:*)
+                            merge_blocked_reason="Loop gave up without converging, recorded in degraded_stages: $_ds"
+                            merge_block_kind="convergence"
+                            persist_merge_blocked_reason "$merge_blocked_reason"
+                            break
+                            ;;
                     esac
                 done
             fi
