@@ -12449,6 +12449,51 @@ leaving changes in the working tree. The reported fixes have NOT landed on
 	return 0
 }
 
+# Run the consumer's FORMAT_CMD before the PR stage pushes (issue #1019).
+#
+# FORMAT_CMD is defined in platform.sh but nothing ever ran it, so consumer
+# formatting rules were dead config. Runs after all implementation commits
+# exist and before the push, so formatter churn lands in the PR as its own
+# `style: format` commit rather than as a red CI check.
+#
+# Only tracked files the formatter modified are staged (never `git add -A`),
+# so stray untracked run artifacts are not swept into the commit.
+#
+# Args:
+#   $1 - working directory (git dir for this run)
+# Returns 0 always: a formatter failure is logged, not fatal one stage before
+# the PR. No-op when FORMAT_CMD is unset or empty.
+run_format_cmd_if_needed() {
+	local work_dir="$1"
+	local format_cmd="${FORMAT_CMD:-}"
+	local -a changed=()
+	local file
+
+	[[ -n "$format_cmd" ]] || return 0
+
+	log "Running FORMAT_CMD before PR push"
+	if ! (cd "$work_dir" && bash -c "$format_cmd") >/dev/null 2>&1; then
+		log_warn "FORMAT_CMD failed — continuing without formatting commit"
+	fi
+
+	while IFS= read -r file; do
+		[[ -n "$file" ]] && changed+=("$file")
+	done < <(git -C "$work_dir" diff --name-only 2>/dev/null)
+
+	if ((${#changed[@]} == 0)); then
+		log "FORMAT_CMD made no changes"
+		return 0
+	fi
+
+	if ! git -C "$work_dir" add -- "${changed[@]}" 2>/dev/null \
+		|| ! git -C "$work_dir" commit -q -m "style: format" 2>/dev/null; then
+		log_warn "Could not commit FORMAT_CMD changes"
+		return 0
+	fi
+	log "Committed FORMAT_CMD changes (${#changed[@]} file(s))"
+	return 0
+}
+
 # Regenerate the pipeline-core plugin bundle when this run edited a canonical
 # script (issue #632).
 #
@@ -14170,6 +14215,8 @@ Only the files listed above should be staged and committed."
     # the first CI run (issue #632; observed on #620 PR #628 and #633). No-op
     # in repos that do not own the generator.
     # -------------------------------------------------------------------------
+    # Format first: formatter edits must exist before the bundle is regenerated
+    # and before the PR stage pushes (issue #1019).    run_format_cmd_if_needed "."
     regenerate_bundle_if_needed "." "$BASE_BRANCH"
 
     # -------------------------------------------------------------------------
