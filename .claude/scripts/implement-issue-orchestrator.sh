@@ -1430,6 +1430,7 @@ init_status() {
             last_update: (now | todate),
             log_dir: $log_dir,
             merge_blocked_reason: null,
+            merge_block_kind: null,
             escalations: [],
             cost_summary: {
                 total_input_tokens: 0,
@@ -2011,6 +2012,20 @@ persist_merge_blocked_reason() {
     [[ -f "$STATUS_FILE" ]] || return 0
     status_json_write --arg reason "$reason" \
        '.merge_blocked_reason = (.merge_blocked_reason // $reason) | .last_update = (now | todate)'
+    sync_status_to_log
+}
+
+# ---------------------------------------------------------------------------
+# persist_merge_block_kind <kind>
+# Persist WHY the merge was blocked (convergence | partial | e2e | manual) into
+# status.json so the batch orchestrator, which reads the per-issue status file,
+# can tell a PR held by configuration from an incidental block (issue #1006).
+# ---------------------------------------------------------------------------
+persist_merge_block_kind() {
+    local kind="$1"
+    [[ -n "$kind" && -f "$STATUS_FILE" ]] || return 0
+    status_json_write --arg kind "$kind" \
+       '.merge_block_kind = $kind | .last_update = (now | todate)'
     sync_status_to_log
 }
 
@@ -15143,6 +15158,7 @@ $complete_summary
         log "merge_pr: merge_blocked_reason check done — blocked='${merge_blocked_reason:-<none>}' kind='${merge_block_kind:-none}'"
 
         if [[ -n "$merge_blocked_reason" ]]; then
+            persist_merge_block_kind "$merge_block_kind"
             local _task_summary_line
             _task_summary_line=$(_format_task_summary_line)
 
