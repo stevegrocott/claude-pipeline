@@ -90,6 +90,9 @@ _run_recovery_block() {
 	# Preconditions the surrounding process_issue() has already established
 	# by the time control reaches the block.
 	local impl_status="error" pr_number="" impl_error=""
+	# issue #1017 added allow_pr_recovery as a precondition of the recovery
+	# guard; process_issue() sets it before control reaches the block.
+	local allow_pr_recovery=true
 	local state
 	state=$(jq -r '.state' "$issue_status_file")
 

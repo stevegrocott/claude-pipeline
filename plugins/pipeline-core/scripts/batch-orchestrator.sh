@@ -1836,6 +1836,7 @@ process_issue() {
 
     if [[ -f "$issue_status_file" ]]; then
         local state
+        local allow_pr_recovery=true
         state=$(jq -r '.state' "$issue_status_file")
 
         # Map script states to expected values
@@ -1873,6 +1874,27 @@ process_issue() {
                 pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
                 log "Issue #$issue_num halted — per-run budget ceiling exceeded (budget_exceeded)"
                 ;;
+            convergence_failure_quality|test_convergence_soft_exit|\
+            test_failed_without_failures|test_fix_commit_guard|\
+            test_oscillation_soft_exit|test_runner_not_started)
+                # Issue #1017: soft-fail terminal states written by
+                # set_final_state.  Handle them like merge_blocked — leave
+                # the PR open and record the state — rather than letting
+                # them reach *) where PR-recovery would flip them to success.
+                impl_status="merge_blocked"
+                pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
+                impl_error="Script exited with soft-fail state: $state"
+                log "PR #${pr_number:-?} left open — soft-fail state: $state"
+                ;;
+            max_iterations_test|max_iterations_validation_fix|\
+            wall_timeout_pr_review|wall_timeout_quality|wall_timeout_test)
+                # Issue #1017: the work did not finish, so a PR number is not
+                # evidence it landed.  Report an error naming the state and
+                # bar the PR-recovery arm below from flipping it to success.
+                impl_status="error"
+                impl_error="Script exited with state: $state"
+                allow_pr_recovery=false
+                ;;
             error|max_iterations_quality|max_iterations_pr_review)
                 impl_status="error"
                 impl_error="Script exited with state: $state"
@@ -1886,6 +1908,9 @@ process_issue() {
             *)
                 impl_status="error"
                 impl_error="Unknown state: $state"
+                # Fail closed: an unrecognised state is no evidence the
+                # work landed, so a stray PR number must not flip it.
+                allow_pr_recovery=false
                 ;;
         esac
 
@@ -1895,7 +1920,7 @@ process_issue() {
         # killed or crashes after PR creation but before set_final_state("completed").
         # pr_recovery_allowed() withholds that credit at the stages where an
         # existing PR is not evidence the work landed (issue #848).
-        if [[ "$impl_status" == "error" ]]; then
+        if [[ "$impl_status" == "error" && "$allow_pr_recovery" == true ]]; then
             local recovered_pr stuck_stage
             recovered_pr=$(jq -r '.stages.pr.pr_number // empty' "$issue_status_file" 2>/dev/null)
             # Name the stage the orchestrator was on when it exited so a masked
