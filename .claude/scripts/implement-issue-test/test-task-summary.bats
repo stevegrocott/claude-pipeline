@@ -316,3 +316,139 @@ _set_tasks_json() {
     log_sp_total=$(jq -r '.task_summary.sp_total' "$LOG_BASE/status.json")
     [ "$log_sp_total" = "$status_sp_total" ]
 }
+
+# =============================================================================
+# PER-TASK STAGE STATUS vs BRANCH EVIDENCE (issue #1022)
+#
+# The task loop marks .stages.implement_task_N completed when the stage returns;
+# the reconcilers then fix .tasks[].status and the count.  These tests drive the
+# real reconcile path and assert the per-task STAGE entry agrees with the
+# reconciled verdict and with task_summary.
+# =============================================================================
+
+# Seed .tasks and the matching .stages.implement_task_N entries.  Each stage is
+# recorded "completed" — the optimistic value the task loop writes.
+_seed_tasks_and_stages() {
+    local tasks_json="$1" ids id
+    _set_tasks_json "$tasks_json"
+    ids=$(jq -r '.[].id' <<< "$tasks_json")
+    for id in $ids; do
+        jq --arg k "implement_task_${id}" \
+            '.stages[$k] = {status: "completed"}' \
+            "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+    done
+}
+
+_stage_status() {
+    jq -r --arg k "implement_task_$1" '.stages[$k].status // "absent"' "$STATUS_FILE"
+}
+
+# Run both reconcilers in the orchestrator's order.
+_run_reconcilers() {
+    reconcile_noncommit_tasks_with_deliverables >/dev/null
+    reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH" >/dev/null
+}
+
+@test "per-task stage: task whose declared artefact is absent is not left completed" {
+    _seed_tasks_and_stages "[
+        {\"id\":1,\"description\":\"**(S)** real\",\"status\":\"completed\"},
+        {\"id\":2,\"description\":\"**(S)** ghost\",\"status\":\"completed\",\"deliverable\":\"file:$TEST_TMP/never-written.json\"}
+    ]"
+    [ "$(_stage_status 2)" = "completed" ]    # precondition: the lie exists
+
+    _run_reconcilers
+
+    [ "$(jq -r '.tasks[] | select(.id==2) | .status' "$STATUS_FILE")" = "failed" ]
+    [ "$(_stage_status 2)" = "failed" ]
+}
+
+@test "per-task stage: task genuinely completed with its artefact stays completed" {
+    echo '{}' > "$TEST_TMP/present.json"
+    _seed_tasks_and_stages "[
+        {\"id\":1,\"description\":\"**(S)** real\",\"status\":\"completed\",\"deliverable\":\"file:$TEST_TMP/present.json\"}
+    ]"
+
+    _run_reconcilers
+
+    [ "$(_stage_status 1)" = "completed" ]
+}
+
+@test "per-task stage: completed stage entries equal task_summary completed count" {
+    echo '{}' > "$TEST_TMP/present.json"
+    _seed_tasks_and_stages "[
+        {\"id\":1,\"description\":\"**(S)** a\",\"status\":\"completed\"},
+        {\"id\":2,\"description\":\"**(S)** b\",\"status\":\"completed\",\"deliverable\":\"file:$TEST_TMP/present.json\"},
+        {\"id\":3,\"description\":\"**(S)** c\",\"status\":\"completed\",\"deliverable\":\"file:$TEST_TMP/never-written.json\"}
+    ]"
+
+    _run_reconcilers
+
+    local stages_completed summary_completed
+    stages_completed=$(jq '[.stages | to_entries[]
+        | select(.key | test("^implement_task_[0-9]+$"))
+        | select(.value.status == "completed")] | length' "$STATUS_FILE")
+    summary_completed=$(compute_task_summary \
+        | jq '.completed.S + .completed.M + .completed.L')
+    [ "$stages_completed" -eq 2 ]
+    [ "$stages_completed" -eq "$summary_completed" ]
+}
+
+@test "per-task stage: reconciliation does not invent stage entries (resume safety)" {
+    _set_tasks_json '[
+        {"id":1,"description":"**(S)** done earlier","status":"completed"},
+        {"id":2,"description":"**(S)** not started","status":"failed"}
+    ]'
+    jq '.stages.implement_task_1 = {status:"completed"}' \
+        "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+
+    _run_reconcilers
+
+    # A task completed in a prior run keeps its completed stage entry (resume
+    # skips it) and a task with no stage entry does not gain one.
+    [ "$(_stage_status 1)" = "completed" ]
+    [ "$(_stage_status 2)" = "absent" ]
+}
+
+@test "per-task stage: pending tasks keep their stage entry untouched" {
+    _seed_tasks_and_stages '[
+        {"id":1,"description":"**(S)** a","status":"pending"}
+    ]'
+
+    _run_reconcilers
+
+    [ "$(_stage_status 1)" = "completed" ]
+}
+
+_stage_evidence_kind() {
+    jq -r --arg k "implement_task_$1" '.stages[$k].evidence_kind // "absent"' "$STATUS_FILE"
+}
+
+@test "per-task stage: file-judged task records evidence_kind file" {
+    _seed_tasks_and_stages "[
+        {\"id\":1,\"description\":\"**(S)** ghost\",\"status\":\"completed\",\"deliverable\":\"file:$TEST_TMP/never-written.json\"}
+    ]"
+
+    _run_reconcilers
+
+    [ "$(_stage_evidence_kind 1)" = "file" ]
+}
+
+@test "per-task stage: operational task records evidence_kind operational" {
+    _seed_tasks_and_stages '[
+        {"id":1,"description":"**(S)** apply config `deliverable:operational:check-live.sh --verify`","status":"completed"}
+    ]'
+
+    run sync_task_stage_verdicts
+    [ "$status" -eq 0 ]
+
+    [ "$(_stage_evidence_kind 1)" = "operational" ]
+    [ "$(_stage_status 1)" = "completed" ]
+}
+
+@test "per-task stage: tasks without a stage entry gain no evidence_kind" {
+    _set_tasks_json '[{"id":2,"description":"**(S)** x","status":"failed"}]'
+
+    _run_reconcilers
+
+    [ "$(_stage_evidence_kind 2)" = "absent" ]
+}
