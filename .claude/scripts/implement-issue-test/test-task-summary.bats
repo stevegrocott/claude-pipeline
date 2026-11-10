@@ -435,7 +435,7 @@ _stage_evidence_kind() {
 
 @test "per-task stage: operational task records evidence_kind operational" {
     _seed_tasks_and_stages '[
-        {"id":1,"description":"**(S)** apply config deliverable:operational:check-live.sh --verify","status":"completed"}
+        {"id":1,"description":"**(S)** apply config `deliverable:operational:check-live.sh --verify`","status":"completed"}
     ]'
 
     run sync_task_stage_verdicts
