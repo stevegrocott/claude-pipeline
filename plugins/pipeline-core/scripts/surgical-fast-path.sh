@@ -350,6 +350,9 @@ else
 
     if [[ ${#_changed_paths[@]} -gt 0 ]]; then
         git add -- "${_changed_paths[@]}" 2>>"$LOG_FILE"
+        # Also stage tracked files the formatter modified outside the
+        # implement scope, matching the orchestrator path (issue #1019).
+        git add -u 2>>"$LOG_FILE"
     elif [[ "$_impl_resume" == "true" ]]; then
         # Resume: implement ran in a prior invocation; stage current state.
         git add -A 2>>"$LOG_FILE"
