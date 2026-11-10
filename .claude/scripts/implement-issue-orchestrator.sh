@@ -6500,6 +6500,42 @@ _file_set_contained() {
 	return 0
 }
 
+# sync_task_stage_verdicts() — persist the evidence-reconciled per-task verdict
+# onto each .stages.implement_task_N entry (issue #1022).
+#
+# The task loop marks a stage entry "completed" when its stage invocation
+# returns, and the two reconcilers (reconcile_noncommit_tasks_with_deliverables,
+# reconcile_failed_tasks_with_branch_evidence) adjust only .tasks[].status and
+# the completed count. Without this write-back a task that changed nothing
+# reads "completed" in its stage entry while merge_blocked_reason names it as
+# lacking evidence. .tasks[].status is the reconciled verdict, so copy it over.
+#
+# Only existing stage entries with a settled (completed|failed) task verdict
+# are touched: no entry is created, so resume — which reads completed stage
+# status to skip finished work — is unaffected for tasks genuinely completed.
+# A mid-run reader still sees the optimistic value until reconciliation runs.
+#
+# Globals:
+#   STATUS_FILE - .tasks[] read, .stages.implement_task_N.status rewritten
+sync_task_stage_verdicts() {
+	[[ -f "$STATUS_FILE" ]] || return 0
+
+	if status_json_write \
+	   'reduce ((.tasks // [])[]
+	        | select(.status == "completed" or .status == "failed")) as $t
+	      (.;
+	       ("implement_task_" + ($t.id | tostring)) as $k |
+	       if (.stages // {}) | has($k)
+	       then .stages[$k].status = $t.status
+	       else . end) |
+	    .last_update = (now | todate)'; then
+		sync_status_to_log
+	else
+		log_warn "sync_task_stage_verdicts: failed to persist per-task" \
+			"stage verdicts — stage entries may be stale"
+	fi
+}
+
 # reconcile_failed_tasks_with_branch_evidence() — convergence-verdict
 # re-evaluation (issue #616/#618/#620 task 2).
 #
@@ -6719,6 +6755,8 @@ reconcile_failed_tasks_with_branch_evidence() {
 				"no declared file evidence vs $base_branch"
 		fi
 	done <<< "$recon_ids"
+
+	sync_task_stage_verdicts
 
 	printf '%s\n' "$reconciled"
 }
