@@ -700,6 +700,94 @@ STUB
     grep -qx -- '-u' "$TEST_TMP/git-add-args"
 }
 
+# Install a FAST_PATH_SPEC_CMD stub that records the spec paths it receives.
+# Args: $1 exit code the stub returns
+install_spec_stub() {
+    local rc="${1:-0}"
+    cat > "$TEST_TMP/bin/spec-stub" <<STUB
+#!/usr/bin/env bash
+echo "spec" >> "$TEST_TMP/call-order"
+printf '%s\n' "\$@" >> "$TEST_TMP/spec-stub-args"
+echo "spec stub output marker"
+exit $rc
+STUB
+    chmod +x "$TEST_TMP/bin/spec-stub"
+}
+
+@test "15f spec gate passes → runs on changed spec only, before commit, then pushes" {
+    install_spec_stub 0
+    export FAST_PATH_SPEC_CMD="$TEST_TMP/bin/spec-stub"
+    export MOCK_GIT_POST_IMPL_FILES=" M e2e/login.spec.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    grep -qx "e2e/login.spec.ts" "$TEST_TMP/spec-stub-args"
+    local order
+    order=$(tr '\n' ' ' < "$TEST_TMP/call-order")
+    [[ "$order" == "spec "* ]]
+    [[ "$order" == *"commit"* ]]
+    [[ "$order" == *"push"* ]]
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_pr.status' 'completed'
+    grep -q "Spec gate passed" "$LOG_FILE"
+}
+
+@test "15g spec gate failure bails spec_failed → no commit or push, output captured" {
+    install_spec_stub 1
+    export FAST_PATH_SPEC_CMD="$TEST_TMP/bin/spec-stub"
+    export MOCK_GIT_POST_IMPL_FILES=" M e2e/login.spec.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -ne 0 ]
+    assert_json_field "$STATUS_FILE" '.state' 'failed'
+    assert_json_field "$STATUS_FILE" '.error' 'spec_failed'
+    run grep -qx "commit" "$TEST_TMP/call-order"
+    [ "$status" -ne 0 ]
+    run grep -qx "push" "$TEST_TMP/call-order"
+    [ "$status" -ne 0 ]
+    local captured
+    captured=$(jq -r '.spec_failure_output' "$LOG_BASE/triage.json")
+    [[ "$captured" == *"spec stub output marker"* ]]
+}
+
+@test "15h spec gate with exit 127 bails spec_cmd_unrunnable, not spec_failed" {
+    install_spec_stub 127
+    export FAST_PATH_SPEC_CMD="$TEST_TMP/bin/spec-stub"
+    export MOCK_GIT_POST_IMPL_FILES=" M e2e/login.spec.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -ne 0 ]
+    assert_json_field "$STATUS_FILE" '.error' 'spec_cmd_unrunnable'
+}
+
+@test "15i spec gate skips when no changed spec files → stub not run, pushes" {
+    install_spec_stub 1
+    export FAST_PATH_SPEC_CMD="$TEST_TMP/bin/spec-stub"
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    [[ ! -f "$TEST_TMP/spec-stub-args" ]]
+    grep -qx "push" "$TEST_TMP/call-order"
+    grep -q "Spec gate: no changed spec files" "$LOG_FILE"
+}
+
+@test "15j spec gate disabled when FAST_PATH_SPEC_CMD is unset" {
+    install_spec_stub 1
+    unset FAST_PATH_SPEC_CMD
+    export MOCK_GIT_POST_IMPL_FILES=" M e2e/login.spec.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    [[ ! -f "$TEST_TMP/spec-stub-args" ]]
+    run grep -q "Spec gate" "$LOG_FILE"
+    [ "$status" -ne 0 ]
+}
+
 @test "16 fast-path bails on genuinely terminal merge states → no merge attempted" {
     # DIRTY, BLOCKED and BEHIND are genuinely terminal — no amount of
     # waiting resolves a real conflict, so the fast-path must bail
