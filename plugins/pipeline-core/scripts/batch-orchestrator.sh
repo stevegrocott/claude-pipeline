@@ -2674,8 +2674,11 @@ comment_paused_on_pr() {
 # Globals:
 #   STATUS_FILE, PLATFORM_DIR
 # Returns:
-#   0 when the PR merged, was closed, or there was nothing to wait for
+#   0 when the PR merged, was closed, there was nothing to wait for, or the
+#     PR is held by REQUIRE_MANUAL_MERGE and BATCH_HALT_ON_MANUAL_MERGE=0
 #   1 on timeout — the caller halts the batch like the circuit breaker does
+#   2 when the PR is held open by REQUIRE_MANUAL_MERGE (merge_block_kind
+#     "manual") — no wait is started; the caller halts with a distinct state
 wait_for_pr_merged() {
 	local issue_num="$1"
 	local max="${BATCH_WAIT_FOR_MERGE_MAX:-7200}"
@@ -2699,6 +2702,29 @@ wait_for_pr_merged() {
 			"$LOG_BASE/issue-$issue_num-status.json" 2>/dev/null) || pr=""
 	fi
 	if [[ -z "$pr" || "$pr" == "null" ]]; then
+		return 0
+	fi
+
+	# A PR held open BY CONFIGURATION (merge_block_kind "manual", issue #1006)
+	# will not merge within any window, so the park's premise is false and
+	# polling can only end in the timeout. The kind is read from the per-issue
+	# status file the inner orchestrator persists, never from log text.
+	# convergence/partial/e2e blocks fall through and park as before.
+	local block_kind=""
+	block_kind=$(jq -r '.merge_block_kind // empty' \
+		"$LOG_BASE/issue-$issue_num-status.json" 2>/dev/null) || block_kind=""
+	if [[ "$block_kind" == "manual" ]]; then
+		if [[ "${BATCH_HALT_ON_MANUAL_MERGE:-1}" == "1" ]]; then
+			log_error "Issue #$issue_num: PR #$pr was held open by" \
+				"REQUIRE_MANUAL_MERGE=1 — not waiting for a merge that" \
+				"is configured not to happen. Halting the batch" \
+				"(BATCH_HALT_ON_MANUAL_MERGE=0 continues instead)."
+			set_paused_on_pr "$pr"
+			return 2
+		fi
+		log_warn "Issue #$issue_num: PR #$pr was held open by" \
+			"REQUIRE_MANUAL_MERGE=1 — continuing without waiting" \
+			"(BATCH_HALT_ON_MANUAL_MERGE=0)"
 		return 0
 	fi
 
@@ -2872,7 +2898,15 @@ for issue in "${ISSUE_ARRAY[@]}"; do
     # the open PR the next branch would conflict with. A timeout halts the
     # batch the way the circuit breaker does — exit_code=2, remaining issues
     # untouched and still `pending` in the manifest.
-    if ! wait_for_pr_merged "$issue"; then
+    _wait_rc=0
+    wait_for_pr_merged "$issue" || _wait_rc=$?
+    if ((_wait_rc == 2)); then
+        # Held open by REQUIRE_MANUAL_MERGE (#1006): a deliberate halt with
+        # its own state and exit code, distinct from the circuit breaker.
+        set_state "halted_on_manual_merge"
+        exit_code=3
+        break
+    elif ((_wait_rc != 0)); then
         exit_code=2
         break
     fi
@@ -2921,8 +2955,8 @@ fi
 # "completed").
 final_failed=$(jq '.progress.failed' "$STATUS_FILE")
 final_skipped=$(jq '.progress.skipped' "$STATUS_FILE")
-if (( exit_code == 2 )); then
-    # Circuit breaker already set state
+if (( exit_code == 2 || exit_code == 3 )); then
+    # Circuit breaker / manual-merge halt already set state
     :
 elif (( final_failed > 0 )); then
     set_state "completed_with_errors"
