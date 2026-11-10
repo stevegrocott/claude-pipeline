@@ -338,8 +338,25 @@ if is_stage_completed fast_path_pr; then
 else
     set_stage_in_progress fast_path_pr
 
+    # Run the consumer's formatter before staging so formatting changes are
+    # included in the commit. Run via `bash -c` (not eval), like TEST_UNIT_CMD.
+    # A formatter failure is non-fatal: the pre-commit hook remains the gate.
+    if [[ -n "${FORMAT_CMD:-}" ]]; then
+        log "Running FORMAT_CMD before commit"
+        if ! bash -c "$FORMAT_CMD" >>"$LOG_FILE" 2>&1; then
+            log "WARNING: FORMAT_CMD failed — committing unformatted changes"
+        fi
+    fi
+
     if [[ ${#_changed_paths[@]} -gt 0 ]]; then
         git add -- "${_changed_paths[@]}" 2>>"$LOG_FILE"
+        # Only a formatter run can have touched tracked files outside the
+        # implement scope, so scope the blanket stage to that case. With
+        # FORMAT_CMD unset, staging stays exactly as it was before issue
+        # #1019 — a consumer that configured no formatter sees no change.
+        if [[ -n "${FORMAT_CMD:-}" ]]; then
+            git add -u 2>>"$LOG_FILE"
+        fi
     elif [[ "$_impl_resume" == "true" ]]; then
         # Resume: implement ran in a prior invocation; stage current state.
         git add -A 2>>"$LOG_FILE"

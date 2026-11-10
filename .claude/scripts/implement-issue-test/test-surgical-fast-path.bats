@@ -213,6 +213,8 @@ case "${1:-}" in
         exit 0
         ;;
     commit)
+        # Record call order so tests can assert step sequencing.
+        echo "commit" >> "$TEST_TMP/call-order"
         if [[ "${MOCK_GIT_HOOK_FAILURE:-0}" == "1" ]]; then
             echo "husky - pre-commit hook failed" >&2
             echo "ESLint: 'foo' is defined but never used (no-unused-vars)" >&2
@@ -222,6 +224,7 @@ case "${1:-}" in
         exit 0
         ;;
     push)
+        echo "push" >> "$TEST_TMP/call-order"
         if [[ "${MOCK_GIT_PUSH_EXIT_CODE:-0}" != "0" ]]; then
             echo "remote: rejected" >&2
             exit "${MOCK_GIT_PUSH_EXIT_CODE}"
@@ -606,6 +609,95 @@ invoke_fast_path_script() {
     [ "$status" -ne 0 ]
     assert_json_field "$STATUS_FILE" '.state' 'failed'
     assert_json_field "$STATUS_FILE" '.error' 'push_rejected'
+}
+
+# Install a FORMAT_CMD stub that records its place in the call order.
+# Args: $1 exit code the stub returns
+install_format_stub() {
+    local rc="${1:-0}"
+    cat > "$TEST_TMP/bin/fmt-stub" <<STUB
+#!/usr/bin/env bash
+echo "format" >> "$TEST_TMP/call-order"
+echo "fmt-stub invoked" >> "$TEST_TMP/fmt-stub-ran"
+exit $rc
+STUB
+    chmod +x "$TEST_TMP/bin/fmt-stub"
+}
+
+@test "15a fast-path runs FORMAT_CMD before the commit and the push" {
+    install_format_stub 0
+    export FORMAT_CMD="$TEST_TMP/bin/fmt-stub"
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    [[ -f "$TEST_TMP/fmt-stub-ran" ]]
+    local order
+    order=$(tr '\n' ' ' < "$TEST_TMP/call-order")
+    # The first recorded action is the format step, ahead of commit and push.
+    [[ "$order" == "format "* ]]
+    [[ "$order" == *"push"* ]]
+}
+
+@test "15b fast-path skips the format step when FORMAT_CMD is unset" {
+    install_format_stub 0
+    unset FORMAT_CMD
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    [[ ! -f "$TEST_TMP/fmt-stub-ran" ]]
+    # Behaviour is otherwise unchanged: the commit and push still happen.
+    grep -qx "commit" "$TEST_TMP/call-order"
+    grep -qx "push" "$TEST_TMP/call-order"
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_pr.status' 'completed'
+}
+
+@test "15c fast-path warns on FORMAT_CMD failure and still pushes" {
+    install_format_stub 1
+    export FORMAT_CMD="$TEST_TMP/bin/fmt-stub"
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    # A failing formatter must not block the PR (CI still catches it).
+    [ "$status" -eq 0 ]
+    [[ -f "$TEST_TMP/fmt-stub-ran" ]]
+    grep -qx "push" "$TEST_TMP/call-order"
+    assert_json_field "$STATUS_FILE" '.stages.fast_path_pr.status' 'completed'
+    grep -q "WARNING.*FORMAT_CMD" "$LOG_FILE"
+}
+
+@test "15d fast-path does not widen staging with 'git add -u' when FORMAT_CMD is unset" {
+    install_format_stub 0
+    unset FORMAT_CMD
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    [[ ! -f "$TEST_TMP/fmt-stub-ran" ]]
+    # No formatter ran, so nothing can have touched files outside the implement
+    # scope — the blanket `git add -u` must not run. Issue #1019 AC2: with
+    # FORMAT_CMD unset, behaviour is unchanged for every consumer.
+    run grep -qx -- '-u' "$TEST_TMP/git-add-args"
+    [ "$status" -ne 0 ]
+}
+
+@test "15e fast-path stages formatter edits outside the implement scope when FORMAT_CMD is set" {
+    install_format_stub 0
+    export FORMAT_CMD="$TEST_TMP/bin/fmt-stub"
+    export MOCK_GIT_POST_IMPL_FILES=" M src/things.test.ts"
+
+    run "$REAL_SCRIPT_DIR/surgical-fast-path.sh"
+
+    [ "$status" -eq 0 ]
+    [[ -f "$TEST_TMP/fmt-stub-ran" ]]
+    # The formatter may have reformatted tracked files the implement step never
+    # named, so those must still be staged when FORMAT_CMD is in play.
+    grep -qx -- '-u' "$TEST_TMP/git-add-args"
 }
 
 @test "16 fast-path bails on genuinely terminal merge states → no merge attempted" {

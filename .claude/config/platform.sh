@@ -196,6 +196,8 @@ if [[ -z "${CLAUDE_CLI:-}" ]]; then
 fi
 
 # Lint and format (set during /adapt)
+# FORMAT_CMD is run by the pipeline on the worktree before the PR push, so
+# formatting changes land in the PR. Leave empty to skip.
 LINT_CMD="${LINT_CMD:-}"
 FORMAT_CMD="${FORMAT_CMD:-}"
 
