@@ -256,7 +256,7 @@ Categorize every `.claude/` file into one of four buckets:
 | JIRA_PROJECT / transitions | Set if using Jira |
 | MERGE_STYLE | Set during brainstorming |
 | TEST_UNIT_CMD / TEST_E2E_CMD | Set based on project stack |
-| LINT_CMD / FORMAT_CMD | Set based on project tooling |
+| LINT_CMD / FORMAT_CMD | Set based on project tooling. The pipeline runs `FORMAT_CMD` before the PR push; leave empty to skip |
 
 **Prompts:**
 
@@ -416,7 +416,7 @@ Based on brainstorming answers, modify `.claude/config/platform.sh`:
 - Set TRACKER, TRACKER_CLI, GIT_HOST, GIT_CLI
 - Set JIRA_PROJECT, JIRA_DONE_TRANSITION, JIRA_IN_PROGRESS_TRANSITION if Jira
 - Set MERGE_STYLE
-- Set TEST_UNIT_CMD, TEST_E2E_CMD, LINT_CMD, FORMAT_CMD based on project stack
+- Set TEST_UNIT_CMD, TEST_E2E_CMD, LINT_CMD, FORMAT_CMD based on project stack (the pipeline runs `FORMAT_CMD` before the PR push)
 
 **Parallel execution:** Tasks in different workstreams with no shared files can run in parallel using `dispatching-parallel-agents`.
 
