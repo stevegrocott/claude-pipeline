@@ -348,6 +348,43 @@ else
         fi
     fi
 
+    # Optional spec gate: run ONLY the changed spec files before committing so
+    # a test-only fix is never merged unexecuted. Opt-in via FAST_PATH_SPEC_CMD
+    # (empty = disabled). Run via `bash -c` (not eval) with the spec paths as
+    # positional args appended to the command. Unlike FORMAT_CMD, failure is
+    # fatal; exit 126/127 (command could not run) gets its own bail reason so
+    # a down stack is not mistaken for a failing spec.
+    if [[ -n "${FAST_PATH_SPEC_CMD:-}" ]]; then
+        _spec_pattern="${FAST_PATH_SPEC_PATTERN:-(^|/)(tests?|__tests__|e2e|specs?)/.*\.(spec|test)\.[^/]+\$}"
+        _spec_paths=()
+        for _cp in "${_changed_paths[@]+"${_changed_paths[@]}"}"; do
+            if [[ "$_cp" =~ $_spec_pattern ]]; then
+                _spec_paths+=("$_cp")
+            fi
+        done
+        if [[ ${#_spec_paths[@]} -eq 0 ]]; then
+            log "Spec gate: no changed spec files — skipping FAST_PATH_SPEC_CMD"
+        else
+            log "Spec gate: running FAST_PATH_SPEC_CMD on ${#_spec_paths[@]} spec(s)"
+            _spec_out="$LOG_BASE/stages/fast-path-spec.log"
+            _spec_rc=0
+            bash -c "$FAST_PATH_SPEC_CMD \"\$@\"" _ "${_spec_paths[@]}" \
+                >"$_spec_out" 2>&1 || _spec_rc=$?
+            if ((_spec_rc != 0)); then
+                _triage_artifact="$LOG_BASE/triage.json"
+                [[ -f "$_triage_artifact" ]] || echo '{}' > "$_triage_artifact"
+                _jq_inplace "$_triage_artifact" \
+                    --arg out "$(head -c 4096 "$_spec_out" 2>/dev/null || true)" \
+                    '.spec_failure_output = $out'
+                if ((_spec_rc == 126 || _spec_rc == 127)); then
+                    bail "spec_cmd_unrunnable"
+                fi
+                bail "spec_failed"
+            fi
+            log "Spec gate passed"
+        fi
+    fi
+
     if [[ ${#_changed_paths[@]} -gt 0 ]]; then
         git add -- "${_changed_paths[@]}" 2>>"$LOG_FILE"
         # Only a formatter run can have touched tracked files outside the
