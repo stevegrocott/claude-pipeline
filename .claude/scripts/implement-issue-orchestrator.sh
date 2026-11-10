@@ -6508,7 +6508,9 @@ _file_set_contained() {
 # reconcile_failed_tasks_with_branch_evidence) adjust only .tasks[].status and
 # the completed count. Without this write-back a task that changed nothing
 # reads "completed" in its stage entry while merge_blocked_reason names it as
-# lacking evidence. .tasks[].status is the reconciled verdict, so copy it over.
+# lacking evidence. .tasks[].status is the reconciled verdict, so copy it over,
+# together with .stages[].evidence_kind ("file" | "operational") naming the
+# evidence path that decided it.
 #
 # Only existing stage entries with a settled (completed|failed) task verdict
 # are touched: no entry is created, so resume — which reads completed stage
@@ -6520,13 +6522,32 @@ _file_set_contained() {
 sync_task_stage_verdicts() {
 	[[ -f "$STATUS_FILE" ]] || return 0
 
-	if status_json_write \
+	# Evidence kind that decided each verdict (issue #1022): "operational"
+	# when the task declares an operational deliverable (judged on a recorded
+	# verification run, not a diff) or was promoted as such; else "file".
+	local kinds_json='{}'
+	local sync_id sync_kind
+	while IFS= read -r sync_id; do
+		[[ "$sync_id" =~ ^-?[0-9]+$ ]] || continue
+		sync_kind="file"
+		if _task_operational_deliverable "$sync_id" > /dev/null; then
+			sync_kind="operational"
+		fi
+		kinds_json=$(jq -c --arg k "$sync_id" --arg v "$sync_kind" \
+			'.[$k] = $v' <<< "$kinds_json")
+	done < <(jq -r '(.tasks // [])[]
+		| select(.status == "completed" or .status == "failed")
+		| .id' "$STATUS_FILE" 2>/dev/null)
+
+	if status_json_write --argjson kinds "$kinds_json" \
 	   'reduce ((.tasks // [])[]
 	        | select(.status == "completed" or .status == "failed")) as $t
 	      (.;
 	       ("implement_task_" + ($t.id | tostring)) as $k |
 	       if (.stages // {}) | has($k)
 	       then .stages[$k].status = $t.status
+	         | .stages[$k].evidence_kind =
+	           ($t.evidence_kind // $kinds[($t.id | tostring)] // "file")
 	       else . end) |
 	    .last_update = (now | todate)'; then
 		sync_status_to_log

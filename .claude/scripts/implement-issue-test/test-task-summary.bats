@@ -418,3 +418,37 @@ _run_reconcilers() {
 
     [ "$(_stage_status 1)" = "completed" ]
 }
+
+_stage_evidence_kind() {
+    jq -r --arg k "implement_task_$1" '.stages[$k].evidence_kind // "absent"' "$STATUS_FILE"
+}
+
+@test "per-task stage: file-judged task records evidence_kind file" {
+    _seed_tasks_and_stages "[
+        {\"id\":1,\"description\":\"**(S)** ghost\",\"status\":\"completed\",\"deliverable\":\"file:$TEST_TMP/never-written.json\"}
+    ]"
+
+    _run_reconcilers
+
+    [ "$(_stage_evidence_kind 1)" = "file" ]
+}
+
+@test "per-task stage: operational task records evidence_kind operational" {
+    _seed_tasks_and_stages '[
+        {"id":1,"description":"**(S)** apply config deliverable:operational:check-live.sh --verify","status":"completed"}
+    ]'
+
+    run sync_task_stage_verdicts
+    [ "$status" -eq 0 ]
+
+    [ "$(_stage_evidence_kind 1)" = "operational" ]
+    [ "$(_stage_status 1)" = "completed" ]
+}
+
+@test "per-task stage: tasks without a stage entry gain no evidence_kind" {
+    _set_tasks_json '[{"id":2,"description":"**(S)** x","status":"failed"}]'
+
+    _run_reconcilers
+
+    [ "$(_stage_evidence_kind 2)" = "absent" ]
+}
