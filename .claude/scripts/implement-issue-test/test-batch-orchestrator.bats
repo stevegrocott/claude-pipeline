@@ -2900,101 +2900,44 @@ GHEOF
 		   "$recovery_block" == *'log_warn'* ]]
 }
 
-# --- Functional simulation: stuck stage appears in warn message ---
+# --- Functional tests: the real recovery block, run via _run_state_dispatch ---
 
-# Build an issue status JSON that simulates a crash mid-stage with a PR written.
-_simulate_recovery_with_stage() {
-	local crash_state="$1"
-	local pr_num="$2"
-	local current_stage="${3:-unknown}"
-
-	local issue_status="$TEST_TMP/sim-issue-status-staged.json"
-	jq -n \
-		--arg s "$crash_state" \
-		--argjson pr "$pr_num" \
-		--arg cs "$current_stage" \
-		'{state: $s, current_stage: $cs, stages: {pr: {pr_number: $pr}}}' \
-		> "$issue_status"
-
-	sim_recovering=false
-	sim_warn_msg=""
-	sim_impl_status="error"
-	sim_pr_number=""
-
-	local st
-	st=$(jq -r '.state' "$issue_status")
-
-	# The stuck stage is what the new code must parse from current_stage
-	local stuck_stage
-	stuck_stage=$(jq -r '.current_stage // "unknown"' \
-		"$issue_status" 2>/dev/null)
-	[[ -n "$stuck_stage" ]] || stuck_stage="unknown"
-
-	# The stage gate is NOT replicated — issue #848 added
-	# pr_recovery_allowed() and this simulation sources the real one, so a
-	# future change to which stages are excluded cannot silently diverge
-	# from what these tests assert.
-	eval "$(_extract_function_body pr_recovery_allowed \
-		"$BATCH_ORCHESTRATOR_SCRIPT")"
-
-	# Recovery block (replicates the post-task-4 implementation)
-	local recovered_pr
-	recovered_pr=$(jq -r '.stages.pr.pr_number // empty' \
-		"$issue_status" 2>/dev/null)
-	if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]] \
-		&& pr_recovery_allowed "$stuck_stage"; then
-		sim_recovering=true
-		sim_warn_msg="Orchestrator exited with state='$st'"
-		sim_warn_msg+=" (stuck at: $stuck_stage)"
-		sim_warn_msg+=" but PR #$recovered_pr exists — recovering as success"
-		sim_impl_status="success"
-		sim_pr_number="$recovered_pr"
-	fi
-}
-
-@test "recovery simulation: warn names the stuck stage when current_stage is set" {
+@test "recovery dispatch: warn names the stuck stage when current_stage is set" {
 	# pr_review is after pr and before merge_pr — the genuine post-PR crash
 	# the heuristic exists for, so it still recovers and still names its stage.
-	_simulate_recovery_with_stage "error" 99 "pr_review"
-	[[ "$sim_recovering" == "true" ]]
-	[[ "$sim_warn_msg" == *"pr_review"* ]]
+	_run_state_dispatch "error" 99 "pr_review"
+	[[ "$d_status" == "success" ]]
+	grep -q "(stuck at: pr_review)" "$d_log_file"
 }
 
-@test "recovery simulation: merge_pr is not recovered even with a PR (i848)" {
-	_simulate_recovery_with_stage "error" 5857 "merge_pr"
-	[[ "$sim_recovering" == "false" ]]
-	[[ "$sim_impl_status" == "error" ]]
+@test "recovery dispatch: merge_pr is not recovered even with a PR (i848)" {
+	_run_state_dispatch "error" 5857 "merge_pr"
+	[[ "$d_status" == "error" ]]
+	refute grep -q "recovering as success" "$d_log_file"
 }
 
-@test "recovery simulation: merge_pr_timeout is not recovered either (i848)" {
-	_simulate_recovery_with_stage "error" 99 "merge_pr_timeout"
-	[[ "$sim_recovering" == "false" ]]
-	[[ "$sim_impl_status" == "error" ]]
+@test "recovery dispatch: merge_pr_timeout is not recovered either (i848)" {
+	_run_state_dispatch "error" 99 "merge_pr_timeout"
+	[[ "$d_status" == "error" ]]
+	refute grep -q "recovering as success" "$d_log_file"
 }
 
-@test "recovery simulation: warn names stuck stage for any error state with PR" {
-	_simulate_recovery_with_stage "interrupted_during_quality" 55 "run_tests"
-	[[ "$sim_recovering" == "true" ]]
-	[[ "$sim_warn_msg" == *"run_tests"* ]]
+@test "recovery dispatch: warn names stuck stage for any error state with PR" {
+	_run_state_dispatch "interrupted_during_quality" 55 "run_tests"
+	[[ "$d_status" == "success" ]]
+	grep -q "(stuck at: run_tests)" "$d_log_file"
 }
 
-@test "recovery simulation: warn falls back to 'unknown' when current_stage absent" {
-	# Simulate a status file with no current_stage field
-	local issue_status="$TEST_TMP/sim-no-stage.json"
-	jq -n --argjson pr 77 \
-		'{state: "error", stages: {pr: {pr_number: $pr}}}' \
-		> "$issue_status"
-
-	local stuck_stage
-	stuck_stage=$(jq -r '.current_stage // "unknown"' \
-		"$issue_status" 2>/dev/null)
-	[[ "$stuck_stage" == "unknown" ]]
+@test "recovery dispatch: warn falls back to 'unknown' when current_stage absent" {
+	_run_state_dispatch "error" 77 "__absent__"
+	[[ "$d_status" == "success" ]]
+	grep -q "(stuck at: unknown)" "$d_log_file"
 }
 
-@test "recovery simulation: still recovers as success when current_stage is set" {
-	_simulate_recovery_with_stage "error" 42 "pr_review"
-	[[ "$sim_impl_status" == "success" ]]
-	[[ "$sim_pr_number" == "42" ]]
+@test "recovery dispatch: still recovers as success when current_stage is set" {
+	_run_state_dispatch "error" 42 "pr_review"
+	[[ "$d_status" == "success" ]]
+	[[ "$d_pr" == "42" ]]
 }
 
 # =============================================================================
@@ -3691,40 +3634,55 @@ EOF
 # (impl_exit != 0) from "it ran but produced nothing" (impl_exit == 0).
 # -----------------------------------------------------------------------
 
-# Replicate the post-fix else-branch logic (process_issue, missing status
-# file case) in pure bash so it can be verified without running the full
-# function (which requires git, gh, a live orchestrator, etc.).
-_simulate_missing_status_file_error() {
+# _run_missing_status_dispatch <impl_exit>
+# Runs the real missing-status-file else-branch of process_issue (extracted
+# verbatim from the script) and sets d_error / d_log in the caller.
+_run_missing_status_dispatch() {
 	local impl_exit="$1"
-	local impl_error=""
-
-	if (( impl_exit != 0 )); then
-		impl_error="Orchestrator failed to execute (exit $impl_exit) — no status file was written"
-	else
-		impl_error="Status file not created"
-	fi
-
-	sim_impl_error="$impl_error"
+	local block="$TEST_TMP/missing-status-block.sh"
+	awk '
+		/# Distinguish "the orchestrator process never even started"/ { cap = 1 }
+		cap { print }
+		cap && /^        fi$/ { exit }
+	' "$BATCH_ORCHESTRATOR_SCRIPT" > "$block"
+	[[ -s "$block" ]] || { echo "missing-status block not found" >&2; return 1; }
+	d_log_file="$TEST_TMP/missing-status-log.txt"
+	: > "$d_log_file"
+	local out
+	out=$(
+		log_error() { printf '%s\n' "$*" >> "$d_log_file"; }
+		issue_num=653
+		runner() {
+			local impl_error=""
+			# shellcheck disable=SC1090
+			source "$block"
+			printf '%s' "$impl_error"
+		}
+		runner
+	) || return 1
+	d_error="$out"
 }
 
 @test "missing status file with non-zero orchestrator exit names the exec failure" {
-	_simulate_missing_status_file_error 126
-	[[ "$sim_impl_error" == *"failed to execute"* ]]
+	_run_missing_status_dispatch 126
+	[[ "$d_error" == *"failed to execute"* ]]
+	grep -q "failed to execute (exit 126)" "$d_log_file"
 }
 
 @test "missing status file with non-zero orchestrator exit includes the exit code" {
-	_simulate_missing_status_file_error 126
-	[[ "$sim_impl_error" == *"126"* ]]
+	_run_missing_status_dispatch 126
+	[[ "$d_error" == *"126"* ]]
 }
 
 @test "missing status file with non-zero orchestrator exit does NOT use the generic message" {
-	_simulate_missing_status_file_error 126
-	[[ "$sim_impl_error" != "Status file not created" ]]
+	_run_missing_status_dispatch 126
+	[[ "$d_error" != "Status file not created" ]]
 }
 
 @test "missing status file with zero orchestrator exit keeps the generic message" {
-	_simulate_missing_status_file_error 0
-	[[ "$sim_impl_error" == "Status file not created" ]]
+	_run_missing_status_dispatch 0
+	[[ "$d_error" == "Status file not created" ]]
+	[[ ! -s "$d_log_file" ]]
 }
 
 @test "batch-orchestrator.sh distinguishes exec failure from generic missing-status-file case" {
@@ -6341,9 +6299,11 @@ _run_state_dispatch() {
 	d_log_file="$TEST_TMP/dispatch-log.txt"
 	: > "$d_log_file"
 	local issue_status_file="$TEST_TMP/dispatch-status.json"
+	# stage "__absent__" omits current_stage from the status file entirely.
 	if [[ -n "$pr" ]]; then
 		jq -n --arg s "$state" --argjson pr "$pr" --arg cs "$stage" --arg r "$reason" \
 			'{state: $s, current_stage: $cs, stages: {pr: {pr_number: $pr}}}
+			 | if $cs == "__absent__" then del(.current_stage) else . end
 			 | if $r != "" then .final_state_reason = $r else . end' \
 			> "$issue_status_file"
 	else

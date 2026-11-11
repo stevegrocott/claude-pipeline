@@ -99,8 +99,9 @@ teardown() {
 # implement-issue-orchestrator.sh main() (approx. lines 7337-7391).
 #
 # Replicates the logic here so we can exercise it with stubs without
-# running the full orchestrator, following the _simulate_state_routing
-# pattern used in test-batch-orchestrator.bats.
+# running the full orchestrator.  (Unlike test-batch-orchestrator.bats, which
+# now runs the extracted production block via _run_state_dispatch, this is
+# still a hand-written copy.)
 #
 # Arguments:
 #   $1  review_verdict  ("approved" or other)
