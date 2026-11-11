@@ -252,45 +252,62 @@ readonly -a GITIGNORE_PATHS=(
 seed_gitignore() {
     local root="$1"
     local file="$root/.gitignore"
-    local tmp line in_block=false found=false
+    local tmp line i j n found=false entry
+    local -a lines=() outside=()
 
     tmp=$(mktemp) || return 1
 
+    if [[ -f "$file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            lines+=("$line")
+        done < "$file"
+    fi
+    n=${#lines[@]}
+
+    # Only a BEGIN with a matching END after it opens a managed block. An
+    # unmatched marker is an ordinary line: treating it as a block start
+    # would swallow every consumer line that follows it. First pass collects
+    # the lines outside any matched pair.
+    for ((i = 0; i < n; i++)); do
+        if [[ "${lines[i]}" == "$GITIGNORE_BEGIN" ]]; then
+            for ((j = i + 1; j < n; j++)); do
+                [[ "${lines[j]}" == "$GITIGNORE_END" ]] && break
+            done
+            if ((j < n)); then
+                i=$j
+                continue
+            fi
+        fi
+        outside+=("${lines[i]}")
+    done
+
     # Entries already present outside the managed block are not re-added.
     GITIGNORE_MISSING=()
-    local outside entry
-    outside=$(mktemp) || { rm -f "$tmp"; return 1; }
-    if [[ -f "$file" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == "$GITIGNORE_BEGIN" ]]; then in_block=true; continue; fi
-            if $in_block; then
-                [[ "$line" == "$GITIGNORE_END" ]] && in_block=false
-                continue
-            fi
-            printf '%s\n' "$line" >> "$outside"
-        done < "$file"
-        in_block=false
-    fi
     for entry in "${GITIGNORE_PATHS[@]}"; do
-        grep -qxF -- "$entry" "$outside" || GITIGNORE_MISSING+=("$entry")
+        if ! printf '%s\n' ${outside[@]+"${outside[@]}"} |
+            grep -qxF -- "$entry"; then
+            GITIGNORE_MISSING+=("$entry")
+        fi
     done
-    rm -f "$outside"
 
-    if [[ -f "$file" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == "$GITIGNORE_BEGIN" ]]; then
-                in_block=true
-                found=true
-                write_gitignore_block >> "$tmp"
+    # Second pass: the first matched pair is replaced in place; further
+    # matched pairs are dropped; every other line is kept verbatim.
+    for ((i = 0; i < n; i++)); do
+        if [[ "${lines[i]}" == "$GITIGNORE_BEGIN" ]]; then
+            for ((j = i + 1; j < n; j++)); do
+                [[ "${lines[j]}" == "$GITIGNORE_END" ]] && break
+            done
+            if ((j < n)); then
+                if ! $found; then
+                    found=true
+                    write_gitignore_block >> "$tmp"
+                fi
+                i=$j
                 continue
             fi
-            if $in_block; then
-                [[ "$line" == "$GITIGNORE_END" ]] && in_block=false
-                continue
-            fi
-            printf '%s\n' "$line" >> "$tmp"
-        done < "$file"
-    fi
+        fi
+        printf '%s\n' "${lines[i]}" >> "$tmp"
+    done
 
     if ! $found && [[ ${#GITIGNORE_MISSING[@]} -gt 0 ]]; then
         # Separate from existing content with one blank line.

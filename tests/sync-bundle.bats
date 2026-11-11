@@ -1784,3 +1784,43 @@ _assert_artifact_entries_once() {
 
 	_assert_artifact_entries_once
 }
+
+@test "(#1043) sync.sh to keeps lines after an unmatched BEGIN marker" {
+	_gitignore_target
+	printf '%s\n' 'a/' '# >>> claude-pipeline artifacts (managed by sync.sh) >>>' \
+		'keep-me/' 'dist/' > "$GI_TARGET/.gitignore"
+
+	_run_sync_to_target || return 1
+
+	grep -qxF 'keep-me/' "$GI_TARGET/.gitignore"
+	grep -qxF 'dist/' "$GI_TARGET/.gitignore"
+	grep -qxF 'a/' "$GI_TARGET/.gitignore"
+	_assert_artifact_entries_once
+}
+
+@test "(#1043) sync.sh to keeps lines around a matched block and replaces it" {
+	_gitignore_target
+	printf '%s\n' 'before/' \
+		'# >>> claude-pipeline artifacts (managed by sync.sh) >>>' \
+		'stale-entry' '# <<< claude-pipeline artifacts <<<' \
+		'after/' > "$GI_TARGET/.gitignore"
+
+	_run_sync_to_target || return 1
+
+	grep -qxF 'before/' "$GI_TARGET/.gitignore"
+	grep -qxF 'after/' "$GI_TARGET/.gitignore"
+	! grep -qxF 'stale-entry' "$GI_TARGET/.gitignore" || return 1
+	_assert_artifact_entries_once
+}
+
+@test "(#1043) sync.sh to keeps a stray END marker line" {
+	_gitignore_target
+	printf '%s\n' 'x/' '# <<< claude-pipeline artifacts <<<' 'y/' \
+		> "$GI_TARGET/.gitignore"
+
+	_run_sync_to_target || return 1
+
+	grep -qxF 'x/' "$GI_TARGET/.gitignore"
+	grep -qxF 'y/' "$GI_TARGET/.gitignore"
+	grep -qxF '# <<< claude-pipeline artifacts <<<' "$GI_TARGET/.gitignore"
+}
