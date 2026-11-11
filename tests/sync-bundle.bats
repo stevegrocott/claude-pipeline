@@ -1675,3 +1675,112 @@ _init_pipeline_git_repo() {
 	[[ -n "$regen_line" ]]
 	((fmt_line < regen_line))
 }
+
+# =============================================================================
+# sync.sh to — seeds pipeline artifact paths into the consumer .gitignore
+# (#1015). The orchestrator writes status.json and logs/ into the consumer
+# repo root; without ignore entries the tree is permanently dirty and
+# verify_fix_stage_commit falsely fails fix stages.
+# =============================================================================
+
+_gitignore_target() {
+	GI_TARGET="$TEST_SCRATCH/consumer"
+	mkdir -p "$GI_TARGET/.claude"
+}
+
+_run_sync_to_target() {
+	run bash "$SYNC_SH" to "$GI_TARGET"
+	[[ "$status" -eq 0 ]] || {
+		printf 'sync.sh to exited %d:\n%s\n' "$status" "$output" >&2
+		return 1
+	}
+}
+
+_assert_artifact_entries_once() {
+	local entry count
+	for entry in 'logs/' 'status.json' 'status.json.lock' 'status.json.lockdir'; do
+		count=$(grep -cxF "$entry" "$GI_TARGET/.gitignore")
+		[[ "$count" -eq 1 ]] || {
+			printf 'FAIL: %s appears %d times (want 1):\n%s\n' \
+				"$entry" "$count" "$(cat "$GI_TARGET/.gitignore")" >&2
+			return 1
+		}
+	done
+}
+
+@test "(#1015 AC1) sync.sh to creates .gitignore when absent" {
+	_gitignore_target
+	[[ ! -e "$GI_TARGET/.gitignore" ]]
+
+	_run_sync_to_target || return 1
+
+	[[ -f "$GI_TARGET/.gitignore" ]]
+	_assert_artifact_entries_once
+}
+
+@test "(#1015 AC2) sync.sh to leaves .gitignore untouched when entries already present" {
+	_gitignore_target
+	printf '%s\n' 'node_modules/' 'logs/' 'status.json' \
+		'status.json.lock' 'status.json.lockdir' > "$GI_TARGET/.gitignore"
+	local before
+	before=$(cat "$GI_TARGET/.gitignore")
+
+	_run_sync_to_target || return 1
+
+	[[ "$(cat "$GI_TARGET/.gitignore")" == "$before" ]] || {
+		printf 'FAIL: .gitignore changed:\n%s\n' \
+			"$(cat "$GI_TARGET/.gitignore")" >&2
+		return 1
+	}
+	_assert_artifact_entries_once
+}
+
+@test "(#1015 AC3) sync.sh to appends block and keeps existing lines byte-identical" {
+	_gitignore_target
+	# Odd spacing, a comment and a blank line must all survive verbatim.
+	printf '%s\n' '# my ignores' '  *.log' '' 'dist/' > "$GI_TARGET/.gitignore"
+	cp "$GI_TARGET/.gitignore" "$TEST_SCRATCH/gitignore.before"
+	local n
+	n=$(wc -l < "$TEST_SCRATCH/gitignore.before")
+
+	_run_sync_to_target || return 1
+
+	# Original content is an exact prefix of the new file.
+	head -n "$n" "$GI_TARGET/.gitignore" | cmp - "$TEST_SCRATCH/gitignore.before"
+	_assert_artifact_entries_once
+}
+
+@test "(#1015 AC3) sync.sh to terminates an unterminated last line before appending" {
+	_gitignore_target
+	printf 'dist/' > "$GI_TARGET/.gitignore"   # no trailing newline
+
+	_run_sync_to_target || return 1
+
+	grep -qxF 'dist/' "$GI_TARGET/.gitignore" || {
+		printf 'FAIL: last line merged with block:\n%s\n' \
+			"$(cat "$GI_TARGET/.gitignore")" >&2
+		return 1
+	}
+	_assert_artifact_entries_once
+}
+
+@test "(#1015 AC4) sync.sh to is idempotent across two runs" {
+	_gitignore_target
+	printf '%s\n' 'dist/' > "$GI_TARGET/.gitignore"
+
+	_run_sync_to_target || return 1
+	cp "$GI_TARGET/.gitignore" "$TEST_SCRATCH/gitignore.first"
+	_run_sync_to_target || return 1
+
+	cmp "$GI_TARGET/.gitignore" "$TEST_SCRATCH/gitignore.first"
+	_assert_artifact_entries_once
+}
+
+@test "(#1015) sync.sh to seeds only missing entries when some are present" {
+	_gitignore_target
+	printf '%s\n' 'logs/' > "$GI_TARGET/.gitignore"
+
+	_run_sync_to_target || return 1
+
+	_assert_artifact_entries_once
+}
