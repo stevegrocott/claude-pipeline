@@ -407,6 +407,54 @@ teardown() {
         || fail "Expected error_kind 'no_structured_output'; got: $error_kind"
 }
 
+@test "unmarked SIGTERM (143) is reported as external termination, not timeout (#1047)" {
+    # The CLI exits 143 immediately — no watchdog fired, so the exit must
+    # not be mapped to 124 and no timeout retry may be launched.
+    local ext_calls_file="$TEST_TMP/ext-calls.txt"
+    export ext_calls_file
+    timeout() {
+        printf 'x\n' >> "$ext_calls_file"
+        return 143
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
+    [[ "$output" == *"terminated externally by SIGTERM"* ]] \
+        || fail "Expected external-termination log; got: $output"
+    [[ "$output" != *"timed out after"* ]] \
+        || fail "External 143 must not be logged as a timeout: $output"
+    [[ "$output" != *"timeout retry"* ]] \
+        || fail "External 143 must not start a timeout retry: $output"
+}
+
+@test "watchdog-delivered SIGTERM is still handled as a timeout (#1047)" {
+    # First call hangs until the watchdog kills it; the marker the watchdog
+    # leaves must keep the 143 -> 124 mapping and start the timeout retry.
+    local hang_fifo="$TEST_TMP/wdmark.fifo"
+    mkfifo "$hang_fifo"
+    local wdm_calls_file="$TEST_TMP/wdm-calls.txt"
+    export wdm_calls_file hang_fifo
+    timeout() {
+        local _n
+        _n=$(wc -l < "$wdm_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$wdm_calls_file"
+        if (( _n == 0 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 124
+        fi
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [[ "$output" == *"timed out after 1s"* ]] \
+        || fail "Watchdog kill must be logged as a timeout; got: $output"
+    [[ "$output" == *"retrying with"* ]] \
+        || fail "Watchdog kill must trigger the timeout retry: $output"
+    [[ "$output" != *"terminated externally"* ]] \
+        || fail "Watchdog kill misreported as external: $output"
+}
+
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
     # Reproduce the original bug: perl alarm() wrapper and claude child are
     # both dead, leaving a childless subshell that blocks indefinitely.
