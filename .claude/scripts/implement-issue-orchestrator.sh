@@ -4043,6 +4043,7 @@ for m in re.finditer(r'\[\s*\{', t):
                     sleep 1
                     _waited=$(( _waited + 1 ))
                 done
+                : > "$_esc_raw.wd"
                 kill "$_esc_pid" 2>/dev/null
             ) </dev/null >/dev/null 2>&1 3>&- &
             local _esc_watchdog_pid=$!
@@ -4056,9 +4057,16 @@ for m in re.finditer(r'\[\s*\{', t):
             # The watchdog kills with SIGTERM (exit 143 = 128 + 15); map to
             # the standard timeout exit code (124) so downstream handling
             # (the warn log below) treats both paths identically.
+            # Only a watchdog-marked 143 is a timeout (issue #1047).
             if (( _esc_exit_code == 143 )); then
-                _esc_exit_code=124
+                if [[ -e "$_esc_raw.wd" ]]; then
+                    _esc_exit_code=124
+                else
+                    log "WARN: Stage $stage_name escalation terminated" \
+                        "externally by SIGTERM — not a timeout"
+                fi
             fi
+            rm -f "$_esc_raw.wd"
 
             output=$(cat "$_esc_raw"); rm -f "$_esc_raw"
 
@@ -4210,6 +4218,7 @@ for m in re.finditer(r'\[\s*\{', t):
                     sleep 1
                     _waited=$(( _waited + 1 ))
                 done
+                : > "$_retry_raw.wd"
                 kill "$_retry_pid" 2>/dev/null
             ) </dev/null >/dev/null 2>&1 3>&- &
             local _retry_watchdog_pid=$!
@@ -4223,9 +4232,16 @@ for m in re.finditer(r'\[\s*\{', t):
             # The watchdog kills with SIGTERM (exit 143 = 128 + 15); map to
             # the standard timeout exit code (124) so downstream handling
             # treats both paths identically.
+            # Only a watchdog-marked 143 is a timeout (issue #1047).
             if (( _retry_exit_code == 143 )); then
-                _retry_exit_code=124
+                if [[ -e "$_retry_raw.wd" ]]; then
+                    _retry_exit_code=124
+                else
+                    log "WARN: Stage $stage_name same-model retry" \
+                        "terminated externally by SIGTERM — not a timeout"
+                fi
             fi
+            rm -f "$_retry_raw.wd"
 
             output=$(cat "$_retry_raw"); rm -f "$_retry_raw"
 
