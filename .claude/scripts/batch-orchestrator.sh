@@ -2671,6 +2671,16 @@ comment_paused_on_pr() {
 			"paused_on_pr comment (non-fatal)"
 }
 
+# Record an issue as completed once its parked PR is observed MERGED (#966).
+# merge_blocked stays only for PRs still open or closed unmerged.
+mark_issue_completed_on_merge() {
+	local issue_num="$1" pr="$2"
+	update_issue_field "$issue_num" "status" "completed"
+	update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
+	update_issue_field "$issue_num" "pr" "$pr" "true"
+	update_progress
+}
+
 # Globals:
 #   STATUS_FILE, PLATFORM_DIR
 # Returns:
@@ -2731,6 +2741,7 @@ wait_for_pr_merged() {
 	state=$(pr_merge_state "$pr")
 	case "$state" in
 		MERGED)
+			mark_issue_completed_on_merge "$issue_num" "$pr"
 			return 0
 			;;
 		CLOSED)
@@ -2754,6 +2765,7 @@ wait_for_pr_merged() {
 			MERGED)
 				log "Issue #$issue_num: PR #$pr merged after" \
 					"${elapsed}s — resuming the batch"
+				mark_issue_completed_on_merge "$issue_num" "$pr"
 				set_paused_on_pr ""
 				set_state "running"
 				return 0

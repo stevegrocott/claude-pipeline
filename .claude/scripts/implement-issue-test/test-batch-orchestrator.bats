@@ -4600,6 +4600,125 @@ _gh_call_count() {
 }
 
 # ---------------------------------------------------------------------------
+# #966: with REQUIRE_MANUAL_MERGE=1 every issue is recorded merge_blocked, and
+# nothing revised that when the operator merged the PR during the park — so a
+# fully merged batch reported {completed: 0, merge_blocked: N}. The wait is the
+# only place that sees the PR merge, so it owns the status correction.
+# ---------------------------------------------------------------------------
+
+# Loads the real status/progress writers the wait is expected to call on a
+# merge. They are extracted from the script, not re-implemented here.
+_load_status_writers() {
+	local fn body
+	for fn in update_issue_field update_progress \
+		mark_issue_completed_on_merge; do
+		body=$(_extract_function_body "$fn" "$BATCH_ORCHESTRATOR_SCRIPT")
+		[[ -n "$body" ]] \
+			|| fail "$fn() not defined in batch-orchestrator.sh"
+		eval "$body"
+	done
+}
+
+# Issue 5980 parked as merge_blocked on PR 1234 (the REQUIRE_MANUAL_MERGE
+# end state), with the progress counters as update_progress left them.
+_seed_status_merge_blocked() {
+	jq -n '{
+		state: "running",
+		issues: [
+			{number: "5980", status: "merge_blocked", pr: "1234",
+			 completed_at: null},
+			{number: "5981", status: "pending", pr: null}
+		],
+		progress: {total: 2, completed: 0, pending: 1, failed: 0,
+			merge_blocked: 1}
+	}' > "$STATUS_FILE"
+}
+
+@test "#966: a held PR merged during the wait is recorded completed with its PR and completed_at" {
+	_load_wait_for_merge_functions
+	_load_status_writers
+	_seed_status_merge_blocked
+	_stub_comment_issue
+	# OPEN on the pre-check, MERGED on the first poll.
+	_stub_gh_pr_states OPEN MERGED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] \
+		|| fail "wait_for_pr_merged failed on a PR that merged: $output"
+
+	local row
+	row=$(jq -c '.issues[] | select(.number == "5980")' "$STATUS_FILE")
+	[[ "$(jq -r '.status' <<< "$row")" == "completed" ]] \
+		|| fail "issue stayed $(jq -r '.status' <<< "$row") after its PR merged: $row"
+	[[ "$(jq -r '.pr' <<< "$row")" == "1234" ]] \
+		|| fail "the PR number was lost: $row"
+	[[ "$(jq -r '.completed_at // empty' <<< "$row")" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]] \
+		|| fail "completed_at was not stamped: $row"
+}
+
+@test "#966: a merge during the wait moves the batch counters from merge_blocked to completed" {
+	_load_wait_for_merge_functions
+	_load_status_writers
+	_seed_status_merge_blocked
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN MERGED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "wait failed: $output"
+
+	[[ "$(jq -r '.progress.completed' "$STATUS_FILE")" == "1" ]] \
+		|| fail "progress.completed is not 1: $(jq -c '.progress' "$STATUS_FILE")"
+	[[ "$(jq -r '.progress.merge_blocked' "$STATUS_FILE")" == "0" ]] \
+		|| fail "progress.merge_blocked is not 0: $(jq -c '.progress' "$STATUS_FILE")"
+}
+
+@test "#966: a held PR still open when the wait times out stays merge_blocked" {
+	_load_wait_for_merge_functions
+	_load_status_writers
+	_seed_status_merge_blocked
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN
+
+	BATCH_WAIT_FOR_MERGE_MAX=5 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 1 ]] \
+		|| fail "expected the timeout return, got status $status"
+
+	[[ "$(jq -r '.issues[0].status' "$STATUS_FILE")" == "merge_blocked" ]] \
+		|| fail "a still-open PR changed the issue to $(jq -r '.issues[0].status' "$STATUS_FILE")"
+	[[ "$(jq -r '.issues[0].completed_at' "$STATUS_FILE")" == "null" ]] \
+		|| fail "completed_at was stamped for an unmerged PR"
+	[[ "$(jq -r '.progress.completed' "$STATUS_FILE")" == "0" ]] \
+		|| fail "an unmerged PR was counted completed"
+}
+
+@test "#966: a held PR closed without merging stays merge_blocked" {
+	_load_wait_for_merge_functions
+	_load_status_writers
+	_seed_status_merge_blocked
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN CLOSED
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+
+	[[ "$(jq -r '.issues[0].status' "$STATUS_FILE")" == "merge_blocked" ]] \
+		|| fail "a closed-unmerged PR changed the issue to $(jq -r '.issues[0].status' "$STATUS_FILE")"
+	[[ "$(jq -r '.progress.completed' "$STATUS_FILE")" == "0" ]] \
+		|| fail "a closed-unmerged PR was counted completed"
+}
+
+# ---------------------------------------------------------------------------
 # #870: a merge_pr-stage failure leaves the PR OPEN but reaches the batch as
 # state:error, whose arm historically recorded only status+error. The park
 # keyed off .issues[].pr, so the batch forked the next issue on top of it.
