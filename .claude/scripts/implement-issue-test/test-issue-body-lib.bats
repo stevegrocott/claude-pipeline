@@ -1836,7 +1836,7 @@ _body_citing() {
 # =============================================================================
 
 @test "#1013: an anchored nonexistent path is rejected as unresolved" {
-	run assert_issue_valid "$(_body_citing .claude/scripts/does-not-exist.sh:L10-40)"
+	run assert_issue_valid "$(_body_citing nope/missing/does-not-exist.sh:L10-40)"
 	[ "$status" -eq 1 ]
 	[[ "$output" == *"unresolved path"* ]]
 	[[ "$output" == *"does-not-exist.sh"* ]]
