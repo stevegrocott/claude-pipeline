@@ -236,6 +236,71 @@ sync_consumer_config() {
     done
 }
 
+# Marked block of pipeline artifact paths seeded into the consumer .gitignore.
+readonly GITIGNORE_BEGIN='# >>> claude-pipeline artifacts (managed by sync.sh) >>>'
+readonly GITIGNORE_END='# <<< claude-pipeline artifacts <<<'
+readonly -a GITIGNORE_PATHS=(
+    'logs/'
+    'status.json'
+    'status.json.lock'
+    'status.json.lockdir'
+    '.serena/'
+    '.claude/env.local'
+    '.claude/local/'
+)
+
+# Seed pipeline artifact paths into <root>/.gitignore under a marked block.
+# Idempotent: an existing block is replaced in place, so re-running yields a
+# byte-identical file and consumer lines outside the block are untouched.
+seed_gitignore() {
+    local root="$1"
+    local file="$root/.gitignore"
+    local tmp line in_block=false found=false
+
+    tmp=$(mktemp) || return 1
+
+    if [[ -f "$file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == "$GITIGNORE_BEGIN" ]]; then
+                in_block=true
+                found=true
+                write_gitignore_block >> "$tmp"
+                continue
+            fi
+            if $in_block; then
+                [[ "$line" == "$GITIGNORE_END" ]] && in_block=false
+                continue
+            fi
+            printf '%s\n' "$line" >> "$tmp"
+        done < "$file"
+    fi
+
+    if ! $found; then
+        # Separate from existing content with one blank line.
+        [[ -s "$tmp" ]] && printf '\n' >> "$tmp"
+        write_gitignore_block >> "$tmp"
+    fi
+
+    if [[ -f "$file" ]] && cmp -s "$tmp" "$file"; then
+        rm -f "$tmp"
+        echo "  KEEP .gitignore (artifact block up to date)"
+        return 0
+    fi
+
+    cp "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    echo "  SEED .gitignore (pipeline artifact block)"
+}
+
+write_gitignore_block() {
+    local path
+    printf '%s\n' "$GITIGNORE_BEGIN"
+    for path in "${GITIGNORE_PATHS[@]}"; do
+        printf '%s\n' "$path"
+    done
+    printf '%s\n' "$GITIGNORE_END"
+}
+
 # Every .claude-relative path a `to` sync would write into a consumer.
 planned_sync_paths() {
     local dir file found
@@ -793,6 +858,10 @@ case "$COMMAND" in
         echo ""
         echo "Seeding consumer config (existing files left untouched):"
         sync_consumer_config "$PIPELINE_DIR" "$PROJECT_DIR"
+
+        echo ""
+        echo "Seeding .gitignore artifact paths:"
+        seed_gitignore "${PROJECT_DIR%/.claude}"
 
         echo ""
         echo "Syncing universal skills:"
