@@ -339,117 +339,56 @@ _run_process_issue_call_site() {
 # FUNCTIONAL: state routing simulation
 # =============================================================================
 #
-# These tests replicate the batch-orchestrator.sh process_issue state-routing
-# logic in pure bash so we can verify it without running the full script (which
-# requires git, gh, etc.).
-
-# Simulate the post-fix state routing for a given state value.
-# Populates: sim_impl_status, sim_pr_number, sim_warn_msg, sim_recovering
-_simulate_state_routing() {
-	local state="$1"
-	local pr_in_status="${2:-}"  # PR number already written to status file
-
-	# Create a temporary mock issue status file
-	local issue_status="$TEST_TMP/sim-issue-status.json"
-	if [[ -n "$pr_in_status" ]]; then
-		jq -n --argjson pr "$pr_in_status" \
-			'{state: $ARGS.named.s, stages: {pr: {pr_number: $pr}}}' \
-			--arg s "$state" > "$issue_status"
-	else
-		jq -n --arg s "$state" '{state: $s}' > "$issue_status"
-	fi
-
-	sim_impl_status="error"
-	sim_pr_number=""
-	sim_warn_msg=""
-	sim_recovering=false
-
-	local st
-	st=$(jq -r '.state' "$issue_status")
-
-	# Replicate the FIXED case statement (post-issue-326 task 1)
-	case "$st" in
-		completed)
-			sim_impl_status="success"
-			sim_pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status" 2>/dev/null)
-			;;
-		already_implemented)
-			sim_impl_status="already_implemented"
-			;;
-		merge_blocked)
-			sim_impl_status="merge_blocked"
-			sim_pr_number=$(jq -r '.stages.pr.pr_number // empty' "$issue_status" 2>/dev/null)
-			sim_warn_msg="PR #${sim_pr_number} left open — merge blocked by quality gate"
-			;;
-		error|max_iterations_quality|max_iterations_pr_review)
-			sim_impl_status="error"
-			;;
-		interrupted_during_*)
-			sim_impl_status="error"
-			;;
-		*)
-			sim_impl_status="error"
-			;;
-	esac
-
-	# Replicate the recovery block (guarded by impl_status == error)
-	if [[ "$sim_impl_status" == "error" ]]; then
-		local recovered_pr
-		recovered_pr=$(jq -r '.stages.pr.pr_number // empty' "$issue_status" 2>/dev/null)
-		if [[ -n "$recovered_pr" && "$recovered_pr" =~ ^[0-9]+$ ]]; then
-			sim_recovering=true
-			sim_warn_msg="Orchestrator exited with state='$st' but PR #$recovered_pr exists — recovering as success"
-			sim_impl_status="success"
-			sim_pr_number="$recovered_pr"
-		fi
-	fi
-}
+# These tests drive _run_state_dispatch, which extracts and runs the real
+# process_issue state-routing block from batch-orchestrator.sh (no replica).
 
 @test "merge_blocked state with PR number: impl_status is not error after routing" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_impl_status" == "merge_blocked" ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$d_status" == "merge_blocked" ]]
 }
 
 @test "merge_blocked state with PR number: recovery block is NOT triggered" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_recovering" == "false" ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$d_status" != "success" ]]
+	[[ "$d_pr" == "42" ]]
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]]
 }
 
 @test "merge_blocked state with PR number: new message contains 'merge blocked by quality gate'" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_warn_msg" == *"merge blocked by quality gate"* ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$(< "$d_log_file")" == *"merge blocked by quality gate"* ]]
 }
 
 @test "merge_blocked state with PR number: new message contains 'left open'" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_warn_msg" == *"left open"* ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$(< "$d_log_file")" == *"PR #42 left open"* ]]
 }
 
 @test "merge_blocked state with PR number: new message does NOT say 'recovering as success'" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_warn_msg" != *"recovering as success"* ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]]
 }
 
 @test "merge_blocked state without PR number: still not treated as error needing recovery" {
-	_simulate_state_routing "merge_blocked" ""
-	[[ "$sim_impl_status" == "merge_blocked" ]]
-	[[ "$sim_recovering" == "false" ]]
+	_run_state_dispatch "merge_blocked" ""
+	[[ "$d_status" == "merge_blocked" ]]
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]]
 }
 
 @test "completed state still routes correctly after merge_blocked arm is added" {
-	_simulate_state_routing "completed" 7
-	[[ "$sim_impl_status" == "success" ]]
-	[[ "$sim_pr_number" == "7" ]]
-	[[ "$sim_recovering" == "false" ]]
+	_run_state_dispatch "completed" 7
+	[[ "$d_status" == "success" ]]
+	[[ "$d_pr" == "7" ]]
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]]
 }
 
-@test "unknown crash state with PR still recovers as success (regression guard)" {
-	# A genuine crash with an unknown state (not merge_blocked) that left a PR
-	# behind must still use the recovery path.
-	_simulate_state_routing "some_unknown_crash_state" 99
-	[[ "$sim_recovering" == "true" ]]
-	[[ "$sim_impl_status" == "success" ]]
-	[[ "$sim_warn_msg" == *"recovering as success"* ]]
+@test "unknown state with PR fails closed instead of recovering as success (#1031)" {
+	# An unrecognised state is no evidence the work landed, so a stray PR
+	# number must not flip it to success.
+	_run_state_dispatch "some_unknown_crash_state" 99
+	[[ "$d_status" == "error" ]]
+	[[ "$d_error" == *"Unknown state"* ]]
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]]
 }
 
 # =============================================================================
@@ -6395,9 +6334,12 @@ _I1017_STATES=(
 
 # _run_state_dispatch <state> <pr_number|""> [current_stage]
 # Runs the real case/recovery block against a synthetic status file and sets
-# d_status, d_error, d_pr in the caller.
+# d_status, d_error, d_pr in the caller. log/log_warn/log_error output is
+# captured to $d_log_file (truncated per call) for message assertions.
 _run_state_dispatch() {
 	local state="$1" pr="$2" stage="${3:-pr_review}" reason="${4:-}"
+	d_log_file="$TEST_TMP/dispatch-log.txt"
+	: > "$d_log_file"
 	local issue_status_file="$TEST_TMP/dispatch-status.json"
 	if [[ -n "$pr" ]]; then
 		jq -n --arg s "$state" --argjson pr "$pr" --arg cs "$stage" --arg r "$reason" \
@@ -6421,7 +6363,9 @@ _run_state_dispatch() {
 
 	local out
 	out=$(
-		log() { :; }; log_warn() { :; }; log_error() { :; }
+		log() { printf '%s\n' "$*" >> "$d_log_file"; }
+		log_warn() { printf '%s\n' "$*" >> "$d_log_file"; }
+		log_error() { printf '%s\n' "$*" >> "$d_log_file"; }
 		eval "$(_extract_function_body pr_recovery_allowed "$BATCH_ORCHESTRATOR_SCRIPT")"
 		issue_num=1017
 		runner() {
