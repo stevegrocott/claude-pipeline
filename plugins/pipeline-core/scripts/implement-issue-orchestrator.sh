@@ -10000,6 +10000,17 @@ _parse_e2e_report_counts() {
 		"$failed"
 }
 
+# Count the "not ok" lines in a BATS run's output.
+# Arguments:
+#   $1 - the run's combined output
+# Outputs:
+#   The number of failing tests on stdout (0 when none)
+_bats_full_suite_failure_count() {
+	local count
+	count=$(printf '%s\n' "$1" | grep -c '^not ok')
+	printf '%s' "${count:-0}"
+}
+
 # Run TEST_E2E_CMD directly and emit the e2e-verify stage's result shape
 # (issue #872).
 #
@@ -14129,6 +14140,22 @@ $full_scope_failures
                     "${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
                     "unmeasured, not red (non-blocking)"
                 DEGRADED_STAGES+=("test:bats_full_suite_timeout")
+            elif (( bats_full_rc != 0 )) \
+                && (( $(_bats_full_suite_failure_count \
+                    "$bats_full_output") == 0 )); then
+                # A non-zero exit with no failing test reported means the
+                # runner died or aborted before producing a verdict (setup
+                # error, killed worker, signal): nothing failed, so the
+                # suite is unmeasured, not red. A distinct marker keeps it
+                # from matching test:*full_suite_red, which would make
+                # reconcile_failed_tasks_with_branch_evidence() treat it as
+                # proof of a real regression.
+                DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")
+                log_warn "Full-suite BATS check exited $bats_full_rc with" \
+                    "no failing test reported — treating as unmeasured," \
+                    "not red (non-blocking)"
+                comment_issue "Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)" \
+                    "⚠️ The full BATS suite (\`bash $bats_runner\`) exited $bats_full_rc but reported **no failing test**, so its state on this branch is **unmeasured**, not red. There are no test failures to review from this run — full log: $bats_full_log" "default"
             elif (( bats_full_rc != 0 )); then
                 # Build the comment from the extracted failing test names
                 # rather than an arbitrary tail. A tail only shows whatever

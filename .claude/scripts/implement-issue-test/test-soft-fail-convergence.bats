@@ -828,3 +828,50 @@ _repro_full_suite_npm_check() {
 	expect_not_ok "no exit/return may sit between the BATS timeout marker and the E2E guard" \
 		grep -qE '^[[:space:]]*(exit|return)\b' <<< "$window"
 }
+
+# =============================================================================
+# FULL-SUITE BATS EXIT WITH NO FAILING TEST (UNMEASURED)
+# =============================================================================
+
+@test "_bats_full_suite_failure_count is 0 when output has no 'not ok' line" {
+	local out
+	out=$(_bats_full_suite_failure_count $'1..3\nok 1 a\nok 2 b\nok 3 c')
+	[ "$out" = "0" ]
+}
+
+@test "_bats_full_suite_failure_count counts every 'not ok' line" {
+	local out
+	out=$(_bats_full_suite_failure_count $'1..3\nnot ok 1 a\nok 2 b\nnot ok 3 c')
+	[ "$out" = "2" ]
+}
+
+@test "_bats_full_suite_failure_count ignores indented 'not ok' text" {
+	local out
+	out=$(_bats_full_suite_failure_count $'ok 1 a\n   # not ok in a comment')
+	[ "$out" = "0" ]
+}
+
+@test "BATS full-suite non-zero exit with no failing test is recorded as unmeasured, not red" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	expect_ok "an unmeasured marker must exist for the BATS arm" \
+		grep -qF 'DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")' "$ORCHESTRATOR_SCRIPT"
+	expect_ok "the unmeasured branch must be gated on the failure count" \
+		grep -qF '_bats_full_suite_failure_count' "$ORCHESTRATOR_SCRIPT"
+
+	# The marker must not match test:*full_suite_red, or the
+	# branch-evidence reconciliation would read it as a real regression.
+	[[ "test:bats_full_suite_unmeasured" != test:*full_suite_red ]]
+	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_full_suite_red")'* ]]
+}
+
+@test "BATS full-suite unmeasured branch precedes the red branch" {
+	local unmeasured_pos red_pos
+	unmeasured_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")' \
+		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	red_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_red")' \
+		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	[[ -n "$unmeasured_pos" && -n "$red_pos" ]]
+	((unmeasured_pos < red_pos))
+}
