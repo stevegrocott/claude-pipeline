@@ -246,51 +246,88 @@ readonly -a GITIGNORE_PATHS=(
     'status.json.lockdir'
 )
 
+# Print the index of the END marker that closes the BEGIN at line $1 of the
+# caller's `lines` array; fail when there is none. Another BEGIN before the
+# END means line $1 is a stale marker: pairing it with that END would swallow
+# the consumer lines between the two BEGINs.
+gitignore_end_index() {
+    local j
+    for ((j = $1 + 1; j < ${#lines[@]}; j++)); do
+        if [[ "${lines[j]}" == "$GITIGNORE_BEGIN" ]]; then
+            return 1
+        fi
+        if [[ "${lines[j]}" == "$GITIGNORE_END" ]]; then
+            echo "$j"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Seed pipeline artifact paths into <root>/.gitignore under a marked block.
 # Idempotent: an existing block is replaced in place, so re-running yields a
 # byte-identical file and consumer lines outside the block are untouched.
 seed_gitignore() {
     local root="$1"
     local file="$root/.gitignore"
-    local tmp line in_block=false found=false
+    local tmp line i j n found=false has_pair=false entry
+    local -a lines=() outside=()
 
     tmp=$(mktemp) || return 1
 
-    # Entries already present outside the managed block are not re-added.
-    GITIGNORE_MISSING=()
-    local outside entry
-    outside=$(mktemp) || { rm -f "$tmp"; return 1; }
     if [[ -f "$file" ]]; then
         while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == "$GITIGNORE_BEGIN" ]]; then in_block=true; continue; fi
-            if $in_block; then
-                [[ "$line" == "$GITIGNORE_END" ]] && in_block=false
+            lines+=("$line")
+        done < "$file"
+    fi
+    n=${#lines[@]}
+
+    # Only a BEGIN with a matching END after it opens a managed block. An
+    # unmatched marker would swallow every consumer line that follows it, so
+    # it never opens a block. First pass collects the lines outside any
+    # matched pair.
+    for ((i = 0; i < n; i++)); do
+        if [[ "${lines[i]}" == "$GITIGNORE_BEGIN" ]]; then
+            if j=$(gitignore_end_index "$i"); then
+                has_pair=true
+                i=$j
                 continue
             fi
-            printf '%s\n' "$line" >> "$outside"
-        done < "$file"
-        in_block=false
-    fi
-    for entry in "${GITIGNORE_PATHS[@]}"; do
-        grep -qxF -- "$entry" "$outside" || GITIGNORE_MISSING+=("$entry")
+        fi
+        outside+=("${lines[i]}")
     done
-    rm -f "$outside"
 
-    if [[ -f "$file" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            if [[ "$line" == "$GITIGNORE_BEGIN" ]]; then
-                in_block=true
+    # Entries already present outside the managed block are not re-added.
+    GITIGNORE_MISSING=()
+    for entry in "${GITIGNORE_PATHS[@]}"; do
+        if ! printf '%s\n' ${outside[@]+"${outside[@]}"} |
+            grep -qxF -- "$entry"; then
+            GITIGNORE_MISSING+=("$entry")
+        fi
+    done
+
+    # Second pass: the first matched pair is replaced in place; further
+    # matched pairs are dropped. With no matched pair, the first unmatched
+    # BEGIN is replaced in place by the fresh block (so a stale marker can
+    # never pair with a later END and swallow consumer lines). Every other
+    # line is kept verbatim.
+    for ((i = 0; i < n; i++)); do
+        if [[ "${lines[i]}" == "$GITIGNORE_BEGIN" ]]; then
+            if j=$(gitignore_end_index "$i"); then
+                if ! $found; then
+                    found=true
+                    write_gitignore_block >> "$tmp"
+                fi
+                i=$j
+                continue
+            elif ! $has_pair && ! $found; then
                 found=true
                 write_gitignore_block >> "$tmp"
                 continue
             fi
-            if $in_block; then
-                [[ "$line" == "$GITIGNORE_END" ]] && in_block=false
-                continue
-            fi
-            printf '%s\n' "$line" >> "$tmp"
-        done < "$file"
-    fi
+        fi
+        printf '%s\n' "${lines[i]}" >> "$tmp"
+    done
 
     if ! $found && [[ ${#GITIGNORE_MISSING[@]} -gt 0 ]]; then
         # Separate from existing content with one blank line.

@@ -1905,6 +1905,84 @@ _install_fix_stage_stubs() {
     [ "$status" -eq 0 ]
 }
 
+# Build a consumer repo, run the real `sync.sh to` against it, then drop the
+# artifacts the orchestrator writes at the repo root (#1015 / #1043).
+_setup_synced_consumer_repo() {
+    local sync_sh
+    sync_sh="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)/sync.sh"
+    [ -f "$sync_sh" ] || fail "sync.sh not found at $sync_sh"
+
+    cd "$TEST_TMP" || return 1
+    rm -rf syncedrepo
+    mkdir -p syncedrepo/.claude
+    cd syncedrepo || return 1
+    git init -q .
+    git checkout -q -b fix-branch
+    printf 'base\n' > src.ts
+    git add src.ts
+    git commit -q -m "initial"
+
+    bash "$sync_sh" to "$PWD" > "$TEST_TMP/sync.out" 2>&1 || \
+        fail "sync.sh to failed: $(cat "$TEST_TMP/sync.out")"
+
+    # Everything sync wrote that is not ignore-managed is committed, so the
+    # only remaining untracked files are the runtime artifacts below.
+    git add -A
+    git commit -q -m "synced pipeline" || true
+
+    mkdir -p logs/implement-issue
+    printf 'log\n' > logs/implement-issue/orchestrator.log
+    printf '{}\n' > status.json
+    printf '' > status.json.lock
+    mkdir -p status.json.lockdir
+    printf 'x\n' > status.json.lockdir/owner
+}
+
+@test "verify_fix_stage_commit accepts a synced consumer whose only dirt is pipeline artifacts" {
+    _setup_synced_consumer_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+
+    # Artifacts exist on disk but sync.sh ignored them: tree is clean.
+    [ -z "$(git status --porcelain)" ] || \
+        fail "artifacts show as dirty after sync: $(git status --porcelain)"
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"silent no-op guard"* ]] || \
+        fail "guard tripped on pipeline artifacts: $output"
+}
+
+@test "verify_fix_stage_commit still fails on real edits in a synced consumer" {
+    _setup_synced_consumer_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+
+    printf 'fixed\n' >> src.ts
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"src.ts"* ]]
+    [[ "$output" != *"status.json"* ]] || \
+        fail "ignored artifact leaked into dirty-path list: $output"
+}
+
+@test "verify_fix_stage_commit fails on artifacts when the consumer was never synced" {
+    # Control: proves the test above is not vacuous — without the seeded
+    # ignore block the same artifacts trip the guard.
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    printf '{}\n' > status.json
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"status.json"* ]]
+}
+
 @test "_handle_fix_stage_result posts no success comment when work is uncommitted" {
     _setup_fix_stage_repo
     local head_before
