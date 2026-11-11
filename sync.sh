@@ -244,9 +244,6 @@ readonly -a GITIGNORE_PATHS=(
     'status.json'
     'status.json.lock'
     'status.json.lockdir'
-    '.serena/'
-    '.claude/env.local'
-    '.claude/local/'
 )
 
 # Seed pipeline artifact paths into <root>/.gitignore under a marked block.
@@ -258,6 +255,26 @@ seed_gitignore() {
     local tmp line in_block=false found=false
 
     tmp=$(mktemp) || return 1
+
+    # Entries already present outside the managed block are not re-added.
+    GITIGNORE_MISSING=()
+    local outside entry
+    outside=$(mktemp) || { rm -f "$tmp"; return 1; }
+    if [[ -f "$file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == "$GITIGNORE_BEGIN" ]]; then in_block=true; continue; fi
+            if $in_block; then
+                [[ "$line" == "$GITIGNORE_END" ]] && in_block=false
+                continue
+            fi
+            printf '%s\n' "$line" >> "$outside"
+        done < "$file"
+        in_block=false
+    fi
+    for entry in "${GITIGNORE_PATHS[@]}"; do
+        grep -qxF -- "$entry" "$outside" || GITIGNORE_MISSING+=("$entry")
+    done
+    rm -f "$outside"
 
     if [[ -f "$file" ]]; then
         while IFS= read -r line || [[ -n "$line" ]]; do
@@ -275,7 +292,7 @@ seed_gitignore() {
         done < "$file"
     fi
 
-    if ! $found; then
+    if ! $found && [[ ${#GITIGNORE_MISSING[@]} -gt 0 ]]; then
         # Separate from existing content with one blank line.
         [[ -s "$tmp" ]] && printf '\n' >> "$tmp"
         write_gitignore_block >> "$tmp"
@@ -294,8 +311,9 @@ seed_gitignore() {
 
 write_gitignore_block() {
     local path
+    [[ ${#GITIGNORE_MISSING[@]} -gt 0 ]] || return 0
     printf '%s\n' "$GITIGNORE_BEGIN"
-    for path in "${GITIGNORE_PATHS[@]}"; do
+    for path in "${GITIGNORE_MISSING[@]}"; do
         printf '%s\n' "$path"
     done
     printf '%s\n' "$GITIGNORE_END"
