@@ -1972,6 +1972,7 @@ set_branch_info() {
 
 set_final_state() {
     local state="$1"
+    local reason="${2:-}"
     local prev_state stage
     # Capture the previous state and current stage BEFORE we overwrite, so the
     # status_change event can carry from_state/to_state per schema.
@@ -1990,8 +1991,13 @@ set_final_state() {
         return 0
     fi
 
-    status_json_write --arg state "$state" \
-       '.state = $state | .last_update = (now | todate)'
+    # Optional $2 reason is persisted as .final_state_reason; without one any
+    # reason left by an earlier transition is cleared so it cannot go stale.
+    status_json_write --arg state "$state" --arg reason "$reason" \
+       '.state = $state
+        | (if $reason == "" then del(.final_state_reason)
+           else .final_state_reason = $reason end)
+        | .last_update = (now | todate)'
     sync_status_to_log
     emit_event "status_change" \
         "stage=$stage" \
@@ -12301,7 +12307,7 @@ _handle_merge_pr_timeout() {
 	local limit_secs="$2"
 	log_error "merge_pr: ${cmd_label} timed out after ${limit_secs}s"
 	set_stage_started "merge_pr_timeout"
-	set_final_state "error"
+	set_final_state "error" "merge_pr: ${cmd_label} timed out after ${limit_secs}s"
 	exit 1
 }
 
@@ -13026,7 +13032,7 @@ Log directory: \`$LOG_BASE\`"
 
         if [[ -z "$issue_body" ]]; then
             log_error "Failed to fetch issue #$ISSUE_NUMBER body"
-            set_final_state "error"
+            set_final_state "error" "Failed to fetch issue #$ISSUE_NUMBER body"
             exit 1
         fi
 
@@ -13034,7 +13040,7 @@ Log directory: \`$LOG_BASE\`"
         # content reach the parse below.  Advisory unless
         # FAIL_ON_STALE_ISSUE_BODY=1.
         if ! warn_if_issue_body_stale "$issue_json"; then
-            set_final_state "error"
+            set_final_state "error" "Issue #$ISSUE_NUMBER body is stale versus its comments (FAIL_ON_STALE_ISSUE_BODY=1)"
             exit 1
         fi
 
@@ -13066,7 +13072,7 @@ Log directory: \`$LOG_BASE\`"
 
         if [[ -z "$tasks_section" ]]; then
             log_error "No 'Implementation Tasks' section found in issue #$ISSUE_NUMBER"
-            set_final_state "error"
+            set_final_state "error" "No 'Implementation Tasks' section found in issue #$ISSUE_NUMBER"
             exit 1
         fi
 
@@ -13112,7 +13118,7 @@ Log directory: \`$LOG_BASE\`"
 $excerpt
 ---"
             fi
-            set_final_state "error"
+            set_final_state "error" "No parseable tasks found in issue #$ISSUE_NUMBER Implementation Tasks section"
             exit 1
         fi
 
@@ -13144,7 +13150,7 @@ $excerpt
         log "Setting up feature branch: $branch"
 
         if ! setup_feature_branch "$branch"; then
-            set_final_state "error"
+            set_final_state "error" "Failed to set up feature branch $branch"
             exit 1
         fi
 
@@ -13283,7 +13289,7 @@ $excerpt
             # ISSUE_TASKS_HEADING_ERE so it stays identical to the PARSE ISSUE awk.
             if ! grep -qiE "$ISSUE_TASKS_HEADING_ERE" "$issue_body_file"; then
                 log_error "Issue body missing 'Implementation Tasks' section"
-                set_final_state "error"
+                set_final_state "error" "Issue body missing 'Implementation Tasks' section"
                 exit 1
             fi
         else
@@ -13295,7 +13301,7 @@ $excerpt
 
         if (( task_count == 0 )); then
             log_error "No tasks to implement"
-            set_final_state "error"
+            set_final_state "error" "No tasks to implement"
             exit 1
         fi
 
@@ -13735,7 +13741,7 @@ $impl_summary" "$tagent"
                 comment_issue "Implementation Failed" \
                     "❌ 0/$task_count tasks completed. No changes were produced. Aborting pipeline." \
                     "error"
-                set_final_state "error"
+                set_final_state "error" "0/$task_count tasks completed; no changes were produced"
                 exit 1
             fi
         fi
@@ -13897,7 +13903,7 @@ Auto-merge will be blocked and the PR left open for review. To merge anyway, re-
             comment_issue "Implementation Failed" \
                 "❌ Implementation completed but no commits landed on the feature branch. Aborting." \
                 "error"
-            set_final_state "error"
+            set_final_state "error" "Implementation completed but branch has 0 commits ahead of $BASE_BRANCH"
             exit 1
         fi
     fi
@@ -14305,7 +14311,7 @@ Only the files listed above should be staged and committed."
         pr_number=$(jq -r '.stages.pr.pr_number // empty' "$STATUS_FILE")
         if [[ -z "$pr_number" || "$pr_number" == "null" ]]; then
             log_error "PR stage marked complete but no PR number found in status"
-            set_final_state "error"
+            set_final_state "error" "PR stage marked complete but no PR number found in status"
             exit 1
         fi
         log "Using existing PR #$pr_number"
@@ -14337,7 +14343,7 @@ $pr_creation_skill}"
 
         if [[ "$pr_status" != "success" ]]; then
             log_error "PR creation failed"
-            set_final_state "error"
+            set_final_state "error" "PR creation failed"
             exit 1
         fi
 
@@ -14350,7 +14356,7 @@ $pr_creation_skill}"
                 pr_number=$(gh pr list --head "$branch" --json number -q '.[0].number' 2>/dev/null || true)
                 if [[ -z "$pr_number" || "$pr_number" == "null" ]]; then
                     log_error "Could not recover PR/MR number from find-mr.sh or gh pr list for branch '$branch'"
-                    set_final_state "error"
+                    set_final_state "error" "Could not recover PR/MR number for branch '$branch'"
                     exit 1
                 fi
                 log "Recovered PR/MR #$pr_number from gh pr list"
@@ -15319,7 +15325,7 @@ $_task_summary_line}" \
             comment_issue "Merge: Failed" \
                 "❌ Failed to merge PR #$pr_number. Manual intervention required." \
                 "default"
-            set_final_state "error"
+            set_final_state "error" "Failed to merge PR #$pr_number"
             exit 1
         fi
 
@@ -15337,7 +15343,7 @@ $_task_summary_line}" \
             comment_issue "Merge: Git Error" \
                 "❌ \`git fetch origin\` failed (exit ${_merge_exit}) after merging PR #${pr_number}. Manual recovery may be needed." \
                 "default"
-            set_final_state "error"
+            set_final_state "error" "merge_pr: git fetch origin failed (exit $_merge_exit)"
             exit 1
         fi
 
@@ -15352,7 +15358,7 @@ $_task_summary_line}" \
             comment_issue "Merge: Git Error" \
                 "❌ \`git checkout $BASE_BRANCH\` failed (exit ${_merge_exit}) after merging PR #${pr_number}. Manual recovery may be needed." \
                 "default"
-            set_final_state "error"
+            set_final_state "error" "merge_pr: git checkout $BASE_BRANCH failed (exit $_merge_exit)"
             exit 1
         fi
 
@@ -15366,7 +15372,7 @@ $_task_summary_line}" \
             comment_issue "Merge: Git Error" \
                 "❌ \`git pull\` failed (exit ${_merge_exit}) after merging PR #${pr_number}. Manual recovery may be needed." \
                 "default"
-            set_final_state "error"
+            set_final_state "error" "merge_pr: git pull failed (exit $_merge_exit)"
             exit 1
         fi
 
