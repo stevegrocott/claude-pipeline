@@ -371,3 +371,117 @@ STUB
 			|| fail "$kind block did not start the park"
 	done
 }
+
+# =============================================================================
+# #1007: a failed container rebuild/health check must reach Gate C.
+#
+# The e2e_verify subshell exits 1 on a rebuild failure. Gate C only fires on
+# an e2e_verify:blocking:* marker, which is derived from the unmeasured
+# marker file the subshell writes — so the rebuild-failure branch has to
+# write that file, or the PR merges with the gate silent. These drive the
+# real run_parallel_post_task_stages() and then the real gate function.
+# =============================================================================
+
+# Mock the collaborators run_parallel_post_task_stages() shells out to, and
+# put a changed E2E spec on the feature branch so Gate C is armed.
+_arm_e2e_stage() {
+	mkdir -p tests/e2e
+	echo "test('x', () => {});" > tests/e2e/new.spec.ts
+	git add tests/e2e/new.spec.ts
+	git commit -q -m "add e2e spec"
+
+	is_stage_completed() { return 1; }
+	set_stage_started() { true; }
+	set_stage_completed() { true; }
+	log() { true; }
+	log_error() { true; }
+	log_warn() { true; }
+	comment_issue() { true; }
+	verify_on_feature_branch() { return 0; }
+	_build_targeted_e2e_cmd() { printf '%s' "echo run-e2e"; }
+	run_stage() {
+		printf '%s' '{"status":"success","result":"passed","summary":"ok","output":{"tests_run":3,"tests_passed":3,"tests_failed":0}}'
+	}
+
+	export TEST_E2E_CMD="echo run-e2e"
+	export TEST_E2E_PATH_PATTERNS='tests/e2e/*'
+	export RESUME_MODE=""
+	unset E2E_CONTAINER_REBUILD E2E_VERIFY_BLOCKING
+	DEGRADED_STAGES=()
+}
+
+@test "#1007: a rebuild failure records the unmeasured and blocking markers and Gate C fires" {
+	_arm_e2e_stage
+	rebuild_and_health_check() {
+		printf '{"rebuild":"failed","health":"unreachable"}'
+		return 1
+	}
+
+	run_parallel_post_task_stages "feature" "frontend" "standard" "M"
+
+	local joined
+	joined=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}")
+	[[ "$joined" == *"e2e_verify:unmeasured"* ]] \
+		|| fail "rebuild failure left no unmeasured marker: $joined"
+	[[ "$joined" == *"e2e_verify:blocking:spec_changed"* ]] \
+		|| fail "rebuild failure left no blocking marker: $joined"
+
+	local reason rc=0
+	reason=$(_e2e_verify_merge_block_reason) || rc=$?
+	[[ "$rc" -eq 0 ]] || fail "Gate C did not block after a rebuild failure"
+	[[ "$reason" == *"never executed"* ]] \
+		|| fail "Gate C reason does not describe the unexecuted spec: $reason"
+}
+
+@test "#1007: a clean e2e run on a spec-changing diff leaves Gate C silent" {
+	_arm_e2e_stage
+	rebuild_and_health_check() {
+		printf '{"rebuild":"success","health":"healthy"}'
+	}
+
+	run_parallel_post_task_stages "feature" "frontend" "standard" "M"
+
+	local joined
+	joined=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}")
+	[[ "$joined" != *"e2e_verify:unmeasured"* ]] \
+		|| fail "clean run recorded an unmeasured marker: $joined"
+	[[ "$joined" != *"e2e_verify:blocking"* ]] \
+		|| fail "clean run recorded a blocking marker: $joined"
+
+	local rc=0
+	_e2e_verify_merge_block_reason >/dev/null || rc=$?
+	[[ "$rc" -eq 1 ]] || fail "Gate C blocked a clean run (rc=$rc)"
+}
+
+@test "#1007: E2E_VERIFY_BLOCKING=0 still opts a rebuild failure out of Gate C" {
+	_arm_e2e_stage
+	rebuild_and_health_check() {
+		printf '{"rebuild":"failed","health":"unreachable"}'
+		return 1
+	}
+	export E2E_VERIFY_BLOCKING=0
+
+	run_parallel_post_task_stages "feature" "frontend" "standard" "M"
+
+	local rc=0
+	_e2e_verify_merge_block_reason >/dev/null || rc=$?
+	[[ "$rc" -eq 1 ]] || fail "opt-out ignored for a rebuild failure (rc=$rc)"
+}
+
+# A subshell that exits non-zero without writing any marker must still be
+# recorded as unmeasured by the parent, not just log_warn'd.
+@test "#1007: a markerless non-zero e2e subshell exit is recorded as unmeasured" {
+	_arm_e2e_stage
+	export E2E_CONTAINER_REBUILD=false
+	# Crash only inside the backgrounded subshell (BASHPID != $$).
+	log() { if [[ "$BASHPID" != "$$" ]]; then exit 9; fi; true; }
+
+	run_parallel_post_task_stages "feature" "frontend" "standard" "M"
+
+	local joined
+	joined=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}")
+	[[ "$joined" == *"e2e_verify:unmeasured"* ]] \
+		|| fail "markerless crash left no unmeasured marker: $joined"
+	[[ "$joined" == *"e2e_verify:blocking:spec_changed"* ]] \
+		|| fail "markerless crash left no blocking marker: $joined"
+}

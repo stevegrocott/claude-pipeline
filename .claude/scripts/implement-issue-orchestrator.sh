@@ -11620,6 +11620,13 @@ run_parallel_post_task_stages() {
 						"⚠️ Container rebuild or health check failed. \
 Rebuild: $rebuild_status, Health: $health_status. \
 E2E tests skipped." "playwright-test-developer"
+					# Record the unmeasured marker before exiting: the
+					# parent gates DEGRADED_STAGES on a non-empty
+					# $e2e_unmeasured_file, and a bare exit 1 here
+					# left E2E silently unrecorded as degraded.
+					printf '%s' \
+						"E2E not measured: container rebuild/health check failed (Rebuild: ${rebuild_status:-unknown}, Health: ${health_status:-unknown})" \
+						> "$e2e_unmeasured_file"
 					exit 1
 				fi
 			fi
@@ -11948,6 +11955,14 @@ $acceptance_summary" "default"
 		if ((e2e_exit != 0)); then
 			log_warn \
 				"e2e-verify stage exited with code $e2e_exit"
+			# A subshell that exits non-zero without writing a marker
+			# (crash, or any exit path that forgot to record one) would
+			# otherwise leave E2E silently unrecorded as degraded.
+			if [[ ! -s "$e2e_unmeasured_file" && ! -s "$e2e_fail_file" ]]; then
+				printf '%s' \
+					"E2E not measured: e2e-verify subshell exited with code $e2e_exit without recording a verdict" \
+					> "$e2e_unmeasured_file"
+			fi
 		fi
 	fi
 
