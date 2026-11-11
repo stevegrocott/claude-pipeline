@@ -325,7 +325,12 @@ _issue_body_extract_paths() {
 	# shellcheck disable=SC2016
 	grep_pat='`[]a-zA-Z0-9_.(){}[-]*/[]a-zA-Z0-9_./(){}[-]+`'
 	grep_pat+='|`[]a-zA-Z0-9_.(){}[-]+\.'"($ISSUE_BODY_KNOWN_EXTS)"'`'
+	# Strip a trailing line anchor (`path:L10`, `path:L10-40`, `path:10-40`)
+	# inside each backtick token first.  The path char-class excludes ':', so
+	# an anchored token would otherwise not match and the path would be
+	# silently dropped, bypassing resolution and generated-tree gates.
 	printf '%s' "$desc" \
+		| sed -E 's/(`[]A-Za-z0-9_./(){}[-]+):[A-Za-z0-9_.,-]*(`)/\1\2/g' \
 		| grep -oE "$grep_pat" \
 		| sed 's/`//g' \
 		| sort -u
