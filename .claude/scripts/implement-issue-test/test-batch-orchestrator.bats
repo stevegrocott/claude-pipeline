@@ -3634,40 +3634,55 @@ EOF
 # (impl_exit != 0) from "it ran but produced nothing" (impl_exit == 0).
 # -----------------------------------------------------------------------
 
-# Replicate the post-fix else-branch logic (process_issue, missing status
-# file case) in pure bash so it can be verified without running the full
-# function (which requires git, gh, a live orchestrator, etc.).
-_simulate_missing_status_file_error() {
+# _run_missing_status_dispatch <impl_exit>
+# Runs the real missing-status-file else-branch of process_issue (extracted
+# verbatim from the script) and sets d_error / d_log in the caller.
+_run_missing_status_dispatch() {
 	local impl_exit="$1"
-	local impl_error=""
-
-	if (( impl_exit != 0 )); then
-		impl_error="Orchestrator failed to execute (exit $impl_exit) — no status file was written"
-	else
-		impl_error="Status file not created"
-	fi
-
-	sim_impl_error="$impl_error"
+	local block="$TEST_TMP/missing-status-block.sh"
+	awk '
+		/# Distinguish "the orchestrator process never even started"/ { cap = 1 }
+		cap { print }
+		cap && /^        fi$/ { exit }
+	' "$BATCH_ORCHESTRATOR_SCRIPT" > "$block"
+	[[ -s "$block" ]] || { echo "missing-status block not found" >&2; return 1; }
+	d_log_file="$TEST_TMP/missing-status-log.txt"
+	: > "$d_log_file"
+	local out
+	out=$(
+		log_error() { printf '%s\n' "$*" >> "$d_log_file"; }
+		issue_num=653
+		runner() {
+			local impl_error=""
+			# shellcheck disable=SC1090
+			source "$block"
+			printf '%s' "$impl_error"
+		}
+		runner
+	) || return 1
+	d_error="$out"
 }
 
 @test "missing status file with non-zero orchestrator exit names the exec failure" {
-	_simulate_missing_status_file_error 126
-	[[ "$sim_impl_error" == *"failed to execute"* ]]
+	_run_missing_status_dispatch 126
+	[[ "$d_error" == *"failed to execute"* ]]
+	grep -q "failed to execute (exit 126)" "$d_log_file"
 }
 
 @test "missing status file with non-zero orchestrator exit includes the exit code" {
-	_simulate_missing_status_file_error 126
-	[[ "$sim_impl_error" == *"126"* ]]
+	_run_missing_status_dispatch 126
+	[[ "$d_error" == *"126"* ]]
 }
 
 @test "missing status file with non-zero orchestrator exit does NOT use the generic message" {
-	_simulate_missing_status_file_error 126
-	[[ "$sim_impl_error" != "Status file not created" ]]
+	_run_missing_status_dispatch 126
+	[[ "$d_error" != "Status file not created" ]]
 }
 
 @test "missing status file with zero orchestrator exit keeps the generic message" {
-	_simulate_missing_status_file_error 0
-	[[ "$sim_impl_error" == "Status file not created" ]]
+	_run_missing_status_dispatch 0
+	[[ "$d_error" == "Status file not created" ]]
+	[[ ! -s "$d_log_file" ]]
 }
 
 @test "batch-orchestrator.sh distinguishes exec failure from generic missing-status-file case" {
