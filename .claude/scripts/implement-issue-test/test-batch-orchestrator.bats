@@ -6397,15 +6397,18 @@ _I1017_STATES=(
 # Runs the real case/recovery block against a synthetic status file and sets
 # d_status, d_error, d_pr in the caller.
 _run_state_dispatch() {
-	local state="$1" pr="$2" stage="${3:-pr_review}"
+	local state="$1" pr="$2" stage="${3:-pr_review}" reason="${4:-}"
 	local issue_status_file="$TEST_TMP/dispatch-status.json"
 	if [[ -n "$pr" ]]; then
-		jq -n --arg s "$state" --argjson pr "$pr" --arg cs "$stage" \
-			'{state: $s, current_stage: $cs, stages: {pr: {pr_number: $pr}}}' \
+		jq -n --arg s "$state" --argjson pr "$pr" --arg cs "$stage" --arg r "$reason" \
+			'{state: $s, current_stage: $cs, stages: {pr: {pr_number: $pr}}}
+			 | if $r != "" then .final_state_reason = $r else . end' \
 			> "$issue_status_file"
 	else
-		jq -n --arg s "$state" --arg cs "$stage" \
-			'{state: $s, current_stage: $cs, stages: {}}' > "$issue_status_file"
+		jq -n --arg s "$state" --arg cs "$stage" --arg r "$reason" \
+			'{state: $s, current_stage: $cs, stages: {}}
+			 | if $r != "" then .final_state_reason = $r else . end' \
+			> "$issue_status_file"
 	fi
 
 	local block="$TEST_TMP/dispatch-block.sh"
@@ -6524,4 +6527,64 @@ _run_state_dispatch() {
 	_run_state_dispatch "error" 42 "pr_review"
 	[[ "$d_status" == "success" ]]
 	[[ "$d_pr" == "42" ]]
+}
+
+# =============================================================================
+# Issue #1016: set_final_state persists a reason; the batch prefers it
+# =============================================================================
+#
+# These tests run the REAL set_final_state (extracted from the orchestrator)
+# and the REAL dispatch block (extracted from process_issue), so removing the
+# reason argument / the batch preference makes them fail.
+
+_source_set_final_state() {
+	local out="$TEST_TMP/final_state_fns.bash" fn
+	: > "$out"
+	for fn in _status_lock_acquire _status_lock_release status_json_write \
+		set_final_state; do
+		_extract_function_body "$fn" "$ORCHESTRATOR_SCRIPT" >> "$out"
+		printf '\n' >> "$out"
+	done
+	log() { :; }; log_warn() { :; }; log_error() { :; }
+	emit_event() { :; }; sync_status_to_log() { :; }
+	# shellcheck disable=SC1090
+	source "$out"
+}
+
+@test "i1016: set_final_state error with a reason persists .final_state_reason and state" {
+	_source_set_final_state
+	jq -n '{state:"running", current_stage:"implement"}' > "$STATUS_FILE"
+	set_final_state "error" "Failed to fetch issue #7 body"
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "error" ]]
+	[[ "$(jq -r '.final_state_reason' "$STATUS_FILE")" == "Failed to fetch issue #7 body" ]]
+}
+
+@test "i1016: set_final_state with no reason does not error under set -u" {
+	_source_set_final_state
+	jq -n '{state:"running", current_stage:"implement"}' > "$STATUS_FILE"
+	set -u
+	run set_final_state "completed"
+	set +u
+	[[ "$status" -eq 0 ]]
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "completed" ]]
+	[[ "$(jq -r '.final_state_reason // "absent"' "$STATUS_FILE")" == "absent" ]]
+}
+
+@test "i1016: a reason with a double quote and a newline round-trips intact" {
+	_source_set_final_state
+	jq -n '{state:"running", current_stage:"implement"}' > "$STATUS_FILE"
+	local reason=$'bad "quoted" cause\nsecond line'
+	set_final_state "error" "$reason"
+	[[ "$(jq -r '.final_state_reason' "$STATUS_FILE")" == "$reason" ]]
+}
+
+@test "i1016: batch impl_error uses the persisted reason when present" {
+	_run_state_dispatch "error" "" "implement" "Failed to fetch issue #7 body"
+	[[ "$d_error" == *"Failed to fetch issue #7 body"* ]]
+	[[ "$d_error" != *"Script exited with state: error"* ]]
+}
+
+@test "i1016: batch impl_error keeps the generic fallback when no reason is persisted" {
+	_run_state_dispatch "error" "" "implement"
+	[[ "$d_error" == "Script exited with state: error" ]]
 }
