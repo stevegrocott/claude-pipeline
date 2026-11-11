@@ -788,6 +788,13 @@ QUIET="${QUIET:-false}"
 CLAUDE_CLI="${CLAUDE_CLI:-claude}"
 EOF
 
+    # The orchestrator sources committable-path-lib.sh at top level, which
+    # the extraction above skips. Put the source line in the extracted file
+    # itself so subprocess wrappers that source only that file still get
+    # committable_path_class (issue #928).
+    printf 'source "%s/committable-path-lib.sh"\n' "$SCRIPT_DIR" \
+        >> "$func_file"
+
     # Source model-config.sh first (provides resolve_model, _next_model_up)
     if [[ -f "$TEST_TMP/model-config.sh" ]]; then
         source "$TEST_TMP/model-config.sh"
