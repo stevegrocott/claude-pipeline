@@ -406,28 +406,30 @@ _simulate_state_routing() {
 }
 
 @test "merge_blocked state with PR number: impl_status is not error after routing" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_impl_status" == "merge_blocked" ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$d_status" == "merge_blocked" ]]
 }
 
 @test "merge_blocked state with PR number: recovery block is NOT triggered" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_recovering" == "false" ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$d_status" != "success" ]]
+	[[ "$d_pr" == "42" ]]
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]]
 }
 
 @test "merge_blocked state with PR number: new message contains 'merge blocked by quality gate'" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_warn_msg" == *"merge blocked by quality gate"* ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$(< "$d_log_file")" == *"merge blocked by quality gate"* ]]
 }
 
 @test "merge_blocked state with PR number: new message contains 'left open'" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_warn_msg" == *"left open"* ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$(< "$d_log_file")" == *"PR #42 left open"* ]]
 }
 
 @test "merge_blocked state with PR number: new message does NOT say 'recovering as success'" {
-	_simulate_state_routing "merge_blocked" 42
-	[[ "$sim_warn_msg" != *"recovering as success"* ]]
+	_run_state_dispatch "merge_blocked" 42
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]]
 }
 
 @test "merge_blocked state without PR number: still not treated as error needing recovery" {
@@ -6395,9 +6397,12 @@ _I1017_STATES=(
 
 # _run_state_dispatch <state> <pr_number|""> [current_stage]
 # Runs the real case/recovery block against a synthetic status file and sets
-# d_status, d_error, d_pr in the caller.
+# d_status, d_error, d_pr in the caller. log/log_warn/log_error output is
+# captured to $d_log_file (truncated per call) for message assertions.
 _run_state_dispatch() {
 	local state="$1" pr="$2" stage="${3:-pr_review}" reason="${4:-}"
+	d_log_file="$TEST_TMP/dispatch-log.txt"
+	: > "$d_log_file"
 	local issue_status_file="$TEST_TMP/dispatch-status.json"
 	if [[ -n "$pr" ]]; then
 		jq -n --arg s "$state" --argjson pr "$pr" --arg cs "$stage" --arg r "$reason" \
@@ -6421,7 +6426,9 @@ _run_state_dispatch() {
 
 	local out
 	out=$(
-		log() { :; }; log_warn() { :; }; log_error() { :; }
+		log() { printf '%s\n' "$*" >> "$d_log_file"; }
+		log_warn() { printf '%s\n' "$*" >> "$d_log_file"; }
+		log_error() { printf '%s\n' "$*" >> "$d_log_file"; }
 		eval "$(_extract_function_body pr_recovery_allowed "$BATCH_ORCHESTRATOR_SCRIPT")"
 		issue_num=1017
 		runner() {
