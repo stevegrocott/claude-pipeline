@@ -1791,10 +1791,46 @@ _assert_artifact_entries_once() {
 		'keep-me/' 'dist/' > "$GI_TARGET/.gitignore"
 
 	_run_sync_to_target || return 1
+	_run_sync_to_target || return 1
 
 	grep -qxF 'keep-me/' "$GI_TARGET/.gitignore"
 	grep -qxF 'dist/' "$GI_TARGET/.gitignore"
 	grep -qxF 'a/' "$GI_TARGET/.gitignore"
+	[ "$(grep -cxF '# >>> claude-pipeline artifacts (managed by sync.sh) >>>' "$GI_TARGET/.gitignore")" -eq 1 ]
+	_assert_artifact_entries_once
+}
+
+@test "(#1043) sync.sh to survives two unmatched BEGIN markers across runs" {
+	_gitignore_target
+	printf '%s\n' 'a/' '# >>> claude-pipeline artifacts (managed by sync.sh) >>>' \
+		'keep-me/' '# >>> claude-pipeline artifacts (managed by sync.sh) >>>' \
+		'dist/' > "$GI_TARGET/.gitignore"
+
+	_run_sync_to_target || return 1
+	_run_sync_to_target || return 1
+
+	grep -qxF 'keep-me/' "$GI_TARGET/.gitignore"
+	grep -qxF 'dist/' "$GI_TARGET/.gitignore"
+	grep -qxF 'a/' "$GI_TARGET/.gitignore"
+	_assert_artifact_entries_once
+}
+
+@test "(#1043) sync.sh to collapses two matched blocks into one" {
+	_gitignore_target
+	printf '%s\n' 'before/' \
+		'# >>> claude-pipeline artifacts (managed by sync.sh) >>>' 'old1' \
+		'# <<< claude-pipeline artifacts <<<' 'mid/' \
+		'# >>> claude-pipeline artifacts (managed by sync.sh) >>>' 'old2' \
+		'# <<< claude-pipeline artifacts <<<' 'after/' > "$GI_TARGET/.gitignore"
+
+	_run_sync_to_target || return 1
+	_run_sync_to_target || return 1
+
+	grep -qxF 'before/' "$GI_TARGET/.gitignore"
+	grep -qxF 'mid/' "$GI_TARGET/.gitignore"
+	grep -qxF 'after/' "$GI_TARGET/.gitignore"
+	! grep -qE '^old[12]$' "$GI_TARGET/.gitignore" || return 1
+	[ "$(grep -cxF '# >>> claude-pipeline artifacts (managed by sync.sh) >>>' "$GI_TARGET/.gitignore")" -eq 1 ]
 	_assert_artifact_entries_once
 }
 

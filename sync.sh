@@ -246,13 +246,26 @@ readonly -a GITIGNORE_PATHS=(
     'status.json.lockdir'
 )
 
+# Print the index of the first END marker after line $1 of the caller's
+# `lines` array; fail when there is none.
+gitignore_end_index() {
+    local j
+    for ((j = $1 + 1; j < ${#lines[@]}; j++)); do
+        if [[ "${lines[j]}" == "$GITIGNORE_END" ]]; then
+            echo "$j"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Seed pipeline artifact paths into <root>/.gitignore under a marked block.
 # Idempotent: an existing block is replaced in place, so re-running yields a
 # byte-identical file and consumer lines outside the block are untouched.
 seed_gitignore() {
     local root="$1"
     local file="$root/.gitignore"
-    local tmp line i j n found=false entry
+    local tmp line i j n found=false has_pair=false entry
     local -a lines=() outside=()
 
     tmp=$(mktemp) || return 1
@@ -265,15 +278,13 @@ seed_gitignore() {
     n=${#lines[@]}
 
     # Only a BEGIN with a matching END after it opens a managed block. An
-    # unmatched marker is an ordinary line: treating it as a block start
-    # would swallow every consumer line that follows it. First pass collects
-    # the lines outside any matched pair.
+    # unmatched marker would swallow every consumer line that follows it, so
+    # it never opens a block. First pass collects the lines outside any
+    # matched pair.
     for ((i = 0; i < n; i++)); do
         if [[ "${lines[i]}" == "$GITIGNORE_BEGIN" ]]; then
-            for ((j = i + 1; j < n; j++)); do
-                [[ "${lines[j]}" == "$GITIGNORE_END" ]] && break
-            done
-            if ((j < n)); then
+            if j=$(gitignore_end_index "$i"); then
+                has_pair=true
                 i=$j
                 continue
             fi
@@ -291,18 +302,22 @@ seed_gitignore() {
     done
 
     # Second pass: the first matched pair is replaced in place; further
-    # matched pairs are dropped; every other line is kept verbatim.
+    # matched pairs are dropped. With no matched pair, the first unmatched
+    # BEGIN is replaced in place by the fresh block (so a stale marker can
+    # never pair with a later END and swallow consumer lines). Every other
+    # line is kept verbatim.
     for ((i = 0; i < n; i++)); do
         if [[ "${lines[i]}" == "$GITIGNORE_BEGIN" ]]; then
-            for ((j = i + 1; j < n; j++)); do
-                [[ "${lines[j]}" == "$GITIGNORE_END" ]] && break
-            done
-            if ((j < n)); then
+            if j=$(gitignore_end_index "$i"); then
                 if ! $found; then
                     found=true
                     write_gitignore_block >> "$tmp"
                 fi
                 i=$j
+                continue
+            elif ! $has_pair && ! $found; then
+                found=true
+                write_gitignore_block >> "$tmp"
                 continue
             fi
         fi
