@@ -1914,6 +1914,18 @@ process_issue() {
                 ;;
         esac
 
+        # Prefer a persisted final_state_reason over the generic fallback
+        # message: the sub-orchestrator knows WHY it stopped, the case arms
+        # above only know the state name.
+        if [[ -n "$impl_error" ]]; then
+            local final_reason
+            final_reason=$(jq -r '.final_state_reason // empty' \
+                "$issue_status_file" 2>/dev/null)
+            if [[ -n "$final_reason" ]]; then
+                impl_error="$final_reason (state: $state)"
+            fi
+        fi
+
         # Recovery: if the orchestrator exited with a non-completed state but
         # stages.pr.pr_number was already written (PR created before crash),
         # treat it as recoverable success. Handles the case where the script is
