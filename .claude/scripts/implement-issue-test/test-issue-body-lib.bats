@@ -267,6 +267,24 @@ valid_body() {
 	[ "$status" -eq 0 ]
 }
 
+@test "assert_issue_valid: refuses a hard-denied .github/workflows path, naming the constraint and a human (#928)" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/.github/workflows"
+	touch "$ISSUE_BODY_REPO_ROOT/.github/workflows/ci.yml"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Tweak CI — \`.github/workflows/ci.yml\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"hard-denied path: .github/workflows/ci.yml"* ]]
+	[[ "$output" == *"EXTRA_COMMIT_PATHS"* ]]
+	[[ "$output" == *"needs a human"* ]]
+}
+
 @test "assert_issue_valid: a canonical .claude/scripts/ task path is unaffected by the generated-tree rule" {
 	touch "$ISSUE_BODY_REPO_ROOT/.claude/scripts/demo-orchestrator.sh"
 	local body
