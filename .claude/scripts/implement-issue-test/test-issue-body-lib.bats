@@ -1830,3 +1830,23 @@ _body_citing() {
 	[[ "$output" == *"unresolved path: scripts/orch.sh"* ]]
 	[[ "$output" == *"did you mean .claude/scripts/orch.sh"* ]]
 }
+
+# =============================================================================
+# assert_issue_valid() — anchored (:Lnn) paths must still be validated (#1013)
+# =============================================================================
+
+@test "#1013: an anchored nonexistent path is rejected as unresolved" {
+	run assert_issue_valid "$(_body_citing .claude/scripts/does-not-exist.sh:L10-40)"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"unresolved path"* ]]
+	[[ "$output" == *"does-not-exist.sh"* ]]
+}
+
+@test "#1013: an anchored generated-tree path is rejected naming the canonical path" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts"
+	touch "$ISSUE_BODY_REPO_ROOT/plugins/pipeline-core/scripts/orch.sh"
+	run assert_issue_valid "$(_body_citing plugins/pipeline-core/scripts/orch.sh:L10-40)"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"generated-tree path"* ]]
+	[[ "$output" == *".claude/scripts/orch.sh"* ]]
+}
