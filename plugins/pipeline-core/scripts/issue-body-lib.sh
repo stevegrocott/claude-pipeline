@@ -794,6 +794,18 @@ lint_task_lines() {
 	return 0
 }
 
+# _issue_body_path_hard_denied <path>
+#
+# True when the commit guard hard-denies the path (#928). Mirrors the
+# non-overridable arm of guard_commit_path_allowlist in the orchestrator.
+_issue_body_path_hard_denied() {
+	local path="${1#./}"
+	case "$path" in
+		.github/workflows/*) return 0 ;;
+	esac
+	return 1
+}
+
 #
 # Validates an issue body against the structural criteria.
 #
@@ -872,6 +884,14 @@ assert_issue_valid() {
 			if [[ "${path#./}" == plugins/pipeline-core/scripts/* ]]; then
 				canonical=".claude/scripts/${path#*plugins/pipeline-core/scripts/}"
 				errors+=("generated-tree path: $path is overwritten by ./sync.sh bundle; cite the canonical source $canonical")
+				continue
+			fi
+			# Hard-denied paths (#928): the commit guard refuses
+			# .github/workflows/** and no EXTRA_COMMIT_PATHS value can
+			# override it, so a task declaring one can never complete.
+			# Refuse at intake rather than let it fail at commit time.
+			if _issue_body_path_hard_denied "$path"; then
+				errors+=("hard-denied path: $path is not committable by the pipeline (not overridable by EXTRA_COMMIT_PATHS); this change needs a human")
 				continue
 			fi
 			if ! _issue_body_path_resolves "$path" "$repo_root"; then

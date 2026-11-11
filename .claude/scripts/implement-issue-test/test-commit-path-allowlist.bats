@@ -183,3 +183,60 @@ run_guard() {
     run_guard "$suggestion"
     [ "$status" -eq 0 ] || fail "Suggested override '$suggestion' did not admit path. Got: $output"
 }
+
+# =============================================================================
+# Cross-gate agreement (issue #928 AC4)
+#
+# Intake (assert_issue_valid) and the commit guard must classify every path
+# the same way: a path intake accepts must be committable, and a path the
+# guard hard-denies must be refused at intake. Both gates are driven over one
+# shared fixture set so a change to either side that makes them diverge fails
+# here. issue-body-lib.sh is sourced in a separate bash process because the
+# orchestrator deliberately does not share its namespace.
+# =============================================================================
+
+# Paths both gates must agree on. Format: <path>|<admit|deny>.
+CROSS_GATE_FIXTURES=(
+    "src/app.ts|admit"
+    ".claude/scripts/implement-issue-test/helpers/test-helper.bash|admit"
+    ".claude/scripts/foo.sh|admit"
+    "docs/guide.md|admit"
+    "styles/site.scss|admit"
+    ".github/workflows/ci.yml|deny"
+)
+
+# intake_accepts <path> — (path must exist under the repo) 0 if assert_issue_valid accepts a body declaring it.
+intake_accepts() {
+    local path="$1"
+    local lib="${TEST_DIR}/../issue-body-lib.sh"
+    local body
+    body=$(printf '## Acceptance Criteria\n\n- [ ] It works\n\n## Implementation Tasks\n\n- [ ] `[default]` **(S)** Change it — `%s`\n' "$path")
+    ISSUE_BODY_LIB="$lib" ISSUE_BODY_REPO_ROOT="$TEST_TMP/repo" BODY="$body" \
+        run bash -c 'source "$ISSUE_BODY_LIB" && assert_issue_valid "$BODY"'
+    return "$status"
+}
+
+@test "cross-gate: intake and commit guard agree on every shared fixture" {
+    local fixture path expect intake_rc guard_rc mismatches=""
+    for fixture in "${CROSS_GATE_FIXTURES[@]}"; do
+        path="${fixture%%|*}"
+        expect="${fixture##*|}"
+
+        # Commit first: intake resolves declared paths against the repo root,
+        # so an absent file would be refused for the wrong reason.
+        commit_paths "$path"
+        intake_accepts "$path" && intake_rc=0 || intake_rc=1
+
+        run_guard
+        guard_rc="$status"
+
+        if [[ "$expect" == admit ]]; then
+            { (( intake_rc == 0 )) && (( guard_rc == 0 )); } \
+                || mismatches+="  $path: expected both to admit (intake=$intake_rc guard=$guard_rc)"$'\n'
+        else
+            { (( intake_rc != 0 )) && (( guard_rc != 0 )); } \
+                || mismatches+="  $path: expected both to deny (intake=$intake_rc guard=$guard_rc)"$'\n'
+        fi
+    done
+    [[ -z "$mismatches" ]] || fail "Gates disagree:"$'\n'"$mismatches"
+}

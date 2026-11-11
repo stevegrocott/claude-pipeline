@@ -119,6 +119,8 @@ source "$SCRIPT_DIR/model-config.sh"
 # model-config.sh. Sourcing is no-op when CLAUDE_USAGE_SESSION_KEY is unset
 # (graceful fallback to today's behavior — see claude-usage.sh).
 source "$SCRIPT_DIR/claude-usage.sh"
+# shellcheck source=committable-path-lib.sh
+source "$SCRIPT_DIR/committable-path-lib.sh"
 # shellcheck source=prompts/triage-prompt.sh
 source "$SCRIPT_DIR/prompts/triage-prompt.sh"
 # shellcheck source=resolve-pipeline-root.sh
@@ -8211,7 +8213,7 @@ sanitize_worktree_commits() {
 guard_commit_path_allowlist() {
 	local git_dir="${1:-.}"
 	local ref="${2:-HEAD}"
-	local path ep
+	local path ep rc
 	local -a bad=() hard=() _extra=() _raw=()
 	# Hoist the EXTRA_COMMIT_PATHS split outside the per-path loop.
 	# Trim whitespace around each pipe-separated entry so values like
@@ -8228,53 +8230,22 @@ guard_commit_path_allowlist() {
 
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
-		# Root-level docs (no directory separator) are always admitted;
-		# nested markdown falls through to the default arm below, where
-		# EXTRA_COMMIT_PATHS can still override it.
-		case "$path" in
-			*.md)
-				case "$path" in
-					*/*) : ;;
-					*) continue ;;
-				esac ;;
+		# The predicate lives in committable-path-lib.sh so the intake
+		# gate and this guard share one definition (issue #928).
+		rc=0
+		committable_path_class "$path" || rc=$?
+		case "$rc" in
+			0) continue ;;
+			2) bad+=("$path"); hard+=("$path"); continue ;;
 		esac
-		case "$path" in
-			# Hard denylist — not overridable by EXTRA_COMMIT_PATHS.
-			.github/workflows/**) bad+=("$path"); hard+=("$path") ;;
-			tests/*) continue ;;
-			prisma/** | */prisma/**) continue ;;
-			docker-compose*.yml) continue ;;
-			docs/**) continue ;;
-			.claude/agents/**) continue ;;
-			.claude/skills/**) continue ;;
-			plugins/pipeline-core/skills/**) continue ;;
-			*.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs)
-				continue ;;
-			# *.bash belongs here for the same reason as *.sh: both are
-			# shell sources. Its absence was an arbitrary omission, not a
-			# policy — the only two .bash files in the repo are the bats
-			# helper libraries (implement-issue-test/helpers/ and
-			# platform-test/helpers/), so any task editing a test helper
-			# had its commit rejected and was recorded `failed` despite
-			# reporting success. Issue #909 task 1 lost this way while
-			# assert_issue_valid had accepted the same path at intake
-			# (issue #928).
-			*.sh | *.bash | *.bats | *.py | *.go | *.rb | *.java | *.rs)
-				continue ;;
-			*.c | *.cpp | *.h | *.hpp) continue ;;
-			# Stylesheets are source, not config: they cannot execute or
-			# alter runtime behaviour outside the rendered page, and the
-			# commit is still reviewed on the PR (issue #978).
-			*.css | *.scss | *.sass | *.less | *.styl) continue ;;
-			*)
-				for ep in "${_extra[@]+"${_extra[@]}"}"; do
-					# shellcheck disable=SC2254
-					case "$path" in
-						$ep) continue 2 ;;
-					esac
-				done
-				bad+=("$path") ;;
-		esac
+		# Overridable: EXTRA_COMMIT_PATHS may still admit it.
+		for ep in "${_extra[@]+"${_extra[@]}"}"; do
+			# shellcheck disable=SC2254
+			case "$path" in
+				$ep) continue 2 ;;
+			esac
+		done
+		bad+=("$path")
 	done < <(
 		git -C "$git_dir" show --name-only --pretty=format: \
 			"$ref" 2>/dev/null \
