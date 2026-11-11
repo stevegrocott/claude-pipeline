@@ -467,3 +467,21 @@ _arm_e2e_stage() {
 	_e2e_verify_merge_block_reason >/dev/null || rc=$?
 	[[ "$rc" -eq 1 ]] || fail "opt-out ignored for a rebuild failure (rc=$rc)"
 }
+
+# A subshell that exits non-zero without writing any marker must still be
+# recorded as unmeasured by the parent, not just log_warn'd.
+@test "#1007: a markerless non-zero e2e subshell exit is recorded as unmeasured" {
+	_arm_e2e_stage
+	export E2E_CONTAINER_REBUILD=false
+	# Crash only inside the backgrounded subshell (BASHPID != $$).
+	log() { if [[ "$BASHPID" != "$$" ]]; then exit 9; fi; true; }
+
+	run_parallel_post_task_stages "feature" "frontend" "standard" "M"
+
+	local joined
+	joined=$(printf '%s\n' "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}")
+	[[ "$joined" == *"e2e_verify:unmeasured"* ]] \
+		|| fail "markerless crash left no unmeasured marker: $joined"
+	[[ "$joined" == *"e2e_verify:blocking:spec_changed"* ]] \
+		|| fail "markerless crash left no blocking marker: $joined"
+}
