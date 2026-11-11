@@ -8249,39 +8249,20 @@ sanitize_worktree_commits() {
 guard_commit_path_allowlist() {
 	local git_dir="${1:-.}"
 	local ref="${2:-HEAD}"
-	local path ep rc
-	local -a bad=() hard=() _extra=() _raw=()
-	# Hoist the EXTRA_COMMIT_PATHS split outside the per-path loop.
-	# Trim whitespace around each pipe-separated entry so values like
-	# 'package.json | package-lock.json' work correctly.
-	if [[ -n "${EXTRA_COMMIT_PATHS:-}" ]]; then
-		IFS='|' read -ra _raw <<< "$EXTRA_COMMIT_PATHS"
-		for ep in "${_raw[@]}"; do
-			ep="${ep#"${ep%%[![:space:]]*}"}"
-			ep="${ep%"${ep##*[![:space:]]}"}"
-			[[ -n "$ep" ]] || continue
-			_extra+=("$ep")
-		done
-	fi
+	local path
+	local -a bad=() hard=()
 
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
-		# The predicate lives in committable-path-lib.sh so the intake
-		# gate and this guard share one definition (issue #928).
-		rc=0
-		committable_path_class "$path" || rc=$?
-		case "$rc" in
-			0) continue ;;
-			2) bad+=("$path"); hard+=("$path"); continue ;;
-		esac
-		# Overridable: EXTRA_COMMIT_PATHS may still admit it.
-		for ep in "${_extra[@]+"${_extra[@]}"}"; do
-			# shellcheck disable=SC2254
-			case "$path" in
-				$ep) continue 2 ;;
-			esac
-		done
+		# Admission (default class plus EXTRA_COMMIT_PATHS) lives in
+		# committable-path-lib.sh so the intake gate and this guard
+		# share one definition (issue #928).
+		committable_path_admitted "$path" && continue
 		bad+=("$path")
+		# Hard-denied paths are reported separately (never overridable).
+		if committable_path_is_hard_denied "$path"; then
+			hard+=("$path")
+		fi
 	done < <(
 		git -C "$git_dir" show --name-only --pretty=format: \
 			"$ref" 2>/dev/null \

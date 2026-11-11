@@ -92,6 +92,8 @@ _issue_body_lib_dir() {
 # when a caller (e.g. batch-orchestrator.sh) already sourced it first.
 # shellcheck source=resolve-pipeline-root.sh
 source "$(_issue_body_lib_dir)/resolve-pipeline-root.sh"
+# shellcheck source=committable-path-lib.sh
+source "$(_issue_body_lib_dir)/committable-path-lib.sh"
 
 #
 # Resolves the agents directory used for agent-name validation.
@@ -796,14 +798,11 @@ lint_task_lines() {
 
 # _issue_body_path_hard_denied <path>
 #
-# True when the commit guard hard-denies the path (#928). Mirrors the
-# non-overridable arm of guard_commit_path_allowlist in the orchestrator.
+# True when the commit guard hard-denies the path (#928). Delegates to the
+# shared predicate in committable-path-lib.sh so intake and the guard cannot
+# drift apart.
 _issue_body_path_hard_denied() {
-	local path="${1#./}"
-	case "$path" in
-		.github/workflows/*) return 0 ;;
-	esac
-	return 1
+	committable_path_is_hard_denied "${1#./}"
 }
 
 #

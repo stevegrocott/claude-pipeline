@@ -205,6 +205,14 @@ CROSS_GATE_FIXTURES=(
     ".github/workflows/ci.yml|deny"
 )
 
+# Overridable-deny paths (class 1): refused by the guard by default,
+# admitted once EXTRA_COMMIT_PATHS matches, and never refused at intake
+# (only the hard denylist is refused there). Format: <path>|<override glob>.
+OVERRIDABLE_FIXTURES=(
+    "data/export.csv|data/*.csv"
+    "config/app.yml|config/*.yml"
+)
+
 # intake_accepts <path> — (path must exist under the repo) 0 if assert_issue_valid accepts a body declaring it.
 intake_accepts() {
     local path="$1"
@@ -237,6 +245,27 @@ intake_accepts() {
             { (( intake_rc != 0 )) && (( guard_rc != 0 )); } \
                 || mismatches+="  $path: expected both to deny (intake=$intake_rc guard=$guard_rc)"$'\n'
         fi
+    done
+    [[ -z "$mismatches" ]] || fail "Gates disagree:"$'\n'"$mismatches"
+}
+
+@test "cross-gate: overridable-deny paths pass intake, guard needs the override" {
+    local fixture path glob mismatches=""
+    for fixture in "${OVERRIDABLE_FIXTURES[@]}"; do
+        path="${fixture%%|*}"
+        glob="${fixture##*|}"
+        commit_paths "$path"
+
+        intake_accepts "$path" \
+            || mismatches+="  $path: intake refused an overridable path"$'\n'
+
+        run_guard
+        (( status != 0 )) \
+            || mismatches+="  $path: guard admitted without override"$'\n'
+
+        run_guard "$glob"
+        (( status == 0 )) \
+            || mismatches+="  $path: guard refused despite override $glob"$'\n'
     done
     [[ -z "$mismatches" ]] || fail "Gates disagree:"$'\n'"$mismatches"
 }
