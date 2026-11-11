@@ -407,6 +407,54 @@ teardown() {
         || fail "Expected error_kind 'no_structured_output'; got: $error_kind"
 }
 
+@test "unmarked SIGTERM (143) is reported as external termination, not timeout (#1047)" {
+    # The CLI exits 143 immediately — no watchdog fired, so the exit must
+    # not be mapped to 124 and no timeout retry may be launched.
+    local ext_calls_file="$TEST_TMP/ext-calls.txt"
+    export ext_calls_file
+    timeout() {
+        printf 'x\n' >> "$ext_calls_file"
+        return 143
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
+    [[ "$output" == *"terminated externally by SIGTERM"* ]] \
+        || fail "Expected external-termination log; got: $output"
+    [[ "$output" != *"timed out after"* ]] \
+        || fail "External 143 must not be logged as a timeout: $output"
+    [[ "$output" != *"timeout retry"* ]] \
+        || fail "External 143 must not start a timeout retry: $output"
+}
+
+@test "watchdog-delivered SIGTERM is still handled as a timeout (#1047)" {
+    # First call hangs until the watchdog kills it; the marker the watchdog
+    # leaves must keep the 143 -> 124 mapping and start the timeout retry.
+    local hang_fifo="$TEST_TMP/wdmark.fifo"
+    mkfifo "$hang_fifo"
+    local wdm_calls_file="$TEST_TMP/wdm-calls.txt"
+    export wdm_calls_file hang_fifo
+    timeout() {
+        local _n
+        _n=$(wc -l < "$wdm_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$wdm_calls_file"
+        if (( _n == 0 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 124
+        fi
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [[ "$output" == *"timed out after 1s"* ]] \
+        || fail "Watchdog kill must be logged as a timeout; got: $output"
+    [[ "$output" == *"retrying with"* ]] \
+        || fail "Watchdog kill must trigger the timeout retry: $output"
+    [[ "$output" != *"terminated externally"* ]] \
+        || fail "Watchdog kill misreported as external: $output"
+}
+
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
     # Reproduce the original bug: perl alarm() wrapper and claude child are
     # both dead, leaving a childless subshell that blocks indefinitely.
@@ -561,6 +609,94 @@ teardown() {
     error_kind=$(printf '%s' "$emitted_envelope" | jq -r '.error_kind // empty')
     [ "$error_kind" = "no_structured_output" ] \
         || fail "Expected error_kind=no_structured_output once the wedged retry_same call was terminated; got: $error_kind"
+}
+
+@test "escalation re-run unmarked SIGTERM is external, watchdog SIGTERM is timeout (#1047)" {
+    local hang_fifo="$TEST_TMP/esc-1047.fifo"
+    mkfifo "$hang_fifo"
+    local counter_file="$TEST_TMP/esc-1047-counter.txt"
+    export hang_fifo counter_file
+
+    timeout() {
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"gibberish"}'
+        elif [[ "$MODE_1047" == external ]]; then
+            return 143
+        else
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        fi
+    }
+    export -f timeout
+
+    # External SIGTERM: no watchdog marker, exit stays 143.
+    printf '0' > "$counter_file"
+    MODE_1047=external
+    export MODE_1047
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "30"
+    [[ "$output" == *"Stage test-iter-1 escalation terminated"*"externally by SIGTERM"* ]] \
+        || fail "Expected external-termination log; got: $output"
+    [[ "$output" != *"CLI exited 124"* ]] \
+        || fail "External 143 must not be mapped to 124: $output"
+
+    # Watchdog SIGTERM: marker present, mapped to 124.
+    printf '0' > "$counter_file"
+    MODE_1047=watchdog
+    export MODE_1047
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "1"
+    [[ "$output" == *"CLI exited 124"* ]] \
+        || fail "Watchdog kill must be mapped to 124; got: $output"
+    [[ "$output" != *"terminated"*"externally"* ]] \
+        || fail "Watchdog kill misreported as external: $output"
+}
+
+@test "retry_same re-run unmarked SIGTERM is external, watchdog SIGTERM is timeout (#1047)" {
+    local hang_fifo="$TEST_TMP/rs-1047.fifo"
+    mkfifo "$hang_fifo"
+    local counter_file="$TEST_TMP/rs-1047-counter.txt"
+    export hang_fifo counter_file
+    # Stub only the long backoff; the watchdog polls `sleep 1` and needs it.
+    sleep() { [[ "$1" == 1 ]] && command sleep 1; return 0; }
+    export -f sleep
+    timeout() {
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"result":"rate limit exceeded, please retry"}'
+        elif [[ "$MODE_1047" == external ]]; then
+            return 143
+        else
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        fi
+    }
+    export -f timeout
+
+    # External SIGTERM: no watchdog marker, exit stays 143.
+    printf '0' > "$counter_file"
+    MODE_1047=external
+    export MODE_1047
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "30"
+    [[ "$output" == *"Stage test-iter-1 same-model retry terminated"*"externally by SIGTERM"* ]] \
+        || fail "Expected external-termination log; got: $output"
+    grep -q 'retry exit code: 143' "$TEST_TMP"/logs/test/stages/*.log \
+        || fail "External 143 must stay 143 in the stage log"
+
+    # Watchdog SIGTERM: marker present, mapped to 124.
+    printf '0' > "$counter_file"
+    MODE_1047=watchdog
+    export MODE_1047
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "1"
+    grep -q 'retry exit code: 124' "$TEST_TMP"/logs/test/stages/*.log \
+        || fail "Watchdog kill must be mapped to 124; got: $output"
+    [[ "$output" != *"terminated"*"externally"* ]] \
+        || fail "Watchdog kill misreported as external: $output"
 }
 
 # =============================================================================
