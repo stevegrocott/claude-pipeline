@@ -1972,6 +1972,7 @@ set_branch_info() {
 
 set_final_state() {
     local state="$1"
+    local reason="${2:-}"
     local prev_state stage
     # Capture the previous state and current stage BEFORE we overwrite, so the
     # status_change event can carry from_state/to_state per schema.
@@ -1990,8 +1991,13 @@ set_final_state() {
         return 0
     fi
 
-    status_json_write --arg state "$state" \
-       '.state = $state | .last_update = (now | todate)'
+    # Optional $2 reason is persisted as .final_state_reason; without one any
+    # reason left by an earlier transition is cleared so it cannot go stale.
+    status_json_write --arg state "$state" --arg reason "$reason" \
+       '.state = $state
+        | (if $reason == "" then del(.final_state_reason)
+           else .final_state_reason = $reason end)
+        | .last_update = (now | todate)'
     sync_status_to_log
     emit_event "status_change" \
         "stage=$stage" \
