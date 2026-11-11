@@ -246,11 +246,16 @@ readonly -a GITIGNORE_PATHS=(
     'status.json.lockdir'
 )
 
-# Print the index of the first END marker after line $1 of the caller's
-# `lines` array; fail when there is none.
+# Print the index of the END marker that closes the BEGIN at line $1 of the
+# caller's `lines` array; fail when there is none. Another BEGIN before the
+# END means line $1 is a stale marker: pairing it with that END would swallow
+# the consumer lines between the two BEGINs.
 gitignore_end_index() {
     local j
     for ((j = $1 + 1; j < ${#lines[@]}; j++)); do
+        if [[ "${lines[j]}" == "$GITIGNORE_BEGIN" ]]; then
+            return 1
+        fi
         if [[ "${lines[j]}" == "$GITIGNORE_END" ]]; then
             echo "$j"
             return 0

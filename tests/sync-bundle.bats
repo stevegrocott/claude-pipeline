@@ -1815,6 +1815,27 @@ _assert_artifact_entries_once() {
 	_assert_artifact_entries_once
 }
 
+@test "(#1043 AC3) sync.sh to keeps lines between two BEGIN markers before one END" {
+	_gitignore_target
+	printf '%s\n' 'a/' '# >>> claude-pipeline artifacts (managed by sync.sh) >>>' \
+		'keep-me/' 'dist/' \
+		'# >>> claude-pipeline artifacts (managed by sync.sh) >>>' 'old1' \
+		'# <<< claude-pipeline artifacts <<<' 'after/' > "$GI_TARGET/.gitignore"
+
+	_run_sync_to_target || return 1
+	cp "$GI_TARGET/.gitignore" "$GI_TARGET/.gitignore.first"
+	_run_sync_to_target || return 1
+
+	grep -qxF 'a/' "$GI_TARGET/.gitignore"
+	grep -qxF 'keep-me/' "$GI_TARGET/.gitignore"
+	grep -qxF 'dist/' "$GI_TARGET/.gitignore"
+	grep -qxF 'after/' "$GI_TARGET/.gitignore"
+	! grep -qxF 'old1' "$GI_TARGET/.gitignore" || return 1
+	[ "$(grep -cxF '# <<< claude-pipeline artifacts <<<' "$GI_TARGET/.gitignore")" -eq 1 ]
+	cmp "$GI_TARGET/.gitignore.first" "$GI_TARGET/.gitignore"
+	_assert_artifact_entries_once
+}
+
 @test "(#1043) sync.sh to collapses two matched blocks into one" {
 	_gitignore_target
 	printf '%s\n' 'before/' \
