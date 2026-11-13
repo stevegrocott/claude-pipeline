@@ -180,6 +180,9 @@ run_guard() {
     suggestion="${suggestion#EXTRA_COMMIT_PATHS=\'}"
     suggestion="${suggestion%\'}"
 
+    # The refusal reset the branch past the denied commit; re-commit the path
+    # so the override is exercised against it rather than the prior HEAD.
+    commit_paths apps/frontend/data/seed.csv
     run_guard "$suggestion"
     [ "$status" -eq 0 ] || fail "Suggested override '$suggestion' did not admit path. Got: $output"
 }
@@ -205,22 +208,23 @@ CROSS_GATE_FIXTURES=(
     ".github/workflows/ci.yml|deny"
 )
 
-# Overridable-deny paths (class 1): refused by the guard by default,
-# admitted once EXTRA_COMMIT_PATHS matches, and never refused at intake
-# (only the hard denylist is refused there). Format: <path>|<override glob>.
+# Overridable-deny paths (class 1): refused by BOTH gates by default and
+# admitted by BOTH once EXTRA_COMMIT_PATHS matches. Format: <path>|<override glob>.
 OVERRIDABLE_FIXTURES=(
     "data/export.csv|data/*.csv"
     "config/app.yml|config/*.yml"
 )
 
-# intake_accepts <path> — (path must exist under the repo) 0 if assert_issue_valid accepts a body declaring it.
+# intake_accepts <path> [EXTRA_COMMIT_PATHS] — (path must exist under the repo)
+# 0 if assert_issue_valid accepts a body declaring it. Empty/absent override
+# leaves EXTRA_COMMIT_PATHS unset, matching run_guard.
 intake_accepts() {
-    local path="$1"
+    local path="$1" extra="${2:-}"
     local lib="${TEST_DIR}/../issue-body-lib.sh"
     local body
     body=$(printf '## Acceptance Criteria\n\n- [ ] It works\n\n## Implementation Tasks\n\n- [ ] `[default]` **(S)** Change it — `%s`\n' "$path")
-    ISSUE_BODY_LIB="$lib" ISSUE_BODY_REPO_ROOT="$TEST_TMP/repo" BODY="$body" \
-        run bash -c 'source "$ISSUE_BODY_LIB" && assert_issue_valid "$BODY"'
+    ISSUE_BODY_LIB="$lib" ISSUE_BODY_REPO_ROOT="$TEST_TMP/repo" BODY="$body" EXTRA="$extra" \
+        run bash -c 'unset EXTRA_COMMIT_PATHS; [[ -n "$EXTRA" ]] && export EXTRA_COMMIT_PATHS="$EXTRA"; source "$ISSUE_BODY_LIB" && assert_issue_valid "$BODY"'
     return "$status"
 }
 
@@ -249,23 +253,57 @@ intake_accepts() {
     [[ -z "$mismatches" ]] || fail "Gates disagree:"$'\n'"$mismatches"
 }
 
-@test "cross-gate: overridable-deny paths pass intake, guard needs the override" {
-    local fixture path glob mismatches=""
+@test "cross-gate: both gates agree under an empty and an admitting override" {
+    local fixture path glob mismatches="" intake_rc guard_rc
     for fixture in "${OVERRIDABLE_FIXTURES[@]}"; do
         path="${fixture%%|*}"
         glob="${fixture##*|}"
         commit_paths "$path"
 
-        intake_accepts "$path" \
-            || mismatches+="  $path: intake refused an overridable path"$'\n'
-
-        run_guard
-        (( status != 0 )) \
-            || mismatches+="  $path: guard admitted without override"$'\n'
-
+        # Admitting override: both gates must admit.
+        intake_accepts "$path" "$glob" && intake_rc=0 || intake_rc=1
         run_guard "$glob"
-        (( status == 0 )) \
-            || mismatches+="  $path: guard refused despite override $glob"$'\n'
+        guard_rc="$status"
+        { (( intake_rc == 0 )) && (( guard_rc == 0 )); } \
+            || mismatches+="  $path: expected both to admit under override $glob (intake=$intake_rc guard=$guard_rc)"$'\n'
+
+        # Empty override: both gates must refuse. Runs second because a
+        # guard refusal reverts the commit, which would invalidate the fixture.
+        intake_accepts "$path" && intake_rc=0 || intake_rc=1
+        run_guard
+        guard_rc="$status"
+        { (( intake_rc != 0 )) && (( guard_rc != 0 )); } \
+            || mismatches+="  $path: expected both to refuse with no override (intake=$intake_rc guard=$guard_rc)"$'\n'
     done
     [[ -z "$mismatches" ]] || fail "Gates disagree:"$'\n'"$mismatches"
+}
+
+# intake_verdict_with_class_override <path> <class-fn-body> — source the lib,
+# then redefine committable_path_class and report intake's verdict. Proves the
+# intake gate consults the shared class function rather than a private copy.
+intake_verdict_with_class_override() {
+    local path="$1" fn_body="$2"
+    local lib="${TEST_DIR}/../issue-body-lib.sh"
+    local body
+    body=$(printf '## Acceptance Criteria\n\n- [ ] It works\n\n## Implementation Tasks\n\n- [ ] `[default]` **(S)** Change it — `%s`\n' "$path")
+    ISSUE_BODY_LIB="$lib" ISSUE_BODY_REPO_ROOT="$TEST_TMP/repo" BODY="$body" FN_BODY="$fn_body" \
+        run bash -c 'unset EXTRA_COMMIT_PATHS; source "$ISSUE_BODY_LIB"; eval "committable_path_class() { $FN_BODY; }"; assert_issue_valid "$BODY"'
+}
+
+@test "intake verdict follows a committable_path_class redefined after sourcing" {
+    commit_paths data/export.csv
+
+    # Baseline: the shipped class refuses .csv by default.
+    intake_verdict_with_class_override data/export.csv 'case "$1" in *.csv) return 1 ;; esac; return 0'
+    [ "$status" -ne 0 ] || fail "Expected refusal when class returns 1. Got: $output"
+
+    # Redefined to admit (class 0): intake now accepts the same path.
+    intake_verdict_with_class_override data/export.csv 'return 0'
+    [ "$status" -eq 0 ] || fail "Intake did not follow class->0. Got: $output"
+
+    # Redefined to hard-deny (class 2): intake refuses a normally-admitted path.
+    commit_paths src/app.ts
+    intake_verdict_with_class_override src/app.ts 'return 2'
+    [ "$status" -ne 0 ] || fail "Intake did not follow class->2. Got: $output"
+    [[ "$output" == *"src/app.ts"* ]] || fail "Expected path named. Got: $output"
 }
