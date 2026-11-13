@@ -440,6 +440,30 @@ main() {
 		return 0
 	fi
 
+	# external_termination (issue #1054): the stage was killed from outside
+	# (not by the watchdog), so the model tier is not at fault.  Retry once at
+	# the same model, then bail — never escalate.  Handled here, before either
+	# backend, so the bash and skill-native paths agree.
+	if [[ "$_status" != "success" ]]; then
+		local _kind _model _prior
+		_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind // empty')
+		if [[ "$_kind" == "external_termination" ]]; then
+			_model=$(printf '%s' "$stage_result" \
+				| jq -r '.model // "haiku"')
+			_prior=$(printf '%s' "$history" | \
+				jq --arg m "$_model" \
+				   '[.[] | select(.from_model == $m)] | length')
+			if (( _prior == 0 )); then
+				printf '%s\n' \
+					'{"action":"retry_same","reason":"external_termination: killed externally, retrying once at the same model"}'
+			else
+				printf '%s\n' \
+					'{"action":"bail","reason":"external_termination: repeated external kill, not escalating"}'
+			fi
+			return 0
+		fi
+	fi
+
 	# Kill-switch: bypass composition and use inline bash directly
 	if [[ "${ESCALATION_POLICY_BACKEND:-}" == "bash" ]]; then
 		_bash_decide "$stage_result" "$history"
