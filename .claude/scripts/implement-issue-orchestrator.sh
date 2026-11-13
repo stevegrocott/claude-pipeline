@@ -4335,6 +4335,21 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$result_model" "null" \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
                     "$_stage_usage" "${complexity:-}")
+            elif (( _retry_exit_code == 143 )); then
+                # Issue #1054: the re-run was also killed from outside (an
+                # unmarked 143 survived _classify_143).  Fail the stage with
+                # external_termination — never escalate.
+                log_error "Stage $stage_name killed externally again on" \
+                    "the same-model retry — failing"
+                _sr_retry=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"external_termination"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage" "${complexity:-}")
+                _apply_stage_action "$_sr_retry" "bail" \
+                    "external_termination: repeated external kill"
+                return $?
             else
                 _sr_retry=$(_emit_stage_result \
                     "error" "null" "$output" \

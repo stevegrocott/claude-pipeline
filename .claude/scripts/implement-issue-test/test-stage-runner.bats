@@ -3956,3 +3956,26 @@ _count_bats_incomplete_markers() {
     [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.status')" = "success" ] \
         || fail "Re-run success must be a success result; got: $output"
 }
+
+@test "re-run also killed externally fails with external_termination, no third dispatch (#1054)" {
+    local calls_file="$TEST_TMP/ext-twice-calls.txt"
+    : > "$calls_file"
+    export calls_file
+    sleep() { [[ "$1" == 1 ]] && command sleep 1; return 0; }
+    export -f sleep
+    timeout() {
+        printf 'call\n' >> "$calls_file"
+        return 143
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
+
+    [ "$status" -ne 0 ]
+    [ "$(wc -l < "$calls_file" | tr -d ' ')" = "2" ] \
+        || fail "Expected exactly 2 dispatches; got: $(cat "$calls_file")"
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.error_kind')" = "external_termination" ] \
+        || fail "Expected error_kind external_termination; got: $output"
+    [[ "$output" != *"action=escalate"* ]] \
+        || fail "External kill must not escalate: $output"
+}
