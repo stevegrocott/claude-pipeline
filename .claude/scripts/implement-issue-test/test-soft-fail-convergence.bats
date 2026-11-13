@@ -794,7 +794,7 @@ _repro_full_suite_npm_check() {
 	expect_ok "a timeout-specific degraded-stage marker must exist for the BATS arm" \
 		grep -qF 'DEGRADED_STAGES+=("test:bats_full_suite_timeout")' "$ORCHESTRATOR_SCRIPT"
 	expect_ok "the BATS arm must branch on the timeout exit code (124) to reach that marker" \
-		grep -qE 'bats_full_rc.*==.*124' "$ORCHESTRATOR_SCRIPT"
+		grep -qE 'rc.*==.*124' "$ORCHESTRATOR_SCRIPT"
 
 	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_full_suite_red")'* ]]
 }
@@ -815,17 +815,30 @@ _repro_full_suite_npm_check() {
 }
 
 @test "#926: a timed-out BATS full-suite check does not exit or return before the E2E guard runs" {
-	local marker_pos bound_pos window
+	local marker_pos bound_pos call_pos window func_body
 	marker_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_timeout")' "$ORCHESTRATOR_SCRIPT" \
 		| head -1 | cut -d: -f1)
 	expect_ok "the BATS timeout marker must exist" test -n "$marker_pos"
+
+	# The outcome chain lives in _bats_full_suite_outcome: its only
+	# return must be the trailing `return 0`, and no exit may appear.
+	func_body=$(sed -n '/^_bats_full_suite_outcome() {/,/^}/p' "$ORCHESTRATOR_SCRIPT")
+	expect_ok "the outcome function must exist" test -n "$func_body"
+	expect_not_ok "the outcome function must never exit" \
+		grep -qE '^[[:space:]]*exit\b' <<< "$func_body"
+	expect_ok "the outcome function must always return 0" \
+		grep -qE '^[[:space:]]*return 0$' <<< "$func_body"
+
+	call_pos=$(grep -n '^[[:space:]]*_bats_full_suite_outcome "\$bats_full_rc"' "$ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	expect_ok "main() must call the outcome function" test -n "$call_pos"
 
 	bound_pos=$(grep -n 'E2E-UNVALIDATED GUARD' "$ORCHESTRATOR_SCRIPT" \
 		| head -1 | cut -d: -f1)
 	expect_ok "the following E2E-unvalidated guard block must still exist" test -n "$bound_pos"
 
-	window=$(sed -n "${marker_pos},${bound_pos}p" "$ORCHESTRATOR_SCRIPT")
-	expect_not_ok "no exit/return may sit between the BATS timeout marker and the E2E guard" \
+	window=$(sed -n "${call_pos},${bound_pos}p" "$ORCHESTRATOR_SCRIPT")
+	expect_not_ok "no exit/return may sit between the BATS outcome call and the E2E guard" \
 		grep -qE '^[[:space:]]*(exit|return)\b' <<< "$window"
 }
 
@@ -874,4 +887,34 @@ _repro_full_suite_npm_check() {
 		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
 	[[ -n "$unmeasured_pos" && -n "$red_pos" ]]
 	((unmeasured_pos < red_pos))
+}
+
+# =============================================================================
+# FULL-SUITE BATS OUTCOME CHAIN (_bats_full_suite_outcome)
+# =============================================================================
+
+@test "_bats_full_suite_outcome: rc 124 records the timeout marker" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 124 "" "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout" ]]
+}
+
+@test "_bats_full_suite_outcome: non-zero rc with no failing test is unmeasured" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 1 "runner aborted" "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured" ]]
+}
+
+@test "_bats_full_suite_outcome: failing test records red and names it" {
+	comment_issue() { printf '%s' "$2" > "$TEST_TMP/comment"; }
+	_bats_full_suite_outcome 1 $'ok 1 a\nnot ok 2 broken' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_red" ]]
+	grep -q 'not ok 2 broken' "$TEST_TMP/comment"
+	grep -q '1 total' "$TEST_TMP/comment"
+}
+
+@test "_bats_full_suite_outcome: rc 0 records nothing" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 0 "ok 1 a" "$TEST_TMP/l.log"
+	((${#DEGRADED_STAGES[@]} == 0))
 }
