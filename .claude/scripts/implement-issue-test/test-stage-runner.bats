@@ -4027,6 +4027,50 @@ _count_bats_incomplete_markers() {
         || fail "Re-run must not record an escalation: $(jq -c '.escalations' "$STATUS_FILE")"
 }
 
+@test "externally terminated stage is still re-run once at the per-run escalation cap (#1054)" {
+    # An external kill says nothing about the model, and its re-run records no
+    # escalation, so the cap that stops further escalations must not stop it.
+    export MAX_ESCALATIONS_PER_RUN=5
+    jq -n '{state:"running", escalations:[
+        {stage:"implement-task-1",from_model:"haiku",to_model:"sonnet",reason:"double_timeout"},
+        {stage:"implement-task-2",from_model:"sonnet",to_model:"opus",reason:"double_timeout"},
+        {stage:"implement-task-3",from_model:"haiku",to_model:"sonnet",reason:"double_timeout"},
+        {stage:"implement-task-4",from_model:"sonnet",to_model:"opus",reason:"double_timeout"},
+        {stage:"implement-task-5",from_model:"haiku",to_model:"sonnet",reason:"double_timeout"}]}' \
+        > "$STATUS_FILE"
+    local calls_file="$TEST_TMP/ext-rerun-cap-calls.txt"
+    : > "$calls_file"
+    export calls_file
+    sleep() { [[ "$1" == 1 ]] && command sleep 1; return 0; }
+    export -f sleep
+    timeout() {
+        local budget="$1" model="" prev="" a
+        for a in "$@"; do
+            [[ "$prev" == --model ]] && model="$a"
+            prev="$a"
+        done
+        printf '%s %s\n' "$budget" "$model" >> "$calls_file"
+        if (( $(wc -l < "$calls_file") == 1 )); then
+            return 143
+        fi
+        echo '{"is_error":false,"structured_output":{"status":"success","summary":"ok"}}'
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
+
+    [ "$(wc -l < "$calls_file" | tr -d ' ')" = "2" ] \
+        || fail "Expected exactly 2 dispatches; got: $(cat "$calls_file")"
+    [ "$(sed -n 1p "$calls_file")" = "$(sed -n 2p "$calls_file")" ] \
+        || fail "Re-run must use same budget and model: $(cat "$calls_file")"
+    [[ "$output" == *"action=retry_same"* ]] \
+        || fail "Expected retry_same decision; got: $output"
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.status')" = "success" ] \
+        || fail "Re-run success must be a success result; got: $output"
+    [ "$(jq '.escalations | length' "$STATUS_FILE")" = "5" ] \
+        || fail "Re-run must not record an escalation: $(jq -c '.escalations' "$STATUS_FILE")"
+}
+
 @test "re-run also killed externally fails with external_termination, no third dispatch (#1054)" {
     local calls_file="$TEST_TMP/ext-twice-calls.txt"
     : > "$calls_file"
