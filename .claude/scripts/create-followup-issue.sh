@@ -15,6 +15,10 @@
 #
 # Environment:
 #   DEPLOY_VERIFY_CMD       When set, appends a ## Deploy Verification section.
+#   EXTRA_COMMIT_PATHS      Loaded from platform.sh; pipe-separated globs of
+#                           paths the pipeline commit guard admits beyond its
+#                           built-in allowlist (passed through to
+#                           assert_issue_valid via committable-path-lib.sh).
 #   FRONTEND_PATH_PATTERNS  Pipe-separated glob patterns (from platform.sh)
 #                           used to disambiguate TS/JS frontend vs backend.
 #   ISSUE_BODY_AGENTS_DIR   Override agents directory (testing/portability).
@@ -35,6 +39,17 @@ readonly SCRIPT_DIR
 # Source the shared validator — exposes assert_issue_valid + valid_agents.
 # shellcheck source=issue-body-lib.sh
 source "${SCRIPT_DIR}/issue-body-lib.sh"
+
+# Load operator configuration so EXTRA_COMMIT_PATHS, DEPLOY_VERIFY_CMD,
+# FRONTEND_PATH_PATTERNS, and other operator-defined settings are present
+# before body construction and validation.  Non-fatal: the caller may have
+# already exported these variables, or platform.sh may not exist in the
+# current environment (e.g. a minimal CI checkout or a consumer that has
+# not yet run /adapting-claude-pipeline).
+_cfi_platform_sh="$(resolve_consumer_file platform.sh 2>/dev/null)" \
+	&& source "$_cfi_platform_sh" 2>/dev/null \
+	|| true
+unset _cfi_platform_sh
 
 # ---------------------------------------------------------------------------
 # Internal helpers
