@@ -685,3 +685,40 @@ _load_deploy_verify_fn() {
 		return 1
 	fi
 }
+
+# ---------------------------------------------------------------------------
+# external_termination (issue #1054): retry_same once, then bail, never
+# escalate — on both the bash and skill-native paths.
+# ---------------------------------------------------------------------------
+
+@test "external_termination with no history answers retry_same (bash)" {
+	export ESCALATION_POLICY_BACKEND=bash
+	run bash "$DECIDE_ACTION_SCRIPT" \
+		'{"status":"error","error_kind":"external_termination","model":"sonnet"}' '[]'
+	[ "$status" -eq 0 ]
+	[[ "$(jq -r '.action' <<< "$output")" == "retry_same" ]]
+}
+
+@test "external_termination after a same-model retry bails (bash)" {
+	export ESCALATION_POLICY_BACKEND=bash
+	run bash "$DECIDE_ACTION_SCRIPT" \
+		'{"status":"error","error_kind":"external_termination","model":"sonnet"}' \
+		'[{"from_model":"sonnet","to_model":"sonnet"}]'
+	[ "$status" -eq 0 ]
+	[[ "$(jq -r '.action' <<< "$output")" == "bail" ]]
+}
+
+@test "external_termination never escalates on the default path" {
+	local m
+	for m in haiku sonnet opus; do
+		run bash "$DECIDE_ACTION_SCRIPT" \
+			"{\"status\":\"error\",\"error_kind\":\"external_termination\",\"model\":\"$m\"}" '[]'
+		[ "$status" -eq 0 ]
+		[[ "$(jq -r '.action' <<< "$output")" == "retry_same" ]]
+	done
+	run bash "$DECIDE_ACTION_SCRIPT" \
+		'{"status":"error","error_kind":"external_termination","model":"haiku"}' \
+		'[{"from_model":"haiku","to_model":"haiku"}]'
+	[ "$status" -eq 0 ]
+	[[ "$(jq -r '.action' <<< "$output")" == "bail" ]]
+}
