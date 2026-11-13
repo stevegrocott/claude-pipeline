@@ -3866,6 +3866,11 @@ for m in re.finditer(r'\[\s*\{', t):
         # so downstream (decide-action.sh) can distinguish a single first-pass
         # timeout (which never reaches here) from a repeated timeout.
         _error_kind="double_timeout"
+    elif (( exit_code == 143 )) && [[ -z "$structured" \
+        && -z "$_fallback_result" ]]; then
+        # Unmarked 143 (issue #1054): killed from outside, not by the
+        # watchdog.  decide-action.sh answers retry_same, never escalate.
+        _error_kind="external_termination"
     elif [[ "$output_subtype" == "error_max_turns" ]]; then
         if [[ "$(effective_fallback "$model")" == "$model" ]]; then
             log_error "Stage $stage_name hit max turns with $model (ceiling) — cannot escalate"

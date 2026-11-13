@@ -3922,3 +3922,37 @@ _count_bats_incomplete_markers() {
     grep -q -- "--max-turns 40" "$claude_calls" || \
         fail "Expected --max-turns 40 from MAX_TURNS_E2E_VERIFY. Calls: $(cat "$claude_calls")"
 }
+
+@test "externally terminated stage is re-run once, same model and budget, no escalation (#1054)" {
+    local calls_file="$TEST_TMP/ext-rerun-calls.txt"
+    : > "$calls_file"
+    export calls_file
+    sleep() { [[ "$1" == 1 ]] && command sleep 1; return 0; }
+    export -f sleep
+    timeout() {
+        local budget="$1" model="" prev="" a
+        for a in "$@"; do
+            [[ "$prev" == --model ]] && model="$a"
+            prev="$a"
+        done
+        printf '%s %s\n' "$budget" "$model" >> "$calls_file"
+        if (( $(wc -l < "$calls_file") == 1 )); then
+            return 143
+        fi
+        echo '{"is_error":false,"structured_output":{"status":"success","summary":"ok"}}'
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
+
+    [ "$(wc -l < "$calls_file" | tr -d ' ')" = "2" ] \
+        || fail "Expected exactly 2 dispatches; got: $(cat "$calls_file")"
+    [ "$(sed -n 1p "$calls_file")" = "$(sed -n 2p "$calls_file")" ] \
+        || fail "Re-run must use same budget and model: $(cat "$calls_file")"
+    [[ "$output" == *"action=retry_same"* ]] \
+        || fail "Expected retry_same decision; got: $output"
+    [[ "$output" != *"action=escalate"* ]] \
+        || fail "External kill must not escalate: $output"
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.status')" = "success" ] \
+        || fail "Re-run success must be a success result; got: $output"
+}
