@@ -205,22 +205,23 @@ CROSS_GATE_FIXTURES=(
     ".github/workflows/ci.yml|deny"
 )
 
-# Overridable-deny paths (class 1): refused by the guard by default,
-# admitted once EXTRA_COMMIT_PATHS matches, and never refused at intake
-# (only the hard denylist is refused there). Format: <path>|<override glob>.
+# Overridable-deny paths (class 1): refused by BOTH gates by default and
+# admitted by BOTH once EXTRA_COMMIT_PATHS matches. Format: <path>|<override glob>.
 OVERRIDABLE_FIXTURES=(
     "data/export.csv|data/*.csv"
     "config/app.yml|config/*.yml"
 )
 
-# intake_accepts <path> — (path must exist under the repo) 0 if assert_issue_valid accepts a body declaring it.
+# intake_accepts <path> [EXTRA_COMMIT_PATHS] — (path must exist under the repo)
+# 0 if assert_issue_valid accepts a body declaring it. Empty/absent override
+# leaves EXTRA_COMMIT_PATHS unset, matching run_guard.
 intake_accepts() {
-    local path="$1"
+    local path="$1" extra="${2:-}"
     local lib="${TEST_DIR}/../issue-body-lib.sh"
     local body
     body=$(printf '## Acceptance Criteria\n\n- [ ] It works\n\n## Implementation Tasks\n\n- [ ] `[default]` **(S)** Change it — `%s`\n' "$path")
-    ISSUE_BODY_LIB="$lib" ISSUE_BODY_REPO_ROOT="$TEST_TMP/repo" BODY="$body" \
-        run bash -c 'source "$ISSUE_BODY_LIB" && assert_issue_valid "$BODY"'
+    ISSUE_BODY_LIB="$lib" ISSUE_BODY_REPO_ROOT="$TEST_TMP/repo" BODY="$body" EXTRA="$extra" \
+        run bash -c 'unset EXTRA_COMMIT_PATHS; [[ -n "$EXTRA" ]] && export EXTRA_COMMIT_PATHS="$EXTRA"; source "$ISSUE_BODY_LIB" && assert_issue_valid "$BODY"'
     return "$status"
 }
 
@@ -249,23 +250,27 @@ intake_accepts() {
     [[ -z "$mismatches" ]] || fail "Gates disagree:"$'\n'"$mismatches"
 }
 
-@test "cross-gate: overridable-deny paths pass intake, guard needs the override" {
-    local fixture path glob mismatches=""
+@test "cross-gate: both gates agree under an empty and an admitting override" {
+    local fixture path glob mismatches="" intake_rc guard_rc
     for fixture in "${OVERRIDABLE_FIXTURES[@]}"; do
         path="${fixture%%|*}"
         glob="${fixture##*|}"
         commit_paths "$path"
 
-        intake_accepts "$path" \
-            || mismatches+="  $path: intake refused an overridable path"$'\n'
-
-        run_guard
-        (( status != 0 )) \
-            || mismatches+="  $path: guard admitted without override"$'\n'
-
+        # Admitting override: both gates must admit.
+        intake_accepts "$path" "$glob" && intake_rc=0 || intake_rc=1
         run_guard "$glob"
-        (( status == 0 )) \
-            || mismatches+="  $path: guard refused despite override $glob"$'\n'
+        guard_rc="$status"
+        { (( intake_rc == 0 )) && (( guard_rc == 0 )); } \
+            || mismatches+="  $path: expected both to admit under override $glob (intake=$intake_rc guard=$guard_rc)"$'\n'
+
+        # Empty override: both gates must refuse. Runs second because a
+        # guard refusal reverts the commit, which would invalidate the fixture.
+        intake_accepts "$path" && intake_rc=0 || intake_rc=1
+        run_guard
+        guard_rc="$status"
+        { (( intake_rc != 0 )) && (( guard_rc != 0 )); } \
+            || mismatches+="  $path: expected both to refuse with no override (intake=$intake_rc guard=$guard_rc)"$'\n'
     done
     [[ -z "$mismatches" ]] || fail "Gates disagree:"$'\n'"$mismatches"
 }
