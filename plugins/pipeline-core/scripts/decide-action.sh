@@ -443,7 +443,13 @@ main() {
 	# external_termination (issue #1054): the stage was killed from outside
 	# (not by the watchdog), so the model tier is not at fault.  Retry once at
 	# the same model, then bail — never escalate.  Handled here, before either
-	# backend, so the bash and skill-native paths agree.
+	# backend, so the bash and skill-native paths agree.  Only a same-model
+	# entry (from_model == to_model) counts as the prior attempt: the history
+	# is run-wide, so another stage's escalation away from this model must not
+	# cost this stage its one re-run.  The orchestrator records no same-model
+	# entry today — run_stage fails a second kill itself on its same-model
+	# retry path — so the bail answer guards callers that do record one.  The
+	# per-run escalation cap above still takes precedence over the re-run.
 	if [[ "$_status" != "success" ]]; then
 		local _kind _model _prior
 		_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind // empty')
@@ -452,7 +458,8 @@ main() {
 				| jq -r '.model // "haiku"')
 			_prior=$(printf '%s' "$history" | \
 				jq --arg m "$_model" \
-				   '[.[] | select(.from_model == $m)] | length')
+				   '[.[] | select(.from_model == $m and .to_model == $m)]
+				    | length')
 			if (( _prior == 0 )); then
 				printf '%s\n' \
 					'{"action":"retry_same","reason":"external_termination: killed externally, retrying once at the same model"}'

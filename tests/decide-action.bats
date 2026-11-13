@@ -722,3 +722,31 @@ _load_deploy_verify_fn() {
 	[ "$status" -eq 0 ]
 	[[ "$(jq -r '.action' <<< "$output")" == "bail" ]]
 }
+
+@test "external_termination is re-run after another stage escalated from that model (bash)" {
+	export ESCALATION_POLICY_BACKEND=bash
+	run bash "$DECIDE_ACTION_SCRIPT" \
+		'{"status":"error","error_kind":"external_termination","model":"sonnet"}' \
+		'[{"stage":"other-stage","from_model":"sonnet","to_model":"opus","reason":"double_timeout"}]'
+	[ "$status" -eq 0 ]
+	[ "$(jq -r '.action' <<< "$output")" = "retry_same" ]
+}
+
+@test "external_termination is re-run after another stage escalated from that model (default path)" {
+	run bash "$DECIDE_ACTION_SCRIPT" \
+		'{"status":"error","error_kind":"external_termination","model":"sonnet"}' \
+		'[{"stage":"other-stage","from_model":"sonnet","to_model":"opus","reason":"double_timeout"}]'
+	[ "$status" -eq 0 ]
+	[ "$(jq -r '.action' <<< "$output")" = "retry_same" ]
+}
+
+@test "external_termination after a same-model re-run bails at every model" {
+	local m
+	for m in haiku sonnet opus; do
+		run bash "$DECIDE_ACTION_SCRIPT" \
+			"{\"status\":\"error\",\"error_kind\":\"external_termination\",\"model\":\"$m\"}" \
+			"[{\"from_model\":\"$m\",\"to_model\":\"$m\"}]"
+		[ "$status" -eq 0 ]
+		[ "$(jq -r '.action' <<< "$output")" = "bail" ]
+	done
+}
