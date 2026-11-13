@@ -787,16 +787,11 @@ _repro_full_suite_npm_check() {
 	[[ "$script_content" == *'DEGRADED_STAGES+=("test:full_suite_red")'* ]]
 }
 
-@test "#926: a timed-out BATS full-suite check is recorded under a marker distinct from a real failure" {
-	local script_content
-	script_content=$(< "$ORCHESTRATOR_SCRIPT")
-
-	expect_ok "a timeout-specific degraded-stage marker must exist for the BATS arm" \
-		grep -qF 'DEGRADED_STAGES+=("test:bats_full_suite_timeout")' "$ORCHESTRATOR_SCRIPT"
-	expect_ok "the BATS arm must branch on the timeout exit code (124) to reach that marker" \
-		grep -qE 'rc.*==.*124' "$ORCHESTRATOR_SCRIPT"
-
-	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_full_suite_red")'* ]]
+@test "#926: a timed-out BATS full-suite run records the timeout marker, never red" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 124 $'ok 1 a\nnot ok 2 b' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout" ]]
+	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
 }
 
 @test "#926: a timed-out npm full-suite check does not exit or return before the BATS check runs" {
@@ -864,19 +859,30 @@ _repro_full_suite_npm_check() {
 	[ "$out" = "0" ]
 }
 
-@test "BATS full-suite non-zero exit with no failing test is recorded as unmeasured, not red" {
-	local script_content
-	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+@test "BATS full-suite killed run (rc 137, no failing test) is unmeasured, not red" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 137 $'1..3\nok 1 a' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured" ]]
+	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
+}
 
-	expect_ok "an unmeasured marker must exist for the BATS arm" \
-		grep -qF 'DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")' "$ORCHESTRATOR_SCRIPT"
-	expect_ok "the unmeasured branch must be gated on the failure count" \
-		grep -qF '_bats_full_suite_failure_count' "$ORCHESTRATOR_SCRIPT"
+@test "BATS full-suite setup error (rc 1, no failing test) is unmeasured, not red" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 1 "bats: command not found" "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured" ]]
+	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
+}
 
-	# The marker must not match test:*full_suite_red, or the
-	# branch-evidence reconciliation would read it as a real regression.
-	[[ "test:bats_full_suite_unmeasured" != test:*full_suite_red ]]
-	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_full_suite_red")'* ]]
+@test "BATS full-suite red run (rc 1 with a failing test) records exactly red" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 1 $'ok 1 a\nnot ok 2 broken' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_red" ]]
+}
+
+@test "BATS full-suite green run (rc 0) records no degraded marker" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 0 $'ok 1 a' "$TEST_TMP/l.log"
+	((${#DEGRADED_STAGES[@]} == 0))
 }
 
 @test "BATS full-suite unmeasured branch precedes the red branch" {
