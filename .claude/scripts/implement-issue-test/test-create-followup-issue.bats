@@ -508,3 +508,26 @@ _call_vague() {
 	[ "$status" -eq 0 ]
 	[ -n "$output" ]
 }
+
+@test "platform.sh load: EXTRA_COMMIT_PATHS from platform.sh admits a path refused by default" {
+	mkdir -p "${ISSUE_BODY_REPO_ROOT}/ops"
+	printf 'x\n' > "${ISSUE_BODY_REPO_ROOT}/ops/settings.json"
+	unset EXTRA_COMMIT_PATHS
+
+	# Without the operator override the not-committable file is refused.
+	rm -f "${TEST_TMP}/.claude/config/platform.sh"
+	run "$GENERATOR" --title "t" --description "d" \
+		--file-path "ops/settings.json" \
+		--pr-number "1" --issue-number "2" --reviewer "r"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"not-committable"* ]]
+
+	# platform.sh supplies EXTRA_COMMIT_PATHS; the same call must now pass.
+	printf '%s\n' 'EXTRA_COMMIT_PATHS="${EXTRA_COMMIT_PATHS:-ops/*}"' \
+		> "${TEST_TMP}/.claude/config/platform.sh"
+	run "$GENERATOR" --title "t" --description "d" \
+		--file-path "ops/settings.json" \
+		--pr-number "1" --issue-number "2" --reviewer "r"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"ops/settings.json"* ]]
+}
