@@ -1868,3 +1868,81 @@ _body_citing() {
 	[[ "$output" == *"generated-tree path"* ]]
 	[[ "$output" == *".claude/scripts/orch.sh"* ]]
 }
+
+# =============================================================================
+# assert_issue_valid() — not-committable paths (#1056)
+# =============================================================================
+
+@test "#1056 AC1: refuses an existing class-1 file when EXTRA_COMMIT_PATHS is empty" {
+	# A .json file is class-1 (not in the committable extension allowlist);
+	# with EXTRA_COMMIT_PATHS empty the commit guard refuses it, so intake
+	# must refuse it too.  RED-verified: removing the new elif makes this fail.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/config"
+	touch "$ISSUE_BODY_REPO_ROOT/config/settings.json"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Tweak the config — \`config/settings.json\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"not-committable path: config/settings.json"* ]]
+	[[ "$output" == *"EXTRA_COMMIT_PATHS"* ]]
+}
+
+@test "#1056 AC1: the diagnostic says to move the reference out of the task line" {
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/config"
+	touch "$ISSUE_BODY_REPO_ROOT/config/settings.json"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Read the config — \`config/settings.json\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"move the reference out of the task line"* ]]
+}
+
+@test "#1056 AC2: accepts a class-1 file when EXTRA_COMMIT_PATHS covers it" {
+	# When EXTRA_COMMIT_PATHS admits the class-1 path, committable_path_admitted
+	# returns true; intake must accept the task.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/config"
+	touch "$ISSUE_BODY_REPO_ROOT/config/settings.json"
+	export EXTRA_COMMIT_PATHS="config/*.json"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Tweak the config — \`config/settings.json\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"not-committable"* ]]
+}
+
+@test "#1056 AC4: hard-denied diagnostic is unchanged and does not emit not-committable path" {
+	# The hard-denied branch continues past the new elif, so it must not
+	# double-report with the not-committable message.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/.github/workflows"
+	touch "$ISSUE_BODY_REPO_ROOT/.github/workflows/ci.yml"
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Tweak CI — \`.github/workflows/ci.yml\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"hard-denied path: .github/workflows/ci.yml"* ]]
+	[[ "$output" != *"not-committable path"* ]]
+}
