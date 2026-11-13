@@ -859,57 +859,77 @@ _repro_full_suite_npm_check() {
 	[ "$out" = "0" ]
 }
 
+# Runs _bats_full_suite_outcome RC OUTPUT with its two side channels captured:
+# the comment title lands in $TEST_TMP/title and its body in $TEST_TMP/body,
+# every warning in $TEST_TMP/warn. A run that posts no comment leaves no
+# title file behind.
+_bats_outcome_captured() {
+	comment_issue() {
+		printf '%s\n' "$1" > "$TEST_TMP/title"
+		printf '%s\n' "$2" > "$TEST_TMP/body"
+	}
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/warn"; }
+	_bats_full_suite_outcome "$1" "$2" "$TEST_TMP/l.log"
+}
+
+BATS_UNMEASURED_TITLE="Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)"
+BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
+
 @test "BATS full-suite killed run (rc 137, no failing test) is unmeasured, not red" {
-	comment_issue() { :; }
-	_bats_full_suite_outcome 137 $'1..3\nok 1 a' "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured" ]]
-	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
+	_bats_outcome_captured 137 $'1..3\nok 1 a'
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured" ]
+	[ "$(< "$TEST_TMP/title")" = "$BATS_UNMEASURED_TITLE" ]
 }
 
-@test "BATS full-suite setup error (rc 1, no failing test) is unmeasured, not red" {
-	comment_issue() { :; }
-	_bats_full_suite_outcome 1 "bats: command not found" "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured" ]]
-	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
+@test "BATS full-suite setup error (rc 1, no TAP at all) is unmeasured, not red" {
+	_bats_outcome_captured 1 "bats: command not found"
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured" ]
+	[ "$(< "$TEST_TMP/title")" = "$BATS_UNMEASURED_TITLE" ]
 }
 
-@test "BATS full-suite unmeasured comment states results seen, plan size and log path" {
-	local captured="$TEST_TMP/comment.txt"
-	comment_issue() { printf '%s\n%s\n' "$1" "$2" > "$captured"; }
-	_bats_full_suite_outcome 137 $'1..7\nok 1 a\nok 2 b' "$TEST_TMP/l.log"
-	grep -qF 'Results seen: 2' "$captured"
-	grep -qF 'TAP plan size: 7' "$captured"
-	grep -qF "stage log: $TEST_TMP/l.log" "$captured"
+@test "BATS full-suite failing test with a complete plan records exactly red" {
+	_bats_outcome_captured 1 $'1..2\nok 1 a\nnot ok 2 broken'
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_red" ]
+	[ "$(< "$TEST_TMP/title")" = "$BATS_RED_TITLE" ]
 }
 
-@test "BATS full-suite unmeasured comment reports no plan when output has none" {
-	local captured="$TEST_TMP/comment.txt"
-	comment_issue() { printf '%s\n%s\n' "$1" "$2" > "$captured"; }
-	_bats_full_suite_outcome 1 "bats: command not found" "$TEST_TMP/l.log"
-	grep -qF 'Results seen: 0' "$captured"
-	grep -qF 'TAP plan size: none reported' "$captured"
+@test "BATS full-suite failing test with a plan cut short is still red, not unmeasured" {
+	_bats_outcome_captured 137 $'1..5\nok 1 a\nnot ok 2 broken'
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_red" ]
+	[ "$(< "$TEST_TMP/title")" = "$BATS_RED_TITLE" ]
 }
 
-@test "BATS full-suite red run (rc 1 with a failing test) records exactly red" {
-	comment_issue() { :; }
-	_bats_full_suite_outcome 1 $'ok 1 a\nnot ok 2 broken' "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_red" ]]
+@test "BATS full-suite timed-out run (rc 124) records only the timeout marker and posts no comment" {
+	_bats_outcome_captured 124 $'1..5\nok 1 a\nnot ok 2 broken'
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_timeout" ]
+	[ ! -e "$TEST_TMP/title" ]
 }
 
-@test "BATS full-suite green run (rc 0) records no degraded marker" {
-	comment_issue() { :; }
-	_bats_full_suite_outcome 0 $'ok 1 a' "$TEST_TMP/l.log"
-	((${#DEGRADED_STAGES[@]} == 0))
+@test "BATS full-suite green run (rc 0) records no degraded marker and posts no comment" {
+	_bats_outcome_captured 0 $'1..1\nok 1 a'
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+	[ ! -e "$TEST_TMP/title" ]
 }
 
-@test "BATS full-suite unmeasured branch precedes the red branch" {
-	local unmeasured_pos red_pos
-	unmeasured_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")' \
-		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
-	red_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_red")' \
-		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
-	[[ -n "$unmeasured_pos" && -n "$red_pos" ]]
-	((unmeasured_pos < red_pos))
+@test "BATS full-suite unmeasured warning states results seen, plan size and log path" {
+	_bats_outcome_captured 137 $'1..7\nok 1 a\nok 2 b'
+	grep -qF 'Results seen: 2 ok, 0 not ok' "$TEST_TMP/warn"
+	grep -qF 'TAP plan size: 7' "$TEST_TMP/warn"
+	grep -qF "stage log: $TEST_TMP/l.log" "$TEST_TMP/warn"
+}
+
+@test "BATS full-suite unmeasured warning says so when no TAP plan was printed" {
+	_bats_outcome_captured 1 "bats: command not found"
+	grep -qF 'Results seen: 0 ok, 0 not ok' "$TEST_TMP/warn"
+	grep -qF 'TAP plan size: none reported' "$TEST_TMP/warn"
+	grep -qF "stage log: $TEST_TMP/l.log" "$TEST_TMP/warn"
+}
+
+@test "BATS full-suite unmeasured comment carries the same evidence as the warning" {
+	_bats_outcome_captured 137 $'1..7\nok 1 a\nok 2 b'
+	grep -qF 'Results seen: 2 ok, 0 not ok' "$TEST_TMP/body"
+	grep -qF 'TAP plan size: 7' "$TEST_TMP/body"
+	grep -qF "stage log: $TEST_TMP/l.log" "$TEST_TMP/body"
 }
 
 # =============================================================================
