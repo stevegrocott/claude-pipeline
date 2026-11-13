@@ -484,6 +484,34 @@ teardown() {
         || fail "Unmarked 143 on retry must be external with elapsed+budget; got: $output"
 }
 
+@test "timeout-retry watchdog kill is a timeout, not external (#1047)" {
+    # Both the initial attempt and the retry hang until their watchdog kills
+    # them. The retry watchdog must write its marker before it kills, so the
+    # resulting 143 is read as a timeout. Without the marker the retry would
+    # be misreported as an external termination.
+    local hang_fifo="$TEST_TMP/retrywd.fifo"
+    mkfifo "$hang_fifo"
+    local rwd_calls_file="$TEST_TMP/rwd-calls.txt"
+    export rwd_calls_file hang_fifo
+    timeout() {
+        local _n
+        _n=$(wc -l < "$rwd_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$rwd_calls_file"
+        if (( _n < 2 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 124
+        fi
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [[ "$output" == *"retry timed out"* || "$output" == *"timed out after"* ]] \
+        || fail "Retry watchdog kill must be a timeout; got: $output"
+    [[ "$output" != *"retry terminated externally"* ]] \
+        || fail "Retry watchdog kill misreported as external: $output"
+}
+
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
     # Reproduce the original bug: perl alarm() wrapper and claude child are
     # both dead, leaving a childless subshell that blocks indefinitely.
