@@ -655,28 +655,113 @@ _wait_for_file() {
 		|| fail "second sync did not reflect latest state: $status_val"
 }
 
+# Shadow cp with a stand-in that records every call in $TEST_TMP/cp-calls and
+# fails the first $1 of them the way GNU cp does when the source is renamed
+# over mid-copy (the Linux CI race, #1057); later calls run the real cp.
+# Callers restore PATH themselves.
+_shadow_cp_failing_first() {
+	local fail_first="$1" real_cp mock_bin="$TEST_TMP/mock-bin"
+	real_cp="$(command -v cp)"
+	mkdir -p "$mock_bin"
+	printf '%s\n' \
+		'#!/usr/bin/env bash' \
+		"echo call >> '$TEST_TMP/cp-calls'" \
+		"if (( \$(wc -l < '$TEST_TMP/cp-calls') <= $fail_first )); then" \
+		"	echo \"cp: skipping file '\$1', as it was replaced while being copied\" >&2" \
+		'	exit 1' \
+		'fi' \
+		"exec '$real_cp' \"\$@\"" \
+		> "$mock_bin/cp"
+	chmod +x "$mock_bin/cp"
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "sync_status_to_log retries after one cp failure and leaves a byte-identical copy" {
+	init_status
+	update_stage "setup" "in_progress"
+
+	# Stale target: only a copy that really happened can make it match.
+	printf '%s\n' '{"state":"stale"}' > "$LOG_BASE/status.json"
+
+	local orig_path="$PATH"
+	_shadow_cp_failing_first 1
+	run sync_status_to_log
+	export PATH="$orig_path"
+
+	[ "$status" -eq 0 ] \
+		|| fail "sync_status_to_log returned $status after one transient cp failure"
+	cmp -s "$STATUS_FILE" "$LOG_BASE/status.json" \
+		|| fail "synced status.json is not byte-identical to STATUS_FILE after the retry"
+
+	local calls
+	calls=$(wc -l < "$TEST_TMP/cp-calls")
+	[ "$calls" -eq 2 ] \
+		|| fail "expected cp to be called twice (one failure, one success); got $calls"
+
+	local tmp_count
+	tmp_count=$(find "$LOG_BASE" -maxdepth 1 -name '.status.json.*' | wc -l)
+	[ "$tmp_count" -eq 0 ] \
+		|| fail "temp file(s) left behind after a retried sync: $tmp_count found"
+	if grep -q 'WARN: sync_status_to_log' "$LOG_FILE"; then
+		fail "a sync that succeeded on retry must not warn"
+	fi
+}
+
 @test "sync_status_to_log emits one warning naming both paths when all cp retries fail" {
 	init_status
 
-	# Install a cp stand-in that always fails; prepend to PATH so it shadows
-	# the real cp only for this test.
-	local mock_bin="$TEST_TMP/mock-bin"
-	mkdir -p "$mock_bin"
-	printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$mock_bin/cp"
-	chmod +x "$mock_bin/cp"
+	# A target left by an earlier sync must survive a failed one untouched.
+	local earlier='{"state":"earlier-sync"}'
+	printf '%s\n' "$earlier" > "$LOG_BASE/status.json"
 
 	local orig_path="$PATH"
-	export PATH="$mock_bin:$PATH"
+	_shadow_cp_failing_first 99
 	run sync_status_to_log
 	export PATH="$orig_path"
 
 	[ "$status" -eq 0 ] \
 		|| fail "sync_status_to_log must return 0 even when cp always fails; got $status"
 
-	# log_warn writes to LOG_FILE when LOG_FILE is set — verify the warning
-	# names both the source and the target path.
-	grep -q "$STATUS_FILE" "$LOG_FILE" \
+	# The retry bound stated in sync_status_to_log is 3 attempts.
+	local calls
+	calls=$(wc -l < "$TEST_TMP/cp-calls")
+	[ "$calls" -eq 3 ] \
+		|| fail "expected exactly 3 cp attempts when every one fails; got $calls"
+
+	# log_warn writes to LOG_FILE when LOG_FILE is set — verify exactly one
+	# warning, naming both the source and the target path.
+	local warnings
+	warnings=$(grep -c 'WARN: sync_status_to_log' "$LOG_FILE" || true)
+	[ "$warnings" -eq 1 ] \
+		|| fail "expected exactly one sync warning in $LOG_FILE; got $warnings"
+	grep 'WARN: sync_status_to_log' "$LOG_FILE" | grep -qF "$STATUS_FILE" \
 		|| fail "warning did not name STATUS_FILE ($STATUS_FILE) in $LOG_FILE"
-	grep -q "$LOG_BASE/status.json" "$LOG_FILE" \
+	grep 'WARN: sync_status_to_log' "$LOG_FILE" | grep -qF "$LOG_BASE/status.json" \
 		|| fail "warning did not name target ($LOG_BASE/status.json) in $LOG_FILE"
+
+	[ "$(cat "$LOG_BASE/status.json")" = "$earlier" ] \
+		|| fail "existing target was modified by a sync whose every attempt failed"
+	local tmp_count
+	tmp_count=$(find "$LOG_BASE" -maxdepth 1 -name '.status.json.*' | wc -l)
+	[ "$tmp_count" -eq 0 ] \
+		|| fail "temp file(s) left behind after a failed sync: $tmp_count found"
+}
+
+@test "sync_status_to_log does not abort a set -e subshell when cp always fails" {
+	init_status
+
+	# A fresh bash, not a subshell of `run`: `run` calls its command where
+	# errexit is ignored, which would make this pass whatever the function
+	# returned.
+	export -f sync_status_to_log log_warn
+
+	local orig_path="$PATH"
+	_shadow_cp_failing_first 99
+	run bash -c 'set -e; sync_status_to_log; echo "after-sync"'
+	export PATH="$orig_path"
+
+	[ "$status" -eq 0 ] \
+		|| fail "set -e subshell exited $status after a failed sync"
+	[[ "$output" == *"after-sync"* ]] \
+		|| fail "set -e subshell stopped at sync_status_to_log: $output"
 }
