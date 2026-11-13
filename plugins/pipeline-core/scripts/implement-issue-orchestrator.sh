@@ -2641,15 +2641,34 @@ trap '_propagate_sigterm; cleanup_reexec_copy; exit 143' TERM
 
 # Sync status.json to log directory after every update
 # This ensures status.json exists in LOG_BASE for resume-from functionality
+#
+# Uses a temp-file + mv pattern to avoid partial reads by concurrent processes
+# (Linux cp is not atomic; mv on the same filesystem is). Retries up to 3
+# times on cp failure (e.g. a transient ESTALE on NFS or busy CI storage).
+# Always returns 0 — a failed sync must never abort the pipeline.
 sync_status_to_log() {
 	if [[ -n "$LOG_BASE" && -d "$LOG_BASE" && -f "$STATUS_FILE" ]]; then
 		local target="$LOG_BASE/status.json"
 		# Avoid copying file to itself (happens with --resume-from)
 		# Guard: realpath fails if target doesn't exist yet (first sync call)
-		if [[ ! -f "$target" ]] || [[ "$(realpath "$STATUS_FILE")" != "$(realpath "$target")" ]]; then
-			cp "$STATUS_FILE" "$target"
+		if [[ ! -f "$target" ]] || \
+			[[ "$(realpath "$STATUS_FILE")" != "$(realpath "$target")" ]]; then
+			local tmp
+			tmp="$(mktemp "$LOG_BASE/.status.json.XXXXXX")" || return 0
+			local attempt
+			for attempt in 1 2 3; do
+				if cp "$STATUS_FILE" "$tmp" 2>/dev/null; then
+					mv -f "$tmp" "$target" || rm -f "$tmp"
+					return 0
+				fi
+				sleep 0.1
+			done
+			rm -f "$tmp"
+			log_warn "sync_status_to_log: cp failed after 3 attempts;" \
+				"src=$STATUS_FILE dst=$target"
 		fi
 	fi
+	return 0
 }
 
 # =============================================================================

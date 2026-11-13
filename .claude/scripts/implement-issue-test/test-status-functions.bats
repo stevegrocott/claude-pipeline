@@ -654,3 +654,29 @@ _wait_for_file() {
 	[ "$status_val" = "completed" ] \
 		|| fail "second sync did not reflect latest state: $status_val"
 }
+
+@test "sync_status_to_log emits one warning naming both paths when all cp retries fail" {
+	init_status
+
+	# Install a cp stand-in that always fails; prepend to PATH so it shadows
+	# the real cp only for this test.
+	local mock_bin="$TEST_TMP/mock-bin"
+	mkdir -p "$mock_bin"
+	printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$mock_bin/cp"
+	chmod +x "$mock_bin/cp"
+
+	local orig_path="$PATH"
+	export PATH="$mock_bin:$PATH"
+	run sync_status_to_log
+	export PATH="$orig_path"
+
+	[ "$status" -eq 0 ] \
+		|| fail "sync_status_to_log must return 0 even when cp always fails; got $status"
+
+	# log_warn writes to LOG_FILE when LOG_FILE is set — verify the warning
+	# names both the source and the target path.
+	grep -q "$STATUS_FILE" "$LOG_FILE" \
+		|| fail "warning did not name STATUS_FILE ($STATUS_FILE) in $LOG_FILE"
+	grep -q "$LOG_BASE/status.json" "$LOG_FILE" \
+		|| fail "warning did not name target ($LOG_BASE/status.json) in $LOG_FILE"
+}

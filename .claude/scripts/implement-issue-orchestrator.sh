@@ -2664,6 +2664,8 @@ sync_status_to_log() {
 				sleep 0.1
 			done
 			rm -f "$tmp"
+			log_warn "sync_status_to_log: cp failed after 3 attempts;" \
+				"src=$STATUS_FILE dst=$target"
 		fi
 	fi
 	return 0
