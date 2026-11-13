@@ -180,6 +180,9 @@ run_guard() {
     suggestion="${suggestion#EXTRA_COMMIT_PATHS=\'}"
     suggestion="${suggestion%\'}"
 
+    # The refusal reset the branch past the denied commit; re-commit the path
+    # so the override is exercised against it rather than the prior HEAD.
+    commit_paths apps/frontend/data/seed.csv
     run_guard "$suggestion"
     [ "$status" -eq 0 ] || fail "Suggested override '$suggestion' did not admit path. Got: $output"
 }
