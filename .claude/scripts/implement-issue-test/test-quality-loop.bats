@@ -2213,15 +2213,17 @@ _setup_synced_consumer_repo() {
 #        always stated — truncation is never silent
 #   AC5: a green run is unchanged — no comment, no degraded stage
 #
-# This code is inline in main() (not a callable function), so — mirroring
-# the pattern already established for this exact block in
-# test-stage-runner.bats (issue #686/#524) — coverage combines two kinds of
-# test:
+# Running the suite and persisting its log is inline in main() (not a
+# callable function), so — mirroring the pattern already established for
+# this exact block in test-stage-runner.bats (issue #686/#524) — that part
+# is covered by two kinds of test:
 #   - static: binds directly to $ORCHESTRATOR_SCRIPT so a fix that never
 #     lands in the real source cannot pass
 #   - functional: a faithful reproduction of the required algorithm run
 #     against fabricated TAP-like output, so the extraction/cap/total logic
 #     itself is verified, not just its presence as a string
+# The verdict and the comment are built by _bats_full_suite_outcome (#1055),
+# which AC2, AC4 and AC5 call directly.
 # =============================================================================
 
 # Isolates the full-suite BATS check block from the real orchestrator source,
@@ -2253,39 +2255,59 @@ $block"
 $block"
 }
 
+# Calls the real outcome function with comment_issue captured: the comment
+# body lands in $TEST_TMP/bats-comment-body. A run that posts no comment
+# leaves no file behind.
+_full_suite_bats_outcome_comment() {
+    comment_issue() { printf '%s\n' "$2" > "$TEST_TMP/bats-comment-body"; }
+    _bats_full_suite_outcome "$1" "$2" "$LOG_BASE/stages/01-bats_full_suite.log"
+}
+
 @test "full-suite BATS check builds the RED comment from extracted failing test names (AC2)" {
-    local block
-    block=$(_full_suite_bats_block)
-    [[ "$block" == *'not ok'* ]] || \
-        fail "Full-suite BATS check must extract '^not ok' lines to name failing tests, not rely solely on tail -40 (issue #799 AC2). Block:
-$block"
-    [[ "$block" == *'grep'* ]] || \
-        fail "Failing test names must be extracted with grep against the persisted output (issue #799 AC2). Block:
-$block"
+    local -a DEGRADED_STAGES=()
+    local output i
+    output="not ok 4 test-bundle-parity.bats - bundle drift detected"
+    for i in $(seq 1 100); do
+        output+=$'\n'"ok $((i + 4)) filler passing test $i"
+    done
+    output+=$'\n'"not ok 105 test-timeout-escalation.bats - pre-existing failure"
+
+    _full_suite_bats_outcome_comment 1 "$output"
+
+    # The early failure sits far above any tail-40 window (the #785
+    # scenario); it reaches the comment only if names are extracted.
+    grep -qF "not ok 4 test-bundle-parity.bats" "$TEST_TMP/bats-comment-body" || \
+        fail "RED comment must name a failure above the tail-40 window (issue #799 AC2). Comment: $(< "$TEST_TMP/bats-comment-body")"
+    grep -qF "not ok 105 test-timeout-escalation.bats" "$TEST_TMP/bats-comment-body" || \
+        fail "RED comment must also name the late failure (issue #799 AC2). Comment: $(< "$TEST_TMP/bats-comment-body")"
 }
 
 @test "full-suite BATS check caps the shown failure list and states the true total (AC4)" {
-    local block
-    block=$(_full_suite_bats_block)
-    [[ "$block" =~ head[[:space:]]+-n?[[:space:]]*[0-9]+ ]] || \
-        fail "Full-suite BATS check must cap the displayed failing-test list (e.g. head -n 50) so a very large failure set stays readable (issue #799 AC4). Block:
-$block"
-    [[ "$block" == *'wc -l'* ]] || \
-        fail "Full-suite BATS check must count and state the true total number of failures, so capping the shown list is never silent truncation (issue #799 AC4). Block:
-$block"
+    local -a DEGRADED_STAGES=()
+    local output="" i
+    for i in $(seq 1 75); do
+        output+="not ok $i failing test $i"$'\n'
+    done
+
+    _full_suite_bats_outcome_comment 1 "$output"
+
+    local shown_count
+    shown_count=$(grep -c '^not ok' "$TEST_TMP/bats-comment-body")
+    [ "$shown_count" -eq 50 ] || \
+        fail "RED comment must cap the displayed failing-test list at 50 (issue #799 AC4); showed $shown_count"
+    grep -qF "75 total" "$TEST_TMP/bats-comment-body" || \
+        fail "RED comment must state the true total of 75 failures, so capping is never silent truncation (issue #799 AC4). Comment: $(head -n 5 "$TEST_TMP/bats-comment-body")"
 }
 
 @test "full-suite BATS check green path is unchanged — no comment call on success (AC5)" {
-    local block
-    block=$(_full_suite_bats_block)
-    local success_branch
-    success_branch=$(printf '%s' "$block" | awk '/else$/,/^ *fi$/')
-    [[ "$success_branch" != *'comment_issue'* ]] || \
-        fail "A green full-suite BATS run must not call comment_issue (issue #799 AC5). Success branch:
-$success_branch"
-    [[ "$success_branch" != *'DEGRADED_STAGES'* ]] || \
-        fail "A green full-suite BATS run must not record a degraded stage (issue #799 AC5). Success branch:
-$success_branch"
+    local -a DEGRADED_STAGES=()
+
+    _full_suite_bats_outcome_comment 0 "ok 1 everything passes"
+
+    [ ! -e "$TEST_TMP/bats-comment-body" ] || \
+        fail "A green full-suite BATS run must not call comment_issue (issue #799 AC5). Comment: $(< "$TEST_TMP/bats-comment-body")"
+    [ "${#DEGRADED_STAGES[@]}" -eq 0 ] || \
+        fail "A green full-suite BATS run must not record a degraded stage (issue #799 AC5); got: ${DEGRADED_STAGES[*]}"
 }
 
 # Faithful reproduction of the algorithm issue #799 requires: persist the

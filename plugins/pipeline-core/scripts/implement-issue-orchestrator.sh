@@ -10000,6 +10000,97 @@ _parse_e2e_report_counts() {
 		"$failed"
 }
 
+# _bats_full_suite_outcome RC OUTPUT LOG_PATH [RUNNER] [SCOPE]
+#
+# Classifies the informational full-suite BATS run (timeout / unmeasured /
+# red / green), records the matching DEGRADED_STAGES marker and posts the
+# issue comment. Non-blocking: always returns 0.
+_bats_full_suite_outcome() {
+    local rc="$1"
+    local output="$2"
+    local log_path="$3"
+    local runner="${4:-.claude/scripts/implement-issue-test/run-tests.sh}"
+    local scope="${5:-}"
+    local failure_names failure_total failure_shown
+
+    if (( rc == 124 )); then
+        # A timeout (rc 124) is neither a real failure nor a pass —
+        # the suite never reached a verdict, so it must not be
+        # recorded under the same test:bats_full_suite_red marker a
+        # confirmed-red run gets (#926 AC3): that would make
+        # reconcile_failed_tasks_with_branch_evidence() treat an
+        # unmeasured suite as proof of a real regression. Record a
+        # distinct marker, log the budget that was exceeded, and fall
+        # through — this check is informational and must always
+        # return control to main() rather than blocking it.
+        log_warn "Full-suite BATS check timed out after" \
+            "${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
+            "unmeasured, not red (non-blocking)"
+        DEGRADED_STAGES+=("test:bats_full_suite_timeout")
+    elif (( rc != 0 )) \
+        && (( $(_bats_full_suite_failure_count \
+            "$output") == 0 )); then
+        # A non-zero exit with no failing test reported means the
+        # runner died or aborted before producing a verdict (setup
+        # error, killed worker, signal): nothing failed, so the
+        # suite is unmeasured, not red. A distinct marker keeps it
+        # from matching test:*full_suite_red, which would make
+        # reconcile_failed_tasks_with_branch_evidence() treat it as
+        # proof of a real regression.
+        DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")
+        # State the evidence in the warning itself, so a killed runner
+        # can be told from a setup error without opening the log.
+        local ok_seen not_ok_seen plan_size
+        ok_seen=$(printf '%s\n' "$output" | grep -c '^ok ' || true)
+        not_ok_seen=$(_bats_full_suite_failure_count "$output")
+        plan_size=$(printf '%s\n' "$output" \
+            | sed -n 's/^1\.\.\([0-9][0-9]*\).*/\1/p' \
+            | head -n 1)
+        plan_size="${plan_size:-none reported}"
+        log_warn "Full-suite BATS check exited $rc with" \
+            "no failing test reported — treating as unmeasured," \
+            "not red (non-blocking). Results seen: $ok_seen ok," \
+            "$not_ok_seen not ok; TAP plan size: $plan_size;" \
+            "stage log: $log_path"
+        comment_issue "Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)" \
+            "⚠️ The full BATS suite (\`bash $runner\`) exited $rc but reported **no failing test**, so its state on this branch is **unmeasured**, not red. There are no test failures to review from this run. Results seen: $ok_seen ok, $not_ok_seen not ok; TAP plan size: $plan_size; stage log: $log_path" "default"
+    elif (( rc != 0 )); then
+        # Build the comment from the extracted failing test names
+        # rather than an arbitrary tail. A tail only shows whatever
+        # happens to be last — on #785 the real (bundle-parity)
+        # failure sat above the tail-40 cutoff and was invisible in
+        # the comment while an unrelated late failure was assessed
+        # instead (#799 AC2/AC3). Cap the shown list but always state
+        # the true total so capping is never silent truncation (AC4).
+        failure_names=$(printf '%s\n' "$output" \
+            | grep '^not ok' || true)
+        if [[ -n "$failure_names" ]]; then
+            failure_total=$(printf '%s\n' \
+                "$failure_names" | wc -l)
+            failure_total="${failure_total//[[:space:]]/}"
+        else
+            failure_total=0
+        fi
+        failure_shown=$(printf '%s\n' \
+            "$failure_names" | head -n 50)
+        DEGRADED_STAGES+=("test:bats_full_suite_red")
+        comment_issue "Full-Suite BATS Check: pipeline tests are RED (non-blocking)" \
+            "⚠️ The full BATS suite (\`bash $runner\`) failed on this branch. The smart-targeted test loop only runs BATS suites related to the changed files (scope: \`$scope\`), so these failures were not caught there. They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
+
+<details>
+<summary>Failing tests ($failure_total total, showing first 50) — full log: $log_path</summary>
+
+\`\`\`
+$failure_shown
+\`\`\`
+</details>" "default"
+        log "WARN: Full-suite BATS check found failures (non-blocking, recorded as degraded)"
+    else
+        log "Full-suite BATS check passed — pipeline BATS tests are green on this branch"
+    fi
+    return 0
+}
+
 # Count the "not ok" lines in a BATS run's output.
 # Arguments:
 #   $1 - the run's combined output
@@ -14126,72 +14217,8 @@ $full_scope_failures
             printf '%s\n' "=== exit code: $bats_full_rc ===" >> "$bats_full_log"
             log "  Log: $bats_full_log"
 
-            if (( bats_full_rc == 124 )); then
-                # A timeout (rc 124) is neither a real failure nor a pass —
-                # the suite never reached a verdict, so it must not be
-                # recorded under the same test:bats_full_suite_red marker a
-                # confirmed-red run gets (#926 AC3): that would make
-                # reconcile_failed_tasks_with_branch_evidence() treat an
-                # unmeasured suite as proof of a real regression. Record a
-                # distinct marker, log the budget that was exceeded, and fall
-                # through — this check is informational and must always
-                # return control to main() rather than blocking it.
-                log_warn "Full-suite BATS check timed out after" \
-                    "${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
-                    "unmeasured, not red (non-blocking)"
-                DEGRADED_STAGES+=("test:bats_full_suite_timeout")
-            elif (( bats_full_rc != 0 )) \
-                && (( $(_bats_full_suite_failure_count \
-                    "$bats_full_output") == 0 )); then
-                # A non-zero exit with no failing test reported means the
-                # runner died or aborted before producing a verdict (setup
-                # error, killed worker, signal): nothing failed, so the
-                # suite is unmeasured, not red. A distinct marker keeps it
-                # from matching test:*full_suite_red, which would make
-                # reconcile_failed_tasks_with_branch_evidence() treat it as
-                # proof of a real regression.
-                DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")
-                log_warn "Full-suite BATS check exited $bats_full_rc with" \
-                    "no failing test reported — treating as unmeasured," \
-                    "not red (non-blocking)"
-                comment_issue "Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)" \
-                    "⚠️ The full BATS suite (\`bash $bats_runner\`) exited $bats_full_rc but reported **no failing test**, so its state on this branch is **unmeasured**, not red. There are no test failures to review from this run — full log: $bats_full_log" "default"
-            elif (( bats_full_rc != 0 )); then
-                # Build the comment from the extracted failing test names
-                # rather than an arbitrary tail. A tail only shows whatever
-                # happens to be last — on #785 the real (bundle-parity)
-                # failure sat above the tail-40 cutoff and was invisible in
-                # the comment while an unrelated late failure was assessed
-                # instead (#799 AC2/AC3). Cap the shown list but always state
-                # the true total so capping is never silent truncation (AC4).
-                local bats_full_failure_names bats_full_failure_total
-                local bats_full_failure_shown
-                bats_full_failure_names=$(printf '%s\n' "$bats_full_output" \
-                    | grep '^not ok' || true)
-                if [[ -n "$bats_full_failure_names" ]]; then
-                    bats_full_failure_total=$(printf '%s\n' \
-                        "$bats_full_failure_names" | wc -l)
-                    bats_full_failure_total="${bats_full_failure_total//[[:space:]]/}"
-                else
-                    bats_full_failure_total=0
-                fi
-                bats_full_failure_shown=$(printf '%s\n' \
-                    "$bats_full_failure_names" | head -n 50)
-                DEGRADED_STAGES+=("test:bats_full_suite_red")
-                comment_issue "Full-Suite BATS Check: pipeline tests are RED (non-blocking)" \
-                    "⚠️ The full BATS suite (\`bash $bats_runner\`) failed on this branch. The smart-targeted test loop only runs BATS suites related to the changed files (scope: \`$branch_scope\`), so these failures were not caught there. They may be **pre-existing on \`$BASE_BRANCH\`** OR failures this PR was expected to fix — **review before merge; do not assume green.**
-
-<details>
-<summary>Failing tests ($bats_full_failure_total total, showing first 50) — full log: $bats_full_log</summary>
-
-\`\`\`
-$bats_full_failure_shown
-\`\`\`
-</details>" "default"
-                log "WARN: Full-suite BATS check found failures (non-blocking, recorded as degraded)"
-            else
-                log "Full-suite BATS check passed — pipeline BATS tests are green on this branch"
-            fi
+            _bats_full_suite_outcome "$bats_full_rc" "$bats_full_output" \
+                "$bats_full_log" "$bats_runner" "$branch_scope"
         fi
 
         # ---------------------------------------------------------------------

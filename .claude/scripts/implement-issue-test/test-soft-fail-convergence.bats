@@ -787,16 +787,11 @@ _repro_full_suite_npm_check() {
 	[[ "$script_content" == *'DEGRADED_STAGES+=("test:full_suite_red")'* ]]
 }
 
-@test "#926: a timed-out BATS full-suite check is recorded under a marker distinct from a real failure" {
-	local script_content
-	script_content=$(< "$ORCHESTRATOR_SCRIPT")
-
-	expect_ok "a timeout-specific degraded-stage marker must exist for the BATS arm" \
-		grep -qF 'DEGRADED_STAGES+=("test:bats_full_suite_timeout")' "$ORCHESTRATOR_SCRIPT"
-	expect_ok "the BATS arm must branch on the timeout exit code (124) to reach that marker" \
-		grep -qE 'bats_full_rc.*==.*124' "$ORCHESTRATOR_SCRIPT"
-
-	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_full_suite_red")'* ]]
+@test "#926: a timed-out BATS full-suite run records the timeout marker, never red" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 124 $'ok 1 a\nnot ok 2 b' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout" ]]
+	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
 }
 
 @test "#926: a timed-out npm full-suite check does not exit or return before the BATS check runs" {
@@ -815,17 +810,30 @@ _repro_full_suite_npm_check() {
 }
 
 @test "#926: a timed-out BATS full-suite check does not exit or return before the E2E guard runs" {
-	local marker_pos bound_pos window
+	local marker_pos bound_pos call_pos window func_body
 	marker_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_timeout")' "$ORCHESTRATOR_SCRIPT" \
 		| head -1 | cut -d: -f1)
 	expect_ok "the BATS timeout marker must exist" test -n "$marker_pos"
+
+	# The outcome chain lives in _bats_full_suite_outcome: its only
+	# return must be the trailing `return 0`, and no exit may appear.
+	func_body=$(sed -n '/^_bats_full_suite_outcome() {/,/^}/p' "$ORCHESTRATOR_SCRIPT")
+	expect_ok "the outcome function must exist" test -n "$func_body"
+	expect_not_ok "the outcome function must never exit" \
+		grep -qE '^[[:space:]]*exit\b' <<< "$func_body"
+	expect_ok "the outcome function must always return 0" \
+		grep -qE '^[[:space:]]*return 0$' <<< "$func_body"
+
+	call_pos=$(grep -n '^[[:space:]]*_bats_full_suite_outcome "\$bats_full_rc"' "$ORCHESTRATOR_SCRIPT" \
+		| head -1 | cut -d: -f1)
+	expect_ok "main() must call the outcome function" test -n "$call_pos"
 
 	bound_pos=$(grep -n 'E2E-UNVALIDATED GUARD' "$ORCHESTRATOR_SCRIPT" \
 		| head -1 | cut -d: -f1)
 	expect_ok "the following E2E-unvalidated guard block must still exist" test -n "$bound_pos"
 
-	window=$(sed -n "${marker_pos},${bound_pos}p" "$ORCHESTRATOR_SCRIPT")
-	expect_not_ok "no exit/return may sit between the BATS timeout marker and the E2E guard" \
+	window=$(sed -n "${call_pos},${bound_pos}p" "$ORCHESTRATOR_SCRIPT")
+	expect_not_ok "no exit/return may sit between the BATS outcome call and the E2E guard" \
 		grep -qE '^[[:space:]]*(exit|return)\b' <<< "$window"
 }
 
@@ -851,27 +859,105 @@ _repro_full_suite_npm_check() {
 	[ "$out" = "0" ]
 }
 
-@test "BATS full-suite non-zero exit with no failing test is recorded as unmeasured, not red" {
-	local script_content
-	script_content=$(< "$ORCHESTRATOR_SCRIPT")
-
-	expect_ok "an unmeasured marker must exist for the BATS arm" \
-		grep -qF 'DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")' "$ORCHESTRATOR_SCRIPT"
-	expect_ok "the unmeasured branch must be gated on the failure count" \
-		grep -qF '_bats_full_suite_failure_count' "$ORCHESTRATOR_SCRIPT"
-
-	# The marker must not match test:*full_suite_red, or the
-	# branch-evidence reconciliation would read it as a real regression.
-	[[ "test:bats_full_suite_unmeasured" != test:*full_suite_red ]]
-	[[ "$script_content" == *'DEGRADED_STAGES+=("test:bats_full_suite_red")'* ]]
+# Runs _bats_full_suite_outcome RC OUTPUT with its two side channels captured:
+# the comment title lands in $TEST_TMP/title and its body in $TEST_TMP/body,
+# every warning in $TEST_TMP/warn. A run that posts no comment leaves no
+# title file behind.
+_bats_outcome_captured() {
+	comment_issue() {
+		printf '%s\n' "$1" > "$TEST_TMP/title"
+		printf '%s\n' "$2" > "$TEST_TMP/body"
+	}
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/warn"; }
+	_bats_full_suite_outcome "$1" "$2" "$TEST_TMP/l.log"
 }
 
-@test "BATS full-suite unmeasured branch precedes the red branch" {
-	local unmeasured_pos red_pos
-	unmeasured_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")' \
-		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
-	red_pos=$(grep -n 'DEGRADED_STAGES+=("test:bats_full_suite_red")' \
-		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
-	[[ -n "$unmeasured_pos" && -n "$red_pos" ]]
-	((unmeasured_pos < red_pos))
+BATS_UNMEASURED_TITLE="Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)"
+BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
+
+@test "BATS full-suite killed run (rc 137, no failing test) is unmeasured, not red" {
+	_bats_outcome_captured 137 $'1..3\nok 1 a'
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured" ]
+	[ "$(< "$TEST_TMP/title")" = "$BATS_UNMEASURED_TITLE" ]
+}
+
+@test "BATS full-suite setup error (rc 1, no TAP at all) is unmeasured, not red" {
+	_bats_outcome_captured 1 "bats: command not found"
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured" ]
+	[ "$(< "$TEST_TMP/title")" = "$BATS_UNMEASURED_TITLE" ]
+}
+
+@test "BATS full-suite failing test with a complete plan records exactly red" {
+	_bats_outcome_captured 1 $'1..2\nok 1 a\nnot ok 2 broken'
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_red" ]
+	[ "$(< "$TEST_TMP/title")" = "$BATS_RED_TITLE" ]
+}
+
+@test "BATS full-suite failing test with a plan cut short is still red, not unmeasured" {
+	_bats_outcome_captured 137 $'1..5\nok 1 a\nnot ok 2 broken'
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_red" ]
+	[ "$(< "$TEST_TMP/title")" = "$BATS_RED_TITLE" ]
+}
+
+@test "BATS full-suite timed-out run (rc 124) records only the timeout marker and posts no comment" {
+	_bats_outcome_captured 124 $'1..5\nok 1 a\nnot ok 2 broken'
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_timeout" ]
+	[ ! -e "$TEST_TMP/title" ]
+}
+
+@test "BATS full-suite green run (rc 0) records no degraded marker and posts no comment" {
+	_bats_outcome_captured 0 $'1..1\nok 1 a'
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+	[ ! -e "$TEST_TMP/title" ]
+}
+
+@test "BATS full-suite unmeasured warning states results seen, plan size and log path" {
+	_bats_outcome_captured 137 $'1..7\nok 1 a\nok 2 b'
+	grep -qF 'Results seen: 2 ok, 0 not ok' "$TEST_TMP/warn"
+	grep -qF 'TAP plan size: 7' "$TEST_TMP/warn"
+	grep -qF "stage log: $TEST_TMP/l.log" "$TEST_TMP/warn"
+}
+
+@test "BATS full-suite unmeasured warning says so when no TAP plan was printed" {
+	_bats_outcome_captured 1 "bats: command not found"
+	grep -qF 'Results seen: 0 ok, 0 not ok' "$TEST_TMP/warn"
+	grep -qF 'TAP plan size: none reported' "$TEST_TMP/warn"
+	grep -qF "stage log: $TEST_TMP/l.log" "$TEST_TMP/warn"
+}
+
+@test "BATS full-suite unmeasured comment carries the same evidence as the warning" {
+	_bats_outcome_captured 137 $'1..7\nok 1 a\nok 2 b'
+	grep -qF 'Results seen: 2 ok, 0 not ok' "$TEST_TMP/body"
+	grep -qF 'TAP plan size: 7' "$TEST_TMP/body"
+	grep -qF "stage log: $TEST_TMP/l.log" "$TEST_TMP/body"
+}
+
+# =============================================================================
+# FULL-SUITE BATS OUTCOME CHAIN (_bats_full_suite_outcome)
+# =============================================================================
+
+@test "_bats_full_suite_outcome: rc 124 records the timeout marker" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 124 "" "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout" ]]
+}
+
+@test "_bats_full_suite_outcome: non-zero rc with no failing test is unmeasured" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 1 "runner aborted" "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured" ]]
+}
+
+@test "_bats_full_suite_outcome: failing test records red and names it" {
+	comment_issue() { printf '%s' "$2" > "$TEST_TMP/comment"; }
+	_bats_full_suite_outcome 1 $'ok 1 a\nnot ok 2 broken' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_red" ]]
+	grep -q 'not ok 2 broken' "$TEST_TMP/comment"
+	grep -q '1 total' "$TEST_TMP/comment"
+}
+
+@test "_bats_full_suite_outcome: rc 0 records nothing" {
+	comment_issue() { :; }
+	_bats_full_suite_outcome 0 "ok 1 a" "$TEST_TMP/l.log"
+	((${#DEGRADED_STAGES[@]} == 0))
 }
