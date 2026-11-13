@@ -277,3 +277,33 @@ intake_accepts() {
     done
     [[ -z "$mismatches" ]] || fail "Gates disagree:"$'\n'"$mismatches"
 }
+
+# intake_verdict_with_class_override <path> <class-fn-body> — source the lib,
+# then redefine committable_path_class and report intake's verdict. Proves the
+# intake gate consults the shared class function rather than a private copy.
+intake_verdict_with_class_override() {
+    local path="$1" fn_body="$2"
+    local lib="${TEST_DIR}/../issue-body-lib.sh"
+    local body
+    body=$(printf '## Acceptance Criteria\n\n- [ ] It works\n\n## Implementation Tasks\n\n- [ ] `[default]` **(S)** Change it — `%s`\n' "$path")
+    ISSUE_BODY_LIB="$lib" ISSUE_BODY_REPO_ROOT="$TEST_TMP/repo" BODY="$body" FN_BODY="$fn_body" \
+        run bash -c 'unset EXTRA_COMMIT_PATHS; source "$ISSUE_BODY_LIB"; eval "committable_path_class() { $FN_BODY; }"; assert_issue_valid "$BODY"'
+}
+
+@test "intake verdict follows a committable_path_class redefined after sourcing" {
+    commit_paths data/export.csv
+
+    # Baseline: the shipped class refuses .csv by default.
+    intake_verdict_with_class_override data/export.csv 'case "$1" in *.csv) return 1 ;; esac; return 0'
+    [ "$status" -ne 0 ] || fail "Expected refusal when class returns 1. Got: $output"
+
+    # Redefined to admit (class 0): intake now accepts the same path.
+    intake_verdict_with_class_override data/export.csv 'return 0'
+    [ "$status" -eq 0 ] || fail "Intake did not follow class->0. Got: $output"
+
+    # Redefined to hard-deny (class 2): intake refuses a normally-admitted path.
+    commit_paths src/app.ts
+    intake_verdict_with_class_override src/app.ts 'return 2'
+    [ "$status" -ne 0 ] || fail "Intake did not follow class->2. Got: $output"
+    [[ "$output" == *"src/app.ts"* ]] || fail "Expected path named. Got: $output"
+}
