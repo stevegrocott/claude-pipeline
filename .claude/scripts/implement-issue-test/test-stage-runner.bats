@@ -419,8 +419,8 @@ teardown() {
     export -f timeout
 
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
-    [[ "$output" == *"terminated externally by SIGTERM"* ]] \
-        || fail "Expected external-termination log; got: $output"
+    [[ "$output" == *"terminated externally by SIGTERM after "*"s (budget 30s)"* ]] \
+        || fail "Expected external-termination log with elapsed+budget; got: $output"
     [[ "$output" != *"timed out after"* ]] \
         || fail "External 143 must not be logged as a timeout: $output"
     [[ "$output" != *"timeout retry"* ]] \
@@ -453,6 +453,63 @@ teardown() {
         || fail "Watchdog kill must trigger the timeout retry: $output"
     [[ "$output" != *"terminated externally"* ]] \
         || fail "Watchdog kill misreported as external: $output"
+}
+
+@test "external SIGTERM on the timeout retry is external after a real watchdog timeout (#1047)" {
+    # First call hangs until the watchdog kills it (a genuine timeout, so the
+    # timeout retry starts). The retry then exits 143 with no watchdog marker:
+    # that is an external kill and must not be reported as a second timeout.
+    local hang_fifo="$TEST_TMP/retryext.fifo"
+    mkfifo "$hang_fifo"
+    local rex_calls_file="$TEST_TMP/rex-calls.txt"
+    export rex_calls_file hang_fifo
+    timeout() {
+        local _n
+        _n=$(wc -l < "$rex_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$rex_calls_file"
+        if (( _n == 0 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 143
+        fi
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [[ "$output" == *"timed out after 1s"* ]] \
+        || fail "First call must be logged as a real timeout; got: $output"
+    [[ "$output" == *"retrying with"* ]] \
+        || fail "Real timeout must start the retry: $output"
+    [[ "$output" == *"retry terminated externally by SIGTERM after "*"s (budget 1"*"s)"* ]] \
+        || fail "Unmarked 143 on retry must be external with elapsed+budget; got: $output"
+}
+
+@test "timeout-retry watchdog kill is a timeout, not external (#1047)" {
+    # Both the initial attempt and the retry hang until their watchdog kills
+    # them. The retry watchdog must write its marker before it kills, so the
+    # resulting 143 is read as a timeout. Without the marker the retry would
+    # be misreported as an external termination.
+    local hang_fifo="$TEST_TMP/retrywd.fifo"
+    mkfifo "$hang_fifo"
+    local rwd_calls_file="$TEST_TMP/rwd-calls.txt"
+    export rwd_calls_file hang_fifo
+    timeout() {
+        local _n
+        _n=$(wc -l < "$rwd_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$rwd_calls_file"
+        if (( _n < 2 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 124
+        fi
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [[ "$output" == *"retry timed out"* || "$output" == *"timed out after"* ]] \
+        || fail "Retry watchdog kill must be a timeout; got: $output"
+    [[ "$output" != *"retry terminated externally"* ]] \
+        || fail "Retry watchdog kill misreported as external: $output"
 }
 
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
@@ -638,7 +695,7 @@ teardown() {
     MODE_1047=external
     export MODE_1047
     run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "30"
-    [[ "$output" == *"Stage test-iter-1 escalation terminated"*"externally by SIGTERM"* ]] \
+    [[ "$output" == *"Stage test-iter-1 escalation terminated"*"externally by SIGTERM after "*"s (budget 30s)"* ]] \
         || fail "Expected external-termination log; got: $output"
     [[ "$output" != *"CLI exited 124"* ]] \
         || fail "External 143 must not be mapped to 124: $output"
@@ -683,7 +740,7 @@ teardown() {
     MODE_1047=external
     export MODE_1047
     run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "30"
-    [[ "$output" == *"Stage test-iter-1 same-model retry terminated"*"externally by SIGTERM"* ]] \
+    [[ "$output" == *"Stage test-iter-1 same-model retry terminated"*"externally by SIGTERM after "*"s (budget 30s)"* ]] \
         || fail "Expected external-termination log; got: $output"
     grep -q 'retry exit code: 143' "$TEST_TMP"/logs/test/stages/*.log \
         || fail "External 143 must stay 143 in the stage log"
@@ -3892,4 +3949,61 @@ _count_bats_incomplete_markers() {
     [ -f "$claude_calls" ] || fail "Claude was not called"
     grep -q -- "--max-turns 40" "$claude_calls" || \
         fail "Expected --max-turns 40 from MAX_TURNS_E2E_VERIFY. Calls: $(cat "$claude_calls")"
+}
+
+@test "externally terminated stage is re-run once, same model and budget, no escalation (#1054)" {
+    local calls_file="$TEST_TMP/ext-rerun-calls.txt"
+    : > "$calls_file"
+    export calls_file
+    sleep() { [[ "$1" == 1 ]] && command sleep 1; return 0; }
+    export -f sleep
+    timeout() {
+        local budget="$1" model="" prev="" a
+        for a in "$@"; do
+            [[ "$prev" == --model ]] && model="$a"
+            prev="$a"
+        done
+        printf '%s %s\n' "$budget" "$model" >> "$calls_file"
+        if (( $(wc -l < "$calls_file") == 1 )); then
+            return 143
+        fi
+        echo '{"is_error":false,"structured_output":{"status":"success","summary":"ok"}}'
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
+
+    [ "$(wc -l < "$calls_file" | tr -d ' ')" = "2" ] \
+        || fail "Expected exactly 2 dispatches; got: $(cat "$calls_file")"
+    [ "$(sed -n 1p "$calls_file")" = "$(sed -n 2p "$calls_file")" ] \
+        || fail "Re-run must use same budget and model: $(cat "$calls_file")"
+    [[ "$output" == *"action=retry_same"* ]] \
+        || fail "Expected retry_same decision; got: $output"
+    [[ "$output" != *"action=escalate"* ]] \
+        || fail "External kill must not escalate: $output"
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.status')" = "success" ] \
+        || fail "Re-run success must be a success result; got: $output"
+}
+
+@test "re-run also killed externally fails with external_termination, no third dispatch (#1054)" {
+    local calls_file="$TEST_TMP/ext-twice-calls.txt"
+    : > "$calls_file"
+    export calls_file
+    sleep() { [[ "$1" == 1 ]] && command sleep 1; return 0; }
+    export -f sleep
+    timeout() {
+        printf 'call\n' >> "$calls_file"
+        return 143
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
+
+    [ "$status" -ne 0 ]
+    [ "$(wc -l < "$calls_file" | tr -d ' ')" = "2" ] \
+        || fail "Expected exactly 2 dispatches; got: $(cat "$calls_file")"
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.error_kind')" = "external_termination" ] \
+        || fail "Expected error_kind external_termination; got: $output"
+    [[ "$output" != *"action=escalate"* ]] \
+        || fail "External kill must not escalate: $output"
 }
