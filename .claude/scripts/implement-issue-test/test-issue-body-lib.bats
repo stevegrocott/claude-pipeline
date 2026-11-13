@@ -1946,3 +1946,64 @@ _body_citing() {
 	[[ "$output" == *"hard-denied path: .github/workflows/ci.yml"* ]]
 	[[ "$output" != *"not-committable path"* ]]
 }
+
+# =============================================================================
+# assert_issue_valid() — not-committable path exemptions (#1056 task 2)
+# =============================================================================
+
+@test "#1056 task2: a not-yet-existing path is exempt from not-committable check" {
+	# A path that does not exist cannot be "not committable" — it is a new
+	# file being added, which the commit guard happily accepts regardless of
+	# extension.  The -f guard on the elif ensures only existing regular files
+	# reach the committable_path_admitted test.  RED-verified: the new elif in
+	# task 1 only fires when the file already exists.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Add helper — \`.claude/scripts/brand-new.json\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"not-committable"* ]]
+}
+
+@test "#1056 task2: a directory path is exempt from not-committable check" {
+	# A directory resolves on disk (-e is true) but is not a regular file
+	# (-f is false), so the not-committable elif is never entered.  A task
+	# that cites a directory for context must not raise this diagnostic.
+	local body
+	body="## Implementation Tasks
+
+- [ ] \`[bash-script-craftsman]\` **(S)** Review helpers — \`.claude/scripts/\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"not-committable"* ]]
+}
+
+@test "#1056 task2: a completed [x] task is exempt from not-committable check" {
+	# _issue_body_parse_tasks skips [x] lines before criterion 3 is evaluated;
+	# a completed task naming a class-1 existing file must never raise the
+	# not-committable diagnostic.  The body also carries an open task with a
+	# committable path so criterion 1 (at least one open task) is satisfied.
+	mkdir -p "$ISSUE_BODY_REPO_ROOT/config"
+	touch "$ISSUE_BODY_REPO_ROOT/config/settings.json"
+	local body
+	body="## Implementation Tasks
+
+- [x] \`[bash-script-craftsman]\` **(S)** Done — \`config/settings.json\`
+- [ ] \`[bash-script-craftsman]\` **(S)** Next step — \`.claude/scripts/issue-body-lib.sh\`
+
+## Acceptance Criteria
+
+- [ ] done"
+	run assert_issue_valid "$body"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"not-committable"* ]]
+}
