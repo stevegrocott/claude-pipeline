@@ -586,3 +586,71 @@ _wait_for_file() {
     branch=$(jq -r '.branch' "$STATUS_FILE")
     [ "$branch" = "after-kill" ] || fail "update lost after stale-lock recovery: $branch"
 }
+
+# =============================================================================
+# SYNC_STATUS_TO_LOG (issue #1057 — cp race fix)
+# =============================================================================
+
+@test "sync_status_to_log copies status.json to LOG_BASE" {
+	init_status
+	sync_status_to_log
+
+	[ -f "$LOG_BASE/status.json" ] \
+		|| fail "sync_status_to_log did not create $LOG_BASE/status.json"
+	jq -e '.' "$LOG_BASE/status.json" >/dev/null 2>&1 \
+		|| fail "synced status.json is not valid JSON"
+}
+
+@test "sync_status_to_log produces file identical to STATUS_FILE" {
+	init_status
+	update_stage "setup" "in_progress"
+	sync_status_to_log
+
+	local orig synced
+	orig=$(jq -c '.' "$STATUS_FILE")
+	synced=$(jq -c '.' "$LOG_BASE/status.json")
+	[ "$orig" = "$synced" ] \
+		|| fail "synced status.json differs from STATUS_FILE"
+}
+
+@test "sync_status_to_log does not leave temp files in LOG_BASE" {
+	init_status
+	sync_status_to_log
+
+	local tmp_count
+	tmp_count=$(find "$LOG_BASE" -maxdepth 1 -name '.status.json.*' | wc -l)
+	[ "$tmp_count" -eq 0 ] \
+		|| fail "temp file(s) left behind after sync: $tmp_count found"
+}
+
+@test "sync_status_to_log returns 0 when LOG_BASE is unset" {
+	init_status
+	local saved_log_base="$LOG_BASE"
+	unset LOG_BASE
+	run sync_status_to_log
+	export LOG_BASE="$saved_log_base"
+	[ "$status" -eq 0 ] \
+		|| fail "sync_status_to_log returned $status when LOG_BASE is unset"
+}
+
+@test "sync_status_to_log returns 0 when STATUS_FILE does not exist" {
+	local missing="$TEST_TMP/nonexistent-status.json"
+	export STATUS_FILE="$missing"
+	run sync_status_to_log
+	[ "$status" -eq 0 ] \
+		|| fail "sync_status_to_log returned $status for missing STATUS_FILE"
+}
+
+@test "sync_status_to_log is idempotent — calling twice leaves valid JSON" {
+	init_status
+	sync_status_to_log
+	update_stage "setup" "completed"
+	sync_status_to_log
+
+	jq -e '.' "$LOG_BASE/status.json" >/dev/null 2>&1 \
+		|| fail "status.json not valid JSON after second sync"
+	local status_val
+	status_val=$(jq -r '.stages.setup.status' "$LOG_BASE/status.json")
+	[ "$status_val" = "completed" ] \
+		|| fail "second sync did not reflect latest state: $status_val"
+}
