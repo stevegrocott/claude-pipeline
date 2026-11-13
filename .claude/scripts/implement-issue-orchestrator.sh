@@ -2975,6 +2975,23 @@ _epoch_ms() {
     fi
 }
 
+# _classify_143 <stage_name> <label> <marker_file> <start_ms> <budget_s>
+#
+# Shared classifier for a stage that exited 143 (issue #1054). Returns 0
+# when the watchdog left its marker (a real timeout; caller maps to 124),
+# 1 when the SIGTERM came from outside (operator, another tool, OS) and
+# logs elapsed seconds and the budget so the two can be told apart.
+# <label> is "" for the primary launch, else e.g. "retry".
+_classify_143() {
+    local stage_name="$1" label="$2" marker="$3"
+    local start_ms="$4" budget="$5"
+    [[ -e "$marker" ]] && return 0
+    log "WARN: Stage $stage_name${label:+ $label} terminated externally" \
+        "by SIGTERM after $(( ($(_epoch_ms) - start_ms) / 1000 ))s" \
+        "(budget ${budget}s) — not a timeout"
+    return 1
+}
+
 # _extract_cli_envelope <raw-stage-output>
 #
 # Isolate the CLI's JSON result envelope from a stage's stdout (issue #646).
@@ -3565,12 +3582,9 @@ run_stage() {
     # An unmarked 143 came from outside (operator, another tool, OS):
     # keep it as 143 so it is not handled as an exhausted budget.
     if (( exit_code == 143 )); then
-        if [[ -e "$_stage_out_tmp.wd" ]]; then
+        if _classify_143 "$stage_name" "" "$_stage_out_tmp.wd" \
+            "$result_start_ms" "$stage_timeout"; then
             exit_code=124
-        else
-            log "WARN: Stage $stage_name terminated externally by" \
-                "SIGTERM after $(( ($(_epoch_ms) - result_start_ms) / 1000 ))s" \
-                "(budget ${stage_timeout}s) — not a timeout"
         fi
     fi
     rm -f "$_stage_out_tmp.wd"
@@ -3688,6 +3702,7 @@ run_stage() {
                 2>&1
         ) > "$_retry_out_tmp" 3>&- &
         local _retry_pid=$!
+        local _retry_start_ms; _retry_start_ms=$(_epoch_ms)
 
         (
             local _waited=0
@@ -3708,11 +3723,9 @@ run_stage() {
 
         # Only a watchdog-marked 143 is a timeout (issue #1047).
         if (( exit_code == 143 )); then
-            if [[ -e "$_retry_out_tmp.wd" ]]; then
+            if _classify_143 "$stage_name" retry "$_retry_out_tmp.wd" \
+                "$_retry_start_ms" "$retry_timeout"; then
                 exit_code=124
-            else
-                log "WARN: Stage $stage_name retry terminated externally" \
-                    "by SIGTERM (budget ${retry_timeout}s) — not a timeout"
             fi
         fi
         rm -f "$_retry_out_tmp.wd"
@@ -4048,6 +4061,7 @@ for m in re.finditer(r'\[\s*\{', t):
                     2>&1
             ) > "$_esc_raw" 3>&- &
             local _esc_pid=$!
+            local _esc_start_ms; _esc_start_ms=$(_epoch_ms)
 
             # Poll in 1s steps rather than one long `sleep $stage_timeout` —
             # see the primary launch's watchdog for why (a cancelled long
@@ -4078,11 +4092,9 @@ for m in re.finditer(r'\[\s*\{', t):
             # (the warn log below) treats both paths identically.
             # Only a watchdog-marked 143 is a timeout (issue #1047).
             if (( _esc_exit_code == 143 )); then
-                if [[ -e "$_esc_raw.wd" ]]; then
+                if _classify_143 "$stage_name" escalation "$_esc_raw.wd" \
+                    "$_esc_start_ms" "$stage_timeout"; then
                     _esc_exit_code=124
-                else
-                    log "WARN: Stage $stage_name escalation terminated" \
-                        "externally by SIGTERM — not a timeout"
                 fi
             fi
             rm -f "$_esc_raw.wd"
@@ -4223,6 +4235,7 @@ for m in re.finditer(r'\[\s*\{', t):
                     2>&1
             ) > "$_retry_raw" 3>&- &
             local _retry_pid=$!
+            local _retry_start_ms; _retry_start_ms=$(_epoch_ms)
 
             # Poll in 1s steps rather than one long `sleep $stage_timeout` —
             # see the primary launch's watchdog for why (a cancelled long
@@ -4253,11 +4266,9 @@ for m in re.finditer(r'\[\s*\{', t):
             # treats both paths identically.
             # Only a watchdog-marked 143 is a timeout (issue #1047).
             if (( _retry_exit_code == 143 )); then
-                if [[ -e "$_retry_raw.wd" ]]; then
+                if _classify_143 "$stage_name" "same-model retry" \
+                    "$_retry_raw.wd" "$_retry_start_ms" "$stage_timeout"; then
                     _retry_exit_code=124
-                else
-                    log "WARN: Stage $stage_name same-model retry" \
-                        "terminated externally by SIGTERM — not a timeout"
                 fi
             fi
             rm -f "$_retry_raw.wd"

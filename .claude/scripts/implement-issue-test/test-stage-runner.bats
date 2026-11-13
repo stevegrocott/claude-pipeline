@@ -419,8 +419,8 @@ teardown() {
     export -f timeout
 
     run run_stage "test-stage" "prompt" "test-schema.json" "" "" "30"
-    [[ "$output" == *"terminated externally by SIGTERM"* ]] \
-        || fail "Expected external-termination log; got: $output"
+    [[ "$output" == *"terminated externally by SIGTERM after "*"s (budget 30s)"* ]] \
+        || fail "Expected external-termination log with elapsed+budget; got: $output"
     [[ "$output" != *"timed out after"* ]] \
         || fail "External 143 must not be logged as a timeout: $output"
     [[ "$output" != *"timeout retry"* ]] \
@@ -480,8 +480,8 @@ teardown() {
         || fail "First call must be logged as a real timeout; got: $output"
     [[ "$output" == *"retrying with"* ]] \
         || fail "Real timeout must start the retry: $output"
-    [[ "$output" == *"retry terminated externally by SIGTERM"* ]] \
-        || fail "Unmarked 143 on retry must be external; got: $output"
+    [[ "$output" == *"retry terminated externally by SIGTERM after "*"s (budget 1"*"s)"* ]] \
+        || fail "Unmarked 143 on retry must be external with elapsed+budget; got: $output"
 }
 
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
@@ -667,7 +667,7 @@ teardown() {
     MODE_1047=external
     export MODE_1047
     run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "30"
-    [[ "$output" == *"Stage test-iter-1 escalation terminated"*"externally by SIGTERM"* ]] \
+    [[ "$output" == *"Stage test-iter-1 escalation terminated"*"externally by SIGTERM after "*"s (budget 30s)"* ]] \
         || fail "Expected external-termination log; got: $output"
     [[ "$output" != *"CLI exited 124"* ]] \
         || fail "External 143 must not be mapped to 124: $output"
@@ -712,7 +712,7 @@ teardown() {
     MODE_1047=external
     export MODE_1047
     run run_stage "test-iter-1" "prompt" "test-schema.json" "" "" "30"
-    [[ "$output" == *"Stage test-iter-1 same-model retry terminated"*"externally by SIGTERM"* ]] \
+    [[ "$output" == *"Stage test-iter-1 same-model retry terminated"*"externally by SIGTERM after "*"s (budget 30s)"* ]] \
         || fail "Expected external-termination log; got: $output"
     grep -q 'retry exit code: 143' "$TEST_TMP"/logs/test/stages/*.log \
         || fail "External 143 must stay 143 in the stage log"
