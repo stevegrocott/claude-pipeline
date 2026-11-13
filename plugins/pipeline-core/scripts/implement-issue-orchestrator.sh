@@ -10038,11 +10038,18 @@ _bats_full_suite_outcome() {
             # reconcile_failed_tasks_with_branch_evidence() treat it as
             # proof of a real regression.
             DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")
+            local results_seen plan_size
+            results_seen=$(printf '%s\n' "$output" \
+                | grep -cE '^(not )?ok ' || true)
+            plan_size=$(printf '%s\n' "$output" \
+                | sed -n 's/^1\.\.\([0-9][0-9]*\).*/\1/p' \
+                | head -n 1)
+            plan_size="${plan_size:-none reported}"
             log_warn "Full-suite BATS check exited $rc with" \
                 "no failing test reported — treating as unmeasured," \
                 "not red (non-blocking)"
             comment_issue "Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)" \
-                "⚠️ The full BATS suite (\`bash $runner\`) exited $rc but reported **no failing test**, so its state on this branch is **unmeasured**, not red. There are no test failures to review from this run — full log: $log_path" "default"
+                "⚠️ The full BATS suite (\`bash $runner\`) exited $rc but reported **no failing test**, so its state on this branch is **unmeasured**, not red. There are no test failures to review from this run. Results seen: $results_seen; TAP plan size: $plan_size; stage log: $log_path" "default"
         elif (( rc != 0 )); then
             # Build the comment from the extracted failing test names
             # rather than an arbitrary tail. A tail only shows whatever

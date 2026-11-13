@@ -873,6 +873,23 @@ _repro_full_suite_npm_check() {
 	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
 }
 
+@test "BATS full-suite unmeasured comment states results seen, plan size and log path" {
+	local captured="$TEST_TMP/comment.txt"
+	comment_issue() { printf '%s\n%s\n' "$1" "$2" > "$captured"; }
+	_bats_full_suite_outcome 137 $'1..7\nok 1 a\nok 2 b' "$TEST_TMP/l.log"
+	grep -qF 'Results seen: 2' "$captured"
+	grep -qF 'TAP plan size: 7' "$captured"
+	grep -qF "stage log: $TEST_TMP/l.log" "$captured"
+}
+
+@test "BATS full-suite unmeasured comment reports no plan when output has none" {
+	local captured="$TEST_TMP/comment.txt"
+	comment_issue() { printf '%s\n%s\n' "$1" "$2" > "$captured"; }
+	_bats_full_suite_outcome 1 "bats: command not found" "$TEST_TMP/l.log"
+	grep -qF 'Results seen: 0' "$captured"
+	grep -qF 'TAP plan size: none reported' "$captured"
+}
+
 @test "BATS full-suite red run (rc 1 with a failing test) records exactly red" {
 	comment_issue() { :; }
 	_bats_full_suite_outcome 1 $'ok 1 a\nnot ok 2 broken' "$TEST_TMP/l.log"
