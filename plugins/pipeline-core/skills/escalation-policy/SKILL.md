@@ -60,7 +60,7 @@ Array of records appended by `record_escalation()` each time a stage is retried 
 
 Filter to records where `stage == current_stage_name` before reasoning.
 
-**Per-run escalation cap (issue #579).** The whole `escalation_history` array (run-wide, not stage-filtered) is also bounded by `MAX_ESCALATIONS_PER_RUN` (default 5, env-overridable). Once `escalation_history | length >= MAX_ESCALATIONS_PER_RUN`, any non-success stage_result routes to **bail** — before any other rule — so a run cannot spend into the pathological 6+ escalation bucket where completion rate collapses (85% at 0–2 escalations vs 60% at 6+). A `success` stage_result is still accepted regardless of history length.
+**Per-run escalation cap (issue #579).** The whole `escalation_history` array (run-wide, not stage-filtered) is also bounded by `MAX_ESCALATIONS_PER_RUN` (default 5, env-overridable). Once `escalation_history | length >= MAX_ESCALATIONS_PER_RUN`, any non-success stage_result routes to **bail** — before any other rule — so a run cannot spend into the pathological 6+ escalation bucket where completion rate collapses (85% at 0–2 escalations vs 60% at 6+). A `success` stage_result is still accepted regardless of history length. An `external_termination` stage_result is also exempt: `decide-action.sh` answers it before the cap (one same-model re-run, never an escalation), so it never reaches this skill.
 
 ## Output Contract
 

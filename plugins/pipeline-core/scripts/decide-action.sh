@@ -424,21 +424,8 @@ main() {
 	local stage_result="$1"
 	local history="$2"
 
-	# Per-run escalation cap (issue #579): once the run has accrued
-	# MAX_ESCALATIONS_PER_RUN escalations, fail fast instead of continuing into
-	# the pathological 6+ bucket where completion rate collapses.  Checked here,
-	# before either backend, so the inline bash and skill-native compose paths
-	# agree.  Only an error stage is capped — a success must still be accepted
-	# regardless of history length, so both backends still run for success.
-	local _status _esc_count
+	local _status
 	_status=$(printf '%s' "$stage_result" | jq -r '.status // empty' 2>/dev/null)
-	_esc_count=$(printf '%s' "$history" | jq 'length' 2>/dev/null) || _esc_count=0
-	if [[ "$_status" != "success" ]] \
-		&& (( _esc_count >= MAX_ESCALATIONS_PER_RUN )); then
-		printf '{"action":"bail","reason":"escalation cap reached: %s escalations >= MAX_ESCALATIONS_PER_RUN=%s (issue #579)"}\n' \
-			"$_esc_count" "$MAX_ESCALATIONS_PER_RUN"
-		return 0
-	fi
 
 	# external_termination (issue #1054): the stage was killed from outside
 	# (not by the watchdog), so the model tier is not at fault.  Retry once at
@@ -448,8 +435,10 @@ main() {
 	# is run-wide, so another stage's escalation away from this model must not
 	# cost this stage its one re-run.  The orchestrator records no same-model
 	# entry today — run_stage fails a second kill itself on its same-model
-	# retry path — so the bail answer guards callers that do record one.  The
-	# per-run escalation cap above still takes precedence over the re-run.
+	# retry path — so the bail answer guards callers that do record one.
+	# Answered ahead of the per-run escalation cap below: the re-run stays at
+	# the same model and records no escalation, so the cap that stops further
+	# escalations has no reason to stop it.
 	if [[ "$_status" != "success" ]]; then
 		local _kind _model _prior
 		_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind // empty')
@@ -469,6 +458,22 @@ main() {
 			fi
 			return 0
 		fi
+	fi
+
+	# Per-run escalation cap (issue #579): once the run has accrued
+	# MAX_ESCALATIONS_PER_RUN escalations, fail fast instead of continuing into
+	# the pathological 6+ bucket where completion rate collapses.  Checked here,
+	# before either backend, so the inline bash and skill-native compose paths
+	# agree.  Only an error stage is capped — a success must still be accepted
+	# regardless of history length, so both backends still run for success.
+	# An external_termination never reaches this check — it is answered above.
+	local _esc_count
+	_esc_count=$(printf '%s' "$history" | jq 'length' 2>/dev/null) || _esc_count=0
+	if [[ "$_status" != "success" ]] \
+		&& (( _esc_count >= MAX_ESCALATIONS_PER_RUN )); then
+		printf '{"action":"bail","reason":"escalation cap reached: %s escalations >= MAX_ESCALATIONS_PER_RUN=%s (issue #579)"}\n' \
+			"$_esc_count" "$MAX_ESCALATIONS_PER_RUN"
+		return 0
 	fi
 
 	# Kill-switch: bypass composition and use inline bash directly

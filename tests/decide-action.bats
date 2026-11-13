@@ -750,3 +750,36 @@ _load_deploy_verify_fn() {
 		[ "$(jq -r '.action' <<< "$output")" = "bail" ]
 	done
 }
+
+@test "external_termination at the per-run escalation cap is still re-run (bash)" {
+	export ESCALATION_POLICY_BACKEND=bash
+	export MAX_ESCALATIONS_PER_RUN=5
+	local sr='{"status":"error","error_kind":"external_termination","model":"sonnet"}'
+	local history='[{"stage":"s1","from_model":"haiku","to_model":"sonnet"},{"stage":"s2","from_model":"sonnet","to_model":"opus"},{"stage":"s3","from_model":"haiku","to_model":"sonnet"},{"stage":"s4","from_model":"sonnet","to_model":"opus"},{"stage":"s5","from_model":"haiku","to_model":"sonnet"}]'
+	run bash "$DECIDE_ACTION_SCRIPT" "$sr" "$history"
+	[ "$status" -eq 0 ]
+	[ "$(jq -r '.action' <<< "$output")" = "retry_same" ]
+}
+
+@test "external_termination at the per-run escalation cap is still re-run (default path)" {
+	export MAX_ESCALATIONS_PER_RUN=5
+	local sr='{"status":"error","error_kind":"external_termination","model":"sonnet"}'
+	local history='[{"stage":"s1","from_model":"haiku","to_model":"sonnet"},{"stage":"s2","from_model":"sonnet","to_model":"opus"},{"stage":"s3","from_model":"haiku","to_model":"sonnet"},{"stage":"s4","from_model":"sonnet","to_model":"opus"},{"stage":"s5","from_model":"haiku","to_model":"sonnet"}]'
+	run bash "$DECIDE_ACTION_SCRIPT" "$sr" "$history"
+	[ "$status" -eq 0 ]
+	[ "$(jq -r '.action' <<< "$output")" = "retry_same" ]
+}
+
+@test "the per-run escalation cap still bails every other error kind" {
+	export MAX_ESCALATIONS_PER_RUN=5
+	local history='[{"stage":"s1","from_model":"haiku","to_model":"sonnet"},{"stage":"s2","from_model":"sonnet","to_model":"opus"},{"stage":"s3","from_model":"haiku","to_model":"sonnet"},{"stage":"s4","from_model":"sonnet","to_model":"opus"},{"stage":"s5","from_model":"haiku","to_model":"sonnet"}]'
+	local kind
+	for kind in double_timeout no_structured_output rate_limit; do
+		run bash "$DECIDE_ACTION_SCRIPT" \
+			"{\"status\":\"error\",\"error_kind\":\"$kind\",\"model\":\"haiku\"}" \
+			"$history"
+		[ "$status" -eq 0 ]
+		[ "$(jq -r '.action' <<< "$output")" = "bail" ]
+		grep -q 'escalation cap reached' <<< "$output"
+	done
+}
