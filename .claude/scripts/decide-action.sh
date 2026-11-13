@@ -446,7 +446,10 @@ main() {
 	# backend, so the bash and skill-native paths agree.  Only a same-model
 	# entry (from_model == to_model) counts as the prior attempt: the history
 	# is run-wide, so another stage's escalation away from this model must not
-	# cost this stage its one re-run.
+	# cost this stage its one re-run.  The orchestrator records no same-model
+	# entry today — run_stage fails a second kill itself on its same-model
+	# retry path — so the bail answer guards callers that do record one.  The
+	# per-run escalation cap above still takes precedence over the re-run.
 	if [[ "$_status" != "success" ]]; then
 		local _kind _model _prior
 		_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind // empty')
