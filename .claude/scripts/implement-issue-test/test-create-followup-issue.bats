@@ -54,6 +54,7 @@ teardown() {
 	unset ISSUE_BODY_REPO_ROOT
 	unset DEPLOY_VERIFY_CMD
 	unset FRONTEND_PATH_PATTERNS
+	unset PIPELINE_CONFIG_DIR
 }
 
 # ---------------------------------------------------------------------------
@@ -456,4 +457,54 @@ _call_vague() {
 		--pr-number "1" --issue-number "2" --reviewer "r"
 	[[ "$output" == *"unknown option"* || "$output" == *"no-such-option"* ]] \
 		|| [[ "$stderr" == *"unknown option"* || "$stderr" == *"no-such-option"* ]]
+}
+
+# =============================================================================
+# 15. EXTRA_COMMIT_PATHS loaded from platform.sh before validation
+# =============================================================================
+
+@test "platform.sh load: DEPLOY_VERIFY_CMD from platform.sh used when caller has not exported it" {
+	# Overwrite the platform.sh already in place by setup_test_env so the
+	# script picks up a non-empty DEPLOY_VERIFY_CMD (and EXTRA_COMMIT_PATHS)
+	# from it, proving operator config is loaded before validation.
+	printf '%s\n' \
+		'DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD:-make deploy-verify}"' \
+		'EXTRA_COMMIT_PATHS="${EXTRA_COMMIT_PATHS:-}"' \
+		'FRONTEND_PATH_PATTERNS="${FRONTEND_PATH_PATTERNS:-}"' \
+		> "${TEST_TMP}/.claude/config/platform.sh"
+
+	# Caller has not exported DEPLOY_VERIFY_CMD — platform.sh must supply it.
+	unset DEPLOY_VERIFY_CMD
+
+	run _call_precise
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"## Deploy Verification"* ]]
+	[[ "$output" == *"make deploy-verify"* ]]
+}
+
+@test "platform.sh load: caller-exported DEPLOY_VERIFY_CMD wins over platform.sh default" {
+	# platform.sh defines a default; caller-exported value must survive.
+	printf '%s\n' \
+		'DEPLOY_VERIFY_CMD="${DEPLOY_VERIFY_CMD:-platform-default-cmd}"' \
+		'EXTRA_COMMIT_PATHS="${EXTRA_COMMIT_PATHS:-}"' \
+		> "${TEST_TMP}/.claude/config/platform.sh"
+
+	export DEPLOY_VERIFY_CMD="caller-cmd"
+
+	run _call_precise
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"caller-cmd"* ]]
+	[[ "$output" != *"platform-default-cmd"* ]]
+}
+
+@test "platform.sh load: missing platform.sh is non-fatal" {
+	# Remove the platform.sh that setup_test_env copied in; the script must
+	# still exit 0 and emit a body when no platform.sh can be resolved.
+	rm -f "${TEST_TMP}/.claude/config/platform.sh"
+
+	unset DEPLOY_VERIFY_CMD
+
+	run _call_precise
+	[ "$status" -eq 0 ]
+	[ -n "$output" ]
 }
