@@ -455,6 +455,35 @@ teardown() {
         || fail "Watchdog kill misreported as external: $output"
 }
 
+@test "external SIGTERM on the timeout retry is external after a real watchdog timeout (#1047)" {
+    # First call hangs until the watchdog kills it (a genuine timeout, so the
+    # timeout retry starts). The retry then exits 143 with no watchdog marker:
+    # that is an external kill and must not be reported as a second timeout.
+    local hang_fifo="$TEST_TMP/retryext.fifo"
+    mkfifo "$hang_fifo"
+    local rex_calls_file="$TEST_TMP/rex-calls.txt"
+    export rex_calls_file hang_fifo
+    timeout() {
+        local _n
+        _n=$(wc -l < "$rex_calls_file" 2>/dev/null || printf '0')
+        printf '\n' >> "$rex_calls_file"
+        if (( _n == 0 )); then
+            read -r _ < "$hang_fifo" 2>/dev/null || true
+        else
+            return 143
+        fi
+    }
+    export -f timeout
+
+    run run_stage "test-stage" "prompt" "test-schema.json" "" "" "1"
+    [[ "$output" == *"timed out after 1s"* ]] \
+        || fail "First call must be logged as a real timeout; got: $output"
+    [[ "$output" == *"retrying with"* ]] \
+        || fail "Real timeout must start the retry: $output"
+    [[ "$output" == *"retry terminated externally by SIGTERM"* ]] \
+        || fail "Unmarked 143 on retry must be external; got: $output"
+}
+
 @test "both initial and retry watchdogs fire when stage subshell is childless and hung" {
     # Reproduce the original bug: perl alarm() wrapper and claude child are
     # both dead, leaving a childless subshell that blocks indefinitely.
