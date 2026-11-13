@@ -796,15 +796,6 @@ lint_task_lines() {
 	return 0
 }
 
-# _issue_body_path_hard_denied <path>
-#
-# True when the commit guard hard-denies the path (#928). Delegates to the
-# shared predicate in committable-path-lib.sh so intake and the guard cannot
-# drift apart.
-_issue_body_path_hard_denied() {
-	committable_path_is_hard_denied "${1#./}"
-}
-
 #
 # Validates an issue body against the structural criteria.
 #
@@ -889,7 +880,7 @@ assert_issue_valid() {
 			# .github/workflows/** and no EXTRA_COMMIT_PATHS value can
 			# override it, so a task declaring one can never complete.
 			# Refuse at intake rather than let it fail at commit time.
-			if _issue_body_path_hard_denied "$path"; then
+			if committable_path_is_hard_denied "${path#./}"; then
 				errors+=("hard-denied path: $path is not committable by the pipeline (not overridable by EXTRA_COMMIT_PATHS); this change needs a human")
 				continue
 			fi
@@ -905,6 +896,21 @@ assert_issue_valid() {
 					message+="; did you mean .claude/$path?"
 				fi
 				errors+=("$message")
+			elif [[ -f "$repo_root/$path" ]] \
+				&& ! committable_path_admitted "${path#./}"; then
+				# Not-admitted paths (#1056 task 1): the commit guard refuses
+				# any class-1 existing regular file not covered by
+				# EXTRA_COMMIT_PATHS; refuse at intake too.  Three cases are
+				# implicitly exempt and never reach this branch (#1056 task 2):
+				#   not-yet-existing paths — -f is false (file absent)
+				#   directory paths       — -f is false (not a regular file)
+				#   completed [x] tasks   — filtered by
+				#                           _issue_body_parse_tasks before
+				#                           this loop
+				# Name the path and EXTRA_COMMIT_PATHS so the author knows
+				# the escape hatch.  Move the reference out of the task line
+				# if the task only reads the file.
+				errors+=("not-committable path: $path is not committable by the pipeline by default; add it to EXTRA_COMMIT_PATHS in .claude/config/platform.sh, or move the reference out of the task line")
 			fi
 		done < <(_issue_body_extract_paths "$desc")
 

@@ -796,15 +796,6 @@ lint_task_lines() {
 	return 0
 }
 
-# _issue_body_path_hard_denied <path>
-#
-# True when the commit guard hard-denies the path (#928). Delegates to the
-# shared predicate in committable-path-lib.sh so intake and the guard cannot
-# drift apart.
-_issue_body_path_hard_denied() {
-	committable_path_is_hard_denied "${1#./}"
-}
-
 #
 # Validates an issue body against the structural criteria.
 #
@@ -889,7 +880,7 @@ assert_issue_valid() {
 			# .github/workflows/** and no EXTRA_COMMIT_PATHS value can
 			# override it, so a task declaring one can never complete.
 			# Refuse at intake rather than let it fail at commit time.
-			if _issue_body_path_hard_denied "$path"; then
+			if committable_path_is_hard_denied "${path#./}"; then
 				errors+=("hard-denied path: $path is not committable by the pipeline (not overridable by EXTRA_COMMIT_PATHS); this change needs a human")
 				continue
 			fi
