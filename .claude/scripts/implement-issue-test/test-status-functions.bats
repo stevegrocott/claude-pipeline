@@ -586,3 +586,182 @@ _wait_for_file() {
     branch=$(jq -r '.branch' "$STATUS_FILE")
     [ "$branch" = "after-kill" ] || fail "update lost after stale-lock recovery: $branch"
 }
+
+# =============================================================================
+# SYNC_STATUS_TO_LOG (issue #1057 — cp race fix)
+# =============================================================================
+
+@test "sync_status_to_log copies status.json to LOG_BASE" {
+	init_status
+	sync_status_to_log
+
+	[ -f "$LOG_BASE/status.json" ] \
+		|| fail "sync_status_to_log did not create $LOG_BASE/status.json"
+	jq -e '.' "$LOG_BASE/status.json" >/dev/null 2>&1 \
+		|| fail "synced status.json is not valid JSON"
+}
+
+@test "sync_status_to_log produces file identical to STATUS_FILE" {
+	init_status
+	update_stage "setup" "in_progress"
+	sync_status_to_log
+
+	local orig synced
+	orig=$(jq -c '.' "$STATUS_FILE")
+	synced=$(jq -c '.' "$LOG_BASE/status.json")
+	[ "$orig" = "$synced" ] \
+		|| fail "synced status.json differs from STATUS_FILE"
+}
+
+@test "sync_status_to_log does not leave temp files in LOG_BASE" {
+	init_status
+	sync_status_to_log
+
+	local tmp_count
+	tmp_count=$(find "$LOG_BASE" -maxdepth 1 -name '.status.json.*' | wc -l)
+	[ "$tmp_count" -eq 0 ] \
+		|| fail "temp file(s) left behind after sync: $tmp_count found"
+}
+
+@test "sync_status_to_log returns 0 when LOG_BASE is unset" {
+	init_status
+	local saved_log_base="$LOG_BASE"
+	unset LOG_BASE
+	run sync_status_to_log
+	export LOG_BASE="$saved_log_base"
+	[ "$status" -eq 0 ] \
+		|| fail "sync_status_to_log returned $status when LOG_BASE is unset"
+}
+
+@test "sync_status_to_log returns 0 when STATUS_FILE does not exist" {
+	local missing="$TEST_TMP/nonexistent-status.json"
+	export STATUS_FILE="$missing"
+	run sync_status_to_log
+	[ "$status" -eq 0 ] \
+		|| fail "sync_status_to_log returned $status for missing STATUS_FILE"
+}
+
+@test "sync_status_to_log is idempotent — calling twice leaves valid JSON" {
+	init_status
+	sync_status_to_log
+	update_stage "setup" "completed"
+	sync_status_to_log
+
+	jq -e '.' "$LOG_BASE/status.json" >/dev/null 2>&1 \
+		|| fail "status.json not valid JSON after second sync"
+	local status_val
+	status_val=$(jq -r '.stages.setup.status' "$LOG_BASE/status.json")
+	[ "$status_val" = "completed" ] \
+		|| fail "second sync did not reflect latest state: $status_val"
+}
+
+# Shadow cp with a stand-in that records every call in $TEST_TMP/cp-calls and
+# fails the first $1 of them the way GNU cp does when the source is renamed
+# over mid-copy (the Linux CI race, #1057); later calls run the real cp.
+# Callers restore PATH themselves.
+_shadow_cp_failing_first() {
+	local fail_first="$1" real_cp mock_bin="$TEST_TMP/mock-bin"
+	real_cp="$(command -v cp)"
+	mkdir -p "$mock_bin"
+	printf '%s\n' \
+		'#!/usr/bin/env bash' \
+		"echo call >> '$TEST_TMP/cp-calls'" \
+		"if (( \$(wc -l < '$TEST_TMP/cp-calls') <= $fail_first )); then" \
+		"	echo \"cp: skipping file '\$1', as it was replaced while being copied\" >&2" \
+		'	exit 1' \
+		'fi' \
+		"exec '$real_cp' \"\$@\"" \
+		> "$mock_bin/cp"
+	chmod +x "$mock_bin/cp"
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "sync_status_to_log retries after one cp failure and leaves a byte-identical copy" {
+	init_status
+	update_stage "setup" "in_progress"
+
+	# Stale target: only a copy that really happened can make it match.
+	printf '%s\n' '{"state":"stale"}' > "$LOG_BASE/status.json"
+
+	local orig_path="$PATH"
+	_shadow_cp_failing_first 1
+	run sync_status_to_log
+	export PATH="$orig_path"
+
+	[ "$status" -eq 0 ] \
+		|| fail "sync_status_to_log returned $status after one transient cp failure"
+	cmp -s "$STATUS_FILE" "$LOG_BASE/status.json" \
+		|| fail "synced status.json is not byte-identical to STATUS_FILE after the retry"
+
+	local calls
+	calls=$(wc -l < "$TEST_TMP/cp-calls")
+	[ "$calls" -eq 2 ] \
+		|| fail "expected cp to be called twice (one failure, one success); got $calls"
+
+	local tmp_count
+	tmp_count=$(find "$LOG_BASE" -maxdepth 1 -name '.status.json.*' | wc -l)
+	[ "$tmp_count" -eq 0 ] \
+		|| fail "temp file(s) left behind after a retried sync: $tmp_count found"
+	if grep -q 'WARN: sync_status_to_log' "$LOG_FILE"; then
+		fail "a sync that succeeded on retry must not warn"
+	fi
+}
+
+@test "sync_status_to_log emits one warning naming both paths when all cp retries fail" {
+	init_status
+
+	# A target left by an earlier sync must survive a failed one untouched.
+	local earlier='{"state":"earlier-sync"}'
+	printf '%s\n' "$earlier" > "$LOG_BASE/status.json"
+
+	local orig_path="$PATH"
+	_shadow_cp_failing_first 99
+	run sync_status_to_log
+	export PATH="$orig_path"
+
+	[ "$status" -eq 0 ] \
+		|| fail "sync_status_to_log must return 0 even when cp always fails; got $status"
+
+	# The retry bound stated in sync_status_to_log is 3 attempts.
+	local calls
+	calls=$(wc -l < "$TEST_TMP/cp-calls")
+	[ "$calls" -eq 3 ] \
+		|| fail "expected exactly 3 cp attempts when every one fails; got $calls"
+
+	# log_warn writes to LOG_FILE when LOG_FILE is set — verify exactly one
+	# warning, naming both the source and the target path.
+	local warnings
+	warnings=$(grep -c 'WARN: sync_status_to_log' "$LOG_FILE" || true)
+	[ "$warnings" -eq 1 ] \
+		|| fail "expected exactly one sync warning in $LOG_FILE; got $warnings"
+	grep 'WARN: sync_status_to_log' "$LOG_FILE" | grep -qF "$STATUS_FILE" \
+		|| fail "warning did not name STATUS_FILE ($STATUS_FILE) in $LOG_FILE"
+	grep 'WARN: sync_status_to_log' "$LOG_FILE" | grep -qF "$LOG_BASE/status.json" \
+		|| fail "warning did not name target ($LOG_BASE/status.json) in $LOG_FILE"
+
+	[ "$(cat "$LOG_BASE/status.json")" = "$earlier" ] \
+		|| fail "existing target was modified by a sync whose every attempt failed"
+	local tmp_count
+	tmp_count=$(find "$LOG_BASE" -maxdepth 1 -name '.status.json.*' | wc -l)
+	[ "$tmp_count" -eq 0 ] \
+		|| fail "temp file(s) left behind after a failed sync: $tmp_count found"
+}
+
+@test "sync_status_to_log does not abort a set -e subshell when cp always fails" {
+	init_status
+
+	# A fresh bash, not a subshell of `run`: `run` calls its command where
+	# errexit is ignored, which would make this pass whatever the function
+	# returned.
+	export -f sync_status_to_log log_warn
+
+	local orig_path="$PATH"
+	_shadow_cp_failing_first 99
+	run bash -c 'set -e; sync_status_to_log; echo "after-sync"'
+	export PATH="$orig_path"
+
+	[ "$status" -eq 0 ] \
+		|| fail "set -e subshell exited $status after a failed sync"
+	[[ "$output" == *"after-sync"* ]] \
+		|| fail "set -e subshell stopped at sync_status_to_log: $output"
+}
