@@ -4890,6 +4890,7 @@ GHEOF
 _capture_log() {
 	log() { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
 	log_warn() { printf 'WARN: %s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_error() { printf 'ERROR: %s\n' "$*" >> "$TEST_TMP/log.out"; }
 	: > "$TEST_TMP/log.out"
 }
 
@@ -6259,6 +6260,39 @@ source_warn_permission_denials() {
 
 	[[ ! -s "$TEST_TMP/log.out" ]] \
 		|| fail "WARN logged without denials: $(cat "$TEST_TMP/log.out")"
+}
+
+@test "#1097: a denied Bash command is logged by its first line only" {
+	source_warn_permission_denials \
+		|| skip "warn_permission_denials() not yet present"
+	_capture_log
+
+	local result_json
+	result_json=$(jq -nc '{permission_denials:[{tool_name:"Bash",tool_input:{command:"FOO=$(date)\nsecond-line-secret"}}]}')
+
+	warn_permission_denials "$result_json" "process-pr" 174
+
+	grep -q 'WARN: .*denied command: FOO=\$(date)' "$TEST_TMP/log.out" \
+		|| fail "first line of denied command not logged: $(cat "$TEST_TMP/log.out")"
+	! grep -q 'second-line-secret' "$TEST_TMP/log.out" \
+		|| fail "later lines of the command leaked into the log"
+	! grep -q 'ERROR' "$TEST_TMP/log.out" \
+		|| fail "non-issue-creation denial logged at ERROR"
+}
+
+@test "#1097: a denied issue-creation call is logged at ERROR" {
+	source_warn_permission_denials \
+		|| skip "warn_permission_denials() not yet present"
+	_capture_log
+
+	local result_json
+	result_json=$(jq -nc '{permission_denials:[{tool_name:"Bash",tool_input:{command:"VAR=\"$(pipeline-core-platform-dir)\"/create-issue.sh --title x\nmore"}}]}')
+
+	warn_permission_denials "$result_json" "process-pr" 174
+
+	grep -q 'ERROR: .*issue-creation denied: .*create-issue.sh' \
+		"$TEST_TMP/log.out" \
+		|| fail "issue-creation denial not logged at ERROR: $(cat "$TEST_TMP/log.out")"
 }
 
 @test "AC3(#1020): process_issue wires warn_permission_denials to process-pr result" {
