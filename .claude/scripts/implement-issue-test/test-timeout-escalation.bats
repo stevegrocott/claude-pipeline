@@ -828,8 +828,8 @@ assert_wall_time_covers_serial() {
     # the get_task_wall_time check above, since that string appears
     # regardless of whether its result is ever used. Assert the
     # resolved value actually reaches the sleep call.
-    printf '%s\n' "$watchdog_region" | grep -qF 'sleep "${twall}"' || \
-        fail "Expected the watchdog's sleep to use the resolved" \
+    printf '%s\n' "$watchdog_region" | grep -qF '_waited < twall' || \
+        fail "Expected the watchdog's poll loop to use the resolved" \
             "per-task twall, not the flat MAX_TASK_WALL_TIME_SECS global." \
             $'\nRegion:\n'"$watchdog_region"
 }
