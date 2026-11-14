@@ -3033,8 +3033,13 @@ _repro_full_suite_bats_check() {
 	[ -n "$window" ] || fail "Could not locate the full-suite BATS check block"
 	[[ "$window" != *'!= "bash"'* ]] || \
 		fail "Full-suite BATS check must no longer exclude the bash scope (#686). Window: $window"
-	[[ "$window" != *'branch_scope" =='* && "$window" != *'branch_scope" !='* ]] || \
-		fail "Full-suite BATS check must not be gated on branch_scope. Window: $window"
+	# Any scope condition (if/elif/case/[[ ]]/&&/||) in the executable lines
+	# gates the check, whatever the variable name or operator (#1070).
+	local scope_gate
+	scope_gate=$(grep -v '^[[:space:]]*#' <<< "$window" | \
+		grep -E '(\[\[|\bif\b|\belif\b|\bcase\b|&&|\|\|).*scope|scope.*(\]\]|&&|\|\||\bin\b)' || true)
+	[ -z "$scope_gate" ] || \
+		fail "Full-suite BATS check must not be gated on any scope condition. Offending: $scope_gate"
 	[[ "$window" == *run-tests.sh* ]] || \
 		fail "Full-suite BATS check must invoke run-tests.sh (full suite). Window: $window"
 }
