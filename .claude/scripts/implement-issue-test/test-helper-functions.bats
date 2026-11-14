@@ -1206,6 +1206,19 @@ WRAPPER
     done
 }
 
+# Issue #1074: an exported CLAUDE_CLI leaking in from a batch launch defeats
+# the mock CLI the suites install, so setup_test_env must scrub it.
+@test "setup_test_env scrubs an inherited CLAUDE_CLI (#1074)" {
+    local outer_tmp="$TEST_TMP"
+    export CLAUDE_CLI=/stale/real/claude
+
+    setup_test_env
+    rm -rf "$TEST_TMP"
+    TEST_TMP="$outer_tmp"
+
+    [[ -z "${CLAUDE_CLI+set}" ]] || fail "CLAUDE_CLI survived setup_test_env"
+}
+
 @test "_timeout_perl_fallback rejects an empty duration with exit 125" {
     run _timeout_perl_fallback "" true
     [ "$status" -eq 125 ]
