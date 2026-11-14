@@ -912,6 +912,43 @@ _i950_squash_merged_branch() {
 	git branch -D feature/serial-test 2>/dev/null || true
 }
 
+@test "execute_batch_serial: prompt passed to run_stage has no WORKTREE BOUNDARY block" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/serial-noboundary main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# Capture the prompt (arg 2) handed to run_stage for the serial task.
+	run_stage() {
+		printf '%s' "$2" > "$TEST_TMP/serial-prompt.txt"
+		printf 'task 1 output\n' > task-1-out.txt
+		git add task-1-out.txt
+		git commit -q -m "task 1"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "3"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks
+	tasks='[{"id":1,"description":"Do thing","agent":"default"}]'
+	rm -f "$TEST_TMP/serial-prompt.txt"
+	execute_batch_serial "$tasks" "feature/serial-noboundary" "main" >/dev/null 2>&1 || true
+
+	local prompt=""
+	[[ -s "$TEST_TMP/serial-prompt.txt" ]] && prompt=$(<"$TEST_TMP/serial-prompt.txt")
+
+	git checkout -q main
+	git branch -D feature/serial-noboundary 2>/dev/null || true
+
+	# Guard against a vacuous pass: the prompt must actually have been captured.
+	[[ "$prompt" == *"Implement task 1 on branch feature/serial-noboundary"* ]]
+	[[ "$prompt" != *"WORKTREE BOUNDARY"* ]]
+}
+
 @test "execute_batch_serial: returns failed IDs when run_stage fails" {
 	cd "$TEST_TMP/repo" || exit 1
 	git checkout -q -b feature/serial-fail main
