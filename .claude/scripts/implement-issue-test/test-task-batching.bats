@@ -21,6 +21,9 @@
 #     5. tasks with no recognisable paths → all batch 1 (no conflict assumed)
 #     6. every task in output has a .batch field
 #
+#   filter_batch_by_dependencies:
+#     keeps tasks whose depends-on tasks all completed; records the rest failed
+#
 #   create_task_worktree:
 #     1. creates worktree directory at expected path
 #     2. creates the expected branch
@@ -279,6 +282,117 @@ _restore_acceptance_env() {
 	nulls=$(printf '%s' "$result" \
 		| jq '[.[] | select(.batch == null)] | length')
 	[ "$nulls" -eq 0 ]
+}
+
+# =============================================================================
+# filter_batch_by_dependencies
+# =============================================================================
+
+@test "filter_batch_by_dependencies: keeps task whose dependencies all completed" {
+	local batch result
+	batch='[{"id":3,"depends_on":[1,2]}]'
+	result=$(filter_batch_by_dependencies "$batch" '[1,2]' '[1,2,3]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[3]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[]" ]
+}
+
+@test "filter_batch_by_dependencies: records task failed when a dependency did not complete" {
+	local batch result
+	batch='[{"id":3,"depends_on":[1,2]}]'
+	result=$(filter_batch_by_dependencies "$batch" '[1]' '[1,2,3]')
+	[ "$(jq -c '.runnable' <<< "$result")" = "[]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[3]" ]
+	[ "$(jq -r '.blocked_by["3"]' <<< "$result")" = "2" ]
+}
+
+@test "filter_batch_by_dependencies: tasks without depends_on always kept" {
+	local result
+	result=$(filter_batch_by_dependencies '[{"id":1},{"id":2,"depends_on":[]}]' '[]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[1,2]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[]" ]
+}
+
+@test "filter_batch_by_dependencies: splits a mixed batch preserving order" {
+	local batch result
+	batch='[{"id":2,"depends_on":[1]},{"id":3,"depends_on":[9]},{"id":4}]'
+	result=$(filter_batch_by_dependencies "$batch" '[1]' '[1,2,3,4,9]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[2,4]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[3]" ]
+}
+
+@test "filter_batch_by_dependencies: matches string and numeric ids alike" {
+	local result
+	result=$(filter_batch_by_dependencies '[{"id":2,"depends_on":["1"]}]' '[1]' '[1,2]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[2]" ]
+}
+
+@test "filter_batch_by_dependencies: empty batch yields empty result" {
+	local result
+	result=$(filter_batch_by_dependencies '[]' '[]')
+	[ "$result" = '{"runnable":[],"failed":[],"blocked_by":{}}' ]
+}
+
+@test "filter_batch_by_dependencies: unknown dependency id does not block" {
+	local result
+	result=$(filter_batch_by_dependencies '[{"id":3,"depends_on":[99]}]' '[1]' '[1,2,3]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[3]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[]" ]
+}
+
+@test "filter_batch_by_dependencies: blocked_by names the uncompleted known dependency" {
+	local result
+	result=$(filter_batch_by_dependencies '[{"id":5,"depends_on":[99,1,4]}]' '[1]' '[1,4,5]')
+	[ "$(jq -c '.failed' <<< "$result")" = "[5]" ]
+	[ "$(jq -r '.blocked_by["5"]' <<< "$result")" = "4" ]
+}
+
+@test "filter_batch_by_dependencies: failed link blocks the whole chain" {
+	local tasks completed batch result
+	tasks='[{"id":1},{"id":2,"depends_on":[1]},{"id":3,"depends_on":[2]}]'
+	tasks=$(compute_task_batches "$tasks" main)
+	[ "$(jq -c 'map(.batch)' <<< "$tasks")" = "[1,2,3]" ]
+
+	# Task 1 failed: nothing completed, so 2 is blocked in batch 2
+	completed='[]'
+	batch=$(jq -c '[.[] | select(.batch == 2)]' <<< "$tasks")
+	result=$(filter_batch_by_dependencies "$batch" "$completed" '[1,2,3]')
+	[ "$(jq -c '.failed' <<< "$result")" = "[2]" ]
+
+	# Task 2 was recorded failed, not completed: 3 is blocked too
+	batch=$(jq -c '[.[] | select(.batch == 3)]' <<< "$tasks")
+	result=$(filter_batch_by_dependencies "$batch" "$completed" '[1,2,3]')
+	[ "$(jq -c '.failed' <<< "$result")" = "[3]" ]
+}
+
+@test "filter_batch_by_dependencies: completed chain runs every link" {
+	local tasks batch result
+	tasks='[{"id":1},{"id":2,"depends_on":[1]},{"id":3,"depends_on":[2]}]'
+	tasks=$(compute_task_batches "$tasks" main)
+	batch=$(jq -c '[.[] | select(.batch == 3)]' <<< "$tasks")
+	result=$(filter_batch_by_dependencies "$batch" '[1,2]' '[1,2,3]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[3]" ]
+}
+
+@test "dispatch loop: filter output replaces batch_tasks before any executor call" {
+	local script="$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh"
+	local head_to_filter filt_to_exec
+	# Nothing executes between the batch loop head and the filter call
+	head_to_filter=$(awk '/for batch_num in "\$\{batch_nums\[@\]\}"/{f=1} /dep_split=\$\(filter_batch_by_dependencies/{exit} f{print}' "$script")
+	[ -n "$head_to_filter" ]
+	run grep -c 'execute_batch_' <<< "$head_to_filter"
+	[ "$output" = "0" ]
+	# The runnable subset is assigned back to batch_tasks before the first executor
+	filt_to_exec=$(awk '/dep_split=\$\(filter_batch_by_dependencies/{f=1} f{print} /execute_batch_(serial|parallel) *\\?$/{if(f)exit}' "$script")
+	grep -q "batch_tasks=\$(jq -c '.runnable'" <<< "$filt_to_exec"
+}
+
+@test "update_task: records reason naming the blocking task" {
+	STATUS_FILE="$TEST_TMP/status-reason.json"
+	export STATUS_FILE
+	printf '%s' '{"tasks":[{"id":3,"status":"pending"}]}' > "$STATUS_FILE"
+	update_task 3 failed 0 "blocked by depends-on task 2 (did not complete)"
+	[ "$(jq -r '.tasks[0].status' "$STATUS_FILE")" = "failed" ]
+	[[ "$(jq -r '.tasks[0].reason' "$STATUS_FILE")" == *"task 2"* ]]
 }
 
 # =============================================================================
