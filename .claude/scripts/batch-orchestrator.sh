@@ -482,20 +482,44 @@ log_warn() {
     printf '%s\n' "$msg" >&2
 }
 
-# Log a WARN naming each tool denied in a claude result's permission_denials.
+# Log a WARN naming each tool denied in a claude result's permission_denials,
+# followed by one line per denied Bash command (first line only). A denied
+# issue-creation call is logged at ERROR: the issue was never created.
 # Usage: warn_permission_denials <result_json> <stage> <issue_num>
 warn_permission_denials() {
     local result_json="$1"
     local stage="$2"
     local issue_num="$3"
     local denials
+    local cmd_line
+    local -a cmd_lines=()
 
     denials=$(printf '%s' "$result_json" | jq -r '
         (.permission_denials // [])
         | map(.tool_name // "unknown") | join(", ")' 2>/dev/null) || denials=""
-    if [[ -n "$denials" ]]; then
-        log_warn "Issue #$issue_num: $stage had permission_denials: $denials"
+    if [[ -z "$denials" ]]; then
+        return 0
     fi
+    log_warn "Issue #$issue_num: $stage had permission_denials: $denials"
+
+    # First line of each denied Bash command, newline-collapsed by jq
+    while IFS= read -r cmd_line; do
+        cmd_lines+=("$cmd_line")
+    done < <(printf '%s' "$result_json" | jq -r '
+        (.permission_denials // [])[]
+        | select(.tool_name == "Bash")
+        | (.tool_input.command // "" | split("\n")[0])' 2>/dev/null)
+
+    for cmd_line in "${cmd_lines[@]}"; do
+        [[ -n "$cmd_line" ]] || continue
+        if [[ "$cmd_line" == *"create-issue"* \
+            || "$cmd_line" == *"create-followup-issue"* \
+            || "$cmd_line" == *"gh issue create"* ]]; then
+            log_error "Issue #$issue_num: $stage issue-creation denied: $cmd_line"
+        else
+            log_warn "Issue #$issue_num: $stage denied command: $cmd_line"
+        fi
+    done
 }
 
 # =============================================================================
