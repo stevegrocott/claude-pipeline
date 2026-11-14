@@ -2903,6 +2903,15 @@ detect_rate_limit() {
         return 1
     fi
 
+    # Structured API error fields: usage_limit_reached or HTTP 429
+    if printf '%s' "$output" | jq -e '
+        ((.api_error_status // null) | tostring) == "429"
+        or ((.api_error // null) | tostring
+            | test("usage_limit_reached"))
+    ' >/dev/null 2>&1; then
+        return 0
+    fi
+
     # Fallback to text pattern matching (only for errors)
     local result
     result=$(printf '%s' "$output" | jq -r '.result // empty' 2>/dev/null)

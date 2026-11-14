@@ -89,6 +89,24 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "detect_rate_limit true for api_error usage_limit_reached envelope" {
+    local output='{"is_error":true,"result":"Usage cap hit","api_error":"usage_limit_reached"}'
+    run detect_rate_limit "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_rate_limit true for api_error_status 429 envelope" {
+    local output='{"is_error":true,"result":"API Error: overloaded","api_error_status":429}'
+    run detect_rate_limit "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_rate_limit false for api_error_status 500 envelope" {
+    local output='{"is_error":true,"result":"API Error: boom","api_error_status":500}'
+    run detect_rate_limit "$output"
+    [ "$status" -eq 1 ]
+}
+
 # =============================================================================
 # EXTRACT_WAIT_TIME
 # =============================================================================
