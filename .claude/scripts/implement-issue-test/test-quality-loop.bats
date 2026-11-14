@@ -206,6 +206,36 @@ teardown() {
     [[ "$output" == *"denied_tools=Bash, Write"* ]]
 }
 
+@test "record_failed_review_fix records degraded token, block reason and PR comment" {
+    DEGRADED_STAGES=()
+    jq '.stages.pr.pr_number = 77' "$STATUS_FILE" > "$STATUS_FILE.tmp"
+    mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+    comment_pr() { printf '%s|%s|%s\n' "$1" "$2" "$3" > "$TEST_TMP/pr_comment"; }
+
+    record_failed_review_fix "fix-review-test" "permission_denied" "Bash, Write"
+
+    [[ "${DEGRADED_STAGES[*]}" == *"quality:fix_failed:fix-review-test"* ]]
+    local reason
+    reason=$(jq -r '.merge_blocked_reason' "$STATUS_FILE")
+    [[ "$reason" == *"fix-review-test"* ]]
+    [[ "$reason" == *"error_kind=permission_denied"* ]]
+    local comment
+    comment=$(<"$TEST_TMP/pr_comment")
+    [[ "$comment" == "77|"*"fix-review-test"* ]]
+    [[ "$comment" == *"denied_tools=Bash, Write"* ]]
+}
+
+@test "record_failed_review_fix skips PR comment when no PR is known" {
+    DEGRADED_STAGES=()
+    comment_pr() { touch "$TEST_TMP/pr_comment"; }
+
+    record_failed_review_fix "fix-review-test"
+
+    [[ ! -e "$TEST_TMP/pr_comment" ]]
+    [[ "${DEGRADED_STAGES[*]}" == *"quality:fix_failed:fix-review-test"* ]]
+    [[ "$(jq -r '.merge_blocked_reason' "$STATUS_FILE")" == *"error_kind=unknown"* ]]
+}
+
 # =============================================================================
 # REVIEW CHANGES REQUESTED HANDLING
 # =============================================================================

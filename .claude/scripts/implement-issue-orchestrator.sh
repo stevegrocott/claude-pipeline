@@ -2037,6 +2037,34 @@ persist_merge_block_kind() {
     sync_status_to_log
 }
 
+# ---------------------------------------------------------------------------
+# record_failed_review_fix <stage_name> [error_kind] [denied_tools]
+# Record a review fix stage that errored and committed nothing: add a
+# degraded-stage token, persist a merge-block reason naming the stage, and
+# comment on the PR (when one is known from status.json) so a human sees why
+# the merge is held. Always returns 0 — recording must never abort the run.
+# ---------------------------------------------------------------------------
+record_failed_review_fix() {
+    local stage_name="$1"
+    local error_kind="${2:-unknown}"
+    local denied_tools="${3:-none}"
+    local reason pr_number
+
+    DEGRADED_STAGES+=("quality:fix_failed:${stage_name}")
+
+    reason="Review fix failed at ${stage_name}: fix errored with no commits (error_kind=${error_kind}, denied_tools=${denied_tools})"
+    persist_merge_blocked_reason "$reason"
+
+    if [[ -f "${STATUS_FILE:-}" ]]; then
+        pr_number=$(jq -r '.stages.pr.pr_number // empty' "$STATUS_FILE" 2>/dev/null)
+    fi
+    if [[ -n "${pr_number:-}" ]]; then
+        comment_pr "$pr_number" "Review Fix Failed ($stage_name)" \
+            "$reason. Merge is blocked until a human reviews." || true
+    fi
+    return 0
+}
+
 increment_quality_iteration() {
     status_json_write '.quality_iterations += 1 |
         .stages.quality_loop.iteration = .quality_iterations |
