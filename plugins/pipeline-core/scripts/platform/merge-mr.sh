@@ -513,6 +513,42 @@ _pr_terminal_state() {
   return 1
 }
 
+# Runs the GitHub merge command with the given arguments. gh can exit non-zero
+# even though GitHub completed the merge (e.g. the post-merge local branch
+# cleanup fails), so a failure is only honoured after re-reading the PR: exit 0
+# with a warning if it is MERGED, otherwise keep the original failure status.
+# In the MERGED case the remote head branch is then deleted best-effort (same-
+# repo PRs only); that never changes the exit code.
+_delete_remote_head() {
+  local pr="$1" info ref cross
+  info=$(gh pr view "$pr" --json headRefName,isCrossRepository \
+    --jq '[.headRefName, (.isCrossRepository | tostring)] | join(" ")' \
+    2>/dev/null) || return 0
+  read -r ref cross <<< "$info"
+  if [ -z "$ref" ] || [ "$cross" != "false" ]; then
+    return 0
+  fi
+  if ! gh api -X DELETE "repos/{owner}/{repo}/git/refs/heads/$ref" \
+    >/dev/null 2>&1; then
+    echo "WARNING: could not delete remote branch $ref (best-effort)" >&2
+  fi
+  return 0
+}
+
+_gh_merge() {
+  local pr="$1" rc=0 state
+  gh pr merge "$@" || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  state=$(gh pr view "$pr" --json state --jq '.state' 2>/dev/null) || state=""
+  if [ "$state" = "MERGED" ]; then
+    echo "WARNING: merge command exited $rc but PR #$pr is MERGED;" \
+      "treating as success" >&2
+    _delete_remote_head "$pr"
+    return 0
+  fi
+  return "$rc"
+}
+
 case "$GIT_HOST" in
   github)
     # Check the terminal states before polling: a merged PR is success, a
@@ -530,9 +566,9 @@ case "$GIT_HOST" in
     wait_for_full_run "$MR" || exit 1
     wait_for_mergeable "$MR" || exit 1
     case "$MERGE_STYLE" in
-      squash) gh pr merge "$MR" --squash --delete-branch ;;
-      merge) gh pr merge "$MR" --merge --delete-branch ;;
-      rebase) gh pr merge "$MR" --rebase --delete-branch ;;
+      squash) _gh_merge "$MR" --squash --delete-branch ;;
+      merge) _gh_merge "$MR" --merge --delete-branch ;;
+      rebase) _gh_merge "$MR" --rebase --delete-branch ;;
       *)
         echo "FATAL: MERGE_STYLE=\"$MERGE_STYLE\" is not a recognised" \
             "merge style. Accepted values: squash, merge, rebase." >&2
