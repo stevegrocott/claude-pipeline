@@ -4013,6 +4013,41 @@ _setup_status_634() {
 	[[ "$output" == *"escaped-1068.txt"* ]]
 }
 
+@test "#1094 execute_batch_parallel: a tracked-file edit is named in exactly one error line" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/trk-1094 main
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+	run_task_in_worktree() {
+		local result_file="$8"
+		printf 'modified' >> "$TEST_TMP/repo/README.md"
+		printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree extract_task_size
+
+	local tasks
+	tasks='[{"id":9,"description":"Modify README","agent":"default","batch":1}]'
+	run execute_batch_parallel 1 "$tasks" "feature/trk-1094" "main"
+
+	local dirty_status
+	dirty_status=$(git status --porcelain -- README.md)
+	git checkout -q -- README.md 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/trk-1094 2>/dev/null || true
+
+	# The tracked file is reported as a modified (not untracked) path
+	[[ "$dirty_status" == " M README.md" ]]
+	local named
+	named=$(printf '%s\n' "$output" | grep -c 'README\.md' || true)
+	[ "$named" -eq 1 ]
+	local errors
+	errors=$(printf '%s\n' "$output" | grep -c 'primary checkout paths changed' || true)
+	[ "$errors" -eq 1 ]
+	printf '%s\n' "$output" | grep 'primary checkout paths changed' | grep -q 'README\.md'
+}
+
 # =============================================================================
 # API-error halt guard at every budget-guard site (issue #1072)
 # =============================================================================
