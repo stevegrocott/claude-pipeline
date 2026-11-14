@@ -127,7 +127,19 @@ GH_EOF
     install_failing_merge_gh MERGED
     run run_platform_script merge-mr.sh 99
     [ "$status" -eq 0 ]
-    assert_output_contains "is MERGED"
+    assert_output_contains "PR #99 is MERGED"
+    assert_output_contains "post-merge branch cleanup failed"
+}
+
+@test "merge-mr github: normal squash merge is silent with exactly one merge call" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    run run_platform_script merge-mr.sh 99
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(grep -c 'gh pr merge' "$TEST_TMP/mock_calls.log")" = "1" ]
+    [ "$(grep -c -e '--json state' "$TEST_TMP/mock_calls.log")" = "1" ]
+    [ "$(grep -c 'gh api' "$TEST_TMP/mock_calls.log")" = "0" ]
 }
 
 @test "merge-mr github: cleanup-failed merge deletes same-repo remote branch" {

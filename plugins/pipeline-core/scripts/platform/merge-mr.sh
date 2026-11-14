@@ -513,12 +513,8 @@ _pr_terminal_state() {
   return 1
 }
 
-# Runs the GitHub merge command with the given arguments. gh can exit non-zero
-# even though GitHub completed the merge (e.g. the post-merge local branch
-# cleanup fails), so a failure is only honoured after re-reading the PR: exit 0
-# with a warning if it is MERGED, otherwise keep the original failure status.
-# In the MERGED case the remote head branch is then deleted best-effort (same-
-# repo PRs only); that never changes the exit code.
+# Best-effort delete of the PR's remote head branch (same-repo PRs only).
+# Never changes the exit code.
 _delete_remote_head() {
   local pr="$1" info ref cross
   info=$(gh pr view "$pr" --json headRefName,isCrossRepository \
@@ -535,14 +531,19 @@ _delete_remote_head() {
   return 0
 }
 
+# Runs the GitHub merge command with the given arguments. gh can exit non-zero
+# even though GitHub completed the merge (e.g. the post-merge local branch
+# cleanup fails), so a failure is only honoured after re-reading the PR: exit 0
+# with a warning if it is MERGED, otherwise keep the original failure status.
+# In the MERGED case the remote head branch is then deleted best-effort.
 _gh_merge() {
   local pr="$1" rc=0 state
   gh pr merge "$@" || rc=$?
   [ "$rc" -ne 0 ] || return 0
   state=$(gh pr view "$pr" --json state --jq '.state' 2>/dev/null) || state=""
   if [ "$state" = "MERGED" ]; then
-    echo "WARNING: merge command exited $rc but PR #$pr is MERGED;" \
-      "treating as success" >&2
+    echo "WARNING: PR #$pr is MERGED but the post-merge branch cleanup" \
+      "failed (merge command exited $rc); treating as success" >&2
     _delete_remote_head "$pr"
     return 0
   fi
