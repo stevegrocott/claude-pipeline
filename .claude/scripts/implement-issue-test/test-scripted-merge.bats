@@ -1072,3 +1072,63 @@ STUB
 	(( step_default > poll_default )) \
 		|| fail "MERGE_MR_STEP_TIMEOUT (${step_default}s) must exceed MERGE_MR_POLL_MAX (${poll_default}s), or the outer timeout kills merge-mr.sh mid-wait (#931)"
 }
+
+# ---------------------------------------------------------------------------
+# Failed `gh pr merge` is only honoured after re-reading the PR state. These
+# run the whole script (not extracted functions) so `set -e` is in play.
+# The first `--json state` call is the terminal-state precheck (OPEN); the
+# second is the post-failure re-read, whose behaviour is the variable.
+# ---------------------------------------------------------------------------
+
+_failing_merge_stub() {
+	local reread="$1"
+	printf '%s' '
+n_file="'"$TEST_TMP"'/state-count"
+for a in "$@"; do
+  case "$a" in
+    state)
+      n=$(cat "$n_file" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      printf "%s" "$n" > "$n_file"
+      if [ "$n" -eq 1 ]; then printf "OPEN\n"; exit 0; fi
+      '"$reread"'
+      ;;
+    mergeStateStatus,statusCheckRollup)
+      printf "%s\n" "{\"mergeStateStatus\":\"CLEAN\",\"statusCheckRollup\":[]}"
+      exit 0 ;;
+    headRefName,isCrossRepository)
+      printf "feature/x true\n"; exit 0 ;;
+  esac
+done
+case "$1 $2" in
+  "pr merge") exit 1 ;;
+esac
+printf "{}\n"; exit 0
+'
+}
+
+@test "merge-mr e2e: merged PR after gh pr merge exits 1 gives exit 0" {
+	run_whole_script "$TEST_TMP/gh-merged.log" \
+		"$(_failing_merge_stub 'printf "MERGED\n"; exit 0')" \
+		"$MERGE_MR" 5979
+
+	[[ "$status" -eq 0 ]] \
+		|| fail "merged PR with failing gh exited $status: $output"
+	[[ "$output" == *"is MERGED"* ]] \
+		|| fail "no MERGED warning in output: $output"
+	grep -q "pr merge" "$TEST_TMP/gh-merged.log" \
+		|| fail "gh pr merge was never invoked"
+}
+
+@test "merge-mr e2e: unreadable PR state after failed merge stays non-zero" {
+	run_whole_script "$TEST_TMP/gh-unreadable.log" \
+		"$(_failing_merge_stub 'exit 1')" \
+		"$MERGE_MR" 5979
+
+	[[ "$status" -ne 0 ]] \
+		|| fail "unreadable state was treated as success: $output"
+	[[ "$output" != *"treating as success"* ]] \
+		|| fail "claimed success on unreadable state: $output"
+	grep -q "pr merge" "$TEST_TMP/gh-unreadable.log" \
+		|| fail "gh pr merge was never invoked"
+}
