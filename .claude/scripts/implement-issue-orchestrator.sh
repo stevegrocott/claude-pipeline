@@ -763,9 +763,17 @@ check_wall_timeout() {
 check_pr_review_wall_timeout() {
     local loop_start="$1"
     local budget="$2"
-    local now elapsed
+    local now elapsed slept=0
     now=$(date +%s)
     elapsed=$(( now - loop_start ))
+    # Rate-limit sleep is not work: exclude it from the loop budget.
+    if (( elapsed > budget )); then
+        slept=$(rate_limit_slept_since "$loop_start")
+        elapsed=$(( elapsed - slept ))
+    fi
+    if (( slept > 0 )); then
+        log "PR-review wall-clock: excluded ${slept}s of rate-limit sleep (effective elapsed: ${elapsed}s)"
+    fi
     if (( elapsed > budget )); then
         log_warn "PR-review wall-clock budget exceeded: ${elapsed}s elapsed (limit: ${budget}s). Soft-exiting review loop."
         return 1
@@ -782,9 +790,17 @@ check_pr_review_wall_timeout() {
 check_test_loop_wall_timeout() {
     local loop_start="$1"
     local budget="$2"
-    local now elapsed
+    local now elapsed slept=0
     now=$(date +%s)
     elapsed=$(( now - loop_start ))
+    # Rate-limit sleep is not work: exclude it from the loop budget.
+    if (( elapsed > budget )); then
+        slept=$(rate_limit_slept_since "$loop_start")
+        elapsed=$(( elapsed - slept ))
+    fi
+    if (( slept > 0 )); then
+        log "Test-loop wall-clock: excluded ${slept}s of rate-limit sleep (effective elapsed: ${elapsed}s)"
+    fi
     if (( elapsed > budget )); then
         log_warn "Test-loop wall-clock budget exceeded:" \
             "${elapsed}s elapsed (limit: ${budget}s)." \
