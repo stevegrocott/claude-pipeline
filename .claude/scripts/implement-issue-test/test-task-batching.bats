@@ -3804,3 +3804,39 @@ _setup_status_634() {
 	[[ "$prompt" == *"absolute path is: $abs_path"* ]]
 	[[ "$prompt" == *"Read and edit files only under that path"* ]]
 }
+
+# =============================================================================
+# _report_primary_checkout_dirt: escaped-worktree detection (#1068)
+# =============================================================================
+
+@test "#1068 _report_primary_checkout_dirt: names newly dirty paths" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	printf 'x' > pre-existing-1068.txt
+	local baseline
+	baseline=$(git status --porcelain)
+	printf 'x' > escaped-1068.txt
+
+	run _report_primary_checkout_dirt "$baseline" 3
+	rm -f pre-existing-1068.txt escaped-1068.txt
+
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"ERROR"* ]]
+	[[ "$output" == *"Batch 3"* ]]
+	[[ "$output" == *"escaped-1068.txt"* ]]
+	[[ "$output" != *"pre-existing-1068.txt"* ]]
+}
+
+@test "#1068 _report_primary_checkout_dirt: silent when nothing new is dirty" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	printf 'x' > pre-existing-1068.txt
+	local baseline
+	baseline=$(git status --porcelain)
+
+	run _report_primary_checkout_dirt "$baseline" 3
+	rm -f pre-existing-1068.txt
+
+	[ "$status" -eq 0 ]
+	[[ -z "$output" ]]
+}

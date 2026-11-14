@@ -8805,6 +8805,39 @@ _task_noop_is_genuine() {
 	[[ "$claimed" == "true" ]]
 }
 
+# Log an error naming primary-checkout paths that became dirty while a
+# parallel batch ran (issue #1068).  Task agents work in worktrees; a path
+# that turns dirty in the primary checkout means one escaped its worktree.
+#
+# Arguments:
+#   $1 - `git status --porcelain` output captured before the batch launched
+#   $2 - batch number (for the message)
+# Returns:
+#   0 when nothing new is dirty, 1 after logging an error
+#
+_report_primary_checkout_dirt() {
+	local baseline="${1:-}"
+	local batch_num="${2:-?}"
+	local now
+	now=$(git status --porcelain 2>/dev/null || printf '')
+	[[ -n "$now" ]] || return 0
+
+	local -a fresh=()
+	local line
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		if [[ $'\n'"$baseline"$'\n' != *$'\n'"$line"$'\n'* ]]; then
+			fresh+=("$line")
+		fi
+	done <<< "$now"
+
+	((${#fresh[@]} > 0)) || return 0
+	log_error "Batch $batch_num: primary checkout became dirty during" \
+		"parallel batch (a task escaped its worktree):" \
+		"$(_porcelain_dirty_paths "$(printf '%s\n' "${fresh[@]}")")"
+	return 1
+}
+
 # Execute a batch of tasks in parallel using worktrees.
 #
 # Arguments:
@@ -8840,6 +8873,9 @@ execute_batch_parallel() {
 	local -a wt_branches=()
 	local -a result_files=()
 	local -a task_walltimes=()
+
+	local primary_baseline
+	primary_baseline=$(git status --porcelain 2>/dev/null || printf '')
 
 	local i
 	for ((i = 0; i < batch_count; i++)); do
@@ -8944,6 +8980,8 @@ execute_batch_parallel() {
 
 	log "Batch $batch_num: all tasks finished," \
 		"collecting results"
+
+	_report_primary_checkout_dirt "$primary_baseline" "$batch_num" || true
 
 	# Ensure we are on the feature branch for merges
 	git checkout "$feature_branch" >/dev/null 2>&1 || true
