@@ -300,10 +300,57 @@ teardown() {
         || fail "Expected error_kind api_error; got: $output"
     [ "$(printf '%s' "$output" | grep -c 'action=retry_same')" = "1" ] \
         || fail "Expected exactly one retry_same dispatch; got: $output"
-    [[ "$output" == *"action=bail"* || "$output" == *"repeated API failure"* ]] \
-        || fail "Expected halt recorded as bail; got: $output"
+    [[ "$output" == *"Stage bailed: api_error: repeated API failure"* ]] \
+        || fail "Expected the api_error bail line; got: $output"
     [[ "$output" != *"action=escalate"* ]] \
         || fail "api_error must not escalate: $output"
+}
+
+# _assert_api_error_envelope — run_stage on the envelope in $1 must classify
+# it api_error: one retry_same, a bail, and never an escalation.
+_assert_api_error_envelope() {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    printf '%s\n' "$1" > "$MOCK_CLAUDE_RESPONSE"
+    export API_ERROR_RETRY_WAIT=0
+
+    run run_stage "test" "prompt" "test-schema.json"
+
+    [ "$status" -ne 0 ]
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.error_kind')" = "api_error" ] \
+        || fail "Expected error_kind api_error; got: $output"
+    [ "$(printf '%s' "$output" | grep -c 'action=retry_same')" = "1" ] \
+        || fail "Expected exactly one retry_same; got: $output"
+    [[ "$output" == *"Stage bailed: api_error: repeated API failure"* ]] \
+        || fail "Expected the api_error bail line; got: $output"
+    [[ "$output" != *"action=escalate"* ]] \
+        || fail "api_error must not escalate: $output"
+    [[ "$output" != *"Diagnostic fallback failure"* ]] \
+        || fail "must not fall through to no_structured_output: $output"
+}
+
+@test "run_stage handles the #1072 incident 403 envelope as api_error" {
+    _assert_api_error_envelope '{"type":"result","subtype":"success","is_error":true,"api_error_status":403,"terminal_reason":"api_error","result":"Failed to authenticate. API Error: 403 forbidden"}'
+}
+
+@test "run_stage handles the no-status expired-login envelope as api_error" {
+    _assert_api_error_envelope '{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"Failed to authenticate: OAuth session expired and could not be refreshed"}'
+}
+
+@test "run_stage handles an expired-login envelope without terminal_reason as api_error" {
+    _assert_api_error_envelope '{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}'
+}
+
+@test "run_stage leaves a successful stage mentioning Failed to authenticate alone" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":false,"result":"Failed to authenticate was fixed","structured_output":{"status":"success","summary":"ok"}}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+    export API_ERROR_RETRY_WAIT=0
+
+    run run_stage "test" "prompt" "test-schema.json"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"API error envelope"* ]] \
+        || fail "success envelope misclassified: $output"
 }
 
 @test "run_stage keeps rate_limit ahead of api_error for a 429 envelope" {
