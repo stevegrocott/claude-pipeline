@@ -404,19 +404,36 @@ _clock_at_offset() {
 @test "handle_rate_limit records its sleep interval" {
     sleep() { :; }
     extract_wait_time() { echo 7; }
-    local expect=$((7 + RATE_LIMIT_BUFFER))
     emit_event() { :; }
+    local before; printf -v before '%(%s)T' -1
     handle_rate_limit '{}' ""
     [ -f "$LOG_BASE/rate-limit-sleeps.log" ]
-    run rate_limit_slept_since 0
-    [ "$output" = "$expect" ]
+    read -r s e < "$LOG_BASE/rate-limit-sleeps.log"
+    [ "$s" -ge "$before" ]
+    [ "$((e - s))" -eq "$((7 + RATE_LIMIT_BUFFER))" ]
 }
 
-@test "rate_limit_slept_since sums only entries at or after the time" {
-    printf '%s\n' "100 5" "200 7" "300 11" "bogus line" \
-        > "$LOG_BASE/rate-limit-sleeps.log"
-    run rate_limit_slept_since 200
-    [ "$output" = "18" ]
-    run rate_limit_slept_since 301
+@test "rate_limit_slept_since counts overlapping sleeps once" {
+    local now; printf -v now '%(%s)T' -1
+    printf '%s\n' "$((now-100)) $((now-60))" "$((now-90)) $((now-50))" \
+        "bogus line" > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since 0
+    [ "$output" = "50" ]
+}
+
+@test "rate_limit_slept_since does not credit future sleep time" {
+    local now; printf -v now '%(%s)T' -1
+    printf '%s\n' "$((now-10)) $((now+500))" > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since 0
+    [ "$output" -ge 10 ]
+    [ "$output" -le 12 ]
+}
+
+@test "rate_limit_slept_since clips a sleep straddling the window start" {
+    local now; printf -v now '%(%s)T' -1
+    printf '%s\n' "$((now-100)) $((now-40))" > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since "$((now-60))"
+    [ "$output" = "20" ]
+    run rate_limit_slept_since "$((now-30))"
     [ "$output" = "0" ]
 }

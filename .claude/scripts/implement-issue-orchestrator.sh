@@ -3092,35 +3092,48 @@ handle_rate_limit() {
 
 # _record_rate_limit_sleep <seconds>
 #
-# Append one "<epoch-seconds> <slept-seconds>" line to the run log
-# directory so callers can later account for time spent sleeping.
+# Append one "<start-epoch> <end-epoch>" line to the run log directory
+# (written before the sleep begins) so callers can later account for time
+# spent sleeping without double counting overlapping parallel sleeps.
 _record_rate_limit_sleep() {
     local seconds="$1"
     local now
 
     [[ -n "${LOG_BASE:-}" ]] || return 0
     printf -v now '%(%s)T' -1
-    printf '%s %s\n' "$now" "$seconds" \
+    printf '%s %s\n' "$now" "$((now + seconds))" \
         >> "$LOG_BASE/rate-limit-sleeps.log" 2>/dev/null || true
 }
 
 # rate_limit_slept_since <epoch-seconds>
 #
-# Print the total seconds slept by handle_rate_limit at or after the given
-# epoch time. Prints 0 when nothing was recorded.
+# Print the seconds slept by handle_rate_limit within [since, now]. Overlapping
+# intervals are merged so concurrent sleeps count once; each interval is
+# clipped to the window start and to the current time. Prints 0 when nothing
+# was recorded.
 rate_limit_slept_since() {
     local since="${1:-0}"
     local file="${LOG_BASE:-}/rate-limit-sleeps.log"
-    local ts secs total=0
+    local start end now total=0 cur_s="" cur_e=""
 
-    if [[ -n "${LOG_BASE:-}" && -f "$file" ]]; then
-        while read -r ts secs; do
-            [[ "$ts" =~ ^[0-9]+$ && "$secs" =~ ^[0-9]+$ ]] || continue
-            if ((ts >= since)); then
-                total=$((total + secs))
-            fi
-        done < "$file"
-    fi
+    [[ -n "${LOG_BASE:-}" && -f "$file" ]] || { printf '0\n'; return 0; }
+    printf -v now '%(%s)T' -1
+
+    while read -r start end; do
+        [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || continue
+        ((start < since)) && start=$since
+        ((end > now)) && end=$now
+        ((end > start)) || continue
+        if [[ -z "$cur_s" ]]; then
+            cur_s=$start; cur_e=$end
+        elif ((start <= cur_e)); then
+            ((end > cur_e)) && cur_e=$end
+        else
+            total=$((total + cur_e - cur_s))
+            cur_s=$start; cur_e=$end
+        fi
+    done < <(sort -n -k1,1 "$file" 2>/dev/null)
+    [[ -n "$cur_s" ]] && total=$((total + cur_e - cur_s))
     printf '%s\n' "$total"
 }
 
