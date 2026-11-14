@@ -5032,6 +5032,10 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
                     "$fix_stage_name: fix errored with no commits" \
                     "(error_kind=${_fix_err_kind:-unknown}" \
                     "denied_tools=${_fix_denied:-none})"
+                # Record the failure (degraded token, merge-block reason, PR
+                # comment). No push is marked and no further review runs.
+                record_failed_review_fix "$fix_stage_name" \
+                    "${_fix_err_kind:-unknown}" "${_fix_denied:-none}"
                 return 2
             fi
 

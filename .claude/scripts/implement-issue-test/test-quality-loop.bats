@@ -206,6 +206,31 @@ teardown() {
     [[ "$output" == *"denied_tools=Bash, Write"* ]]
 }
 
+@test "quality loop failed fix calls helper once and runs no further review" {
+    printf '0' > "$TEST_TMP/reviews"
+    run_stage() {
+        case "$1" in
+            simplify-*) echo '{"status":"success","output":{"summary":"S"}}' ;;
+            review-*)
+                printf '%s' "$(( $(<"$TEST_TMP/reviews") + 1 ))" > "$TEST_TMP/reviews"
+                echo '{"status":"success","output":{"result":"changes_requested","summary":"x","issues":[{"severity":"major","description":"bug"}]}}'
+                ;;
+            fix-review-*)
+                echo '{"status":"error","output":null,"model":"sonnet","error_kind":"permission_denied"}'
+                ;;
+        esac
+    }
+    record_failed_review_fix() { printf '%s|%s\n' "$1" "$2" >> "$TEST_TMP/helper"; }
+    comment_issue() { :; }
+
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test" || rc=$?
+
+    [[ "${rc:-0}" -eq 2 ]]
+    [[ "$(wc -l < "$TEST_TMP/helper")" -eq 1 ]]
+    [[ "$(<"$TEST_TMP/helper")" == "fix-review-test-iter-"*"|permission_denied" ]]
+    [[ "$(<"$TEST_TMP/reviews")" -eq 1 ]]
+}
+
 @test "record_failed_review_fix records degraded token, block reason and PR comment" {
     DEGRADED_STAGES=()
     jq '.stages.pr.pr_number = 77' "$STATUS_FILE" > "$STATUS_FILE.tmp"
