@@ -1921,6 +1921,63 @@ _halt_if_budget_exceeded() {
     exit 2
 }
 
+# Record an API-error halt durably in status.json (issue #1072).
+#
+# run_stage executes inside a command-substitution subshell, so a bail there
+# cannot stop the parent.  Like the budget halt, the signal that survives is
+# the status file: .api_error_halt = {stage, status, detail}.  The parent-shell
+# _halt_if_api_error guard reads it.  A resume clears it (see resume init).
+#
+# Arguments:
+#   $1 - stage name
+#   $2 - raw stage output (the CLI envelope is extracted from it)
+set_api_error_halt() {
+    local stage_name="$1"
+    local raw="${2:-}"
+    local envelope code detail
+
+    envelope=$(_extract_cli_envelope "$raw")
+    code=$(jq -r '.api_error_status // "unknown"' <<< "${envelope:-null}" \
+        2>/dev/null) || code="unknown"
+    detail=$(jq -r '(.result // "") | tostring | .[0:200]' \
+        <<< "${envelope:-null}" 2>/dev/null) || detail=""
+    status_json_write --arg stage "$stage_name" --arg code "$code" \
+        --arg detail "$detail" \
+        '.api_error_halt = {stage: $stage, status: $code, detail: $detail}
+         | .last_update = (now | todate)'
+    sync_status_to_log
+}
+
+# Parent-shell halt guard for a repeated API error (issue #1072).
+#
+# Reads .api_error_halt from the status file.  When present, ends the run in
+# state error with a final_state_reason beginning "api_error:" that carries the
+# status code, posts an issue comment naming the API error and saying the run
+# can be resumed, and exits 1.  Tasks not yet dispatched stay pending.  A
+# cheap no-op otherwise, so it is safe to call after every spending stage.
+_halt_if_api_error() {
+    [[ -f "$STATUS_FILE" ]] || return 0
+    local _halt _stage _code _detail _reason
+    _halt=$(jq -c '.api_error_halt // empty' "$STATUS_FILE" 2>/dev/null) \
+        || return 0
+    [[ -n "$_halt" ]] || return 0
+
+    _stage=$(jq -r '.stage // "unknown"' <<< "$_halt")
+    _code=$(jq -r '.status // "unknown"' <<< "$_halt")
+    _detail=$(jq -r '.detail // ""' <<< "$_halt")
+
+    _reason="api_error: Claude API error (status ${_code}) at stage ${_stage}"
+    _reason+=" after one retry; run stopped and can be resumed"
+    log_error "Run halted (API error): $_reason — no further stages will run."
+    comment_issue "Run Stopped: API Error" \
+        "❌ The Claude API returned an error (status ${_code}) at stage \`${_stage}\`, and the one same-model retry hit it again. The run was stopped so no further tasks are dispatched against an unavailable API. Tasks not yet dispatched remain pending. Check API availability or authentication, then resume with \`--resume\`.${_detail:+
+
+API response: ${_detail}}" \
+        "error"
+    set_final_state "error" "$_reason"
+    exit 1
+}
+
 record_escalation() {
     local stage="$1"
     local from_model="$2"
@@ -2480,6 +2537,18 @@ load_resume_state() {
 
     # Get PR number if it exists
     RESUME_PR_NUMBER=$(jq -r '.stages.pr.pr_number // empty' "$status_path")
+
+    # Issue #1072: a previous run's API-error halt record must not halt this
+    # run.  Cleared here because STATUS_FILE is not yet bound in logdir mode.
+    if jq -e 'has("api_error_halt")' "$status_path" >/dev/null 2>&1; then
+        local _resume_tmp="${status_path}.resume.$$"
+        if jq 'del(.api_error_halt)' "$status_path" > "$_resume_tmp" \
+            2>/dev/null; then
+            mv "$_resume_tmp" "$status_path"
+        else
+            rm -f "$_resume_tmp"
+        fi
+    fi
 }
 
 # Check if a stage is completed in status file
@@ -4410,6 +4479,7 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$result_model" '"api_error"' \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
                     "$_stage_usage" "${complexity:-}")
+                set_api_error_halt "${_RUN_STAGE_NAME:-$stage_name}" "$output"
                 _apply_stage_action "$_sr_retry" "bail" \
                     "api_error: repeated API failure, not escalating"
                 return $?

@@ -4238,3 +4238,68 @@ _count_bats_incomplete_markers() {
     [[ "$output" != *"action=escalate"* ]] \
         || fail "External kill must not escalate: $output"
 }
+
+# =============================================================================
+# API-ERROR HALT GUARD (#1072)
+# =============================================================================
+
+_seed_api_halt_status() {
+    cat > "$STATUS_FILE" <<'JSON'
+{"issue":123,"branch":"b","current_stage":"implement","log_dir":"logs",
+ "state":"running","tasks":[{"id":1,"status":"pending"}],
+ "stages":{},"escalations":[],
+ "api_error_halt":{"stage":"implement-task-1","status":"403",
+  "detail":"Failed to authenticate. API Error: 403"}}
+JSON
+}
+
+@test "repeated API error records api_error_halt with the status code (#1072)" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":403,"terminal_reason":"api_error","result":"Failed to authenticate. API Error: 403"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+    export API_ERROR_RETRY_WAIT=0
+
+    run run_stage "test" "prompt" "test-schema.json"
+
+    [ "$(jq -r '.api_error_halt.status' "$STATUS_FILE")" = "403" ] \
+        || fail "halt not recorded: $(cat "$STATUS_FILE")"
+}
+
+@test "_halt_if_api_error ends the run in error naming the API error (#1072)" {
+    _seed_api_halt_status
+    comment_issue() { printf '%s\n%s\n' "$1" "$2" > "$TEST_TMP/comment.txt"; }
+    export -f comment_issue
+
+    run _halt_if_api_error
+
+    [ "$status" -eq 1 ]
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "error" ]
+    [[ "$(jq -r '.final_state_reason' "$STATUS_FILE")" == "api_error:"*"403"* ]] \
+        || fail "bad reason: $(jq -r '.final_state_reason' "$STATUS_FILE")"
+    [ "$(jq -r '.tasks[0].status' "$STATUS_FILE")" = "pending" ]
+    grep -q "403" "$TEST_TMP/comment.txt" || fail "comment lacks status code"
+    grep -q "resume" "$TEST_TMP/comment.txt" || fail "comment lacks resume hint"
+    ! grep -q "usually indicates a bug in the orchestrator" "$TEST_TMP/comment.txt" \
+        || fail "comment blames the orchestrator"
+}
+
+@test "_halt_if_api_error is a no-op without a halt record (#1072)" {
+    _seed_api_halt_status
+    jq 'del(.api_error_halt)' "$STATUS_FILE" > "$STATUS_FILE.t" \
+        && mv "$STATUS_FILE.t" "$STATUS_FILE"
+
+    run _halt_if_api_error
+
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "running" ]
+}
+
+@test "resume clears a previous run's api_error_halt (#1072)" {
+    _seed_api_halt_status
+
+    load_resume_state "$STATUS_FILE"
+    run _halt_if_api_error
+
+    [ "$status" -eq 0 ]
+    [ "$(jq 'has("api_error_halt")' "$STATUS_FILE")" = "false" ]
+}
