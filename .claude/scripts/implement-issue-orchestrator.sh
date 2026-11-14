@@ -4786,6 +4786,7 @@ Output a summary of changes made."
                 2>/dev/null || true)
             simplify_result=$(run_stage "$simplify_stage_name" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
             _halt_if_budget_exceeded
+            _halt_if_api_error
             local simplify_status
             simplify_status=$(printf '%s' "$simplify_result" | jq -r '.status // "success"')
             if [[ "$simplify_status" != "error" ]]; then
@@ -4901,6 +4902,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         local review_result
         review_result=$(run_stage "$review_stage_name" "$review_prompt" "implement-issue-review.json" "code-reviewer" "$loop_complexity")
         _halt_if_budget_exceeded
+        _halt_if_api_error
         local review_run_status
         review_run_status=$(printf '%s' "$review_result" | jq -r '.status // "success"')
         if [[ "$review_run_status" != "error" ]]; then
@@ -5118,6 +5120,7 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             local fix_result
             fix_result=$(run_stage "$fix_stage_name" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity" "" "${loop_model_override:-}")
             _halt_if_budget_exceeded
+            _halt_if_api_error
             local fix_status
             fix_status=$(printf '%s' "$fix_result" | jq -r '.status // "success"')
             if [[ "$fix_status" != "error" ]]; then
@@ -8300,6 +8303,7 @@ Commit your changes with a descriptive message."
 		fi
 		unset _RUN_STAGE_DESC_LEN
 		_halt_if_budget_exceeded
+		_halt_if_api_error
 
 		local impl_status
 		impl_status=$(printf '%s' "$impl_result" \
@@ -9606,6 +9610,7 @@ Commit your changes with a descriptive message."
 						"$_next_tagent" "$_next_tsize" \
 						"$_pw_timeout" "$_pw_model")
 					_halt_if_budget_exceeded
+					_halt_if_api_error
 
 					local _pw_status
 					_pw_status=$(printf '%s' "$_pw_result" \
@@ -9777,6 +9782,7 @@ Commit your changes with a descriptive message."
 			fi
 			unset _RUN_STAGE_DESC_LEN
 			_halt_if_budget_exceeded
+			_halt_if_api_error
 
 			local impl_status
 			impl_status=$(printf '%s' "$impl_result" \
@@ -11341,6 +11347,7 @@ Output both test results and validation findings in one structured response.
         local test_result
         test_result=$(run_stage "test-iter-$test_iteration" "$test_prompt" "$test_schema" "default" "$loop_complexity")
         _halt_if_budget_exceeded
+        _halt_if_api_error
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$test_result"; then
@@ -11575,6 +11582,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             local fix_result
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
+            _halt_if_api_error
 
             _test_fix_head_after=$(git -C "$loop_dir" rev-parse HEAD \
                 2>/dev/null || true)
@@ -11657,6 +11665,7 @@ Output a summary of fixes applied."
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
+            _halt_if_api_error
 
             _test_fix_head_after=$(git -C "$loop_dir" rev-parse HEAD \
                 2>/dev/null || true)
@@ -12090,6 +12099,7 @@ Report result as 'passed' or 'failed' with a detailed summary."
 					"implement-issue-e2e-validate.json" \
 					"playwright-test-developer")
 				_halt_if_budget_exceeded
+				_halt_if_api_error
 			fi
 
 			local e2e_verify_status e2e_verify_summary
@@ -12310,6 +12320,7 @@ Output result as 'passed' or 'failed' with a detailed summary."
 					"implement-issue-test.json" \
 					"default")
 				_halt_if_budget_exceeded
+				_halt_if_api_error
 
 				local acceptance_status acceptance_summary
 				acceptance_status=$(printf '%s' "$acceptance_result" \
@@ -12384,6 +12395,7 @@ $acceptance_summary" "default"
 	# budget inside its background subshell.  Halt in the PARENT shell BEFORE
 	# dispatching any sequential fix stage, so no fix CLI call runs post-breach.
 	_halt_if_budget_exceeded
+	_halt_if_api_error
 
 	# Issue #745: the initial e2e-verify call reported a verdict its own
 	# counts don't support (zero tests run, or passed+failed short of
@@ -12453,6 +12465,7 @@ Commit your changes."
 				"$AGENT" \
 				"$max_task_size")
 			_halt_if_budget_exceeded
+			_halt_if_api_error
 
 			local e2e_fix_summary
 			e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
@@ -12496,6 +12509,7 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				"implement-issue-e2e-validate.json" \
 				"playwright-test-developer")
 			_halt_if_budget_exceeded
+			_halt_if_api_error
 
 			local rerun_status rerun_summary
 			rerun_status=$(printf '%s' "$rerun_result" \
@@ -12660,6 +12674,7 @@ Investigate the root cause and fix the issue. Commit your changes."
 			"implement-issue-fix.json" \
 			"$AGENT")
 		_halt_if_budget_exceeded
+		_halt_if_api_error
 
 		local acceptance_fix_summary
 		acceptance_fix_summary=$(printf '%s' \
@@ -13879,6 +13894,7 @@ $task_list_md
             # after every batch dispatch, so re-assert the durable budget halt
             # here — otherwise the run would keep spending on later stages.
             _halt_if_budget_exceeded
+            _halt_if_api_error
 
             # Process completed tasks
             local comp_count
@@ -14745,6 +14761,7 @@ $pr_creation_skill}"
         local pr_result
         pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "opus")
         _halt_if_budget_exceeded
+        _halt_if_api_error
 
         local pr_status
         pr_status=$(printf '%s' "$pr_result" | jq -r '.output.status')
@@ -15042,6 +15059,7 @@ Approve or request changes. Output a summary suitable for an issue comment."
         local review_result
         review_result=$(run_stage "pr-review-iter-$pr_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer" "" "$pr_review_timeout" "$pr_review_model")
         _halt_if_budget_exceeded
+        _halt_if_api_error
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$review_result"; then
@@ -15303,6 +15321,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             local fix_result
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
             _halt_if_budget_exceeded
+            _halt_if_api_error
 
             # Comments only if a commit landed; fails loudly if the stage left
             # its work uncommitted.
@@ -15396,6 +15415,7 @@ $complete_skill
         local complete_result
         complete_result=$(run_stage "complete" "$complete_prompt" "implement-issue-complete.json")
         _halt_if_budget_exceeded
+        _halt_if_api_error
 
         local complete_summary
         complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
@@ -15979,6 +15999,7 @@ STEPS:
                         "implement-issue-deploy-verify.json" \
                         "default")
                     _halt_if_budget_exceeded
+                    _halt_if_api_error
 
                     local dv_status dv_health dv_summary
                     dv_status=$(printf '%s' "$deploy_verify_result" \
