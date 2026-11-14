@@ -274,6 +274,23 @@ _clock_at_offset() {
     [[ "$call" == *"7200" ]] || fail "Expected wait=7200 recorded; got: $call"
 }
 
+@test "handle_rate_limit does NOT record exhaustion for a usage-limit envelope (#1088)" {
+    sleep() { :; }
+    export -f sleep
+
+    local sentinel="$TEST_TMP/exhaustion-called"
+    record_inferred_exhaustion() {
+        printf '%s %s\n' "$1" "$2" > "$sentinel"
+    }
+    export -f record_inferred_exhaustion
+
+    local output='{"is_error":true,"api_error_status":429,"api_error":"usage_limit_reached","result":"hit your limit. Retry-After: 7200 seconds"}'
+
+    handle_rate_limit "$output" "sonnet" >/dev/null 2>&1
+
+    [ ! -f "$sentinel" ] || fail "exhaustion recorded for account-wide usage limit"
+}
+
 @test "handle_rate_limit does NOT record exhaustion when wait at or below threshold" {
     sleep() { :; }
     export -f sleep

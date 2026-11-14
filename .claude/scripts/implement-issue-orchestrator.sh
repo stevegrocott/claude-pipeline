@@ -2923,9 +2923,11 @@ detect_rate_limit() {
 }
 
 # detect_api_error — true when the CLI envelope is an API-error result:
-# is_error is true and either api_error_status is a non-null number or the
-# result text starts with "API Error".  Callers check detect_rate_limit
-# first, so a 429 is classified rate_limit, not api_error.
+# is_error is true and either api_error_status is non-null or the result
+# text starts with "API Error".  Callers check detect_rate_limit first; it
+# reads the envelope fields (api_error_status 429, api_error
+# usage_limit_reached) as well as text patterns, so those are classified
+# rate_limit, not api_error.
 detect_api_error() {
     local output="$1"
 
@@ -3018,6 +3020,16 @@ _wait_until_reset() {
     printf '%s\n' "$delta"
 }
 
+# _is_usage_limit_envelope — true when the CLI envelope reports an
+# account-wide usage limit (api_error usage_limit_reached).
+_is_usage_limit_envelope() {
+    local output="$1"
+
+    printf '%s' "$output" | jq -e '
+        ((.api_error // null) | tostring | test("usage_limit_reached"))
+    ' >/dev/null 2>&1
+}
+
 handle_rate_limit() {
     local output="$1"
     local model="${2:-}"
@@ -3039,7 +3051,10 @@ handle_rate_limit() {
     # repeatedly sleeping. Only do this when we know which model to mark; if
     # claude-usage.sh did not provide the helper (older checkout / test stub)
     # the recording is skipped silently — the sleep below still proceeds.
+    # A usage-limit envelope is the exception: that limit is on the account,
+    # not on a model, so marking this model exhausted would be wrong.
     if [[ -n "$model" ]] \
+        && ! _is_usage_limit_envelope "$output" \
         && (( parsed_wait > RATE_LIMIT_EXHAUSTION_THRESHOLD )) \
         && declare -F record_inferred_exhaustion >/dev/null 2>&1; then
         log "Wait ${parsed_wait}s > ${RATE_LIMIT_EXHAUSTION_THRESHOLD}s — recording inferred exhaustion for $model"
