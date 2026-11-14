@@ -6492,3 +6492,77 @@ _source_set_final_state() {
 	_run_state_dispatch "error" "" "implement"
 	[[ "$d_error" == "Script exited with state: error" ]]
 }
+
+# =============================================================================
+# mark_interrupted_if_active — signal handling state (#1067)
+# =============================================================================
+
+source_mark_interrupted() {
+	local func_file="$TEST_TMP/mark_interrupted.bash"
+	_extract_function_body mark_interrupted_if_active \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	_extract_function_body set_state "$BATCH_ORCHESTRATOR_SCRIPT" \
+		>> "$func_file"
+	grep -q 'mark_interrupted_if_active' "$func_file" || return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+	LOCK_FILE="$TEST_TMP/batch.lock"
+}
+
+@test "mark_interrupted_if_active sets interrupted when lock held and running" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	mark_interrupted_if_active
+
+	[[ "$(jq -r .state "$STATUS_FILE")" == "interrupted" ]]
+}
+
+@test "mark_interrupted_if_active sets interrupted when parked on a PR" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"paused_on_pr","paused_on_pr":"7"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	mark_interrupted_if_active
+
+	[[ "$(jq -r .state "$STATUS_FILE")" == "interrupted" ]]
+	[[ "$(jq -r .paused_on_pr "$STATUS_FILE")" == "7" ]]
+}
+
+@test "mark_interrupted_if_active leaves a terminal state untouched" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"completed"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	run mark_interrupted_if_active
+
+	[[ "$status" -ne 0 ]]
+	[[ "$(jq -r .state "$STATUS_FILE")" == "completed" ]]
+}
+
+@test "mark_interrupted_if_active ignores a lock held by another batch" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+	printf '%s\n' "999999" > "$LOCK_FILE"
+
+	run mark_interrupted_if_active
+
+	[[ "$status" -ne 0 ]]
+	[[ "$(jq -r .state "$STATUS_FILE")" == "running" ]]
+}
+
+@test "mark_interrupted_if_active is a no-op without a lock file" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+
+	run mark_interrupted_if_active
+
+	[[ "$status" -ne 0 ]]
+	[[ "$(jq -r .state "$STATUS_FILE")" == "running" ]]
+}
+
+@test "TERM trap calls mark_interrupted_if_active before cleanup" {
+	grep -qE "^trap 'mark_interrupted_if_active; cleanup; exit 143' TERM" \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
