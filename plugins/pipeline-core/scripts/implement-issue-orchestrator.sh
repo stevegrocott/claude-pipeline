@@ -7610,6 +7610,33 @@ compute_task_batches() {
 	printf '%s' "$tasks_json" | jq ".$batch_updates"
 }
 
+# Splits a batch into tasks that may run and tasks that must be recorded failed
+# because a declared `depends-on:` task did not complete.
+#
+# A task is kept only when every id in its .depends_on is in the completed set.
+# A dependency that is failed, skipped or unknown (never completed) blocks it.
+# Tasks with no .depends_on are always kept.
+#
+# Arguments:
+#   $1 - batch tasks JSON array (each may carry .depends_on id array)
+#   $2 - JSON array of completed task ids (default [])
+#
+# Output (stdout):
+#   {"runnable": [<task>...], "failed": [<id>...]}
+#   runnable preserves input order; failed lists ids of blocked tasks.
+#
+filter_batch_by_dependencies() {
+	local batch_json="${1:-[]}"
+	local completed_json="${2:-[]}"
+
+	jq -c --argjson done "$completed_json" '
+		def ok: (.depends_on // [])
+			| all(. as $d | $done | map(tostring) | index($d | tostring) != null);
+		{runnable: [.[] | select(ok)],
+		 failed: [.[] | select(ok | not) | .id]}
+	' <<< "$batch_json"
+}
+
 # =============================================================================
 # WORKTREE-BASED PARALLEL TASK EXECUTION
 # =============================================================================
@@ -13748,6 +13775,30 @@ $impl_summary" "$tagent"
                 fi
                 batch_tasks="$pending_tasks"
                 batch_size="$pending_count"
+            fi
+
+            # Drop tasks whose declared depends-on tasks did not complete
+            # (issue #634 ordering only; this enforces the outcome) and
+            # record them failed so they never reach the executors.
+            local dep_completed dep_split dep_blocked_id
+            dep_completed=$(jq -c \
+                '[.tasks[]? | select(.status == "completed") | .id]' \
+                "$STATUS_FILE" 2>/dev/null) || dep_completed=""
+            [[ -n "$dep_completed" ]] || dep_completed='[]'
+            dep_split=$(filter_batch_by_dependencies \
+                "$batch_tasks" "$dep_completed")
+            while IFS= read -r dep_blocked_id; do
+                [[ -n "$dep_blocked_id" ]] || continue
+                log_error "Task $dep_blocked_id skipped: a depends-on" \
+                    "task did not complete"
+                update_task "$dep_blocked_id" "failed" "0"
+            done < <(jq -r '.failed[]' <<< "$dep_split")
+            batch_tasks=$(jq -c '.runnable' <<< "$dep_split")
+            batch_size=$(jq 'length' <<< "$batch_tasks")
+            if ((batch_size == 0)); then
+                log "Batch $batch_num: no runnable tasks" \
+                    "(unmet dependencies)"
+                continue
             fi
 
             # Mark tasks in_progress

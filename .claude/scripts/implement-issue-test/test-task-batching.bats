@@ -331,6 +331,45 @@ _restore_acceptance_env() {
 	[ "$result" = '{"runnable":[],"failed":[]}' ]
 }
 
+@test "filter_batch_by_dependencies: failed link blocks the whole chain" {
+	local tasks completed batch result
+	tasks='[{"id":1},{"id":2,"depends_on":[1]},{"id":3,"depends_on":[2]}]'
+	tasks=$(compute_task_batches "$tasks" main)
+	[ "$(jq -c 'map(.batch)' <<< "$tasks")" = "[1,2,3]" ]
+
+	# Task 1 failed: nothing completed, so 2 is blocked in batch 2
+	completed='[]'
+	batch=$(jq -c '[.[] | select(.batch == 2)]' <<< "$tasks")
+	result=$(filter_batch_by_dependencies "$batch" "$completed")
+	[ "$(jq -c '.failed' <<< "$result")" = "[2]" ]
+
+	# Task 2 was recorded failed, not completed: 3 is blocked too
+	batch=$(jq -c '[.[] | select(.batch == 3)]' <<< "$tasks")
+	result=$(filter_batch_by_dependencies "$batch" "$completed")
+	[ "$(jq -c '.failed' <<< "$result")" = "[3]" ]
+}
+
+@test "filter_batch_by_dependencies: completed chain runs every link" {
+	local tasks batch result
+	tasks='[{"id":1},{"id":2,"depends_on":[1]},{"id":3,"depends_on":[2]}]'
+	tasks=$(compute_task_batches "$tasks" main)
+	batch=$(jq -c '[.[] | select(.batch == 3)]' <<< "$tasks")
+	result=$(filter_batch_by_dependencies "$batch" '[1,2]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[3]" ]
+}
+
+@test "dispatch loop filters each batch before executing it" {
+	local script="$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh"
+	local call_line exec_line
+	call_line=$(grep -n 'dep_split=$(filter_batch_by_dependencies' \
+		"$script" | head -1 | cut -d: -f1)
+	exec_line=$(grep -n 'serial_result=$(execute_batch_serial' \
+		"$script" | head -1 | cut -d: -f1)
+	[ -n "$call_line" ]
+	[ -n "$exec_line" ]
+	[ "$call_line" -lt "$exec_line" ]
+}
+
 # =============================================================================
 # create_task_worktree
 # =============================================================================

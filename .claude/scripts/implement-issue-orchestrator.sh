@@ -13777,6 +13777,30 @@ $impl_summary" "$tagent"
                 batch_size="$pending_count"
             fi
 
+            # Drop tasks whose declared depends-on tasks did not complete
+            # (issue #634 ordering only; this enforces the outcome) and
+            # record them failed so they never reach the executors.
+            local dep_completed dep_split dep_blocked_id
+            dep_completed=$(jq -c \
+                '[.tasks[]? | select(.status == "completed") | .id]' \
+                "$STATUS_FILE" 2>/dev/null) || dep_completed=""
+            [[ -n "$dep_completed" ]] || dep_completed='[]'
+            dep_split=$(filter_batch_by_dependencies \
+                "$batch_tasks" "$dep_completed")
+            while IFS= read -r dep_blocked_id; do
+                [[ -n "$dep_blocked_id" ]] || continue
+                log_error "Task $dep_blocked_id skipped: a depends-on" \
+                    "task did not complete"
+                update_task "$dep_blocked_id" "failed" "0"
+            done < <(jq -r '.failed[]' <<< "$dep_split")
+            batch_tasks=$(jq -c '.runnable' <<< "$dep_split")
+            batch_size=$(jq 'length' <<< "$batch_tasks")
+            if ((batch_size == 0)); then
+                log "Batch $batch_num: no runnable tasks" \
+                    "(unmet dependencies)"
+                continue
+            fi
+
             # Mark tasks in_progress
             local ti
             for ((ti = 0; ti < batch_size; ti++)); do
