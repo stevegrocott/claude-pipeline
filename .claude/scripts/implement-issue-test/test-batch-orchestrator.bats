@@ -6699,3 +6699,47 @@ STUB
 	[[ -f "$skill" ]]
 	grep -q '"\$STATE" == "interrupted"' "$skill"
 }
+
+# -----------------------------------------------------------------------------
+# Rate-limit envelope parity with implement-issue-orchestrator (#1088)
+# -----------------------------------------------------------------------------
+
+_source_batch_rate_limit() {
+	source_batch_function detect_rate_limit
+	source_batch_function _wait_until_reset
+	source_batch_function extract_wait_time
+	RATE_LIMIT_DEFAULT_WAIT=1234
+}
+
+@test "#1088: batch detect_rate_limit recognizes usage_limit_reached" {
+	_source_batch_rate_limit
+	local env='{"is_error":true,"api_error":"usage_limit_reached","result":"x"}'
+	detect_rate_limit "$env" 1
+}
+
+@test "#1088: batch detect_rate_limit recognizes api_error_status 429" {
+	_source_batch_rate_limit
+	local env='{"is_error":true,"api_error_status":429,"result":"x"}'
+	detect_rate_limit "$env" 1
+}
+
+@test "#1088: batch detect_rate_limit ignores api_error_status 500" {
+	_source_batch_rate_limit
+	local env='{"is_error":true,"api_error_status":500,"result":"boom"}'
+	run detect_rate_limit "$env" 1
+	[[ "$status" -eq 1 ]]
+}
+
+@test "#1088: batch extract_wait_time parses 'resets <time> (<zone>)'" {
+	_source_batch_rate_limit
+	local env='{"is_error":true,"api_error":"usage_limit_reached","result":"Limit reached - resets 3pm (UTC)"}'
+	local wait
+	wait=$(extract_wait_time "$env")
+	[[ "$wait" =~ ^[0-9]+$ ]]
+	((wait != 1234 && wait <= 86400))
+}
+
+@test "#1088: batch extract_wait_time falls back to default" {
+	_source_batch_rate_limit
+	[[ "$(extract_wait_time '{"result":"nothing"}')" == "1234" ]]
+}
