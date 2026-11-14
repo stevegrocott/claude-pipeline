@@ -3100,7 +3100,7 @@ _record_rate_limit_sleep() {
     local now
 
     [[ -n "${LOG_BASE:-}" ]] || return 0
-    printf -v now '%(%s)T' -1
+    now=$(date +%s)
     printf '%s %s\n' "$now" "$((now + seconds))" \
         >> "$LOG_BASE/rate-limit-sleeps.log" 2>/dev/null || true
 }
@@ -3117,7 +3117,7 @@ rate_limit_slept_since() {
     local start end now total=0 cur_s="" cur_e=""
 
     [[ -n "${LOG_BASE:-}" && -f "$file" ]] || { printf '0\n'; return 0; }
-    printf -v now '%(%s)T' -1
+    now=$(date +%s)
 
     while read -r start end; do
         [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || continue
