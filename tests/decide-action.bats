@@ -807,12 +807,25 @@ _load_deploy_verify_fn() {
 
 @test "external_termination with unreadable history counts as no prior re-run, with empty stderr" {
 	local sr='{"status":"error","error_kind":"external_termination","model":"sonnet"}'
-	local bad
-	for bad in 'not json' '' '{"a":1}' '"str"'; do
-		run --separate-stderr bash "$DECIDE_ACTION_SCRIPT" "$sr" "$bad"
-		[ "$status" -eq 0 ]
-		[ "$(jq -r '.action' <<< "$output")" = "retry_same" ]
-		[ -z "$stderr" ]
+	local bad backend label
+	for backend in bash ""; do
+		export ESCALATION_POLICY_BACKEND="$backend"
+		label="${backend:-default}"
+		for bad in 'not json' '' '{"a":1}' '"str"' 'null' '[1,2]' '[] []'; do
+			run --separate-stderr bash "$DECIDE_ACTION_SCRIPT" "$sr" "$bad"
+			[ "$status" -eq 0 ] || {
+				printf 'FAIL: backend=%s history=%q: exit status %s\n' "$label" "$bad" "$status" >&2
+				return 1
+			}
+			[ "$(jq -r '.action' <<< "$output")" = "retry_same" ] || {
+				printf 'FAIL: backend=%s history=%q: expected retry_same, got: %s\n' "$label" "$bad" "$output" >&2
+				return 1
+			}
+			[ -z "$stderr" ] || {
+				printf 'FAIL: backend=%s history=%q: unexpected stderr: %s\n' "$label" "$bad" "$stderr" >&2
+				return 1
+			}
+		done
 	done
 }
 
