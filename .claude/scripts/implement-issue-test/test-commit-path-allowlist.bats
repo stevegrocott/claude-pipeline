@@ -316,6 +316,19 @@ intake_verdict_with_class_override() {
     [ "$status" -ne 0 ] || fail "Existing path not refused. Got: $output"
     [[ "$output" == *"hard-denied path: src/app.ts"* ]] \
         || fail "Expected hard-denied diagnostic (existing). Got: $output"
+    [[ "$output" != *"not-committable path:"* ]] \
+        || fail "Hard-denied path also reported as not-committable. Got: $output"
+
+    # Missing file whose parent directory exists (src/ was created above).
+    [[ -d "$TEST_TMP/repo/src" && ! -e "$TEST_TMP/repo/src/missing.ts" ]]
+    intake_verdict_with_class_override src/missing.ts 'return 2'
+    [ "$status" -ne 0 ] || fail "Missing file in existing dir not refused. Got: $output"
+    [[ "$output" == *"hard-denied path: src/missing.ts"* ]] \
+        || fail "Expected hard-denied diagnostic (missing file, existing dir). Got: $output"
+    [[ "$output" != *"not-committable path:"* ]] \
+        || fail "Missing file reported as not-committable. Got: $output"
+    [[ "$output" != *"unresolved path"* ]] \
+        || fail "Missing file reported as unresolved. Got: $output"
 
     # Not-yet-existing path: same diagnostic, not an unresolved-path error.
     [[ ! -e "$TEST_TMP/repo/src/not-yet/created.ts" ]]
