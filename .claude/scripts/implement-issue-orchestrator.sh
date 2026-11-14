@@ -3781,6 +3781,12 @@ run_stage() {
     _permission_denials=$(_extract_denials "$_envelope" \
         | jq -r 'select(length > 0) | join(", ")' 2>/dev/null || true)
 
+    # One WARN per stage CLI result with denials, whatever the outcome
+    # (including accepted stages), so denied tools are never silent.
+    if [[ -n "$_permission_denials" ]]; then
+        log_warn "$stage_name permission denials (tools: $_permission_denials)"
+    fi
+
     # Extract structured output from the run
     local structured
     structured=$(printf '%s' "$_envelope" | jq -c '.structured_output // empty' 2>/dev/null)
@@ -3910,8 +3916,7 @@ for m in re.finditer(r'\[\s*\{', t):
             | jq -r '.status // empty' 2>/dev/null)
         if [[ "$_structured_status" == "error" ]]; then
             if [[ -n "$_permission_denials" ]]; then
-                log "WARN: $stage_name blocked by permission hook" \
-                    "(tools: $_permission_denials) — bailing"
+                log "$stage_name blocked by permission hook — bailing"
                 _error_kind="permission_denied"
             else
                 _error_kind="structured_error"

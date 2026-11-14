@@ -1680,6 +1680,25 @@ EOF
         fail "Expected 0 escalations recorded, got: $escalation_count"
 }
 
+@test "run_stage logs exactly one WARN naming denied tools on an accepted stage" {
+    source "$MODEL_CONFIG_ARRAYS_FILE"
+    cat > "$STATUS_FILE" << 'EOF'
+{"escalations": [], "stages": {}}
+EOF
+    timeout() {
+        shift 4
+        echo '{"result":"ok","structured_output":{"status":"success"},"permission_denials":[{"tool_name":"Edit"},{"tool_name":"Bash"}]}'
+    }
+    export -f timeout
+
+    run run_stage "test-iter-1" "prompt" "test-schema.json" "" ""
+
+    local warn_count
+    warn_count=$(grep -c "permission denials (tools: Edit, Bash)" "$LOG_FILE")
+    (( warn_count == 1 )) || \
+        fail "Expected exactly 1 denial WARN, got $warn_count. Log: $(cat "$LOG_FILE")"
+}
+
 @test "run_stage records structured_error escalation with reason 'structured_error'" {
     source "$MODEL_CONFIG_ARRAYS_FILE"
     cat > "$STATUS_FILE" << 'EOF'
