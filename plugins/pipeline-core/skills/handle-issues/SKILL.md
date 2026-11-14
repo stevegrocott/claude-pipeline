@@ -370,7 +370,7 @@ Before fetching issues, check if a previous batch was interrupted:
 if [[ -f status.json ]]; then
     STATE=$(jq -r '.state' status.json)
 
-    if [[ "$STATE" == "running" || "$STATE" == "circuit_breaker" ]]; then
+    if [[ "$STATE" == "running" || "$STATE" == "circuit_breaker" || "$STATE" == "interrupted" ]]; then
         PROGRESS=$(jq -r '.progress | "\(.completed)/\(.total) complete, \(.failed) failed, \(.pending) pending"' status.json)
         LOG_DIR=$(jq -r '.log_dir' status.json)
         BRANCH=$(jq -r '.base_branch' status.json)
@@ -637,8 +637,9 @@ if [[ "$CURR_SNAPSHOT" != "$PREV_SNAPSHOT" ]]; then
 fi
 ```
 
-If `STATE` is **not** `completed`, `completed_with_errors`, or `circuit_breaker`, call
-`ScheduleWakeup` again with `delaySeconds=270`. Otherwise run the **completion block** below.
+If `STATE` is **not** `completed`, `completed_with_errors`, `circuit_breaker`, or `interrupted`, call
+`ScheduleWakeup` again with `delaySeconds=270`. Otherwise run the **completion block** below
+(`interrupted` is terminal — the orchestrator stopped; Step 0 offers resume on the next run).
 
 **Completion block** — run once when the batch reaches a terminal state:
 
