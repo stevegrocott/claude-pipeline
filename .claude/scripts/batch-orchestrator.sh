@@ -1117,6 +1117,7 @@ process_pr_allowed_tools() {
 		'Bash(pipeline-core-create-followup-issue*)'
 		'Bash(*/pipeline-core/*/scripts/create-followup-issue.sh*)'
 		'Bash(.claude/scripts/create-followup-issue.sh*)'
+		'Bash(.claude/scripts/*)'
 		'Bash(jq *)'
 		'Read'
 		'Grep'

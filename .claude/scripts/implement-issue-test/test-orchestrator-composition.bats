@@ -506,6 +506,12 @@ allowed_tools_output() {
 	[[ "$out" == *'Bash(.claude/scripts/create-followup-issue.sh*)'* ]]
 }
 
+@test "(e) allow-list permits repo-relative platform scripts" {
+	local out
+	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
+	[[ "$out" == *'Bash(.claude/scripts/*)'* ]]
+}
+
 @test "(e) allow-list includes PLATFORM_DIR entry when set" {
 	local out
 	out=$(PLATFORM_DIR=/x/platform allowed_tools_output)
