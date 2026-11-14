@@ -376,12 +376,10 @@ Examples:
 
 > **CRITICAL — NEVER use `gh issue create` or `create-issue.sh` directly.** Every follow-up issue MUST go through `create-followup-issue.sh`. It runs `assert_issue_valid` fail-closed before creation, ensuring the body has parseable task lines, a known agent, a resolvable file path, and an `## Acceptance Criteria` section. Writing bodies by hand and bypassing this script produces malformed issues that stall the pipeline and require manual remediation. If `create-followup-issue.sh` exits non-zero for any reason (missing argument, validation failure), log the error and skip that item — do NOT fall back to `gh issue create`.
 
-For each extracted issue, invoke `create-followup-issue.sh` (dual-mode: prefer the plugin
-bin `pipeline-core-create-followup-issue`, else the repo-local script):
+For each extracted issue, invoke the platform wrapper `create-followup-issue.sh` as a bare command, using the literal path resolved in Step 0 (no `VAR="$(…)"` assignment, no `||` fallback):
 
 ```bash
-CREATE_FOLLOWUP="$(command -v pipeline-core-create-followup-issue || echo .claude/scripts/create-followup-issue.sh)"
-"$CREATE_FOLLOWUP" \
+"<PLATFORM_DIR>/create-followup-issue.sh" \
   --title "$ISSUE_TITLE" \
   --description "$EXTRACTED_DESCRIPTION" \
   --task-description "$INFERRED_TASK_DESCRIPTION" \
@@ -392,6 +390,8 @@ CREATE_FOLLOWUP="$(command -v pipeline-core-create-followup-issue || echo .claud
   --labels "${LABELS}" \
   --type precise   # or: --type vague (adds needs-explore label)
 ```
+
+The wrapper prints the created issue number on stdout — record that number from the command output (do not capture it with `$(…)`).
 
 **`--file-path` is required** — extract it from the `[File:Line]` reference in the review comment. If the review item mentions a function or concept but no file path, use the primary file changed in the PR/MR diff as the fallback. If no file can be determined at all, pass `"."` (the script will infer agent `"default"` and the issue will be valid). Never omit `--file-path`.
 
