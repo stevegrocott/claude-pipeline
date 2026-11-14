@@ -98,6 +98,8 @@ setup() {
 }
 
 teardown() {
+	rm -f "$TEST_TMP/repo"/pre-existing-1068.txt \
+		"$TEST_TMP/repo"/escaped-1068.txt 2>/dev/null || true
 	_restore_acceptance_env
 	teardown_test_env
 }
@@ -3818,7 +3820,6 @@ _setup_status_634() {
 	printf 'x' > escaped-1068.txt
 
 	run _report_primary_checkout_dirt "$baseline" 3
-	rm -f pre-existing-1068.txt escaped-1068.txt
 
 	[ "$status" -eq 1 ]
 	[[ "$output" == *"ERROR"* ]]
@@ -3835,8 +3836,65 @@ _setup_status_634() {
 	baseline=$(git status --porcelain)
 
 	run _report_primary_checkout_dirt "$baseline" 3
-	rm -f pre-existing-1068.txt
 
 	[ "$status" -eq 0 ]
 	[[ -z "$output" ]]
+}
+
+@test "#1068 _report_primary_checkout_dirt: ignores the run's own LOG_BASE inside the repo" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	export LOG_BASE="$TEST_TMP/repo/logs/implement-issue/run-1"
+	mkdir -p "$LOG_BASE"
+	local baseline
+	baseline=$(_primary_checkout_status)
+	printf 'x' > "$LOG_BASE/orchestrator.log"
+	printf 'x' > escaped-1068.txt
+
+	run _report_primary_checkout_dirt "$baseline" 3
+
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"escaped-1068.txt"* ]]
+	[[ "$output" != *"orchestrator.log"* ]]
+	[[ "$output" != *"logs/"* ]]
+}
+
+@test "#1068 _report_primary_checkout_dirt: silent when only LOG_BASE files appear" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	export LOG_BASE="$TEST_TMP/repo/logs/implement-issue/run-1"
+	mkdir -p "$LOG_BASE"
+	local baseline
+	baseline=$(_primary_checkout_status)
+	printf 'x' > "$LOG_BASE/orchestrator.log"
+
+	run _report_primary_checkout_dirt "$baseline" 3
+
+	[ "$status" -eq 0 ]
+	[[ -z "$output" ]]
+}
+
+@test "#1068 execute_batch_parallel: logs an error when a task edits the primary checkout" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/esc-1068 main
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+	run_task_in_worktree() {
+		local result_file="$8"
+		printf 'x' > "$TEST_TMP/repo/escaped-1068.txt"
+		printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree extract_task_size
+
+	local tasks
+	tasks='[{"id":9,"description":"Modify src.ts","agent":"default","batch":1}]'
+	run execute_batch_parallel 1 "$tasks" "feature/esc-1068" "main"
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/esc-1068 2>/dev/null || true
+
+	[[ "$output" == *"primary checkout paths changed"* ]]
+	[[ "$output" == *"escaped-1068.txt"* ]]
 }

@@ -8805,12 +8805,39 @@ _task_noop_is_genuine() {
 	[[ "$claimed" == "true" ]]
 }
 
-# Log an error naming primary-checkout paths that became dirty while a
-# parallel batch ran (issue #1068).  Task agents work in worktrees; a path
-# that turns dirty in the primary checkout means one escaped its worktree.
+# `git status --porcelain` for the primary checkout with the run's own log
+# directory (${LOG_BASE}) left out, so files this run writes never count as
+# dirt (issue #1068).  Uses a pathspec exclude so a collapsed untracked
+# directory entry (e.g. `?? logs/`) is filtered too.
+_primary_checkout_status() {
+	local top rel=""
+	top=$(git rev-parse --show-toplevel 2>/dev/null || printf '')
+	# Compare physical paths: git reports the resolved toplevel, while
+	# LOG_BASE may go through a symlink (e.g. macOS /var -> /private/var).
+	local logp
+	logp=$(cd -P "${LOG_BASE:-/nonexistent}" 2>/dev/null && pwd -P || printf '')
+	if [[ -n "$top" && -n "$logp" && "$logp" == "$top"/* ]]; then
+		rel="${logp#"$top"/}"
+	fi
+	if [[ -n "$rel" ]]; then
+		git status --porcelain -- ":/" ":(top,exclude)${rel}" \
+			2>/dev/null || printf ''
+	else
+		git status --porcelain 2>/dev/null || printf ''
+	fi
+}
+
+# Log an error naming primary-checkout paths that changed while a parallel
+# batch ran (issue #1068).  Task agents work in worktrees, so a path that
+# turns dirty in the primary checkout usually means one escaped its worktree,
+# but an operator or another session could equally be the cause.
+#
+# Known limitation: detection compares `git status --porcelain` lines, so
+# further edits to a path that was already dirty before the batch leave the
+# status line identical and are NOT detected.
 #
 # Arguments:
-#   $1 - `git status --porcelain` output captured before the batch launched
+#   $1 - `_primary_checkout_status` output captured before the batch launched
 #   $2 - batch number (for the message)
 # Returns:
 #   0 when nothing new is dirty, 1 after logging an error
@@ -8819,7 +8846,7 @@ _report_primary_checkout_dirt() {
 	local baseline="${1:-}"
 	local batch_num="${2:-?}"
 	local now
-	now=$(git status --porcelain 2>/dev/null || printf '')
+	now=$(_primary_checkout_status)
 	[[ -n "$now" ]] || return 0
 
 	local -a fresh=()
@@ -8832,8 +8859,9 @@ _report_primary_checkout_dirt() {
 	done <<< "$now"
 
 	((${#fresh[@]} > 0)) || return 0
-	log_error "Batch $batch_num: primary checkout became dirty during" \
-		"parallel batch (a task escaped its worktree):" \
+	log_error "Batch $batch_num: primary checkout paths changed during" \
+		"parallel batch (a task may have escaped its worktree, or an" \
+		"operator/another session edited them):" \
 		"$(_porcelain_dirty_paths "$(printf '%s\n' "${fresh[@]}")")"
 	return 1
 }
@@ -8875,7 +8903,7 @@ execute_batch_parallel() {
 	local -a task_walltimes=()
 
 	local primary_baseline
-	primary_baseline=$(git status --porcelain 2>/dev/null || printf '')
+	primary_baseline=$(_primary_checkout_status)
 
 	local i
 	for ((i = 0; i < batch_count; i++)); do
