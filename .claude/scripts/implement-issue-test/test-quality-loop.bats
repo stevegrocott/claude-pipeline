@@ -231,6 +231,68 @@ teardown() {
     [[ "$(<"$TEST_TMP/reviews")" -eq 1 ]]
 }
 
+@test "quality loop arms deferred push only when fix moved the head" {
+    printf '0' > "$TEST_TMP/reviews"
+    run_stage() {
+        case "$1" in
+            simplify-*) echo '{"status":"success","output":{"summary":"S"}}' ;;
+            review-*)
+                local n
+                n=$(( $(<"$TEST_TMP/reviews") + 1 ))
+                printf '%s' "$n" > "$TEST_TMP/reviews"
+                if (( n == 1 )); then
+                    echo '{"status":"success","output":{"result":"changes_requested","summary":"x","issues":[{"severity":"major","description":"bug"}]}}'
+                else
+                    echo '{"status":"success","output":{"result":"approved","summary":"ok"}}'
+                fi
+                ;;
+            fix-review-*)
+                git -C "$QUALITY_LOOP_DIR" commit -q --allow-empty -m fix
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
+                ;;
+        esac
+    }
+    comment_issue() { :; }
+    PR_REVIEW_PUSH_PENDING=0
+    PR_REVIEW_PUSH_BRANCH=""
+
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
+
+    [[ "$PR_REVIEW_PUSH_PENDING" == "1" ]]
+    [[ "$PR_REVIEW_PUSH_BRANCH" == "test-branch" ]]
+    grep -q "Review fix committed on test-branch" "$LOG_FILE"
+}
+
+@test "quality loop does not arm deferred push when fix leaves head unmoved" {
+    printf '0' > "$TEST_TMP/reviews"
+    run_stage() {
+        case "$1" in
+            simplify-*) echo '{"status":"success","output":{"summary":"S"}}' ;;
+            review-*)
+                local n
+                n=$(( $(<"$TEST_TMP/reviews") + 1 ))
+                printf '%s' "$n" > "$TEST_TMP/reviews"
+                if (( n == 1 )); then
+                    echo '{"status":"success","output":{"result":"changes_requested","summary":"x","issues":[{"severity":"major","description":"bug"}]}}'
+                else
+                    echo '{"status":"success","output":{"result":"approved","summary":"ok"}}'
+                fi
+                ;;
+            fix-review-*)
+                echo '{"status":"success","output":{"summary":"Fixed"}}'
+                ;;
+        esac
+    }
+    comment_issue() { :; }
+    PR_REVIEW_PUSH_PENDING=0
+    PR_REVIEW_PUSH_BRANCH=""
+
+    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
+
+    [[ "$PR_REVIEW_PUSH_PENDING" == "0" ]]
+    ! grep -q "Review fix committed" "$LOG_FILE"
+}
+
 @test "record_failed_review_fix records degraded token, block reason and PR comment" {
     DEGRADED_STAGES=()
     jq '.stages.pr.pr_number = 77' "$STATUS_FILE" > "$STATUS_FILE.tmp"

@@ -4999,6 +4999,9 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             # size: S→sonnet, M→sonnet, L→opus (via resolve_model in run_stage).
             # Pass loop_model_override (arg 7) so an escalated model takes effect
             # on subsequent iterations after stall detection.
+            local fix_head_before
+            fix_head_before=$(git -C "$loop_dir" rev-parse HEAD 2>/dev/null \
+                || printf '')
             local fix_stage_name="fix-review-${stage_prefix}-iter-$loop_iteration"
             set_stage_started "$fix_stage_name"
             local fix_result
@@ -5047,6 +5050,16 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
                         "the code/tests allowlist — aborting quality loop"
                     break
                 }
+            fi
+
+            # Arm the deferred push (and log the committed line) only when
+            # the head actually moved since the fix began.
+            local fix_head_after
+            fix_head_after=$(git -C "$loop_dir" rev-parse HEAD 2>/dev/null \
+                || printf '')
+            if [[ -n "$fix_head_after" \
+                && "$fix_head_after" != "$fix_head_before" ]]; then
+                mark_review_push_pending "$loop_branch"
             fi
 
             if (( post_fix_commits <= pre_fix_commits )) && (( loop_iteration >= 2 )); then

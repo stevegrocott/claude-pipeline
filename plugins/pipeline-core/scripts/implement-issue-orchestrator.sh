@@ -2037,6 +2037,34 @@ persist_merge_block_kind() {
     sync_status_to_log
 }
 
+# ---------------------------------------------------------------------------
+# record_failed_review_fix <stage_name> [error_kind] [denied_tools]
+# Record a review fix stage that errored and committed nothing: add a
+# degraded-stage token, persist a merge-block reason naming the stage, and
+# comment on the PR (when one is known from status.json) so a human sees why
+# the merge is held. Always returns 0 — recording must never abort the run.
+# ---------------------------------------------------------------------------
+record_failed_review_fix() {
+    local stage_name="$1"
+    local error_kind="${2:-unknown}"
+    local denied_tools="${3:-none}"
+    local reason pr_number
+
+    DEGRADED_STAGES+=("quality:fix_failed:${stage_name}")
+
+    reason="Review fix failed at ${stage_name}: fix errored with no commits (error_kind=${error_kind}, denied_tools=${denied_tools})"
+    persist_merge_blocked_reason "$reason"
+
+    if [[ -f "${STATUS_FILE:-}" ]]; then
+        pr_number=$(jq -r '.stages.pr.pr_number // empty' "$STATUS_FILE" 2>/dev/null)
+    fi
+    if [[ -n "${pr_number:-}" ]]; then
+        comment_pr "$pr_number" "Review Fix Failed ($stage_name)" \
+            "$reason. Merge is blocked until a human reviews." || true
+    fi
+    return 0
+}
+
 increment_quality_iteration() {
     status_json_write '.quality_iterations += 1 |
         .stages.quality_loop.iteration = .quality_iterations |
@@ -3781,6 +3809,12 @@ run_stage() {
     _permission_denials=$(_extract_denials "$_envelope" \
         | jq -r 'select(length > 0) | join(", ")' 2>/dev/null || true)
 
+    # One WARN per stage CLI result with denials, whatever the outcome
+    # (including accepted stages), so denied tools are never silent.
+    if [[ -n "$_permission_denials" ]]; then
+        log_warn "$stage_name permission denials (tools: $_permission_denials)"
+    fi
+
     # Extract structured output from the run
     local structured
     structured=$(printf '%s' "$_envelope" | jq -c '.structured_output // empty' 2>/dev/null)
@@ -3910,8 +3944,7 @@ for m in re.finditer(r'\[\s*\{', t):
             | jq -r '.status // empty' 2>/dev/null)
         if [[ "$_structured_status" == "error" ]]; then
             if [[ -n "$_permission_denials" ]]; then
-                log "WARN: $stage_name blocked by permission hook" \
-                    "(tools: $_permission_denials) — bailing"
+                log "$stage_name blocked by permission hook — bailing"
                 _error_kind="permission_denied"
             else
                 _error_kind="structured_error"
@@ -4565,6 +4598,7 @@ run_triage_stage() {
 # Returns:
 #   0 on success (approved)
 #   0 on max iterations exceeded (soft-fail, adds to DEGRADED_STAGES)
+#   2 when a fix stage returned an error and committed nothing
 run_quality_loop() {
     local loop_dir="$1"
     local loop_branch="$2"
@@ -4965,6 +4999,9 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             # size: S→sonnet, M→sonnet, L→opus (via resolve_model in run_stage).
             # Pass loop_model_override (arg 7) so an escalated model takes effect
             # on subsequent iterations after stall detection.
+            local fix_head_before
+            fix_head_before=$(git -C "$loop_dir" rev-parse HEAD 2>/dev/null \
+                || printf '')
             local fix_stage_name="fix-review-${stage_prefix}-iter-$loop_iteration"
             set_stage_started "$fix_stage_name"
             local fix_result
@@ -4985,6 +5022,26 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             current_fix_model=$(printf '%s' "$fix_result" | jq -r '.model // "sonnet"')
             post_fix_commits=$(git rev-list --count "${BASE_BRANCH}..${loop_branch}" 2>/dev/null || echo "0")
 
+            # A fix stage that errored and committed nothing cannot make
+            # progress; abort with the error kind and denied tools logged.
+            if [[ "$fix_status" == "error" ]] \
+                && (( post_fix_commits <= pre_fix_commits )); then
+                local _fix_err_kind _fix_denied
+                _fix_err_kind=$(printf '%s' "$fix_result" \
+                    | jq -r '.error_kind // "unknown"' 2>/dev/null)
+                _fix_denied=$(printf '%s' "$fix_result" \
+                    | jq -r '[.denials[]? | if type == "object" then (.tool_name // .tool // tostring) else tostring end] | join(", ")' 2>/dev/null)
+                log_error \
+                    "$fix_stage_name: fix errored with no commits" \
+                    "(error_kind=${_fix_err_kind:-unknown}" \
+                    "denied_tools=${_fix_denied:-none})"
+                # Record the failure (degraded token, merge-block reason, PR
+                # comment). No push is marked and no further review runs.
+                record_failed_review_fix "$fix_stage_name" \
+                    "${_fix_err_kind:-unknown}" "${_fix_denied:-none}"
+                return 2
+            fi
+
             # Guard: verify any new fix-review commit against path allowlist
             if (( post_fix_commits > pre_fix_commits )); then
                 guard_commit_path_allowlist "$loop_dir" || {
@@ -4993,6 +5050,16 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
                         "the code/tests allowlist — aborting quality loop"
                     break
                 }
+            fi
+
+            # Arm the deferred push (and log the committed line) only when
+            # the head actually moved since the fix began.
+            local fix_head_after
+            fix_head_after=$(git -C "$loop_dir" rev-parse HEAD 2>/dev/null \
+                || printf '')
+            if [[ -n "$fix_head_after" \
+                && "$fix_head_after" != "$fix_head_before" ]]; then
+                mark_review_push_pending "$loop_branch"
             fi
 
             if (( post_fix_commits <= pre_fix_commits )) && (( loop_iteration >= 2 )); then
