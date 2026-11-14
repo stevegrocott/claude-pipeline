@@ -304,6 +304,64 @@ teardown() {
         || fail "Expected rate_limit handling; got: $output"
 }
 
+@test "run_stage waits out a usage-limit envelope, retries same model (#1088)" {
+    local counter_file="$TEST_TMP/ul-counter.txt"
+    local sleeps="$TEST_TMP/ul-sleeps.txt"
+    local claude_calls="$TEST_TMP/ul-calls.txt"
+    printf '0' > "$counter_file"
+    export counter_file sleeps claude_calls
+    timeout() {
+        shift; shift; shift; shift
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" >> "$claude_calls"
+        if (( n == 1 )); then
+            echo '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"api_error":"usage_limit_reached","api_error_origin":"first_party","terminal_reason":"api_error","result":"You'"'"'ve hit your 5-hour limit · resets 3pm (Region/City)","num_turns":1,"duration_ms":856}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    sleep() { echo "$1" >> "$sleeps"; }
+    export -f sleep
+    date() {
+        if [[ "$1" == "+%H %M %S" ]]; then
+            echo "14 02 00"
+        else
+            command date "$@"
+        fi
+    }
+    export -f date
+
+    printf '%s' '{"issue":123,"branch":"b","current_stage":"implement","log_dir":"logs","state":"running","tasks":[{"id":1,"status":"pending"}],"stages":{},"escalations":[]}' \
+        > "$STATUS_FILE"
+
+    run run_stage "test" "prompt" "test-schema.json"
+
+    # 3pm - 14:02 = 3480s, plus RATE_LIMIT_BUFFER (60)
+    grep -qx "$((3480 + RATE_LIMIT_BUFFER))" "$sleeps" \
+        || fail "Expected one sleep of 3540; sleeps: $(cat "$sleeps" 2>/dev/null)"
+    [ "$(grep -cx "$((3480 + RATE_LIMIT_BUFFER))" "$sleeps")" -eq 1 ] \
+        || fail "Expected exactly one rate-limit sleep: $(cat "$sleeps")"
+    [[ "$output" == *"rate_limit"* || "$output" == *"Rate limit"* ]] \
+        || fail "Expected rate_limit classification; got: $output"
+    [[ "$output" != *"API error envelope"* ]] \
+        || fail "Usage limit must not be an api_error: $output"
+    [ "$(cat "$counter_file")" -eq 2 ] \
+        || fail "Expected exactly 2 claude calls (retry same model)"
+    local m1 m2
+    m1=$(sed -n '1p' "$claude_calls" | grep -oE -- '--model [^ ]+')
+    m2=$(sed -n '2p' "$claude_calls" | grep -oE -- '--model [^ ]+')
+    [ -n "$m1" ] && [ "$m1" = "$m2" ] \
+        || fail "Expected same model on retry; got '$m1' vs '$m2'"
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.status')" = "success" ] \
+        || fail "Expected success result; got: $output"
+    [ "$(jq 'has("api_error_halt")' "$STATUS_FILE")" = "false" ] \
+        || fail "api_error_halt must not be recorded"
+}
+
 # =============================================================================
 # FIELD-AWARE STRUCTURED OUTPUT RECOVERY
 # =============================================================================

@@ -89,6 +89,24 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "detect_rate_limit true for api_error usage_limit_reached envelope" {
+    local output='{"is_error":true,"result":"Usage cap hit","api_error":"usage_limit_reached"}'
+    run detect_rate_limit "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_rate_limit true for api_error_status 429 envelope" {
+    local output='{"is_error":true,"result":"API Error: overloaded","api_error_status":429}'
+    run detect_rate_limit "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_rate_limit false for api_error_status 500 envelope" {
+    local output='{"is_error":true,"result":"API Error: boom","api_error_status":500}'
+    run detect_rate_limit "$output"
+    [ "$status" -eq 1 ]
+}
+
 # =============================================================================
 # EXTRACT_WAIT_TIME
 # =============================================================================
@@ -121,6 +139,72 @@ teardown() {
     local output='{"result":"Retry-after: 120, or wait 30 minutes"}'
     run extract_wait_time "$output"
     [ "$output" = "120" ]
+}
+
+# Print "<h>:<mm><am|pm>" for now + $1 seconds in zone $2 (empty = local).
+_clock_at_offset() {
+    local offset="$1"
+    local zone="${2:-}"
+    local epoch=$(( $(date +%s) + offset ))
+    local -a tz_env=()
+    [[ -n "$zone" ]] && tz_env=(env "TZ=$zone")
+    local fmt
+    fmt=$("${tz_env[@]}" date -r "$epoch" '+%I:%M%p' 2>/dev/null \
+        || "${tz_env[@]}" date -d "@$epoch" '+%I:%M%p')
+    fmt="${fmt#0}"
+    printf '%s' "${fmt,,}"
+}
+
+@test "extract_wait_time reads resets <time> (<zone>) for a known zone" {
+    local clock
+    clock=$(_clock_at_offset 7200 America/New_York)
+    run extract_wait_time "{\"result\":\"limit reached - resets $clock (America/New_York)\"}"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 7000 ]
+    [ "$output" -le 7260 ]
+}
+
+@test "extract_wait_time uses local time for an unknown zone" {
+    local clock
+    clock=$(_clock_at_offset 7200)
+    run extract_wait_time "{\"result\":\"resets $clock (Mars/Olympus_Mons)\"}"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 7000 ]
+    [ "$output" -le 7260 ]
+}
+
+@test "extract_wait_time uses local time when no zone is given" {
+    local clock
+    clock=$(_clock_at_offset 7200)
+    run extract_wait_time "{\"result\":\"resets $clock\"}"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 7000 ]
+    [ "$output" -le 7260 ]
+}
+
+@test "extract_wait_time returns default when reset time is unparseable" {
+    run extract_wait_time '{"result":"resets soonish (UTC)"}'
+    [ "$status" -eq 0 ]
+    [ "$output" = "3600" ]
+    run extract_wait_time '{"result":"resets 25pm (UTC)"}'
+    [ "$output" = "3600" ]
+}
+
+@test "extract_wait_time returns 0 when reset time is just past" {
+    local clock
+    clock=$(_clock_at_offset -600 UTC)
+    run extract_wait_time "{\"result\":\"resets $clock (UTC)\"}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
+}
+
+@test "extract_wait_time rolls a long-past reset time to tomorrow" {
+    local clock
+    clock=$(_clock_at_offset -7200 UTC)
+    run extract_wait_time "{\"result\":\"resets $clock (UTC)\"}"
+    [ "$status" -eq 0 ]
+    [ "$output" -ge 79000 ]
+    [ "$output" -le 79400 ]
 }
 
 # =============================================================================
@@ -188,6 +272,23 @@ teardown() {
 
     # The recorded wait should be the parsed value (7200), not buffered
     [[ "$call" == *"7200" ]] || fail "Expected wait=7200 recorded; got: $call"
+}
+
+@test "handle_rate_limit does NOT record exhaustion for a usage-limit envelope (#1088)" {
+    sleep() { :; }
+    export -f sleep
+
+    local sentinel="$TEST_TMP/exhaustion-called"
+    record_inferred_exhaustion() {
+        printf '%s %s\n' "$1" "$2" > "$sentinel"
+    }
+    export -f record_inferred_exhaustion
+
+    local output='{"is_error":true,"api_error_status":429,"api_error":"usage_limit_reached","result":"hit your limit. Retry-After: 7200 seconds"}'
+
+    handle_rate_limit "$output" "sonnet" >/dev/null 2>&1
+
+    [ ! -f "$sentinel" ] || fail "exhaustion recorded for account-wide usage limit"
 }
 
 @test "handle_rate_limit does NOT record exhaustion when wait at or below threshold" {
