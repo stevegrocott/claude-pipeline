@@ -1945,12 +1945,15 @@ update_task() {
     local task_id="$1"
     local status="$2"
     local review_attempts="${3:-0}"
+    local reason="${4:-}"
 
     status_json_write --argjson id "$task_id" \
        --arg status "$status" \
        --argjson attempts "$review_attempts" \
+       --arg reason "$reason" \
        '(.tasks[] | select(.id == $id)).status = $status |
         (.tasks[] | select(.id == $id)).review_attempts = $attempts |
+        (if $reason != "" then (.tasks[] | select(.id == $id)).reason = $reason else . end) |
         .current_task = $id |
         .last_update = (now | todate)'
     sync_status_to_log
@@ -7613,27 +7616,36 @@ compute_task_batches() {
 # Splits a batch into tasks that may run and tasks that must be recorded failed
 # because a declared `depends-on:` task did not complete.
 #
-# A task is kept only when every id in its .depends_on is in the completed set.
-# A dependency that is failed, skipped or unknown (never completed) blocks it.
+# A task is blocked only by a KNOWN dependency (an id in $3) that is not in the
+# completed set; a failed or skipped known dependency blocks it. A depends-on
+# id matching no task is ignored (AC5), not treated as blocking.
 # Tasks with no .depends_on are always kept.
 #
 # Arguments:
 #   $1 - batch tasks JSON array (each may carry .depends_on id array)
 #   $2 - JSON array of completed task ids (default [])
+#   $3 - JSON array of all known task ids (default []: nothing is known,
+#        so nothing blocks)
 #
 # Output (stdout):
-#   {"runnable": [<task>...], "failed": [<id>...]}
-#   runnable preserves input order; failed lists ids of blocked tasks.
+#   {"runnable": [<task>...], "failed": [<id>...], "blocked_by": {"<id>": <dep id>}}
+#   runnable preserves input order; failed lists ids of blocked tasks;
+#   blocked_by maps each blocked id to its first blocking dependency id.
 #
 filter_batch_by_dependencies() {
 	local batch_json="${1:-[]}"
 	local completed_json="${2:-[]}"
+	local known_json="${3:-[]}"
 
-	jq -c --argjson done "$completed_json" '
-		def ok: (.depends_on // [])
-			| all(. as $d | $done | map(tostring) | index($d | tostring) != null);
-		{runnable: [.[] | select(ok)],
-		 failed: [.[] | select(ok | not) | .id]}
+	jq -c --argjson done "$completed_json" --argjson known "$known_json" '
+		def has($set; $d): $set | map(tostring) | index($d | tostring) != null;
+		def blockers: (.depends_on // [])
+			| map(select(has($known; .) and (has($done; .) | not)));
+		{runnable: [.[] | select(blockers | length == 0)],
+		 failed: [.[] | select(blockers | length > 0) | .id],
+		 blocked_by: ([.[] | select(blockers | length > 0)
+			| {key: (.id | tostring), value: (blockers | .[0])}]
+			| from_entries)}
 	' <<< "$batch_json"
 }
 
@@ -13780,18 +13792,22 @@ $impl_summary" "$tagent"
             # Drop tasks whose declared depends-on tasks did not complete
             # (issue #634 ordering only; this enforces the outcome) and
             # record them failed so they never reach the executors.
-            local dep_completed dep_split dep_blocked_id
+            local dep_completed dep_split dep_blocked_id dep_known dep_by
+            dep_known=$(printf '%s' "$tasks_json" | jq -c 'map(.id)')
             dep_completed=$(jq -c \
                 '[.tasks[]? | select(.status == "completed") | .id]' \
                 "$STATUS_FILE" 2>/dev/null) || dep_completed=""
             [[ -n "$dep_completed" ]] || dep_completed='[]'
             dep_split=$(filter_batch_by_dependencies \
-                "$batch_tasks" "$dep_completed")
+                "$batch_tasks" "$dep_completed" "$dep_known")
             while IFS= read -r dep_blocked_id; do
                 [[ -n "$dep_blocked_id" ]] || continue
-                log_error "Task $dep_blocked_id skipped: a depends-on" \
-                    "task did not complete"
-                update_task "$dep_blocked_id" "failed" "0"
+                dep_by=$(jq -r --arg id "$dep_blocked_id" \
+                    '.blocked_by[$id]' <<< "$dep_split")
+                log_error "Task $dep_blocked_id skipped: depends-on" \
+                    "task $dep_by did not complete"
+                update_task "$dep_blocked_id" "failed" "0" \
+                    "blocked by depends-on task $dep_by (did not complete)"
             done < <(jq -r '.failed[]' <<< "$dep_split")
             batch_tasks=$(jq -c '.runnable' <<< "$dep_split")
             batch_size=$(jq 'length' <<< "$batch_tasks")
