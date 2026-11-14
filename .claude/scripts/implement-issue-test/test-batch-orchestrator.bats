@@ -6700,6 +6700,80 @@ STUB
 }
 
 # =============================================================================
+# Lock taken over mid-run: ownership check must refuse (#1067, #1092)
+# =============================================================================
+
+@test "real batch: lock taken over by live foreign pid, SIGTERM leaves state running and lock in place" {
+	local scripts_copy
+	setup_batch_scripts_copy
+
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'MOCKGH'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "issue view" ]]; then
+	if [[ "$*" == *"body,labels"* ]]; then
+		printf '%s\n' '{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing — `.claude/scripts/x.sh`\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+	else
+		echo "OPEN"
+	fi
+fi
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	cat > "$scripts_copy/implement-issue-orchestrator.sh" << 'STUB'
+#!/usr/bin/env bash
+trap 'exit 143' TERM
+: > "$STUB_DIR/ready"
+while :; do
+	sleep 0.1
+done
+STUB
+	chmod +x "$scripts_copy/implement-issue-orchestrator.sh"
+	export STUB_DIR="$TEST_TMP/stub"
+	mkdir -p "$STUB_DIR"
+
+	cd "$TEST_TMP" || fail "cd failed"
+	git init -q . 2>/dev/null
+	"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test \
+		> "$TEST_TMP/batch.out" 2>&1 &
+	local batch_pid=$!
+
+	local i
+	for i in {1..300}; do
+		[[ -f "$STUB_DIR/ready" ]] && break
+		sleep 0.1
+	done
+	[[ -f "$STUB_DIR/ready" ]] || fail "stub never started: $(cat "$TEST_TMP/batch.out")"
+	[[ "$(cat logs/.batch-orchestrator.lock)" == "$batch_pid" ]] \
+		|| fail "batch does not hold the lock while running"
+	for i in {1..50}; do
+		[[ "$(jq -r .state status.json 2>/dev/null)" == "running" ]] && break
+		sleep 0.1
+	done
+	[[ "$(jq -r .state status.json)" == "running" ]] \
+		|| fail "state never became running"
+
+	# The lock changes hands to a live foreign process mid-run.
+	sleep 60 &
+	local holder_pid=$!
+	printf '%s\n' "$holder_pid" > logs/.batch-orchestrator.lock
+
+	kill -TERM "$batch_pid"
+	local batch_exit=0
+	wait "$batch_pid" || batch_exit=$?
+	local lock_after
+	lock_after=$(cat logs/.batch-orchestrator.lock 2>/dev/null)
+	kill "$holder_pid" 2>/dev/null
+
+	[[ "$batch_exit" -eq 143 ]]
+	[[ "$(jq -r .state status.json)" == "running" ]]
+	[[ "$lock_after" == "$holder_pid" ]]
+}
+
+# =============================================================================
 # Lock-refused batch changes no state (#1067)
 # =============================================================================
 
