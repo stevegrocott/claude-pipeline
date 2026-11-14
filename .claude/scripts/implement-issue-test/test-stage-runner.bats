@@ -4381,8 +4381,14 @@ JSON
 
     run run_stage "test" "prompt" "test-schema.json"
 
+    [ "$status" -ne 0 ]
     [ "$(jq -r '.api_error_halt.status' "$STATUS_FILE")" = "403" ] \
         || fail "halt not recorded: $(cat "$STATUS_FILE")"
+    [[ "$(jq -r '.api_error_halt.detail' "$STATUS_FILE")" == \
+        "Failed to authenticate"* ]] \
+        || fail "halt detail wrong: $(cat "$STATUS_FILE")"
+    [ "$(printf '%s' "$output" | grep -c 'action=retry_same')" = "1" ] \
+        || fail "Expected exactly one retry_same; got: $output"
 }
 
 @test "_halt_if_api_error ends the run in error naming the API error (#1072)" {

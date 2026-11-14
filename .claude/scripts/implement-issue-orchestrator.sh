@@ -2949,7 +2949,9 @@ detect_rate_limit() {
 # detect_api_error — true when the CLI envelope is an API-error result:
 # is_error is true and either api_error_status is non-null or the result
 # text starts with "API Error" or "Failed to authenticate", or
-# terminal_reason is "api_error".  Callers check detect_rate_limit first; it
+# terminal_reason is "api_error".  Text matching is anchored to the start of
+# result (a mid-text mention does not match) and every branch requires
+# is_error == true.  Callers check detect_rate_limit first; it
 # reads the envelope fields (api_error_status 429, api_error
 # usage_limit_reached) as well as text patterns, so those are classified
 # rate_limit, not api_error.
