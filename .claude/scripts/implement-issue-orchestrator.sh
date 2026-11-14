@@ -4598,7 +4598,6 @@ run_triage_stage() {
 # Returns:
 #   0 on success (approved)
 #   0 on max iterations exceeded (soft-fail, adds to DEGRADED_STAGES)
-#   2 when a fix stage returned an error and committed nothing
 run_quality_loop() {
     local loop_dir="$1"
     local loop_branch="$2"
@@ -4999,9 +4998,6 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             # size: S→sonnet, M→sonnet, L→opus (via resolve_model in run_stage).
             # Pass loop_model_override (arg 7) so an escalated model takes effect
             # on subsequent iterations after stall detection.
-            local fix_head_before
-            fix_head_before=$(git -C "$loop_dir" rev-parse HEAD 2>/dev/null \
-                || printf '')
             local fix_stage_name="fix-review-${stage_prefix}-iter-$loop_iteration"
             set_stage_started "$fix_stage_name"
             local fix_result
@@ -5022,26 +5018,6 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             current_fix_model=$(printf '%s' "$fix_result" | jq -r '.model // "sonnet"')
             post_fix_commits=$(git rev-list --count "${BASE_BRANCH}..${loop_branch}" 2>/dev/null || echo "0")
 
-            # A fix stage that errored and committed nothing cannot make
-            # progress; abort with the error kind and denied tools logged.
-            if [[ "$fix_status" == "error" ]] \
-                && (( post_fix_commits <= pre_fix_commits )); then
-                local _fix_err_kind _fix_denied
-                _fix_err_kind=$(printf '%s' "$fix_result" \
-                    | jq -r '.error_kind // "unknown"' 2>/dev/null)
-                _fix_denied=$(printf '%s' "$fix_result" \
-                    | jq -r '[.denials[]? | if type == "object" then (.tool_name // .tool // tostring) else tostring end] | join(", ")' 2>/dev/null)
-                log_error \
-                    "$fix_stage_name: fix errored with no commits" \
-                    "(error_kind=${_fix_err_kind:-unknown}" \
-                    "denied_tools=${_fix_denied:-none})"
-                # Record the failure (degraded token, merge-block reason, PR
-                # comment). No push is marked and no further review runs.
-                record_failed_review_fix "$fix_stage_name" \
-                    "${_fix_err_kind:-unknown}" "${_fix_denied:-none}"
-                return 2
-            fi
-
             # Guard: verify any new fix-review commit against path allowlist
             if (( post_fix_commits > pre_fix_commits )); then
                 guard_commit_path_allowlist "$loop_dir" || {
@@ -5050,16 +5026,6 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
                         "the code/tests allowlist — aborting quality loop"
                     break
                 }
-            fi
-
-            # Arm the deferred push (and log the committed line) only when
-            # the head actually moved since the fix began.
-            local fix_head_after
-            fix_head_after=$(git -C "$loop_dir" rev-parse HEAD 2>/dev/null \
-                || printf '')
-            if [[ -n "$fix_head_after" \
-                && "$fix_head_after" != "$fix_head_before" ]]; then
-                mark_review_push_pending "$loop_branch"
             fi
 
             if (( post_fix_commits <= pre_fix_commits )) && (( loop_iteration >= 2 )); then
@@ -12711,8 +12677,11 @@ verify_fix_stage_commit() {
 #   $4 - branch head SHA captured before the fix stage ran
 #   $5 - fix stage result JSON
 # Returns:
-#   0 - fix committed, or a genuine no-op
+#   0 - fix committed (head moved)
 #   1 - fix left uncommitted; no success comment posted
+#   2 - fix stage errored and committed nothing; nothing was reported, the
+#       caller must record the failure and stop (no push, no re-review)
+#   3 - genuine no-op: stage succeeded, nothing to change; no push is armed
 _handle_fix_stage_result() {
 	local pr_number="$1"
 	local pr_iteration="$2"
@@ -12734,11 +12703,19 @@ leaving changes in the working tree. The reported fixes have NOT landed on
 		return 1
 	fi
 
-	# Genuine no-op: nothing landed, so there is no fix to report.
 	if [[ -z "$head_after" || "$head_after" == "$head_before" ]]; then
+		local fix_status
+		fix_status=$(printf '%s' "$fix_result" \
+			| jq -r '.status // "success"' 2>/dev/null)
+		if [[ "$fix_status" == "error" ]]; then
+			log_error "fix-pr-review-iter-$pr_iteration errored and" \
+				"committed nothing — not a no-op"
+			return 2
+		fi
+		# Genuine no-op: nothing landed, so there is no fix to report.
 		log "No commit from fix-pr-review-iter-$pr_iteration" \
 			"and a clean tree — skipping the fix comment"
-		return 0
+		return 3
 	fi
 
 	local fix_summary
@@ -15071,8 +15048,28 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             # Comments only if a commit landed; fails loudly if the stage left
             # its work uncommitted.
-            if _handle_fix_stage_result "$pr_number" "$pr_iteration" \
-                "$branch" "$fix_head_before" "$fix_result"; then
+            local fix_handle_rc=0
+            _handle_fix_stage_result "$pr_number" "$pr_iteration" \
+                "$branch" "$fix_head_before" "$fix_result" || fix_handle_rc=$?
+            if (( fix_handle_rc == 2 )); then
+                # Errored fix, nothing committed: record the cause (persisted
+                # before any max-iterations reason), arm no push, and stop
+                # rather than re-review an unchanged branch.
+                local _pr_fix_kind _pr_fix_denied
+                _pr_fix_kind=$(printf '%s' "$fix_result" \
+                    | jq -r '.error_kind // "unknown"' 2>/dev/null)
+                _pr_fix_denied=$(printf '%s' "$fix_result" \
+                    | jq -r '[.denials[]? | if type == "object" then (.tool_name // .tool // tostring) else tostring end] | join(", ")' 2>/dev/null)
+                log_error "fix-pr-review-iter-$pr_iteration failed" \
+                    "(error_kind=${_pr_fix_kind:-unknown}" \
+                    "denied_tools=${_pr_fix_denied:-none}) — stopping review loop"
+                record_failed_review_fix "fix-pr-review-iter-$pr_iteration" \
+                    "${_pr_fix_kind:-unknown}" "${_pr_fix_denied:-none}"
+                pr_approved=true
+                break
+            elif (( fix_handle_rc == 3 )); then
+                log "fix-pr-review-iter-$pr_iteration changed nothing — no push armed"
+            elif (( fix_handle_rc == 0 )); then
                 # A review fix can edit a canonical .claude/scripts/ file just
                 # as easily as the initial implementation can — the pre-PR
                 # call above only covers commits that existed before the PR

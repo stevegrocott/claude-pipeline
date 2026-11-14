@@ -179,120 +179,6 @@ teardown() {
     [ "$iterations" -ge 2 ] || fail "Should have retried after error, got $iterations iterations"
 }
 
-@test "quality loop returns 2 and logs error kind and denied tools when fix errors with no commits" {
-    run_stage() {
-        local stage_name="$1"
-        case "$stage_name" in
-            simplify-*)
-                echo '{"status":"success","output":{"summary":"Simplified"}}'
-                ;;
-            review-*)
-                echo '{"status":"success","output":{"result":"changes_requested","summary":"Needs work","issues":[{"severity":"major","description":"bug"}]}}'
-                ;;
-            fix-review-*)
-                echo '{"status":"error","output":null,"denials":["Bash","Write"],"model":"sonnet","error_kind":"permission_denied"}'
-                ;;
-        esac
-    }
-    export -f run_stage
-
-    comment_issue() { :; }
-    export -f comment_issue
-
-    run run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
-
-    [ "$status" -eq 2 ]
-    [[ "$output" == *"error_kind=permission_denied"* ]]
-    [[ "$output" == *"denied_tools=Bash, Write"* ]]
-}
-
-@test "quality loop failed fix calls helper once and runs no further review" {
-    printf '0' > "$TEST_TMP/reviews"
-    run_stage() {
-        case "$1" in
-            simplify-*) echo '{"status":"success","output":{"summary":"S"}}' ;;
-            review-*)
-                printf '%s' "$(( $(<"$TEST_TMP/reviews") + 1 ))" > "$TEST_TMP/reviews"
-                echo '{"status":"success","output":{"result":"changes_requested","summary":"x","issues":[{"severity":"major","description":"bug"}]}}'
-                ;;
-            fix-review-*)
-                echo '{"status":"error","output":null,"model":"sonnet","error_kind":"permission_denied"}'
-                ;;
-        esac
-    }
-    record_failed_review_fix() { printf '%s|%s\n' "$1" "$2" >> "$TEST_TMP/helper"; }
-    comment_issue() { :; }
-
-    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test" || rc=$?
-
-    [[ "${rc:-0}" -eq 2 ]]
-    [[ "$(wc -l < "$TEST_TMP/helper")" -eq 1 ]]
-    [[ "$(<"$TEST_TMP/helper")" == "fix-review-test-iter-"*"|permission_denied" ]]
-    [[ "$(<"$TEST_TMP/reviews")" -eq 1 ]]
-}
-
-@test "quality loop arms deferred push only when fix moved the head" {
-    printf '0' > "$TEST_TMP/reviews"
-    run_stage() {
-        case "$1" in
-            simplify-*) echo '{"status":"success","output":{"summary":"S"}}' ;;
-            review-*)
-                local n
-                n=$(( $(<"$TEST_TMP/reviews") + 1 ))
-                printf '%s' "$n" > "$TEST_TMP/reviews"
-                if (( n == 1 )); then
-                    echo '{"status":"success","output":{"result":"changes_requested","summary":"x","issues":[{"severity":"major","description":"bug"}]}}'
-                else
-                    echo '{"status":"success","output":{"result":"approved","summary":"ok"}}'
-                fi
-                ;;
-            fix-review-*)
-                git -C "$QUALITY_LOOP_DIR" commit -q --allow-empty -m fix
-                echo '{"status":"success","output":{"summary":"Fixed"}}'
-                ;;
-        esac
-    }
-    comment_issue() { :; }
-    PR_REVIEW_PUSH_PENDING=0
-    PR_REVIEW_PUSH_BRANCH=""
-
-    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
-
-    [[ "$PR_REVIEW_PUSH_PENDING" == "1" ]]
-    [[ "$PR_REVIEW_PUSH_BRANCH" == "test-branch" ]]
-    grep -q "Review fix committed on test-branch" "$LOG_FILE"
-}
-
-@test "quality loop does not arm deferred push when fix leaves head unmoved" {
-    printf '0' > "$TEST_TMP/reviews"
-    run_stage() {
-        case "$1" in
-            simplify-*) echo '{"status":"success","output":{"summary":"S"}}' ;;
-            review-*)
-                local n
-                n=$(( $(<"$TEST_TMP/reviews") + 1 ))
-                printf '%s' "$n" > "$TEST_TMP/reviews"
-                if (( n == 1 )); then
-                    echo '{"status":"success","output":{"result":"changes_requested","summary":"x","issues":[{"severity":"major","description":"bug"}]}}'
-                else
-                    echo '{"status":"success","output":{"result":"approved","summary":"ok"}}'
-                fi
-                ;;
-            fix-review-*)
-                echo '{"status":"success","output":{"summary":"Fixed"}}'
-                ;;
-        esac
-    }
-    comment_issue() { :; }
-    PR_REVIEW_PUSH_PENDING=0
-    PR_REVIEW_PUSH_BRANCH=""
-
-    run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
-
-    [[ "$PR_REVIEW_PUSH_PENDING" == "0" ]]
-    ! grep -q "Review fix committed" "$LOG_FILE"
-}
-
 @test "record_failed_review_fix records degraded token, block reason and PR comment" {
     DEGRADED_STAGES=()
     jq '.stages.pr.pr_number = 77' "$STATUS_FILE" > "$STATUS_FILE.tmp"
@@ -2179,20 +2065,145 @@ _setup_synced_consumer_repo() {
         fail "committed fix must post its success comment, got: $comments"
 }
 
+# Extracts the review loop's fix hand-over (the _handle_fix_stage_result call
+# and its dispatch on the return code) from the real main() so tests execute
+# the production text rather than a copy.
+_extract_fix_handover() {
+    declare -f main | awk '
+        /local fix_handle_rc=0/ { on=1 }
+        on { print }
+        on && /did not land its changes/ {
+            # declare -f renders elif as nested else/if: three closing fi
+            for (i = 0; i < 3; i++) { getline; print }
+            exit
+        }'
+}
+
+# Runs the extracted hand-over inside a one-shot loop (it uses `break`).
+_run_fix_handover() {
+    local block
+    block=$(_extract_fix_handover)
+    [[ -n "$block" ]] || return 99
+    eval "_handover() {
+        local pr_number=77 pr_iteration=1 branch=fix-branch pr_approved=false
+        local fix_head_before=\"\$1\" fix_result=\"\$2\"
+        while true; do
+            $block
+            break
+        done
+        printf 'pr_approved=%s\\n' \"\$pr_approved\"
+    }"
+    _handover "$@"
+}
+
 @test "main defers the PR push only when the fix stage result is accepted" {
-    # The deferral lives in main's review loop; the guard's return code gates
-    # it, so an uncommitted fix can no longer schedule a no-op push.
-    local main_def
-    main_def=$(declare -f main)
-
-    local fix_block
-    fix_block=$(printf '%s' "$main_def" \
-        | awk '/if _handle_fix_stage_result/,/^ *fi$/')
-
-    [[ "$fix_block" == *"mark_review_push_pending"* ]] || \
-        fail "the push marker must sit inside the _handle_fix_stage_result success branch"
-    [[ "$fix_block" == *"did not land its changes"* ]] || \
+    local block
+    block=$(_extract_fix_handover)
+    [[ "$block" == *"mark_review_push_pending"* ]] || \
+        fail "the push marker must sit inside the hand-over"
+    [[ "$block" == *"did not land its changes"* ]] || \
         fail "the failure branch must log that the changes did not land"
+}
+
+@test "_handle_fix_stage_result returns 2 for an errored fix with a clean tree" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+
+    run _handle_fix_stage_result 77 1 "fix-branch" "$head_before" \
+        '{"status":"error","error_kind":"permission_denied","denials":["Edit"]}'
+
+    [ "$status" -eq 2 ]
+    [[ ! -f "$TEST_TMP/comments.log" ]] || \
+        fail "no PR comment may be posted by the handler itself"
+}
+
+@test "_handle_fix_stage_result returns 3 for a successful fix that changed nothing" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+
+    run _handle_fix_stage_result 77 1 "fix-branch" "$head_before" \
+        '{"status":"success","output":{"summary":"nothing to do"}}'
+
+    [ "$status" -eq 3 ]
+}
+
+@test "_handle_fix_stage_result returns 0 for an errored fix that still committed" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+    printf 'fixed\n' >> src.ts
+    git add src.ts
+    git commit -q -m "partial fix"
+
+    run _handle_fix_stage_result 77 1 "fix-branch" "$head_before" \
+        '{"status":"error","error_kind":"model_error"}'
+
+    [ "$status" -eq 0 ]
+}
+
+@test "review loop hand-over after a no-op arms no push and does not stop" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+    regenerate_bundle_if_needed() { :; }
+    record_failed_review_fix() { touch "$TEST_TMP/recorded"; }
+    PR_REVIEW_PUSH_PENDING=0
+    PR_REVIEW_PUSH_BRANCH=""
+
+    _run_fix_handover "$head_before" \
+        '{"status":"success","output":{"summary":"nothing"}}' \
+        > "$TEST_TMP/handover.out"
+
+    [[ "$PR_REVIEW_PUSH_PENDING" == "0" ]]
+    [[ ! -e "$TEST_TMP/recorded" ]]
+    grep -q "pr_approved=false" "$TEST_TMP/handover.out"
+    run grep -c "Review fix committed" "$LOG_FILE"
+    [ "$output" = "0" ]
+}
+
+@test "review loop hand-over after an errored fix records, arms no push and stops" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+    regenerate_bundle_if_needed() { :; }
+    record_failed_review_fix() { printf '%s|%s|%s\n' "$1" "$2" "$3" > "$TEST_TMP/recorded"; }
+    PR_REVIEW_PUSH_PENDING=0
+    PR_REVIEW_PUSH_BRANCH=""
+
+    _run_fix_handover "$head_before" \
+        '{"status":"error","error_kind":"permission_denied","denials":["Edit","AskUserQuestion"]}' \
+        > "$TEST_TMP/handover.out"
+
+    [[ "$PR_REVIEW_PUSH_PENDING" == "0" ]]
+    [[ "$(<"$TEST_TMP/recorded")" == "fix-pr-review-iter-1|permission_denied|Edit, AskUserQuestion" ]]
+    grep -q "pr_approved=true" "$TEST_TMP/handover.out"
+}
+
+@test "review loop hand-over after a committed fix arms the push" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+    regenerate_bundle_if_needed() { :; }
+    printf 'fixed\n' >> src.ts
+    git add src.ts
+    git commit -q -m "fix"
+    PR_REVIEW_PUSH_PENDING=0
+    PR_REVIEW_PUSH_BRANCH=""
+
+    _run_fix_handover "$head_before" \
+        '{"status":"success","output":{"summary":"Fixed"}}' \
+        > "$TEST_TMP/handover.out"
+
+    [[ "$PR_REVIEW_PUSH_PENDING" == "1" ]]
+    [[ "$PR_REVIEW_PUSH_BRANCH" == "fix-branch" ]]
 }
 
 # =============================================================================
@@ -2213,7 +2224,7 @@ _setup_synced_consumer_repo() {
 
     local fix_block
     fix_block=$(printf '%s' "$main_def" \
-        | awk '/if _handle_fix_stage_result/,/^ *fi$/')
+        | awk '/_handle_fix_stage_result "\$pr_number"/,/^ *fi$/')
 
     if [[ "$fix_block" == *"git push origin"* ]]; then
         fail "the fix branch still pushes per iteration: $fix_block"
@@ -2228,7 +2239,7 @@ _setup_synced_consumer_repo() {
     # the stage-completed call that closes it.
     local tail_block
     tail_block=$(printf '%s' "$main_def" \
-        | awk '/if _handle_fix_stage_result/,/set_stage_completed "pr_review"/')
+        | awk '/_handle_fix_stage_result "\$pr_number"/,/set_stage_completed "pr_review"/')
 
     [[ "$tail_block" == *"flush_review_push"* ]] || \
         fail "the loop never flushes its deferred push: $tail_block"
@@ -2336,7 +2347,7 @@ _setup_synced_consumer_repo() {
 
     run _handle_fix_stage_result 628 1 "fix-branch" "$head_before" "$fix_result"
 
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 3 ]
 }
 
 # =============================================================================
