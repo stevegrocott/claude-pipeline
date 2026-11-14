@@ -254,3 +254,53 @@ GH
     [ "$final_state" = "interrupted_during_parse_issue" ]
     [ "$final_state" != "running" ]
 }
+
+# =============================================================================
+# REPEATED SIGTERM: the TERM handler ignores further TERMs
+# =============================================================================
+
+@test "orchestrator TERM handler ignores further TERMs before any cleanup" {
+    local line
+    line=$(grep -E "^trap .* TERM$" "$ORCHESTRATOR_SCRIPT")
+    [[ "$line" == "trap \"trap '' TERM; "* ]]
+}
+
+@test "real orchestrator: two SIGTERMs 10ms apart still finish the EXIT trap" {
+    local mock_bin="$TEST_TMP/mockbin"
+    mkdir -p "$mock_bin"
+    cat > "$mock_bin/gh" << 'GH'
+#!/usr/bin/env bash
+exec sleep 60
+GH
+    chmod +x "$mock_bin/gh"
+    export PATH="$mock_bin:$PATH"
+
+    local status_file="$TEST_TMP/real_status2.json"
+
+    set -m
+    "$ORCHESTRATOR_SCRIPT" --issue 123 --branch test --quiet \
+        --status-file "$status_file" > "$TEST_TMP/orch2.out" 2>&1 &
+    local pid=$!
+    set +m
+
+    local i=0 state=""
+    while ((i++ < 100)); do
+        if [[ -f "$status_file" ]]; then
+            state=$(jq -r '.state // empty' "$status_file" 2>/dev/null || true)
+            [[ "$state" == "running" ]] && break
+        fi
+        sleep 0.1
+    done
+    [ "$state" = "running" ]
+
+    kill -TERM -"$pid" 2>/dev/null || true
+    sleep 0.01
+    kill -TERM "$pid" 2>/dev/null || true
+    local rc=0
+    wait "$pid" 2>/dev/null || rc=$?
+
+    [ "$rc" -eq 143 ]
+    local final_state
+    final_state=$(jq -r '.state' "$status_file")
+    [ "$final_state" = "interrupted_during_parse_issue" ]
+}
