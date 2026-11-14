@@ -770,6 +770,27 @@ _load_deploy_verify_fn() {
 	[ "$(jq -r '.action' <<< "$output")" = "retry_same" ]
 }
 
+@test "external_termination at the cap with a same-model entry bails with the repeated-kill reason (bash)" {
+	export ESCALATION_POLICY_BACKEND=bash
+	export MAX_ESCALATIONS_PER_RUN=5
+	local sr='{"status":"error","error_kind":"external_termination","model":"sonnet"}'
+	local history='[{"stage":"s1","from_model":"haiku","to_model":"sonnet"},{"stage":"s2","from_model":"sonnet","to_model":"opus"},{"stage":"s3","from_model":"haiku","to_model":"sonnet"},{"stage":"s4","from_model":"sonnet","to_model":"opus"},{"stage":"s5","from_model":"sonnet","to_model":"sonnet"}]'
+	run bash "$DECIDE_ACTION_SCRIPT" "$sr" "$history"
+	[ "$status" -eq 0 ]
+	[ "$(jq -r '.action' <<< "$output")" = "bail" ]
+	[[ "$(jq -r '.reason' <<< "$output")" == *"repeated external kill"* ]]
+}
+
+@test "external_termination at the cap with a same-model entry bails with the repeated-kill reason (default path)" {
+	export MAX_ESCALATIONS_PER_RUN=5
+	local sr='{"status":"error","error_kind":"external_termination","model":"sonnet"}'
+	local history='[{"stage":"s1","from_model":"haiku","to_model":"sonnet"},{"stage":"s2","from_model":"sonnet","to_model":"opus"},{"stage":"s3","from_model":"haiku","to_model":"sonnet"},{"stage":"s4","from_model":"sonnet","to_model":"opus"},{"stage":"s5","from_model":"sonnet","to_model":"sonnet"}]'
+	run bash "$DECIDE_ACTION_SCRIPT" "$sr" "$history"
+	[ "$status" -eq 0 ]
+	[ "$(jq -r '.action' <<< "$output")" = "bail" ]
+	[[ "$(jq -r '.reason' <<< "$output")" == *"repeated external kill"* ]]
+}
+
 @test "the per-run escalation cap still bails every other error kind" {
 	export MAX_ESCALATIONS_PER_RUN=5
 	local history='[{"stage":"s1","from_model":"haiku","to_model":"sonnet"},{"stage":"s2","from_model":"sonnet","to_model":"opus"},{"stage":"s3","from_model":"haiku","to_model":"sonnet"},{"stage":"s4","from_model":"sonnet","to_model":"opus"},{"stage":"s5","from_model":"haiku","to_model":"sonnet"}]'
