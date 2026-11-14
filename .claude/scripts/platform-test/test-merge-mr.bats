@@ -103,10 +103,13 @@ install_failing_merge_gh() {
     cat > "$TEST_TMP/bin/gh" << GH_EOF
 #!/usr/bin/env bash
 echo "gh \$*" >> "\$TEST_TMP/mock_calls.log"
+[[ "\$1" == api && -n "\$MOCK_API_FAIL" ]] && exit 1
 case "\$2" in
   merge) exit 1 ;;
   view)
-    if [[ "\$*" == *"--json state"* ]]; then
+    if [[ "\$*" == *"--json headRefName"* ]]; then
+      echo "\${MOCK_HEAD_INFO:-feature/x false}"
+    elif [[ "\$*" == *"--json state"* ]]; then
       n=\$(grep -c -e '--json state' "\$TEST_TMP/mock_calls.log")
       if ((n == 1)); then echo OPEN; else echo "$after_state"; fi
     else
@@ -125,6 +128,37 @@ GH_EOF
     run run_platform_script merge-mr.sh 99
     [ "$status" -eq 0 ]
     assert_output_contains "is MERGED"
+}
+
+@test "merge-mr github: cleanup-failed merge deletes same-repo remote branch" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    install_failing_merge_gh MERGED
+    run run_platform_script merge-mr.sh 99
+    [ "$status" -eq 0 ]
+    grep -q -e 'gh api -X DELETE repos/{owner}/{repo}/git/refs/heads/feature/x' \
+        "$TEST_TMP/mock_calls.log"
+}
+
+@test "merge-mr github: cleanup-failed merge skips fork PR branch delete" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    export MOCK_HEAD_INFO="feature/x true"
+    install_failing_merge_gh MERGED
+    run run_platform_script merge-mr.sh 99
+    [ "$status" -eq 0 ]
+    run grep -c 'gh api' "$TEST_TMP/mock_calls.log"
+    [ "$output" = "0" ]
+}
+
+@test "merge-mr github: branch delete failure never changes exit code" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    export MOCK_API_FAIL=1
+    install_failing_merge_gh MERGED
+    run run_platform_script merge-mr.sh 99
+    [ "$status" -eq 0 ]
+    assert_output_contains "could not delete remote branch"
 }
 
 @test "merge-mr github: merge failure and PR still OPEN keeps failure" {
