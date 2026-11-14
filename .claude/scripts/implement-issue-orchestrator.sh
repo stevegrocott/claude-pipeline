@@ -1921,6 +1921,63 @@ _halt_if_budget_exceeded() {
     exit 2
 }
 
+# Record an API-error halt durably in status.json (issue #1072).
+#
+# run_stage executes inside a command-substitution subshell, so a bail there
+# cannot stop the parent.  Like the budget halt, the signal that survives is
+# the status file: .api_error_halt = {stage, status, detail}.  The parent-shell
+# _halt_if_api_error guard reads it.  A resume clears it (see resume init).
+#
+# Arguments:
+#   $1 - stage name
+#   $2 - raw stage output (the CLI envelope is extracted from it)
+set_api_error_halt() {
+    local stage_name="$1"
+    local raw="${2:-}"
+    local envelope code detail
+
+    envelope=$(_extract_cli_envelope "$raw")
+    code=$(jq -r '.api_error_status // "unknown"' <<< "${envelope:-null}" \
+        2>/dev/null) || code="unknown"
+    detail=$(jq -r '(.result // "") | tostring | .[0:200]' \
+        <<< "${envelope:-null}" 2>/dev/null) || detail=""
+    status_json_write --arg stage "$stage_name" --arg code "$code" \
+        --arg detail "$detail" \
+        '.api_error_halt = {stage: $stage, status: $code, detail: $detail}
+         | .last_update = (now | todate)'
+    sync_status_to_log
+}
+
+# Parent-shell halt guard for a repeated API error (issue #1072).
+#
+# Reads .api_error_halt from the status file.  When present, ends the run in
+# state error with a final_state_reason beginning "api_error:" that carries the
+# status code, posts an issue comment naming the API error and saying the run
+# can be resumed, and exits 1.  Tasks not yet dispatched stay pending.  A
+# cheap no-op otherwise, so it is safe to call after every spending stage.
+_halt_if_api_error() {
+    [[ -f "$STATUS_FILE" ]] || return 0
+    local _halt _stage _code _detail _reason
+    _halt=$(jq -c '.api_error_halt // empty' "$STATUS_FILE" 2>/dev/null) \
+        || return 0
+    [[ -n "$_halt" ]] || return 0
+
+    _stage=$(jq -r '.stage // "unknown"' <<< "$_halt")
+    _code=$(jq -r '.status // "unknown"' <<< "$_halt")
+    _detail=$(jq -r '.detail // ""' <<< "$_halt")
+
+    _reason="api_error: Claude API error (status ${_code}) at stage ${_stage}"
+    _reason+=" after one retry; run stopped and can be resumed"
+    log_error "Run halted (API error): $_reason — no further stages will run."
+    comment_issue "Run Stopped: API Error" \
+        "❌ The Claude API returned an error (status ${_code}) at stage \`${_stage}\`, and the one same-model retry hit it again. The run was stopped so no further tasks are dispatched against an unavailable API. Tasks not yet dispatched remain pending. Check API availability or authentication, then resume with \`--resume\`.${_detail:+
+
+API response: ${_detail}}" \
+        "error"
+    set_final_state "error" "$_reason"
+    exit 1
+}
+
 record_escalation() {
     local stage="$1"
     local from_model="$2"
@@ -2480,6 +2537,18 @@ load_resume_state() {
 
     # Get PR number if it exists
     RESUME_PR_NUMBER=$(jq -r '.stages.pr.pr_number // empty' "$status_path")
+
+    # Issue #1072: a previous run's API-error halt record must not halt this
+    # run.  Cleared here because STATUS_FILE is not yet bound in logdir mode.
+    if jq -e 'has("api_error_halt")' "$status_path" >/dev/null 2>&1; then
+        local _resume_tmp="${status_path}.resume.$$"
+        if jq 'del(.api_error_halt)' "$status_path" > "$_resume_tmp" \
+            2>/dev/null; then
+            mv "$_resume_tmp" "$status_path"
+        else
+            rm -f "$_resume_tmp"
+        fi
+    fi
 }
 
 # Check if a stage is completed in status file
@@ -2837,6 +2906,21 @@ detect_rate_limit() {
     fi
 
     return 1
+}
+
+# detect_api_error — true when the CLI envelope is an API-error result:
+# is_error is true and either api_error_status is a non-null number or the
+# result text starts with "API Error".  Callers check detect_rate_limit
+# first, so a 429 is classified rate_limit, not api_error.
+detect_api_error() {
+    local output="$1"
+
+    printf '%s' "$output" | jq -e '
+        (.is_error == true) and
+        ((.api_error_status // null) != null
+         or ((.result // "") | type == "string"
+             and test("^API Error")))
+    ' >/dev/null 2>&1
 }
 
 extract_wait_time() {
@@ -3926,6 +4010,9 @@ for m in re.finditer(r'\[\s*\{', t):
     elif detect_rate_limit "$output"; then
         handle_rate_limit "$output" "$model"
         _error_kind="rate_limit"
+    elif detect_api_error "$output"; then
+        log_error "Stage $stage_name — API error envelope from $model"
+        _error_kind="api_error"
     elif [[ -z "$structured" && -z "$_fallback_result" ]]; then
         # No parseable output of any kind
         local output_byte_count output_preview
@@ -4221,6 +4308,15 @@ for m in re.finditer(r'\[\s*\{', t):
                 return 1
             fi
 
+            # An api_error is a transient upstream failure: back off before
+            # the one same-model retry so it doesn't hit the same outage.
+            if [[ "${_error_kind:-}" == "api_error" ]]; then
+                local _api_wait="${API_ERROR_RETRY_WAIT:-300}"
+                [[ "$_api_wait" =~ ^[0-9]+$ ]] || _api_wait=300
+                log "  api_error: waiting ${_api_wait}s before same-model retry"
+                sleep "$_api_wait"
+            fi
+
             # handle_rate_limit() was already called during error_kind
             # classification above; emit the retry/model_call events now.
             emit_event "retry" \
@@ -4371,6 +4467,22 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$result_model" "null" \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
                     "$_stage_usage" "${complexity:-}")
+            elif detect_api_error "$(_extract_cli_envelope "$output")"; then
+                # Issue #1072: the retry was also an API error.  Fail the
+                # stage as api_error and halt — no third dispatch, and
+                # never escalate (the model tier is not at fault).
+                log_error "Stage $stage_name hit an API error again on" \
+                    "the same-model retry — failing"
+                _sr_retry=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"api_error"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage" "${complexity:-}")
+                set_api_error_halt "${_RUN_STAGE_NAME:-$stage_name}" "$output"
+                _apply_stage_action "$_sr_retry" "bail" \
+                    "api_error: repeated API failure, not escalating"
+                return $?
             elif (( _retry_exit_code == 143 )); then
                 # Issue #1054: the re-run was also killed from outside (an
                 # unmarked 143 survived _classify_143).  Fail the stage with
@@ -4674,6 +4786,7 @@ Output a summary of changes made."
                 2>/dev/null || true)
             simplify_result=$(run_stage "$simplify_stage_name" "$simplify_prompt" "implement-issue-simplify.json" "" "$loop_complexity")
             _halt_if_budget_exceeded
+            _halt_if_api_error
             local simplify_status
             simplify_status=$(printf '%s' "$simplify_result" | jq -r '.status // "success"')
             if [[ "$simplify_status" != "error" ]]; then
@@ -4789,6 +4902,7 @@ Simply output 'approved' if code quality is acceptable, or 'changes_requested' w
         local review_result
         review_result=$(run_stage "$review_stage_name" "$review_prompt" "implement-issue-review.json" "code-reviewer" "$loop_complexity")
         _halt_if_budget_exceeded
+        _halt_if_api_error
         local review_run_status
         review_run_status=$(printf '%s' "$review_result" | jq -r '.status // "success"')
         if [[ "$review_run_status" != "error" ]]; then
@@ -5006,6 +5120,7 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             local fix_result
             fix_result=$(run_stage "$fix_stage_name" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity" "" "${loop_model_override:-}")
             _halt_if_budget_exceeded
+            _halt_if_api_error
             local fix_status
             fix_status=$(printf '%s' "$fix_result" | jq -r '.status // "success"')
             if [[ "$fix_status" != "error" ]]; then
@@ -8188,6 +8303,7 @@ Commit your changes with a descriptive message."
 		fi
 		unset _RUN_STAGE_DESC_LEN
 		_halt_if_budget_exceeded
+		_halt_if_api_error
 
 		local impl_status
 		impl_status=$(printf '%s' "$impl_result" \
@@ -9494,6 +9610,7 @@ Commit your changes with a descriptive message."
 						"$_next_tagent" "$_next_tsize" \
 						"$_pw_timeout" "$_pw_model")
 					_halt_if_budget_exceeded
+					_halt_if_api_error
 
 					local _pw_status
 					_pw_status=$(printf '%s' "$_pw_result" \
@@ -9665,6 +9782,7 @@ Commit your changes with a descriptive message."
 			fi
 			unset _RUN_STAGE_DESC_LEN
 			_halt_if_budget_exceeded
+			_halt_if_api_error
 
 			local impl_status
 			impl_status=$(printf '%s' "$impl_result" \
@@ -11229,6 +11347,7 @@ Output both test results and validation findings in one structured response.
         local test_result
         test_result=$(run_stage "test-iter-$test_iteration" "$test_prompt" "$test_schema" "default" "$loop_complexity")
         _halt_if_budget_exceeded
+        _halt_if_api_error
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$test_result"; then
@@ -11463,6 +11582,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             local fix_result
             fix_result=$(run_stage "fix-tests-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
+            _halt_if_api_error
 
             _test_fix_head_after=$(git -C "$loop_dir" rev-parse HEAD \
                 2>/dev/null || true)
@@ -11545,6 +11665,7 @@ Output a summary of fixes applied."
             local fix_result
             fix_result=$(run_stage "fix-test-quality-iter-$test_iteration" "$fix_prompt" "implement-issue-fix.json" "$loop_agent" "$loop_complexity")
             _halt_if_budget_exceeded
+            _halt_if_api_error
 
             _test_fix_head_after=$(git -C "$loop_dir" rev-parse HEAD \
                 2>/dev/null || true)
@@ -11978,6 +12099,7 @@ Report result as 'passed' or 'failed' with a detailed summary."
 					"implement-issue-e2e-validate.json" \
 					"playwright-test-developer")
 				_halt_if_budget_exceeded
+				_halt_if_api_error
 			fi
 
 			local e2e_verify_status e2e_verify_summary
@@ -12198,6 +12320,7 @@ Output result as 'passed' or 'failed' with a detailed summary."
 					"implement-issue-test.json" \
 					"default")
 				_halt_if_budget_exceeded
+				_halt_if_api_error
 
 				local acceptance_status acceptance_summary
 				acceptance_status=$(printf '%s' "$acceptance_result" \
@@ -12272,6 +12395,7 @@ $acceptance_summary" "default"
 	# budget inside its background subshell.  Halt in the PARENT shell BEFORE
 	# dispatching any sequential fix stage, so no fix CLI call runs post-breach.
 	_halt_if_budget_exceeded
+	_halt_if_api_error
 
 	# Issue #745: the initial e2e-verify call reported a verdict its own
 	# counts don't support (zero tests run, or passed+failed short of
@@ -12341,6 +12465,7 @@ Commit your changes."
 				"$AGENT" \
 				"$max_task_size")
 			_halt_if_budget_exceeded
+			_halt_if_api_error
 
 			local e2e_fix_summary
 			e2e_fix_summary=$(printf '%s' "$e2e_fix_result" \
@@ -12384,6 +12509,7 @@ Report result as 'passed' or 'failed' with a detailed summary."
 				"implement-issue-e2e-validate.json" \
 				"playwright-test-developer")
 			_halt_if_budget_exceeded
+			_halt_if_api_error
 
 			local rerun_status rerun_summary
 			rerun_status=$(printf '%s' "$rerun_result" \
@@ -12548,6 +12674,7 @@ Investigate the root cause and fix the issue. Commit your changes."
 			"implement-issue-fix.json" \
 			"$AGENT")
 		_halt_if_budget_exceeded
+		_halt_if_api_error
 
 		local acceptance_fix_summary
 		acceptance_fix_summary=$(printf '%s' \
@@ -13767,6 +13894,7 @@ $task_list_md
             # after every batch dispatch, so re-assert the durable budget halt
             # here — otherwise the run would keep spending on later stages.
             _halt_if_budget_exceeded
+            _halt_if_api_error
 
             # Process completed tasks
             local comp_count
@@ -14633,6 +14761,7 @@ $pr_creation_skill}"
         local pr_result
         pr_result=$(run_stage "pr" "$pr_prompt" "implement-issue-pr.json" "" "" "" "opus")
         _halt_if_budget_exceeded
+        _halt_if_api_error
 
         local pr_status
         pr_status=$(printf '%s' "$pr_result" | jq -r '.output.status')
@@ -14930,6 +15059,7 @@ Approve or request changes. Output a summary suitable for an issue comment."
         local review_result
         review_result=$(run_stage "pr-review-iter-$pr_iteration" "$review_prompt" "implement-issue-review.json" "code-reviewer" "" "$pr_review_timeout" "$pr_review_model")
         _halt_if_budget_exceeded
+        _halt_if_api_error
 
         # Handle timeout: skip result inspection and retry on next iteration
         if is_stage_timeout "$review_result"; then
@@ -15191,6 +15321,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             local fix_result
             fix_result=$(run_stage "fix-pr-review-iter-$pr_iteration" "$fix_prompt" "implement-issue-fix.json" "$AGENT")
             _halt_if_budget_exceeded
+            _halt_if_api_error
 
             # Comments only if a commit landed; fails loudly if the stage left
             # its work uncommitted.
@@ -15284,6 +15415,7 @@ $complete_skill
         local complete_result
         complete_result=$(run_stage "complete" "$complete_prompt" "implement-issue-complete.json")
         _halt_if_budget_exceeded
+        _halt_if_api_error
 
         local complete_summary
         complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
@@ -15867,6 +15999,7 @@ STEPS:
                         "implement-issue-deploy-verify.json" \
                         "default")
                     _halt_if_budget_exceeded
+                    _halt_if_api_error
 
                     local dv_status dv_health dv_summary
                     dv_status=$(printf '%s' "$deploy_verify_result" \

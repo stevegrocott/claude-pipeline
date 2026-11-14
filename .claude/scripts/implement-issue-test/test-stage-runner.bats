@@ -236,6 +236,74 @@ teardown() {
     [[ "$output" == *"no_structured_output"* ]]
 }
 
+@test "run_stage classifies an API-error envelope as api_error" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+
+    export API_ERROR_RETRY_WAIT=0
+
+    run run_stage "test" "prompt" "test-schema.json"
+    # The first pass is classified api_error (not no_structured_output) and
+    # decide-action.sh answers retry_same (task 2), after the back-off.
+    [[ "$output" == *"API error envelope"* \
+        && "$output" == *"action=retry_same"* ]] \
+        || fail "Expected first-pass api_error classification; got: $output"
+    [[ "$output" != *"Diagnostic fallback failure"* ]] \
+        || fail "API error must not fall through to no_structured_output: $output"
+}
+
+@test "run_stage waits API_ERROR_RETRY_WAIT seconds before an api_error retry_same" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+    export API_ERROR_RETRY_WAIT=7
+
+    # Shadow sleep with a recorder so the test neither waits nor guesses.
+    mkdir -p "$TEST_TMP/sleepbin"
+    printf '#!/usr/bin/env bash\necho "$1" >> "%s/sleeps"\n' "$TEST_TMP" \
+        > "$TEST_TMP/sleepbin/sleep"
+    chmod +x "$TEST_TMP/sleepbin/sleep"
+    PATH="$TEST_TMP/sleepbin:$PATH" run run_stage "test" "prompt" "test-schema.json"
+
+    [[ "$output" == *"waiting 7s before same-model retry"* ]] \
+        || fail "Expected api_error back-off log; got: $output"
+    grep -qx '7' "$TEST_TMP/sleeps" \
+        || fail "sleep 7 not invoked; sleeps: $(cat "$TEST_TMP/sleeps" 2>/dev/null)"
+}
+
+@test "retry also an API error fails with api_error, no third dispatch (#1072)" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+    export API_ERROR_RETRY_WAIT=0
+
+    run run_stage "test" "prompt" "test-schema.json"
+
+    [ "$status" -ne 0 ]
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.error_kind')" = "api_error" ] \
+        || fail "Expected error_kind api_error; got: $output"
+    [ "$(printf '%s' "$output" | grep -c 'action=retry_same')" = "1" ] \
+        || fail "Expected exactly one retry_same dispatch; got: $output"
+    [[ "$output" == *"action=bail"* || "$output" == *"repeated API failure"* ]] \
+        || fail "Expected halt recorded as bail; got: $output"
+    [[ "$output" != *"action=escalate"* ]] \
+        || fail "api_error must not escalate: $output"
+}
+
+@test "run_stage keeps rate_limit ahead of api_error for a 429 envelope" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":429,"result":"API Error: 429 too many requests, retry-after 1"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+
+    run run_stage "test" "prompt" "test-schema.json"
+    [[ "$output" != *"API error envelope"* ]] \
+        || fail "429 must be rate_limit, not api_error: $output"
+    [[ "$output" == *"rate_limit"* || "$output" == *"Rate limit"* \
+        || "$output" == *"rate limit"* ]] \
+        || fail "Expected rate_limit handling; got: $output"
+}
+
 # =============================================================================
 # FIELD-AWARE STRUCTURED OUTPUT RECOVERY
 # =============================================================================
@@ -4169,4 +4237,69 @@ _count_bats_incomplete_markers() {
         || fail "Expected error_kind external_termination; got: $output"
     [[ "$output" != *"action=escalate"* ]] \
         || fail "External kill must not escalate: $output"
+}
+
+# =============================================================================
+# API-ERROR HALT GUARD (#1072)
+# =============================================================================
+
+_seed_api_halt_status() {
+    cat > "$STATUS_FILE" <<'JSON'
+{"issue":123,"branch":"b","current_stage":"implement","log_dir":"logs",
+ "state":"running","tasks":[{"id":1,"status":"pending"}],
+ "stages":{},"escalations":[],
+ "api_error_halt":{"stage":"implement-task-1","status":"403",
+  "detail":"Failed to authenticate. API Error: 403"}}
+JSON
+}
+
+@test "repeated API error records api_error_halt with the status code (#1072)" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":403,"terminal_reason":"api_error","result":"Failed to authenticate. API Error: 403"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+    export API_ERROR_RETRY_WAIT=0
+
+    run run_stage "test" "prompt" "test-schema.json"
+
+    [ "$(jq -r '.api_error_halt.status' "$STATUS_FILE")" = "403" ] \
+        || fail "halt not recorded: $(cat "$STATUS_FILE")"
+}
+
+@test "_halt_if_api_error ends the run in error naming the API error (#1072)" {
+    _seed_api_halt_status
+    comment_issue() { printf '%s\n%s\n' "$1" "$2" > "$TEST_TMP/comment.txt"; }
+    export -f comment_issue
+
+    run _halt_if_api_error
+
+    [ "$status" -eq 1 ]
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "error" ]
+    [[ "$(jq -r '.final_state_reason' "$STATUS_FILE")" == "api_error:"*"403"* ]] \
+        || fail "bad reason: $(jq -r '.final_state_reason' "$STATUS_FILE")"
+    [ "$(jq -r '.tasks[0].status' "$STATUS_FILE")" = "pending" ]
+    grep -q "403" "$TEST_TMP/comment.txt" || fail "comment lacks status code"
+    grep -q "resume" "$TEST_TMP/comment.txt" || fail "comment lacks resume hint"
+    ! grep -q "usually indicates a bug in the orchestrator" "$TEST_TMP/comment.txt" \
+        || fail "comment blames the orchestrator"
+}
+
+@test "_halt_if_api_error is a no-op without a halt record (#1072)" {
+    _seed_api_halt_status
+    jq 'del(.api_error_halt)' "$STATUS_FILE" > "$STATUS_FILE.t" \
+        && mv "$STATUS_FILE.t" "$STATUS_FILE"
+
+    run _halt_if_api_error
+
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "running" ]
+}
+
+@test "resume clears a previous run's api_error_halt (#1072)" {
+    _seed_api_halt_status
+
+    load_resume_state "$STATUS_FILE"
+    run _halt_if_api_error
+
+    [ "$status" -eq 0 ]
+    [ "$(jq 'has("api_error_halt")' "$STATUS_FILE")" = "false" ]
 }

@@ -4012,3 +4012,35 @@ _setup_status_634() {
 	[[ "$output" == *"primary checkout paths changed"* ]]
 	[[ "$output" == *"escaped-1068.txt"* ]]
 }
+
+# =============================================================================
+# API-error halt guard at every budget-guard site (issue #1072)
+# =============================================================================
+
+@test "every _halt_if_budget_exceeded call site is followed by _halt_if_api_error" {
+	local budget_sites api_sites missing
+	budget_sites=$(grep -c '^[[:space:]]*_halt_if_budget_exceeded$' \
+		"$ORCHESTRATOR_SCRIPT")
+	api_sites=$(grep -c '^[[:space:]]*_halt_if_api_error$' \
+		"$ORCHESTRATOR_SCRIPT")
+	[ "$budget_sites" -gt 0 ]
+	[ "$api_sites" -eq "$budget_sites" ]
+
+	missing=$(awk '
+		prev ~ /^[ \t]*_halt_if_budget_exceeded$/ &&
+			$0 !~ /^[ \t]*_halt_if_api_error$/ { n++ }
+		{ prev = $0 }
+		END { print n + 0 }
+	' "$ORCHESTRATOR_SCRIPT")
+	[ "$missing" -eq 0 ]
+}
+
+@test "api_error halt record stops the run before a later stage runs" {
+	export STATUS_FILE="$TEST_TMP/status.json"
+	printf '%s' '{"state":"running","api_error_halt":{"stage":"implement-task-1","status":"500","detail":"x"}}' \
+		> "$STATUS_FILE"
+	comment_issue() { :; }
+	set_final_state() { :; }
+	run _halt_if_api_error
+	[ "$status" -eq 1 ]
+}
