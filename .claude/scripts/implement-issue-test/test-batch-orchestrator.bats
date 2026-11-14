@@ -6599,3 +6599,66 @@ source_mark_interrupted() {
 	[[ "$body" == *'ACTIVE_ORCH_PGID=""'* ]]
 	[[ "$body" == *'kill -- -"$pgid"'* ]]
 }
+
+# =============================================================================
+# Real batch + stub per-issue script: SIGTERM end state (#1067)
+# =============================================================================
+
+@test "real batch: SIGTERM leaves state interrupted, lock gone, stub signalled once" {
+	local scripts_copy
+	setup_batch_scripts_copy
+
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'MOCKGH'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "issue view" ]]; then
+	if [[ "$*" == *"body,labels"* ]]; then
+		printf '%s\n' '{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing — `.claude/scripts/x.sh`\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+	else
+		echo "OPEN"
+	fi
+fi
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	# Stub per-issue script: announce readiness, count each TERM it gets.
+	cat > "$scripts_copy/implement-issue-orchestrator.sh" << 'STUB'
+#!/usr/bin/env bash
+: > "$STUB_DIR/terms"
+trap 'printf "x\n" >> "$STUB_DIR/terms"; exit 143' TERM
+: > "$STUB_DIR/ready"
+while :; do
+	sleep 0.1
+done
+STUB
+	chmod +x "$scripts_copy/implement-issue-orchestrator.sh"
+	export STUB_DIR="$TEST_TMP/stub"
+	mkdir -p "$STUB_DIR"
+
+	cd "$TEST_TMP" || fail "cd failed"
+	git init -q . 2>/dev/null
+	"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test \
+		> "$TEST_TMP/batch.out" 2>&1 &
+	local batch_pid=$!
+
+	local i
+	for i in {1..300}; do
+		[[ -f "$STUB_DIR/ready" ]] && break
+		sleep 0.1
+	done
+	[[ -f "$STUB_DIR/ready" ]] || fail "stub never started: $(cat "$TEST_TMP/batch.out")"
+	[[ -f logs/.batch-orchestrator.lock ]] || fail "lock not held while running"
+
+	kill -TERM "$batch_pid"
+	local batch_exit=0
+	wait "$batch_pid" || batch_exit=$?
+	sleep 0.5
+
+	[[ "$batch_exit" -eq 143 ]]
+	[[ "$(jq -r .state status.json)" == "interrupted" ]]
+	[[ ! -e logs/.batch-orchestrator.lock ]]
+	[[ "$(wc -l < "$STUB_DIR/terms" | tr -d ' ')" -eq 1 ]]
+}
