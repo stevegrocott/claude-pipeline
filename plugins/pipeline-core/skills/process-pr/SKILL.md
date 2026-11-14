@@ -228,6 +228,16 @@ if [[ -f "$STATUS_JSON" ]]; then
             MERGE_BLOCKED_REASON="PR review loop ended without an approved verdict recorded in degraded_stages: $MAX_ITER_ENTRY"
         fi
     fi
+
+    # Fall back to scanning degraded_stages for a quality:fix_failed entry —
+    # a quality-loop fix stage failed, so the findings were never resolved
+    # (mirrors the orchestrator partial gate).
+    if [[ -z "$MERGE_BLOCKED_REASON" ]]; then
+        FIX_FAILED_ENTRY=$(jq -r '(.degraded_stages // [])[] | select(startswith("quality:fix_failed"))' "$STATUS_JSON" 2>/dev/null | head -1)
+        if [[ -n "$FIX_FAILED_ENTRY" ]]; then
+            MERGE_BLOCKED_REASON="Quality-loop fix stage failed, recorded in degraded_stages: $FIX_FAILED_ENTRY"
+        fi
+    fi
 fi
 
 if [[ -n "$MERGE_BLOCKED_REASON" ]]; then
