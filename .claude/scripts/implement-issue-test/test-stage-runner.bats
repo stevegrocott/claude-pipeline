@@ -253,6 +253,21 @@ teardown() {
         || fail "API error must not fall through to no_structured_output: $output"
 }
 
+@test "detect_api_error matches terminal_reason api_error without a status" {
+    run detect_api_error '{"is_error":true,"terminal_reason":"api_error","result":"boom"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_api_error matches a Failed to authenticate result" {
+    run detect_api_error '{"is_error":true,"result":"Failed to authenticate. Token expired"}'
+    [ "$status" -eq 0 ]
+}
+
+@test "detect_api_error ignores terminal_reason api_error when is_error is false" {
+    run detect_api_error '{"is_error":false,"terminal_reason":"api_error","result":"ok"}'
+    [ "$status" -eq 1 ]
+}
+
 @test "run_stage waits API_ERROR_RETRY_WAIT seconds before an api_error retry_same" {
     export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
     echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}' \
