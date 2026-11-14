@@ -6662,3 +6662,40 @@ STUB
 	[[ ! -e logs/.batch-orchestrator.lock ]]
 	[[ "$(wc -l < "$STUB_DIR/terms" | tr -d ' ')" -eq 1 ]]
 }
+
+# =============================================================================
+# Lock-refused batch changes no state (#1067)
+# =============================================================================
+
+@test "real batch: lock refused leaves status.json and lock untouched" {
+	local scripts_copy
+	setup_batch_scripts_copy
+
+	cd "$TEST_TMP" || fail "cd failed"
+	git init -q . 2>/dev/null
+	mkdir -p logs
+
+	# A live foreign holder owns the lock; status.json says running.
+	sleep 60 &
+	local holder_pid=$!
+	printf '%s\n' "$holder_pid" > logs/.batch-orchestrator.lock
+	printf '%s\n' '{"state":"running","issues":[]}' > status.json
+	local status_before lock_before
+	status_before=$(cat status.json)
+	lock_before=$(cat logs/.batch-orchestrator.lock)
+
+	run "$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
+	kill "$holder_pid" 2>/dev/null
+
+	[[ "$status" -eq 3 ]]
+	[[ "$output" == *"Another batch is running"* ]]
+	[[ "$(cat status.json)" == "$status_before" ]]
+	[[ "$(jq -r .state status.json)" != "interrupted" ]]
+	[[ "$(cat logs/.batch-orchestrator.lock)" == "$lock_before" ]]
+}
+
+@test "handle-issues skill Step 0 names interrupted as a resumable state" {
+	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/handle-issues/SKILL.md"
+	[[ -f "$skill" ]]
+	grep -q '"\$STATE" == "interrupted"' "$skill"
+}
