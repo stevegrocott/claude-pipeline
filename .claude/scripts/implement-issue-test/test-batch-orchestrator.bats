@@ -6566,3 +6566,36 @@ source_mark_interrupted() {
 	grep -qE "^trap 'mark_interrupted_if_active; cleanup; exit 143' TERM" \
 		"$BATCH_ORCHESTRATOR_SCRIPT"
 }
+
+@test "mark_interrupted_if_active exit mode rewrites running" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	mark_interrupted_if_active exit
+
+	[[ "$(jq -r .state "$STATUS_FILE")" == "interrupted" ]]
+}
+
+@test "mark_interrupted_if_active exit mode keeps paused_on_pr" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"paused_on_pr"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	run mark_interrupted_if_active exit
+
+	[[ "$status" -ne 0 ]]
+	[[ "$(jq -r .state "$STATUS_FILE")" == "paused_on_pr" ]]
+}
+
+@test "EXIT trap marks interrupted before cleanup releases the lock" {
+	grep -qE "^trap 'mark_interrupted_if_active exit; cleanup' EXIT" \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "cleanup clears the per-issue group id so it is signalled once" {
+	local body
+	body=$(_extract_function_body cleanup "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'ACTIVE_ORCH_PGID=""'* ]]
+	[[ "$body" == *'kill -- -"$pgid"'* ]]
+}

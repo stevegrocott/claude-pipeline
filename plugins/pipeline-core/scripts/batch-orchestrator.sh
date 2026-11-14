@@ -409,8 +409,11 @@ cleanup_reexec_copy() {
 # the recorded state is "running" or parked ("paused_on_pr"). Terminal states
 # (completed*, circuit_breaker, budget_exceeded, ...) and a lock owned by
 # another batch are left untouched. Never fails; returns 0 when it wrote
-# "interrupted", 1 otherwise.
+# "interrupted", 1 otherwise. With argument "exit" (EXIT trap, no signal
+# seen) only "running" is rewritten: a normal exit parked on a PR keeps
+# "paused_on_pr". Any other/no argument means a signal ended the batch.
 mark_interrupted_if_active() {
+	local mode="${1:-signal}"
 	local holder=""
 	local current=""
 
@@ -423,6 +426,9 @@ mark_interrupted_if_active() {
 
 	case "$current" in
 		running | paused_on_pr)
+			if [[ "$current" == "paused_on_pr" && "$mode" == "exit" ]]; then
+				return 1
+			fi
 			set_state "interrupted" 2>/dev/null || return 1
 			return 0
 			;;
@@ -436,13 +442,19 @@ mark_interrupted_if_active() {
 # batch always terminates the full orchestrator subtree and never leaks the
 # temp snapshot, even on failure.
 cleanup() {
-    [[ -n "$ACTIVE_ORCH_PGID" ]] && kill -- -"$ACTIVE_ORCH_PGID" 2>/dev/null
+    # Signal the per-issue group once: a second TERM would cut short the
+    # orchestrator's own exit trap (#1067). Clear the id after signalling.
+    if [[ -n "$ACTIVE_ORCH_PGID" ]]; then
+        local pgid="$ACTIVE_ORCH_PGID"
+        ACTIVE_ORCH_PGID=""
+        kill -- -"$pgid" 2>/dev/null
+    fi
     release_lock
     cleanup_reexec_copy
 }
 
 trap 'mark_interrupted_if_active; cleanup; exit 143' TERM
-trap cleanup EXIT
+trap 'mark_interrupted_if_active exit; cleanup' EXIT
 acquire_lock
 
 # =============================================================================
