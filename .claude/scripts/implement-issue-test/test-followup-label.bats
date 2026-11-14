@@ -215,6 +215,16 @@ ${validated_body}"
 	grep -q '"<PLATFORM_DIR>/comment-issue.sh"' "$PROCESS_PR_SKILL"
 }
 
+@test "process-pr SKILL.md Step 4g calls the platform create-followup-issue.sh wrapper bare" {
+	[[ -f "$PROCESS_PR_SKILL" ]]
+	grep -q '^"<PLATFORM_DIR>/create-followup-issue.sh" \\$' "$PROCESS_PR_SKILL"
+	# The denied dual-mode resolution form is gone
+	run grep -nE 'CREATE_FOLLOWUP=|command -v pipeline-core-create-followup-issue' "$PROCESS_PR_SKILL"
+	[ "$status" -eq 1 ]
+	# The skill tells the model to record the printed number
+	grep -q 'prints the created issue number' "$PROCESS_PR_SKILL"
+}
+
 @test "approved + major adjacent issue: create-issue.sh receives needs-explore" {
 	local review_result
 	review_result=$(jq -n '{
