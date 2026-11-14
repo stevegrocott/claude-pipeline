@@ -326,3 +326,13 @@ intake_verdict_with_class_override() {
     [[ "$output" != *"unresolved path"* ]] \
         || fail "Missing path reported as unresolved. Got: $output"
 }
+
+@test "class redefined to 0 accepts an existing workflow file at intake" {
+    commit_paths .github/workflows/ci.yml
+
+    intake_verdict_with_class_override .github/workflows/ci.yml 'return 0'
+    [ "$status" -eq 0 ] \
+        || fail "Hard-deny branch ignored class->0 for a workflow path. Got: $output"
+    [[ "$output" != *"hard-denied path:"* ]] \
+        || fail "Workflow path still hard-denied under class->0. Got: $output"
+}
