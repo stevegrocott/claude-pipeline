@@ -204,6 +204,17 @@ ${validated_body}"
 # FUNCTIONAL: approved verdict + major adjacent issue → needs-explore applied
 # =============================================================================
 
+@test "process-pr SKILL.md resolves platform dir with one bare command and literal paths after" {
+	[[ -f "$PROCESS_PR_SKILL" ]]
+	# The bare command appears on its own line
+	grep -qx 'pipeline-core-platform-dir' "$PROCESS_PR_SKILL"
+	# No denied VAR="$(...)" form or $PLATFORM_DIR expansion remains
+	run grep -nE 'PLATFORM_DIR="\$\(|"\$PLATFORM_DIR' "$PROCESS_PR_SKILL"
+	[ "$status" -eq 1 ]
+	# Later commands use the literal placeholder
+	grep -q '"<PLATFORM_DIR>/comment-issue.sh"' "$PROCESS_PR_SKILL"
+}
+
 @test "approved + major adjacent issue: create-issue.sh receives needs-explore" {
 	local review_result
 	review_result=$(jq -n '{

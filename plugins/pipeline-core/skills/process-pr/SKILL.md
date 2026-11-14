@@ -101,15 +101,24 @@ digraph process_pr {
 
 **Why merge first:** Follow-up issues should only be created if the merge succeeds. Creating issues before merge can leave orphaned issues if merge fails (conflict, permissions, etc.). Merging first ensures we only create follow-ups for work that actually landed.
 
+### Step 0: Resolve the Platform Directory
+
+Run this as its own bare command — no `VAR="$(…)"` assignment, no `||` fallback:
+
+```bash
+pipeline-core-platform-dir
+```
+
+Use the path it prints as a literal in every later command, in place of `<PLATFORM_DIR>`. If the command is not found, use `.claude/scripts/platform`.
+
 ### Step 1: Validate Inputs
 
 ```bash
 # Verify PR/MR exists and is open
-PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
-"$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER"
+"<PLATFORM_DIR>/read-mr-comments.sh" "$PR_NUMBER"
 
 # Verify issue exists and is open
-"$PLATFORM_DIR/read-issue.sh" "$ISSUE_NUMBER"
+"<PLATFORM_DIR>/read-issue.sh" "$ISSUE_NUMBER"
 ```
 
 **If validation fails:** Stop and report error.
@@ -118,8 +127,7 @@ PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/p
 
 ```bash
 # Get PR/MR comments
-PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
-"$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER"
+"<PLATFORM_DIR>/read-mr-comments.sh" "$PR_NUMBER"
 ```
 
 **Extract:**
@@ -134,8 +142,7 @@ PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/p
 
 ```bash
 # Get comments as JSON array
-PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
-COMMENTS=$("$PLATFORM_DIR/read-mr-comments.sh" "$PR_NUMBER" | jq -r '.[]')
+COMMENTS=$("<PLATFORM_DIR>/read-mr-comments.sh" "$PR_NUMBER" | jq -r '.[]')
 ```
 
 **Step 3b: Extract status from comments (most recent wins)**
@@ -243,8 +250,7 @@ fi
 if [[ -n "$MERGE_BLOCKED_REASON" ]]; then
     echo "MERGE BLOCKED: $MERGE_BLOCKED_REASON"
     # Post a comment on the PR explaining why it was not merged
-    PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
-    "$PLATFORM_DIR/comment-mr.sh" "$PR_NUMBER" "$(cat <<EOF
+    "<PLATFORM_DIR>/comment-mr.sh" "$PR_NUMBER" "$(cat <<EOF
 ## Merge Blocked — Unresolved Quality Feedback
 
 This PR was **not** merged automatically because the quality loop exited with a convergence failure, meaning the reviewer repeatedly flagged the same issues without resolution.
@@ -289,8 +295,7 @@ A PreToolUse hook now hard-blocks direct `gh pr merge` / `glab mr merge`, so att
 ### Step 4c: Comment on Issue
 
 ```bash
-PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
-"$PLATFORM_DIR/comment-issue.sh" "$ISSUE_NUMBER" "$(cat <<'EOF'
+"<PLATFORM_DIR>/comment-issue.sh" "$ISSUE_NUMBER" "$(cat <<'EOF'
 ## Completed
 
 Resolved via PR/MR #$PR_NUMBER (merged).
@@ -307,8 +312,7 @@ EOF
 ### Step 4d: Close Issue
 
 ```bash
-PLATFORM_DIR="$(pipeline-core-platform-dir 2>/dev/null || echo .claude/scripts/platform)"
-"$PLATFORM_DIR/transition-issue.sh" "$ISSUE_NUMBER"
+"<PLATFORM_DIR>/transition-issue.sh" "$ISSUE_NUMBER"
 ```
 
 ### Step 4e: Delete Branch
