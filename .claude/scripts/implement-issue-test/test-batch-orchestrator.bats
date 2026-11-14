@@ -6659,10 +6659,12 @@ MOCKGH
 	export PATH="$mock_bin:$PATH"
 
 	# Stub per-issue script: announce readiness, count each TERM it gets.
+	# After a TERM it lingers ~1s before exiting, so a second TERM sent
+	# during that window is caught and counted by the re-entered trap.
 	cat > "$scripts_copy/implement-issue-orchestrator.sh" << 'STUB'
 #!/usr/bin/env bash
 : > "$STUB_DIR/terms"
-trap 'printf "x\n" >> "$STUB_DIR/terms"; exit 143' TERM
+trap 'printf "x\n" >> "$STUB_DIR/terms"; sleep 1; exit 143' TERM
 : > "$STUB_DIR/ready"
 while :; do
 	sleep 0.1
@@ -6689,7 +6691,7 @@ STUB
 	kill -TERM "$batch_pid"
 	local batch_exit=0
 	wait "$batch_pid" || batch_exit=$?
-	sleep 0.5
+	sleep 1.5
 
 	[[ "$batch_exit" -eq 143 ]]
 	[[ "$(jq -r .state status.json)" == "interrupted" ]]
