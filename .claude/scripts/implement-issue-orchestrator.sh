@@ -9321,8 +9321,18 @@ execute_batch_parallel() {
 			_task_pid=$!
 			set +m
 			set -m
-			( sleep "${twall}" && \
-				kill -- -"$_task_pid" 2>/dev/null ) > /dev/null 2>&1 &
+			# Poll once a second up to twall; exit as soon as the
+			# task is gone so no long sleep outlives it. fd 3 is
+			# closed so the watchdog never holds the lock open.
+			(
+				_waited=0
+				while ((_waited < twall)); do
+					kill -0 "$_task_pid" 2>/dev/null || exit 0
+					sleep 1
+					_waited=$((_waited + 1))
+				done
+				kill -- -"$_task_pid" 2>/dev/null
+			) > /dev/null 2>&1 3>&- &
 			_watchdog_pid=$!
 			set +m
 			wait "$_task_pid" 2>/dev/null
