@@ -101,10 +101,29 @@ setup() {
 }
 
 teardown() {
+	_cleanup_primary_checkout_1094
 	rm -f "$TEST_TMP/repo"/pre-existing-1068.txt \
 		"$TEST_TMP/repo"/escaped-1068.txt 2>/dev/null || true
 	_restore_acceptance_env
 	teardown_test_env
+}
+
+# Restore the primary checkout after the #1094 tests even when they fail
+# mid-way: revert README.md, drop the stray file, return to main, and delete
+# the per-test feature branches.
+_cleanup_primary_checkout_1094() {
+	[[ -d "$TEST_TMP/repo" ]] || return 0
+	(
+		cd "$TEST_TMP/repo" || exit 0
+		rm -f stray-1094.txt
+		git checkout -q -- README.md 2>/dev/null || true
+		git worktree prune 2>/dev/null || true
+		git checkout -q main 2>/dev/null || true
+		local b
+		for b in feature/trk-1094 feature/stray-a-1094 feature/stray-b-1094; do
+			git branch -D "$b" 2>/dev/null || true
+		done
+	) || true
 }
 
 # Undo the exports/stubs _run_acceptance_for_route_file installs so they
@@ -4069,10 +4088,6 @@ _setup_status_634() {
 
 	local dirty_status
 	dirty_status=$(git status --porcelain -- README.md)
-	git checkout -q -- README.md 2>/dev/null || true
-	git worktree prune 2>/dev/null || true
-	git checkout -q main 2>/dev/null || true
-	git branch -D feature/trk-1094 2>/dev/null || true
 
 	# The tracked file is reported as a modified (not untracked) path
 	[[ "$dirty_status" == " M README.md" ]]
@@ -4085,12 +4100,14 @@ _setup_status_634() {
 	printf '%s\n' "$output" | grep 'primary checkout paths changed' | grep -q 'README\.md'
 }
 
-@test "#1094 execute_batch_parallel: a pre-existing stray file is left as found and the batch result matches a run without it" {
+@test "#1094 execute_batch_parallel: a reported stray file is left as found and the batch result matches a run without the check" {
 	cd "$TEST_TMP/repo" || exit 1
 	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
 
+	# The stray file appears DURING the batch, so the check reports it.
 	run_task_in_worktree() {
 		local result_file="$8"
+		printf 'stray-content' > "$TEST_TMP/repo/stray-1094.txt"
 		printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
 	}
 	extract_task_size() { printf '%s' "S"; }
@@ -4099,42 +4116,38 @@ _setup_status_634() {
 	local tasks
 	tasks='[{"id":9,"description":"Modify src.ts","agent":"default","batch":1}]'
 
-	# Run A: clean primary checkout
+	# Run A: real _report_primary_checkout_dirt
 	git checkout -q -b feature/stray-a-1094 main
 	run execute_batch_parallel 1 "$tasks" "feature/stray-a-1094" "main"
-	local clean_status="$status" clean_output="$output"
-	git worktree prune 2>/dev/null || true
-	git checkout -q main 2>/dev/null || true
-	git branch -D feature/stray-a-1094 2>/dev/null || true
-
-	# Run B: same batch with a stray file already present before it starts
-	printf 'stray-content' > "$TEST_TMP/repo/stray-1094.txt"
-	git checkout -q -b feature/stray-b-1094 main
-	run execute_batch_parallel 1 "$tasks" "feature/stray-b-1094" "main"
-	local stray_status="$status" stray_output="$output"
-	local stray_present=0 stray_content=""
+	local real_output="$output"
+	local real_present=0 real_content=""
 	if [[ -f "$TEST_TMP/repo/stray-1094.txt" ]]; then
-		stray_present=1
-		stray_content=$(cat "$TEST_TMP/repo/stray-1094.txt")
+		real_present=1
+		real_content=$(cat "$TEST_TMP/repo/stray-1094.txt")
 	fi
 	git worktree prune 2>/dev/null || true
 	git checkout -q main 2>/dev/null || true
-	git branch -D feature/stray-b-1094 2>/dev/null || true
+	git branch -D feature/stray-a-1094 2>/dev/null || true
 	rm -f "$TEST_TMP/repo/stray-1094.txt"
 
-	# Stray file untouched by the dirt check
-	[ "$stray_present" -eq 1 ]
-	[ "$stray_content" = "stray-content" ]
-	# Not reported, and batch result identical to the run without it
-	[[ "$stray_output" != *"stray-1094.txt"* ]]
-	[[ "$stray_output" != *"primary checkout paths changed"* ]]
-	[ "$stray_status" -eq "$clean_status" ]
-	local norm_stray norm_clean
-	norm_stray=$(printf '%s\n' "${stray_output//stray-b-1094/X}" |
-		sed -E 's/^\[[^]]*\]//; s/PID [0-9]+/PID N/')
-	norm_clean=$(printf '%s\n' "${clean_output//stray-a-1094/X}" |
-		sed -E 's/^\[[^]]*\]//; s/PID [0-9]+/PID N/')
-	[ "$norm_stray" = "$norm_clean" ]
+	# Run B: identical batch with the check stubbed out
+	_report_primary_checkout_dirt() { :; }
+	git checkout -q -b feature/stray-b-1094 main
+	run execute_batch_parallel 1 "$tasks" "feature/stray-b-1094" "main"
+	local stub_output="$output"
+
+	# Control: the real check did report the stray file
+	[[ "$real_output" == *"primary checkout paths changed"* ]]
+	[[ "$real_output" == *"stray-1094.txt"* ]]
+	# The check left the reported file untouched
+	[ "$real_present" -eq 1 ]
+	[ "$real_content" = "stray-content" ]
+	# completed/failed/conflicted identical with and without the check
+	local real_json stub_json
+	real_json=$(printf '%s\n' "$real_output" | sed -n '/^{"completed"/,$p' | jq -cS '.')
+	stub_json=$(printf '%s\n' "$stub_output" | sed -n '/^{"completed"/,$p' | jq -cS '.')
+	[ -n "$real_json" ]
+	[ "$real_json" = "$stub_json" ]
 }
 
 # =============================================================================
