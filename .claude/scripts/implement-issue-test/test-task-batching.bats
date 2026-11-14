@@ -21,6 +21,9 @@
 #     5. tasks with no recognisable paths → all batch 1 (no conflict assumed)
 #     6. every task in output has a .batch field
 #
+#   filter_batch_by_dependencies:
+#     keeps tasks whose depends-on tasks all completed; records the rest failed
+#
 #   create_task_worktree:
 #     1. creates worktree directory at expected path
 #     2. creates the expected branch
@@ -279,6 +282,53 @@ _restore_acceptance_env() {
 	nulls=$(printf '%s' "$result" \
 		| jq '[.[] | select(.batch == null)] | length')
 	[ "$nulls" -eq 0 ]
+}
+
+# =============================================================================
+# filter_batch_by_dependencies
+# =============================================================================
+
+@test "filter_batch_by_dependencies: keeps task whose dependencies all completed" {
+	local batch result
+	batch='[{"id":3,"depends_on":[1,2]}]'
+	result=$(filter_batch_by_dependencies "$batch" '[1,2]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[3]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[]" ]
+}
+
+@test "filter_batch_by_dependencies: records task failed when a dependency did not complete" {
+	local batch result
+	batch='[{"id":3,"depends_on":[1,2]}]'
+	result=$(filter_batch_by_dependencies "$batch" '[1]')
+	[ "$(jq -c '.runnable' <<< "$result")" = "[]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[3]" ]
+}
+
+@test "filter_batch_by_dependencies: tasks without depends_on always kept" {
+	local result
+	result=$(filter_batch_by_dependencies '[{"id":1},{"id":2,"depends_on":[]}]' '[]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[1,2]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[]" ]
+}
+
+@test "filter_batch_by_dependencies: splits a mixed batch preserving order" {
+	local batch result
+	batch='[{"id":2,"depends_on":[1]},{"id":3,"depends_on":[9]},{"id":4}]'
+	result=$(filter_batch_by_dependencies "$batch" '[1]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[2,4]" ]
+	[ "$(jq -c '.failed' <<< "$result")" = "[3]" ]
+}
+
+@test "filter_batch_by_dependencies: matches string and numeric ids alike" {
+	local result
+	result=$(filter_batch_by_dependencies '[{"id":2,"depends_on":["1"]}]' '[1]')
+	[ "$(jq -c '.runnable | map(.id)' <<< "$result")" = "[2]" ]
+}
+
+@test "filter_batch_by_dependencies: empty batch yields empty result" {
+	local result
+	result=$(filter_batch_by_dependencies '[]' '[]')
+	[ "$result" = '{"runnable":[],"failed":[]}' ]
 }
 
 # =============================================================================
