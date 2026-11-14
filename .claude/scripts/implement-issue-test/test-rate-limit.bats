@@ -390,3 +390,74 @@ _clock_at_offset() {
     log_output=$(handle_rate_limit "$rate_limit_output" 2>&1)
     [[ "$log_output" == *"Rate limit hit"* ]] || fail "Expected rate limit log message"
 }
+
+# =============================================================================
+# SLEEP ACCOUNTING
+# =============================================================================
+
+@test "rate_limit_slept_since is 0 when nothing recorded" {
+    run rate_limit_slept_since 0
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
+}
+
+@test "handle_rate_limit records its sleep interval" {
+    sleep() { :; }
+    extract_wait_time() { echo 7; }
+    emit_event() { :; }
+    local before; printf -v before '%(%s)T' -1
+    handle_rate_limit '{}' ""
+    [ -f "$LOG_BASE/rate-limit-sleeps.log" ]
+    read -r s e < "$LOG_BASE/rate-limit-sleeps.log"
+    [ "$s" -ge "$before" ]
+    [ "$((e - s))" -eq "$((7 + RATE_LIMIT_BUFFER))" ]
+}
+
+@test "rate_limit_slept_since counts overlapping sleeps once" {
+    local now; printf -v now '%(%s)T' -1
+    printf '%s\n' "$((now-100)) $((now-60))" "$((now-90)) $((now-50))" \
+        "bogus line" > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since 0
+    [ "$output" = "50" ]
+}
+
+@test "rate_limit_slept_since does not credit future sleep time" {
+    local now; printf -v now '%(%s)T' -1
+    printf '%s\n' "$((now-10)) $((now+500))" > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since 0
+    [ "$output" -ge 10 ]
+    [ "$output" -le 12 ]
+}
+
+@test "rate_limit_slept_since clips a sleep straddling the window start" {
+    local now; printf -v now '%(%s)T' -1
+    printf '%s\n' "$((now-100)) $((now-40))" > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since "$((now-60))"
+    [ "$output" = "20" ]
+    run rate_limit_slept_since "$((now-30))"
+    [ "$output" = "0" ]
+}
+
+@test "sleep accounting reads the clock without the printf time format (bash 3.2)" {
+    # bash 3.2 rejects the %(...)T format; reject it here too so a clock read
+    # that depends on it fails under bash 5 as it would on stock macOS.
+    printf() {
+        local arg
+        for arg in "$@"; do
+            [[ "$arg" != *'%('* ]] || return 1
+        done
+        builtin printf "$@"
+    }
+    local now s e
+    now=$(date +%s)
+
+    _record_rate_limit_sleep 30
+    read -r s e < "$LOG_BASE/rate-limit-sleeps.log"
+    [ "$s" -ge "$now" ]
+    [ "$((e - s))" -eq 30 ]
+
+    builtin printf '%s\n' "$((now-100)) $((now-60))" > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since 0
+    [ "$status" -eq 0 ]
+    [ "$output" = "40" ]
+}

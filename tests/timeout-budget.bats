@@ -75,6 +75,7 @@ _source_timeout_functions() {
 	# the full orchestrator environment.
 	printf '%s\n' \
 		'log_warn() { printf "[WARN] %s\n" "$*" >&2; }' \
+		'log() { printf "[LOG] %s\n" "$*" >&2; }' \
 		> "$func_file"
 	awk '
 		/^readonly / { next }
@@ -95,6 +96,8 @@ _source_timeout_functions() {
 		/^calc_test_loop_budget\(\) \{$/,/^\}$/                  { print; next }
 		/^calc_orchestrator_wall_time\(\) \{$/,/^\}$/            { print; next }
 		/^check_test_loop_wall_timeout\(\) \{$/,/^\}$/           { print; next }
+		/^check_pr_review_wall_timeout\(\) \{$/,/^\}$/        { print; next }
+		/^rate_limit_slept_since\(\) \{$/,/^\}$/              { print; next }
 	' "$ORCHESTRATOR" >> "$func_file"
 	# shellcheck disable=SC1090
 	source "$func_file"
@@ -606,4 +609,66 @@ _mock_diff_count() {
 			"$budget" >&2
 		return 1
 	}
+}
+
+# =============================================================================
+# (6) Loop wall checks exclude rate-limit sleep since the loop started
+# =============================================================================
+
+@test "(6a) test-loop check passes when overrun is entirely rate-limit sleep" {
+	_source_timeout_functions
+	export LOG_BASE="$TEST_TMP"
+	local start=$(( $(date +%s) - 700 ))
+	printf '%s %s\n' "$(( start + 100 ))" "$(( start + 600 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
+
+	run --separate-stderr check_test_loop_wall_timeout "$start" 300
+	[ "$status" -eq 0 ]
+}
+
+@test "(6b) test-loop check fails when sleep does not cover the overrun" {
+	_source_timeout_functions
+	export LOG_BASE="$TEST_TMP"
+	local start=$(( $(date +%s) - 700 ))
+	printf '%s %s\n' "$(( start + 100 ))" "$(( start + 200 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
+
+	run check_test_loop_wall_timeout "$start" 300
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"Test-loop wall-clock budget exceeded"* ]]
+}
+
+@test "(6c) test-loop check ignores sleeps that ended before loop start" {
+	_source_timeout_functions
+	export LOG_BASE="$TEST_TMP"
+	local start=$(( $(date +%s) - 700 ))
+	printf '%s %s\n' "$(( start - 1000 ))" "$(( start - 100 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
+
+	run check_test_loop_wall_timeout "$start" 300
+	[ "$status" -eq 1 ]
+}
+
+@test "(6d) pr-review check passes when overrun is entirely rate-limit sleep" {
+	_source_timeout_functions
+	export LOG_BASE="$TEST_TMP"
+	local start=$(( $(date +%s) - 700 ))
+	printf '%s %s\n' "$(( start + 100 ))" "$(( start + 600 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
+
+	run check_pr_review_wall_timeout "$start" 300
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"excluded 500s of rate-limit sleep"* ]]
+}
+
+@test "(6e) pr-review check fails when sleep does not cover the overrun" {
+	_source_timeout_functions
+	export LOG_BASE="$TEST_TMP"
+	local start=$(( $(date +%s) - 700 ))
+	printf '%s %s\n' "$(( start + 100 ))" "$(( start + 200 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
+
+	run check_pr_review_wall_timeout "$start" 300
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"PR-review wall-clock budget exceeded"* ]]
 }

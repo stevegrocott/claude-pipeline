@@ -736,9 +736,17 @@ get_task_wall_time_with_retry() {
 
 check_wall_timeout() {
     local now="${1:-}"
-    local elapsed
+    local elapsed slept=0
     now="${now:-$(date +%s)}"
     elapsed=$(( now - ORCHESTRATOR_START_EPOCH ))
+    # Rate-limit sleep is not work: exclude it from the wall budget.
+    if (( elapsed > MAX_ORCHESTRATOR_WALL_TIME )); then
+        slept=$(rate_limit_slept_since "$ORCHESTRATOR_START_EPOCH")
+        elapsed=$(( elapsed - slept ))
+    fi
+    if (( slept > 0 )); then
+        log "Wall-clock: excluded ${slept}s of rate-limit sleep (effective elapsed: ${elapsed}s)"
+    fi
     if (( elapsed > MAX_ORCHESTRATOR_WALL_TIME )); then
         log_warn "Global wall-clock timeout: ${elapsed}s elapsed (limit: ${MAX_ORCHESTRATOR_WALL_TIME}s). Soft-exiting current loop."
         return 1
@@ -755,9 +763,17 @@ check_wall_timeout() {
 check_pr_review_wall_timeout() {
     local loop_start="$1"
     local budget="$2"
-    local now elapsed
+    local now elapsed slept=0
     now=$(date +%s)
     elapsed=$(( now - loop_start ))
+    # Rate-limit sleep is not work: exclude it from the loop budget.
+    if (( elapsed > budget )); then
+        slept=$(rate_limit_slept_since "$loop_start")
+        elapsed=$(( elapsed - slept ))
+    fi
+    if (( slept > 0 )); then
+        log "PR-review wall-clock: excluded ${slept}s of rate-limit sleep (effective elapsed: ${elapsed}s)"
+    fi
     if (( elapsed > budget )); then
         log_warn "PR-review wall-clock budget exceeded: ${elapsed}s elapsed (limit: ${budget}s). Soft-exiting review loop."
         return 1
@@ -774,9 +790,17 @@ check_pr_review_wall_timeout() {
 check_test_loop_wall_timeout() {
     local loop_start="$1"
     local budget="$2"
-    local now elapsed
+    local now elapsed slept=0
     now=$(date +%s)
     elapsed=$(( now - loop_start ))
+    # Rate-limit sleep is not work: exclude it from the loop budget.
+    if (( elapsed > budget )); then
+        slept=$(rate_limit_slept_since "$loop_start")
+        elapsed=$(( elapsed - slept ))
+    fi
+    if (( slept > 0 )); then
+        log "Test-loop wall-clock: excluded ${slept}s of rate-limit sleep (effective elapsed: ${elapsed}s)"
+    fi
     if (( elapsed > budget )); then
         log_warn "Test-loop wall-clock budget exceeded:" \
             "${elapsed}s elapsed (limit: ${budget}s)." \
@@ -3062,7 +3086,55 @@ handle_rate_limit() {
             log_warn "record_inferred_exhaustion failed for $model"
     fi
 
+    _record_rate_limit_sleep "$wait_time"
     sleep "$wait_time"
+}
+
+# _record_rate_limit_sleep <seconds>
+#
+# Append one "<start-epoch> <end-epoch>" line to the run log directory
+# (written before the sleep begins) so callers can later account for time
+# spent sleeping without double counting overlapping parallel sleeps.
+_record_rate_limit_sleep() {
+    local seconds="$1"
+    local now
+
+    [[ -n "${LOG_BASE:-}" ]] || return 0
+    now=$(date +%s)
+    printf '%s %s\n' "$now" "$((now + seconds))" \
+        >> "$LOG_BASE/rate-limit-sleeps.log" 2>/dev/null || true
+}
+
+# rate_limit_slept_since <epoch-seconds>
+#
+# Print the seconds slept by handle_rate_limit within [since, now]. Overlapping
+# intervals are merged so concurrent sleeps count once; each interval is
+# clipped to the window start and to the current time. Prints 0 when nothing
+# was recorded.
+rate_limit_slept_since() {
+    local since="${1:-0}"
+    local file="${LOG_BASE:-}/rate-limit-sleeps.log"
+    local start end now total=0 cur_s="" cur_e=""
+
+    [[ -n "${LOG_BASE:-}" && -f "$file" ]] || { printf '0\n'; return 0; }
+    now=$(date +%s)
+
+    while read -r start end; do
+        [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || continue
+        ((start < since)) && start=$since
+        ((end > now)) && end=$now
+        ((end > start)) || continue
+        if [[ -z "$cur_s" ]]; then
+            cur_s=$start; cur_e=$end
+        elif ((start <= cur_e)); then
+            ((end > cur_e)) && cur_e=$end
+        else
+            total=$((total + cur_e - cur_s))
+            cur_s=$start; cur_e=$end
+        fi
+    done < <(sort -n -k1,1 "$file" 2>/dev/null)
+    [[ -n "$cur_s" ]] && total=$((total + cur_e - cur_s))
+    printf '%s\n' "$total"
 }
 
 # =============================================================================
