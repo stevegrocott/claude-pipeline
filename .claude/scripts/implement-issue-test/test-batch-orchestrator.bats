@@ -6810,6 +6810,16 @@ STUB
 	grep -q '"\$STATE" == "interrupted"' "$skill"
 }
 
+@test "handle-issues skill monitor terminal-state sentence names interrupted as terminal" {
+	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/handle-issues/SKILL.md"
+	[[ -f "$skill" ]]
+	local sentence
+	sentence="$(grep -A1 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
+	[[ "$sentence" == *'`interrupted`'* ]]
+	[[ "$sentence" == *'`completed_with_errors`, `circuit_breaker`, or `interrupted`'* ]]
+	grep -q '`interrupted` is terminal' "$skill"
+}
+
 # -----------------------------------------------------------------------------
 # Rate-limit envelope parity with implement-issue-orchestrator (#1088)
 # -----------------------------------------------------------------------------
