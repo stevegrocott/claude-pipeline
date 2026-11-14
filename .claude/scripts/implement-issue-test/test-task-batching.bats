@@ -4085,6 +4085,58 @@ _setup_status_634() {
 	printf '%s\n' "$output" | grep 'primary checkout paths changed' | grep -q 'README\.md'
 }
 
+@test "#1094 execute_batch_parallel: a pre-existing stray file is left as found and the batch result matches a run without it" {
+	cd "$TEST_TMP/repo" || exit 1
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+	run_task_in_worktree() {
+		local result_file="$8"
+		printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree extract_task_size
+
+	local tasks
+	tasks='[{"id":9,"description":"Modify src.ts","agent":"default","batch":1}]'
+
+	# Run A: clean primary checkout
+	git checkout -q -b feature/stray-a-1094 main
+	run execute_batch_parallel 1 "$tasks" "feature/stray-a-1094" "main"
+	local clean_status="$status" clean_output="$output"
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/stray-a-1094 2>/dev/null || true
+
+	# Run B: same batch with a stray file already present before it starts
+	printf 'stray-content' > "$TEST_TMP/repo/stray-1094.txt"
+	git checkout -q -b feature/stray-b-1094 main
+	run execute_batch_parallel 1 "$tasks" "feature/stray-b-1094" "main"
+	local stray_status="$status" stray_output="$output"
+	local stray_present=0 stray_content=""
+	if [[ -f "$TEST_TMP/repo/stray-1094.txt" ]]; then
+		stray_present=1
+		stray_content=$(cat "$TEST_TMP/repo/stray-1094.txt")
+	fi
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/stray-b-1094 2>/dev/null || true
+	rm -f "$TEST_TMP/repo/stray-1094.txt"
+
+	# Stray file untouched by the dirt check
+	[ "$stray_present" -eq 1 ]
+	[ "$stray_content" = "stray-content" ]
+	# Not reported, and batch result identical to the run without it
+	[[ "$stray_output" != *"stray-1094.txt"* ]]
+	[[ "$stray_output" != *"primary checkout paths changed"* ]]
+	[ "$stray_status" -eq "$clean_status" ]
+	local norm_stray norm_clean
+	norm_stray=$(printf '%s\n' "${stray_output//stray-b-1094/X}" |
+		sed -E 's/^\[[^]]*\]//; s/PID [0-9]+/PID N/')
+	norm_clean=$(printf '%s\n' "${clean_output//stray-a-1094/X}" |
+		sed -E 's/^\[[^]]*\]//; s/PID [0-9]+/PID N/')
+	[ "$norm_stray" = "$norm_clean" ]
+}
+
 # =============================================================================
 # API-error halt guard at every budget-guard site (issue #1072)
 # =============================================================================
