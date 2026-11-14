@@ -179,6 +179,33 @@ teardown() {
     [ "$iterations" -ge 2 ] || fail "Should have retried after error, got $iterations iterations"
 }
 
+@test "quality loop returns 2 and logs error kind and denied tools when fix errors with no commits" {
+    run_stage() {
+        local stage_name="$1"
+        case "$stage_name" in
+            simplify-*)
+                echo '{"status":"success","output":{"summary":"Simplified"}}'
+                ;;
+            review-*)
+                echo '{"status":"success","output":{"result":"changes_requested","summary":"Needs work","issues":[{"severity":"major","description":"bug"}]}}'
+                ;;
+            fix-review-*)
+                echo '{"status":"error","output":null,"denials":["Bash","Write"],"model":"sonnet","error_kind":"permission_denied"}'
+                ;;
+        esac
+    }
+    export -f run_stage
+
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run run_quality_loop "$QUALITY_LOOP_DIR" "test-branch" "test"
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"error_kind=permission_denied"* ]]
+    [[ "$output" == *"denied_tools=Bash, Write"* ]]
+}
+
 # =============================================================================
 # REVIEW CHANGES REQUESTED HANDLING
 # =============================================================================

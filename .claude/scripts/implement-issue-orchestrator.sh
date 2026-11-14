@@ -4570,6 +4570,7 @@ run_triage_stage() {
 # Returns:
 #   0 on success (approved)
 #   0 on max iterations exceeded (soft-fail, adds to DEGRADED_STAGES)
+#   2 when a fix stage returned an error and committed nothing
 run_quality_loop() {
     local loop_dir="$1"
     local loop_branch="$2"
@@ -4989,6 +4990,22 @@ Fix only the blocking issues and commit. Output a summary of fixes applied."
             local current_fix_model post_fix_commits
             current_fix_model=$(printf '%s' "$fix_result" | jq -r '.model // "sonnet"')
             post_fix_commits=$(git rev-list --count "${BASE_BRANCH}..${loop_branch}" 2>/dev/null || echo "0")
+
+            # A fix stage that errored and committed nothing cannot make
+            # progress; abort with the error kind and denied tools logged.
+            if [[ "$fix_status" == "error" ]] \
+                && (( post_fix_commits <= pre_fix_commits )); then
+                local _fix_err_kind _fix_denied
+                _fix_err_kind=$(printf '%s' "$fix_result" \
+                    | jq -r '.error_kind // "unknown"' 2>/dev/null)
+                _fix_denied=$(printf '%s' "$fix_result" \
+                    | jq -r '[.denials[]? | if type == "object" then (.tool_name // .tool // tostring) else tostring end] | join(", ")' 2>/dev/null)
+                log_error \
+                    "$fix_stage_name: fix errored with no commits" \
+                    "(error_kind=${_fix_err_kind:-unknown}" \
+                    "denied_tools=${_fix_denied:-none})"
+                return 2
+            fi
 
             # Guard: verify any new fix-review commit against path allowlist
             if (( post_fix_commits > pre_fix_commits )); then
