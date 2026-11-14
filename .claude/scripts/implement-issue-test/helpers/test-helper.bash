@@ -94,6 +94,11 @@ setup_test_env() {
         _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_DIR \
         _IMPLEMENT_ISSUE_ORCHESTRATOR_SCRIPT_PATH
 
+    # An exported CLAUDE_CLI (e.g. from a batch launch) would defeat the
+    # mock CLI each test installs; scrub it so tests start from a clean CLI
+    # resolution. Tests that need it set it explicitly in their own body.
+    unset CLAUDE_CLI
+
     TEST_TMP=$(mktemp -d)
     export TEST_TMP
 

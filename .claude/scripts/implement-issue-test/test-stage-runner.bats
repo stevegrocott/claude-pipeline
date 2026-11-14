@@ -107,6 +107,34 @@ teardown() {
     [ -n "$stage_log" ]
 }
 
+# Issue #1074: an exported CLAUDE_CLI must not defeat the PATH mock claude.
+@test "run_stage calls the PATH mock when CLAUDE_CLI was exported (#1074)" {
+    local standin="$TEST_TMP/standin-claude"
+    local marker="$TEST_TMP/standin-ran"
+    printf '#!/usr/bin/env bash\ntouch "%s"\nexit 1\n' "$marker" > "$standin"
+    chmod +x "$standin"
+
+    # Simulate the leaked env a batch launch hands to bats, then re-run the
+    # scrub the way every suite's setup() does.
+    local outer_tmp="$TEST_TMP"
+    export CLAUDE_CLI="$standin"
+    setup_test_env
+    rm -rf "$TEST_TMP"
+    TEST_TMP="$outer_tmp"
+    cd "$TEST_TMP" || fail "cd failed"
+    # The orchestrator defaults CLAUDE_CLI to the bare command name.
+    CLAUDE_CLI="${CLAUDE_CLI:-claude}"
+
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"result":"ok","structured_output":{"status":"success","result":"done"}}' > "$MOCK_CLAUDE_RESPONSE"
+
+    run run_stage "test-stage" "test prompt" "test-schema.json"
+    [ "$status" -eq 0 ] || fail "run_stage failed: $output"
+    [[ ! -e "$marker" ]] || fail "stand-in CLAUDE_CLI ran despite the scrub"
+    [[ "$output" == *'"status":"success"'* ]] || \
+        fail "PATH mock result missing from output: $output"
+}
+
 # =============================================================================
 # STAGE COUNTER AND LOGGING
 # =============================================================================
