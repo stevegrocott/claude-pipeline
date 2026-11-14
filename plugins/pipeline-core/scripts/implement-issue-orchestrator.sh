@@ -2040,6 +2040,34 @@ persist_merge_block_kind() {
     sync_status_to_log
 }
 
+# ---------------------------------------------------------------------------
+# record_failed_review_fix <stage_name> [error_kind] [denied_tools]
+# Record a review fix stage that errored and committed nothing: add a
+# degraded-stage token, persist a merge-block reason naming the stage, and
+# comment on the PR (when one is known from status.json) so a human sees why
+# the merge is held. Always returns 0 — recording must never abort the run.
+# ---------------------------------------------------------------------------
+record_failed_review_fix() {
+    local stage_name="$1"
+    local error_kind="${2:-unknown}"
+    local denied_tools="${3:-none}"
+    local reason pr_number
+
+    DEGRADED_STAGES+=("quality:fix_failed:${stage_name}")
+
+    reason="Review fix failed at ${stage_name}: fix errored with no commits (error_kind=${error_kind}, denied_tools=${denied_tools})"
+    persist_merge_blocked_reason "$reason"
+
+    if [[ -f "${STATUS_FILE:-}" ]]; then
+        pr_number=$(jq -r '.stages.pr.pr_number // empty' "$STATUS_FILE" 2>/dev/null)
+    fi
+    if [[ -n "${pr_number:-}" ]]; then
+        comment_pr "$pr_number" "Review Fix Failed ($stage_name)" \
+            "$reason. Merge is blocked until a human reviews." || true
+    fi
+    return 0
+}
+
 increment_quality_iteration() {
     status_json_write '.quality_iterations += 1 |
         .stages.quality_loop.iteration = .quality_iterations |
@@ -3784,6 +3812,12 @@ run_stage() {
     _permission_denials=$(_extract_denials "$_envelope" \
         | jq -r 'select(length > 0) | join(", ")' 2>/dev/null || true)
 
+    # One WARN per stage CLI result with denials, whatever the outcome
+    # (including accepted stages), so denied tools are never silent.
+    if [[ -n "$_permission_denials" ]]; then
+        log_warn "$stage_name permission denials (tools: $_permission_denials)"
+    fi
+
     # Extract structured output from the run
     local structured
     structured=$(printf '%s' "$_envelope" | jq -c '.structured_output // empty' 2>/dev/null)
@@ -3913,8 +3947,7 @@ for m in re.finditer(r'\[\s*\{', t):
             | jq -r '.status // empty' 2>/dev/null)
         if [[ "$_structured_status" == "error" ]]; then
             if [[ -n "$_permission_denials" ]]; then
-                log "WARN: $stage_name blocked by permission hook" \
-                    "(tools: $_permission_denials) — bailing"
+                log "$stage_name blocked by permission hook — bailing"
                 _error_kind="permission_denied"
             else
                 _error_kind="structured_error"
@@ -12762,8 +12795,11 @@ verify_fix_stage_commit() {
 #   $4 - branch head SHA captured before the fix stage ran
 #   $5 - fix stage result JSON
 # Returns:
-#   0 - fix committed, or a genuine no-op
+#   0 - fix committed (head moved)
 #   1 - fix left uncommitted; no success comment posted
+#   2 - fix stage errored and committed nothing; nothing was reported, the
+#       caller must record the failure and stop (no push, no re-review)
+#   3 - genuine no-op: stage succeeded, nothing to change; no push is armed
 _handle_fix_stage_result() {
 	local pr_number="$1"
 	local pr_iteration="$2"
@@ -12785,11 +12821,19 @@ leaving changes in the working tree. The reported fixes have NOT landed on
 		return 1
 	fi
 
-	# Genuine no-op: nothing landed, so there is no fix to report.
 	if [[ -z "$head_after" || "$head_after" == "$head_before" ]]; then
+		local fix_status
+		fix_status=$(printf '%s' "$fix_result" \
+			| jq -r '.status // "success"' 2>/dev/null)
+		if [[ "$fix_status" == "error" ]]; then
+			log_error "fix-pr-review-iter-$pr_iteration errored and" \
+				"committed nothing — not a no-op"
+			return 2
+		fi
+		# Genuine no-op: nothing landed, so there is no fix to report.
 		log "No commit from fix-pr-review-iter-$pr_iteration" \
 			"and a clean tree — skipping the fix comment"
-		return 0
+		return 3
 	fi
 
 	local fix_summary
@@ -15150,8 +15194,28 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             # Comments only if a commit landed; fails loudly if the stage left
             # its work uncommitted.
-            if _handle_fix_stage_result "$pr_number" "$pr_iteration" \
-                "$branch" "$fix_head_before" "$fix_result"; then
+            local fix_handle_rc=0
+            _handle_fix_stage_result "$pr_number" "$pr_iteration" \
+                "$branch" "$fix_head_before" "$fix_result" || fix_handle_rc=$?
+            if (( fix_handle_rc == 2 )); then
+                # Errored fix, nothing committed: record the cause (persisted
+                # before any max-iterations reason), arm no push, and stop
+                # rather than re-review an unchanged branch.
+                local _pr_fix_kind _pr_fix_denied
+                _pr_fix_kind=$(printf '%s' "$fix_result" \
+                    | jq -r '.error_kind // "unknown"' 2>/dev/null)
+                _pr_fix_denied=$(printf '%s' "$fix_result" \
+                    | jq -r '[.denials[]? | if type == "object" then (.tool_name // .tool // tostring) else tostring end] | join(", ")' 2>/dev/null)
+                log_error "fix-pr-review-iter-$pr_iteration failed" \
+                    "(error_kind=${_pr_fix_kind:-unknown}" \
+                    "denied_tools=${_pr_fix_denied:-none}) — stopping review loop"
+                record_failed_review_fix "fix-pr-review-iter-$pr_iteration" \
+                    "${_pr_fix_kind:-unknown}" "${_pr_fix_denied:-none}"
+                pr_approved=true
+                break
+            elif (( fix_handle_rc == 3 )); then
+                log "fix-pr-review-iter-$pr_iteration changed nothing — no push armed"
+            elif (( fix_handle_rc == 0 )); then
                 # A review fix can edit a canonical .claude/scripts/ file just
                 # as easily as the initial implementation can — the pre-PR
                 # call above only covers commits that existed before the PR
