@@ -4409,6 +4409,21 @@ JSON
         || fail "comment blames the orchestrator"
 }
 
+@test "_halt_if_api_error comments once per halt record but exits 1 each time" {
+    _seed_api_halt_status
+    comment_issue() { printf 'x\n' >> "$TEST_TMP/comments.txt"; }
+    export -f comment_issue
+
+    run _halt_if_api_error
+    [ "$status" -eq 1 ]
+    run _halt_if_api_error
+    [ "$status" -eq 1 ]
+
+    [ "$(wc -l < "$TEST_TMP/comments.txt" | tr -d ' ')" = "1" ] \
+        || fail "expected exactly one comment: $(cat "$TEST_TMP/comments.txt")"
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "error" ]
+}
+
 @test "_halt_if_api_error is a no-op without a halt record (#1072)" {
     _seed_api_halt_status
     jq 'del(.api_error_halt)' "$STATUS_FILE" > "$STATUS_FILE.t" \
