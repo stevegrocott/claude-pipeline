@@ -101,10 +101,29 @@ setup() {
 }
 
 teardown() {
+	_cleanup_primary_checkout_1094
 	rm -f "$TEST_TMP/repo"/pre-existing-1068.txt \
 		"$TEST_TMP/repo"/escaped-1068.txt 2>/dev/null || true
 	_restore_acceptance_env
 	teardown_test_env
+}
+
+# Restore the primary checkout after the #1094 tests even when they fail
+# mid-way: revert README.md, drop the stray file, return to main, and delete
+# the per-test feature branches.
+_cleanup_primary_checkout_1094() {
+	[[ -d "$TEST_TMP/repo" ]] || return 0
+	(
+		cd "$TEST_TMP/repo" || exit 0
+		rm -f stray-1094.txt
+		git checkout -q -- README.md 2>/dev/null || true
+		git worktree prune 2>/dev/null || true
+		git checkout -q main 2>/dev/null || true
+		local b
+		for b in feature/trk-1094 feature/stray-a-1094 feature/stray-b-1094; do
+			git branch -D "$b" 2>/dev/null || true
+		done
+	) || true
 }
 
 # Undo the exports/stubs _run_acceptance_for_route_file installs so they
@@ -910,6 +929,43 @@ _i950_squash_merged_branch() {
 
 	git checkout -q main
 	git branch -D feature/serial-test 2>/dev/null || true
+}
+
+@test "execute_batch_serial: prompt passed to run_stage has no WORKTREE BOUNDARY block" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/serial-noboundary main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	# Capture the prompt (arg 2) handed to run_stage for the serial task.
+	run_stage() {
+		printf '%s' "$2" > "$TEST_TMP/serial-prompt.txt"
+		printf 'task 1 output\n' > task-1-out.txt
+		git add task-1-out.txt
+		git commit -q -m "task 1"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"abc123","summary":"done"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "3"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks
+	tasks='[{"id":1,"description":"Do thing","agent":"default"}]'
+	rm -f "$TEST_TMP/serial-prompt.txt"
+	execute_batch_serial "$tasks" "feature/serial-noboundary" "main" >/dev/null 2>&1 || true
+
+	local prompt=""
+	[[ -s "$TEST_TMP/serial-prompt.txt" ]] && prompt=$(<"$TEST_TMP/serial-prompt.txt")
+
+	git checkout -q main
+	git branch -D feature/serial-noboundary 2>/dev/null || true
+
+	# Guard against a vacuous pass: the prompt must actually have been captured.
+	[[ "$prompt" == *"Implement task 1 on branch feature/serial-noboundary"* ]]
+	[[ "$prompt" != *"WORKTREE BOUNDARY"* ]]
 }
 
 @test "execute_batch_serial: returns failed IDs when run_stage fails" {
@@ -4003,7 +4059,10 @@ _setup_status_634() {
 
 	local tasks
 	tasks='[{"id":9,"description":"Modify src.ts","agent":"default","batch":1}]'
-	run execute_batch_parallel 1 "$tasks" "feature/esc-1068" "main"
+	# 3>&-: the stub returns at once, so the per-task watchdog's sleep can
+	# outlive the batch; it must not inherit bats' output fd and hold the
+	# suite open until the sleep ends.
+	run execute_batch_parallel 1 "$tasks" "feature/esc-1068" "main" 3>&-
 
 	git worktree prune 2>/dev/null || true
 	git checkout -q main 2>/dev/null || true
@@ -4011,6 +4070,90 @@ _setup_status_634() {
 
 	[[ "$output" == *"primary checkout paths changed"* ]]
 	[[ "$output" == *"escaped-1068.txt"* ]]
+}
+
+@test "#1094 execute_batch_parallel: a tracked-file edit is named in exactly one error line" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/trk-1094 main
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+	run_task_in_worktree() {
+		local result_file="$8"
+		printf 'modified' >> "$TEST_TMP/repo/README.md"
+		printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree extract_task_size
+
+	local tasks
+	tasks='[{"id":9,"description":"Modify README","agent":"default","batch":1}]'
+	# 3>&-: see the #1068 execute_batch_parallel test above
+	run execute_batch_parallel 1 "$tasks" "feature/trk-1094" "main" 3>&-
+
+	local dirty_status
+	dirty_status=$(git status --porcelain -- README.md)
+
+	# The tracked file is reported as a modified (not untracked) path
+	[[ "$dirty_status" == " M README.md" ]]
+	local named
+	named=$(printf '%s\n' "$output" | grep -c 'README\.md' || true)
+	[ "$named" -eq 1 ]
+	local errors
+	errors=$(printf '%s\n' "$output" | grep -c 'primary checkout paths changed' || true)
+	[ "$errors" -eq 1 ]
+	printf '%s\n' "$output" | grep 'primary checkout paths changed' | grep -q 'README\.md'
+}
+
+@test "#1094 execute_batch_parallel: a reported stray file is left as found and the batch result matches a run without the check" {
+	cd "$TEST_TMP/repo" || exit 1
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+	# The stray file appears DURING the batch, so the check reports it.
+	run_task_in_worktree() {
+		local result_file="$8"
+		printf 'stray-content' > "$TEST_TMP/repo/stray-1094.txt"
+		printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree extract_task_size
+
+	local tasks
+	tasks='[{"id":9,"description":"Modify src.ts","agent":"default","batch":1}]'
+
+	# Run A: real _report_primary_checkout_dirt
+	git checkout -q -b feature/stray-a-1094 main
+	# 3>&-: see the #1068 execute_batch_parallel test above
+	run execute_batch_parallel 1 "$tasks" "feature/stray-a-1094" "main" 3>&-
+	local real_output="$output"
+	local real_present=0 real_content=""
+	if [[ -f "$TEST_TMP/repo/stray-1094.txt" ]]; then
+		real_present=1
+		real_content=$(cat "$TEST_TMP/repo/stray-1094.txt")
+	fi
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/stray-a-1094 2>/dev/null || true
+	rm -f "$TEST_TMP/repo/stray-1094.txt"
+
+	# Run B: identical batch with the check stubbed out
+	_report_primary_checkout_dirt() { :; }
+	git checkout -q -b feature/stray-b-1094 main
+	# 3>&-: see the #1068 execute_batch_parallel test above
+	run execute_batch_parallel 1 "$tasks" "feature/stray-b-1094" "main" 3>&-
+	local stub_output="$output"
+
+	# Control: the real check did report the stray file
+	[[ "$real_output" == *"primary checkout paths changed"* ]]
+	[[ "$real_output" == *"stray-1094.txt"* ]]
+	# The check left the reported file untouched
+	[ "$real_present" -eq 1 ]
+	[ "$real_content" = "stray-content" ]
+	# completed/failed/conflicted identical with and without the check
+	local real_json stub_json
+	real_json=$(printf '%s\n' "$real_output" | sed -n '/^{"completed"/,$p' | jq -cS '.')
+	stub_json=$(printf '%s\n' "$stub_output" | sed -n '/^{"completed"/,$p' | jq -cS '.')
+	[ -n "$real_json" ]
+	[ "$real_json" = "$stub_json" ]
 }
 
 # =============================================================================
