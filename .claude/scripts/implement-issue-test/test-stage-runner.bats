@@ -241,13 +241,35 @@ teardown() {
     echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}' \
         > "$MOCK_CLAUDE_RESPONSE"
 
+    export API_ERROR_RETRY_WAIT=0
+
     run run_stage "test" "prompt" "test-schema.json"
-    # The first pass is classified api_error (not no_structured_output);
-    # decide-action.sh's reason carries that kind into the escalation.
-    [[ "$output" == *"Stage test api_error: escalating"* ]] \
+    # The first pass is classified api_error (not no_structured_output) and
+    # decide-action.sh answers retry_same (task 2), after the back-off.
+    [[ "$output" == *"API error envelope"* \
+        && "$output" == *"action=retry_same"* ]] \
         || fail "Expected first-pass api_error classification; got: $output"
     [[ "$output" != *"Diagnostic fallback failure"* ]] \
         || fail "API error must not fall through to no_structured_output: $output"
+}
+
+@test "run_stage waits API_ERROR_RETRY_WAIT seconds before an api_error retry_same" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+    export API_ERROR_RETRY_WAIT=7
+
+    # Shadow sleep with a recorder so the test neither waits nor guesses.
+    mkdir -p "$TEST_TMP/sleepbin"
+    printf '#!/usr/bin/env bash\necho "$1" >> "%s/sleeps"\n' "$TEST_TMP" \
+        > "$TEST_TMP/sleepbin/sleep"
+    chmod +x "$TEST_TMP/sleepbin/sleep"
+    PATH="$TEST_TMP/sleepbin:$PATH" run run_stage "test" "prompt" "test-schema.json"
+
+    [[ "$output" == *"waiting 7s before same-model retry"* ]] \
+        || fail "Expected api_error back-off log; got: $output"
+    grep -qx '7' "$TEST_TMP/sleeps" \
+        || fail "sleep 7 not invoked; sleeps: $(cat "$TEST_TMP/sleeps" 2>/dev/null)"
 }
 
 @test "run_stage keeps rate_limit ahead of api_error for a 429 envelope" {

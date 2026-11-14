@@ -4239,6 +4239,15 @@ for m in re.finditer(r'\[\s*\{', t):
                 return 1
             fi
 
+            # An api_error is a transient upstream failure: back off before
+            # the one same-model retry so it doesn't hit the same outage.
+            if [[ "${_error_kind:-}" == "api_error" ]]; then
+                local _api_wait="${API_ERROR_RETRY_WAIT:-300}"
+                [[ "$_api_wait" =~ ^[0-9]+$ ]] || _api_wait=300
+                log "  api_error: waiting ${_api_wait}s before same-model retry"
+                sleep "$_api_wait"
+            fi
+
             # handle_rate_limit() was already called during error_kind
             # classification above; emit the retry/model_call events now.
             emit_event "retry" \
