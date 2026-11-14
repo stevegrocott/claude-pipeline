@@ -1993,11 +1993,17 @@ _halt_if_api_error() {
     _reason="api_error: Claude API error (status ${_code}) at stage ${_stage}"
     _reason+=" after one retry; run stopped and can be resumed"
     log_error "Run halted (API error): $_reason — no further stages will run."
-    comment_issue "Run Stopped: API Error" \
-        "❌ The Claude API returned an error (status ${_code}) at stage \`${_stage}\`, and the one same-model retry hit it again. The run was stopped so no further tasks are dispatched against an unavailable API. Tasks not yet dispatched remain pending. Check API availability or authentication, then resume with \`--resume\`.${_detail:+
+    # Post the comment once per halt record; later guard calls on the same
+    # record still halt (exit 1) but stay quiet.
+    if [[ "$(jq -r '.api_error_halt.commented // false' "$STATUS_FILE" \
+        2>/dev/null)" != "true" ]]; then
+        comment_issue "Run Stopped: API Error" \
+            "❌ The Claude API returned an error (status ${_code}) at stage \`${_stage}\`, and the one same-model retry hit it again. The run was stopped so no further tasks are dispatched against an unavailable API. Tasks not yet dispatched remain pending. Check API availability or authentication, then resume with \`--resume\`.${_detail:+
 
 API response: ${_detail}}" \
-        "error"
+            "error"
+        status_json_write '.api_error_halt.commented = true'
+    fi
     set_final_state "error" "$_reason"
     exit 1
 }

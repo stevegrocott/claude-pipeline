@@ -4044,3 +4044,47 @@ _setup_status_634() {
 	run _halt_if_api_error
 	[ "$status" -eq 1 ]
 }
+
+@test "execute_batch_serial: repeated API error on task 1 never dispatches depends-on:1 task 2" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/serial-halt main
+	mkdir -p "$LOG_BASE/stages"
+
+	export STATUS_FILE="$TEST_TMP/status.json"
+	export DISPATCH_LOG="$TEST_TMP/dispatched.log"
+	printf '%s' '{"state":"running"}' > "$STATUS_FILE"
+	: > "$DISPATCH_LOG"
+
+	# Like the real run_stage on a repeated API error: record the halt in
+	# the status file (set_api_error_halt) and return a failed envelope.
+	# The dispatch log is a file because run_stage runs in a $(...) subshell.
+	run_stage() {
+		printf '%s\n' "$1" >> "$DISPATCH_LOG"
+		jq '.api_error_halt = {stage: "implement-task-1",
+			status: "500", detail: "x"}' "$STATUS_FILE" \
+			> "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+		printf '%s' '{"status":"error","error":"api_error"}'
+	}
+	comment_issue() { :; }
+	set_final_state() { :; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks
+	tasks='[{"id":1,"description":"First task","agent":"default"},'
+	tasks+='{"id":2,"description":"Second task `depends-on:1`","agent":"default"}]'
+	run execute_batch_serial "$tasks" "feature/serial-halt" "main"
+
+	# The guard halted the run (exit 1) ...
+	[ "$status" -eq 1 ]
+	# ... task 1 was dispatched ...
+	grep -q '^implement-task-1' "$DISPATCH_LOG"
+	# ... and task 2 never was.
+	[ "$(grep -c '^implement-task-2' "$DISPATCH_LOG")" -eq 0 ]
+
+	git checkout -q main
+	git branch -D feature/serial-halt 2>/dev/null || true
+}

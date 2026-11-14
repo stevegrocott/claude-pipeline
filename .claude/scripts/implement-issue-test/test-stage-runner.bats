@@ -306,6 +306,53 @@ teardown() {
         || fail "api_error must not escalate: $output"
 }
 
+@test "run_stage succeeds when the API error clears on the retry (#1091)" {
+    local counter_file="$TEST_TMP/call-counter.txt"
+    printf '0' > "$counter_file"
+    export API_ERROR_RETRY_WAIT=0
+    timeout() {
+        shift  # timeout value
+        shift  # env
+        shift  # -u
+        shift  # CLAUDECODE
+        local n
+        n=$(cat "$counter_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$counter_file"
+        echo "$@" > "$TEST_TMP/call-$n-args.txt"
+        if (( n == 1 )); then
+            echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}'
+        else
+            echo '{"result":"ok","structured_output":{"status":"success"}}'
+        fi
+    }
+    export -f timeout
+    export counter_file
+
+    run run_stage "test" "prompt" "test-schema.json"
+
+    [ "$status" -eq 0 ] || fail "run_stage failed: $output"
+    [ "$(cat "$counter_file")" = "2" ] \
+        || fail "Expected exactly two dispatches, got: $(cat "$counter_file")"
+
+    # Both dispatches stay on the same model (retry_same, no escalation).
+    local first_model second_model
+    first_model=$(grep -o -- '--model [a-z]*' "$TEST_TMP/call-1-args.txt")
+    second_model=$(grep -o -- '--model [a-z]*' "$TEST_TMP/call-2-args.txt")
+    [ -n "$first_model" ] || fail "no --model in first call"
+    [ "$first_model" = "$second_model" ] \
+        || fail "model changed on retry: $first_model -> $second_model"
+
+    [ "$(printf '%s' "$output" | grep -c 'action=retry_same')" = "1" ] \
+        || fail "Expected exactly one retry_same; got: $output"
+    [[ "$output" != *"Stage bailed"* ]] \
+        || fail "must not bail when the retry succeeds: $output"
+    if [[ -f "$STATUS_FILE" ]]; then
+        [ "$(jq 'has("api_error_halt")' "$STATUS_FILE")" = "false" ] \
+            || fail "api_error_halt must not be recorded: $(cat "$STATUS_FILE")"
+    fi
+}
+
 # _assert_api_error_envelope — run_stage on the envelope in $1 must classify
 # it api_error: one retry_same, a bail, and never an escalation.
 _assert_api_error_envelope() {
@@ -4407,6 +4454,21 @@ JSON
     grep -q "resume" "$TEST_TMP/comment.txt" || fail "comment lacks resume hint"
     ! grep -q "usually indicates a bug in the orchestrator" "$TEST_TMP/comment.txt" \
         || fail "comment blames the orchestrator"
+}
+
+@test "_halt_if_api_error comments once per halt record but exits 1 each time" {
+    _seed_api_halt_status
+    comment_issue() { printf 'x\n' >> "$TEST_TMP/comments.txt"; }
+    export -f comment_issue
+
+    run _halt_if_api_error
+    [ "$status" -eq 1 ]
+    run _halt_if_api_error
+    [ "$status" -eq 1 ]
+
+    [ "$(wc -l < "$TEST_TMP/comments.txt" | tr -d ' ')" = "1" ] \
+        || fail "expected exactly one comment: $(cat "$TEST_TMP/comments.txt")"
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "error" ]
 }
 
 @test "_halt_if_api_error is a no-op without a halt record (#1072)" {
