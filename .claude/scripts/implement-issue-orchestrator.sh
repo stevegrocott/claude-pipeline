@@ -2839,6 +2839,21 @@ detect_rate_limit() {
     return 1
 }
 
+# detect_api_error — true when the CLI envelope is an API-error result:
+# is_error is true and either api_error_status is a non-null number or the
+# result text starts with "API Error".  Callers check detect_rate_limit
+# first, so a 429 is classified rate_limit, not api_error.
+detect_api_error() {
+    local output="$1"
+
+    printf '%s' "$output" | jq -e '
+        (.is_error == true) and
+        ((.api_error_status // null) != null
+         or ((.result // "") | type == "string"
+             and test("^API Error")))
+    ' >/dev/null 2>&1
+}
+
 extract_wait_time() {
     local output="$1"
     local result
@@ -3926,6 +3941,9 @@ for m in re.finditer(r'\[\s*\{', t):
     elif detect_rate_limit "$output"; then
         handle_rate_limit "$output" "$model"
         _error_kind="rate_limit"
+    elif detect_api_error "$output"; then
+        log_error "Stage $stage_name — API error envelope from $model"
+        _error_kind="api_error"
     elif [[ -z "$structured" && -z "$_fallback_result" ]]; then
         # No parseable output of any kind
         local output_byte_count output_preview

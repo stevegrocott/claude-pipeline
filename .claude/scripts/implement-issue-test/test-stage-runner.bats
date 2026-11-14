@@ -236,6 +236,33 @@ teardown() {
     [[ "$output" == *"no_structured_output"* ]]
 }
 
+@test "run_stage classifies an API-error envelope as api_error" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+
+    run run_stage "test" "prompt" "test-schema.json"
+    # The first pass is classified api_error (not no_structured_output);
+    # decide-action.sh's reason carries that kind into the escalation.
+    [[ "$output" == *"Stage test api_error: escalating"* ]] \
+        || fail "Expected first-pass api_error classification; got: $output"
+    [[ "$output" != *"Diagnostic fallback failure"* ]] \
+        || fail "API error must not fall through to no_structured_output: $output"
+}
+
+@test "run_stage keeps rate_limit ahead of api_error for a 429 envelope" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":429,"result":"API Error: 429 too many requests, retry-after 1"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+
+    run run_stage "test" "prompt" "test-schema.json"
+    [[ "$output" != *"API error envelope"* ]] \
+        || fail "429 must be rate_limit, not api_error: $output"
+    [[ "$output" == *"rate_limit"* || "$output" == *"Rate limit"* \
+        || "$output" == *"rate limit"* ]] \
+        || fail "Expected rate_limit handling; got: $output"
+}
+
 # =============================================================================
 # FIELD-AWARE STRUCTURED OUTPUT RECOVERY
 # =============================================================================
