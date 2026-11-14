@@ -1180,6 +1180,104 @@ _i950_squash_merged_branch() {
 	git branch -D wt-task-2 2>/dev/null || true
 }
 
+# Shared setup for the watchdog-lifetime tests (issue #1113): a task that
+# outlives the first 1s poll, a `sleep` shim recording every sleeper the
+# watchdog starts (pid, parent pid, whether fd 3 is open), and a no-op
+# watchdog cancel so only the watchdog's own exit logic can end it.
+_setup_watchdog_probe() {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/wd-test main
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+	printf 'alpha\n' > alpha.ts
+	git add alpha.ts
+	git commit -q -m "add source file"
+
+	WD_PROBE="$TEST_TMP/wd-probe"
+	mkdir -p "$WD_PROBE/bin"
+	: > "$WD_PROBE/sleepers"
+	: > "$WD_PROBE/fd3"
+	cat > "$WD_PROBE/bin/sleep" <<SHIM
+#!/bin/bash
+printf '%s %s\n' "\$\$" "\$PPID" >> "$WD_PROBE/sleepers"
+if ( : >&3 ) 2>/dev/null; then
+	printf 'open\n' >> "$WD_PROBE/fd3"
+else
+	printf 'closed\n' >> "$WD_PROBE/fd3"
+fi
+exec /bin/sleep "\$@"
+SHIM
+	chmod +x "$WD_PROBE/bin/sleep"
+	PATH="$WD_PROBE/bin:$PATH"
+
+	run_task_in_worktree() {
+		local wt_path="$5" result_file="$8"
+		cd "$wt_path" || return 1
+		/bin/sleep 2
+		printf '{"status":"success","review_attempts":1}' \
+			> "$result_file"
+		return 0
+	}
+	export -f run_task_in_worktree
+
+	# Make the batch's "cancel the watchdog" kill a no-op; kill -0 and
+	# every other form still reach the builtin.
+	kill() {
+		if [[ "$1" == "--" && "$2" == -* ]]; then
+			return 0
+		fi
+		builtin kill "$@"
+	}
+	export -f kill
+
+	WD_TASKS='[{"id":1,"description":"Modify alpha.ts","agent":"default","batch":1}]'
+}
+
+_teardown_watchdog_probe() {
+	cd "$TEST_TMP/repo" 2>/dev/null || return 0
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/wd-test 2>/dev/null || true
+	git branch -D wt-task-1 2>/dev/null || true
+}
+
+@test "execute_batch_parallel: with the cancel a no-op, nothing the watchdog started is alive 3s after the batch (issue #1113)" {
+	_setup_watchdog_probe
+
+	execute_batch_parallel 1 "$WD_TASKS" \
+		"feature/wd-test" "main" >/dev/null 2>&1 || true
+
+	# The watchdog must have actually polled (guards a vacuous pass).
+	[[ -s "$WD_PROBE/sleepers" ]]
+
+	/bin/sleep 3
+	local pid ppid alive=""
+	while read -r pid ppid; do
+		if builtin kill -0 "$pid" 2>/dev/null \
+			|| builtin kill -0 "$ppid" 2>/dev/null; then
+			alive+="$pid/$ppid "
+		fi
+	done < "$WD_PROBE/sleepers"
+
+	_teardown_watchdog_probe
+	[[ -z "$alive" ]] || {
+		pkill -f "$WD_PROBE" 2>/dev/null || true
+		fail "watchdog processes still alive 3s after the batch: $alive"
+	}
+}
+
+@test "execute_batch_parallel: the watchdog launch closes fd 3 (issue #1113)" {
+	_setup_watchdog_probe
+
+	execute_batch_parallel 1 "$WD_TASKS" \
+		"feature/wd-test" "main" >/dev/null 2>&1 || true
+
+	_teardown_watchdog_probe
+	[[ -s "$WD_PROBE/fd3" ]]
+	if grep -q open "$WD_PROBE/fd3"; then
+		fail "watchdog child inherited an open fd 3"
+	fi
+}
+
 # =============================================================================
 # run_parallel_post_task_stages (parallel e2e-verify and acceptance-test)
 # Tests the parallel execution of post-task stages with independent exit codes
