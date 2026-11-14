@@ -7996,6 +7996,11 @@ run_task_in_worktree() {
 		return 1
 	}
 
+	# Absolute, symlink-resolved worktree path for the prompt's boundary
+	# block (we have just cd'd into it).
+	local wt_abs_path
+	wt_abs_path=$(pwd -P)
+
 	# Baseline for the result-file writer below (issue #794) — captured
 	# before any stage runs so "did this task commit anything?" is answered
 	# from the worktree's own starting point rather than from HEAD~1, which
@@ -8048,6 +8053,14 @@ run_task_in_worktree() {
 		test_discovery_skill=$(load_skill "test-discovery")
 		local background_block
 		background_block=$(build_background_block)
+		local boundary_block
+		boundary_block="
+WORKTREE BOUNDARY:
+Your worktree's absolute path is: $wt_abs_path
+Read and edit files only under that path. Never read or edit the
+main checkout or any other worktree, even if a path you see points
+there; resolve every file relative to the worktree above.
+"
 		local impl_prompt
 		impl_prompt="${PLATFORM_PATTERNS_PREFIX}Implement task $task_id on branch $wt_branch in the current working directory:
 
@@ -8057,7 +8070,7 @@ $test_discovery_skill
 
 ## End Skill Instructions
 
-}$task_desc${line_range_hint}${files_block}${background_block}
+}$task_desc${line_range_hint}${files_block}${background_block}${boundary_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?

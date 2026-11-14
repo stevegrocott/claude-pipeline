@@ -3747,3 +3747,60 @@ _setup_status_634() {
 	expect_ok "no task is credited" test "$count" = "0"
 	expect_ok "the rejected-commit task stays failed" test "$status" = "failed"
 }
+
+# =============================================================================
+# run_task_in_worktree: worktree boundary block in the task prompt (#1068)
+# =============================================================================
+
+@test "#1068 run_task_in_worktree: prompt carries the worktree's absolute path and boundary" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/wt-boundary 2>/dev/null || true
+	git branch -D wt-task-97 2>/dev/null || true
+	git checkout -q -b feature/wt-boundary main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	local wt_path="$TEST_TMP/wt-97"
+	rm -rf "$wt_path"
+	git worktree add -q -b wt-task-97 "$wt_path" feature/wt-boundary
+
+	local prompt_file="$TEST_TMP/prompt-97.txt"
+	run_stage() {
+		printf '%s' "$2" > "$TEST_TMP/prompt-97.txt"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"none","summary":"x"}}'
+	}
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	load_skill() { printf '%s' ""; }
+	sanitize_worktree_commits() { return 0; }
+	guard_commit_path_allowlist() { return 0; }
+	should_run_quality_loop() { return 1; }
+
+	local rf="$LOG_BASE/stages/task-97-worktree.log"
+	rm -f "$rf"
+	(
+		run_task_in_worktree 97 "Do the thing" "default" "S" \
+			"$wt_path" "wt-task-97" "feature/wt-boundary" \
+			"$rf" "main"
+	) >/dev/null 2>&1 || true
+
+	cd "$TEST_TMP/repo" || exit 1
+	local abs_path
+	abs_path=$(cd "$wt_path" && pwd -P)
+	local prompt
+	prompt=$(<"$prompt_file")
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/wt-boundary 2>/dev/null || true
+	git branch -D wt-task-97 2>/dev/null || true
+
+	[[ "$prompt" == *"WORKTREE BOUNDARY"* ]]
+	[[ "$prompt" == *"absolute path is: $abs_path"* ]]
+	[[ "$prompt" == *"Read and edit files only under that path"* ]]
+}
