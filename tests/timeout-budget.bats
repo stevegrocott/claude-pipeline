@@ -619,7 +619,8 @@ _mock_diff_count() {
 	_source_timeout_functions
 	export LOG_BASE="$TEST_TMP"
 	local start=$(( $(date +%s) - 700 ))
-	printf '%s 500\n' "$(( start + 100 ))" > "$LOG_BASE/rate-limit-sleeps.log"
+	printf '%s %s\n' "$(( start + 100 ))" "$(( start + 600 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
 
 	run --separate-stderr check_test_loop_wall_timeout "$start" 300
 	[ "$status" -eq 0 ]
@@ -629,18 +630,20 @@ _mock_diff_count() {
 	_source_timeout_functions
 	export LOG_BASE="$TEST_TMP"
 	local start=$(( $(date +%s) - 700 ))
-	printf '%s 100\n' "$(( start + 100 ))" > "$LOG_BASE/rate-limit-sleeps.log"
+	printf '%s %s\n' "$(( start + 100 ))" "$(( start + 200 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
 
 	run check_test_loop_wall_timeout "$start" 300
 	[ "$status" -eq 1 ]
 	[[ "$output" == *"Test-loop wall-clock budget exceeded"* ]]
 }
 
-@test "(6c) test-loop check ignores sleeps recorded before loop start" {
+@test "(6c) test-loop check ignores sleeps that ended before loop start" {
 	_source_timeout_functions
 	export LOG_BASE="$TEST_TMP"
 	local start=$(( $(date +%s) - 700 ))
-	printf '%s 900\n' "$(( start - 50 ))" > "$LOG_BASE/rate-limit-sleeps.log"
+	printf '%s %s\n' "$(( start - 1000 ))" "$(( start - 100 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
 
 	run check_test_loop_wall_timeout "$start" 300
 	[ "$status" -eq 1 ]
@@ -650,7 +653,8 @@ _mock_diff_count() {
 	_source_timeout_functions
 	export LOG_BASE="$TEST_TMP"
 	local start=$(( $(date +%s) - 700 ))
-	printf '%s 500\n' "$(( start + 100 ))" > "$LOG_BASE/rate-limit-sleeps.log"
+	printf '%s %s\n' "$(( start + 100 ))" "$(( start + 600 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
 
 	run check_pr_review_wall_timeout "$start" 300
 	[ "$status" -eq 0 ]
@@ -661,7 +665,8 @@ _mock_diff_count() {
 	_source_timeout_functions
 	export LOG_BASE="$TEST_TMP"
 	local start=$(( $(date +%s) - 700 ))
-	printf '%s 100\n' "$(( start + 100 ))" > "$LOG_BASE/rate-limit-sleeps.log"
+	printf '%s %s\n' "$(( start + 100 ))" "$(( start + 200 ))" \
+		> "$LOG_BASE/rate-limit-sleeps.log"
 
 	run check_pr_review_wall_timeout "$start" 300
 	[ "$status" -eq 1 ]

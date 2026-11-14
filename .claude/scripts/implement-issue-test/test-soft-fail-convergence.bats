@@ -178,7 +178,7 @@ teardown() {
 @test "check_wall_timeout excludes rate-limit sleep since the run started" {
 	ORCHESTRATOR_START_EPOCH=1000000000
 	MAX_ORCHESTRATOR_WALL_TIME=3600
-	printf '%s %s\n' 1000000500 1000 > "$LOG_BASE/rate-limit-sleeps.log"
+	printf '%s %s\n' 1000000500 1000001500 > "$LOG_BASE/rate-limit-sleeps.log"
 
 	# elapsed 4000 - slept 1000 = 3000 -> within budget
 	run check_wall_timeout 1000004000
@@ -189,7 +189,7 @@ teardown() {
 @test "check_wall_timeout still times out when sleep does not cover the overage" {
 	ORCHESTRATOR_START_EPOCH=1000000000
 	MAX_ORCHESTRATOR_WALL_TIME=3600
-	printf '%s %s\n' 1000000500 100 > "$LOG_BASE/rate-limit-sleeps.log"
+	printf '%s %s\n' 1000000500 1000000600 > "$LOG_BASE/rate-limit-sleeps.log"
 
 	# elapsed 4000 - slept 100 = 3900 > 3600
 	run check_wall_timeout 1000004000
@@ -197,10 +197,10 @@ teardown() {
 	[[ "$output" == *"3900s elapsed"* ]]
 }
 
-@test "check_wall_timeout ignores sleeps recorded before the run started" {
+@test "check_wall_timeout ignores sleeps that ended before the run started" {
 	ORCHESTRATOR_START_EPOCH=1000000000
 	MAX_ORCHESTRATOR_WALL_TIME=3600
-	printf '%s %s\n' 999999000 1000 > "$LOG_BASE/rate-limit-sleeps.log"
+	printf '%s %s\n' 999999000 1000000000 > "$LOG_BASE/rate-limit-sleeps.log"
 
 	run check_wall_timeout 1000004000
 	[ "$status" -eq 1 ]
