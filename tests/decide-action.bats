@@ -815,3 +815,40 @@ _load_deploy_verify_fn() {
 		[ -z "$stderr" ]
 	done
 }
+
+# ---------------------------------------------------------------------------
+# api_error: answered like external_termination — retry_same once, then
+# bail, never escalate.
+# ---------------------------------------------------------------------------
+
+@test "api_error with no history answers retry_same on both paths" {
+	local backend
+	for backend in bash ""; do
+		export ESCALATION_POLICY_BACKEND="$backend"
+		run bash "$DECIDE_ACTION_SCRIPT" \
+			'{"status":"error","error_kind":"api_error","model":"sonnet"}' '[]'
+		[ "$status" -eq 0 ]
+		[[ "$(jq -r '.action' <<< "$output")" == "retry_same" ]]
+		[[ "$(jq -r '.reason' <<< "$output")" == "api_error:"* ]]
+	done
+}
+
+@test "api_error after a same-model retry bails and never escalates" {
+	local m
+	for m in haiku sonnet opus; do
+		run bash "$DECIDE_ACTION_SCRIPT" \
+			"{\"status\":\"error\",\"error_kind\":\"api_error\",\"model\":\"$m\"}" \
+			"[{\"from_model\":\"$m\",\"to_model\":\"$m\"}]"
+		[ "$status" -eq 0 ]
+		[[ "$(jq -r '.action' <<< "$output")" == "bail" ]]
+		[[ "$(jq -r '.reason' <<< "$output")" == "api_error:"* ]]
+	done
+}
+
+@test "api_error ignores another stage's escalation away from the model" {
+	run bash "$DECIDE_ACTION_SCRIPT" \
+		'{"status":"error","error_kind":"api_error","model":"sonnet"}' \
+		'[{"from_model":"sonnet","to_model":"opus"}]'
+	[ "$status" -eq 0 ]
+	[[ "$(jq -r '.action' <<< "$output")" == "retry_same" ]]
+}
