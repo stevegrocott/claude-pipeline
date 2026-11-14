@@ -422,6 +422,18 @@ teardown() {
 	grep -q 'pr_review:max_iterations' "$skill_file"
 }
 
+@test "process-pr SKILL.md falls back to degraded_stages scan for quality:fix_failed" {
+	local skill_file
+	skill_file="$(dirname "$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")")/plugins/pipeline-core/skills/process-pr/SKILL.md"
+	[[ -f "$skill_file" ]] || skill_file="$(dirname "$(dirname "$ORCHESTRATOR_SCRIPT")")/skills/process-pr/SKILL.md"
+
+	[[ -f "$skill_file" ]]
+	# Skill-drift guard: the orchestrator partial gate blocks on this token, so
+	# Step 4a must too.
+	grep -q 'startswith("quality:fix_failed")' "$skill_file"
+	grep -q 'quality:fix_failed' "$ORCHESTRATOR_SCRIPT"
+}
+
 # =============================================================================
 # STATIC ANALYSIS: process-pr schema includes merge_blocked status
 # =============================================================================
