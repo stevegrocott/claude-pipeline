@@ -2903,6 +2903,15 @@ detect_rate_limit() {
         return 1
     fi
 
+    # Structured API error fields: usage_limit_reached or HTTP 429
+    if printf '%s' "$output" | jq -e '
+        ((.api_error_status // null) | tostring) == "429"
+        or ((.api_error // null) | tostring
+            | test("usage_limit_reached"))
+    ' >/dev/null 2>&1; then
+        return 0
+    fi
+
     # Fallback to text pattern matching (only for errors)
     local result
     result=$(printf '%s' "$output" | jq -r '.result // empty' 2>/dev/null)
@@ -2950,7 +2959,63 @@ extract_wait_time() {
         return
     fi
 
+    # Try "resets <time> (<zone>)" — seconds until the next wall-clock reset
+    local reset_wait
+    reset_wait=$(_wait_until_reset "$search_text")
+    if [[ -n "$reset_wait" ]]; then
+        printf '%s\n' "$reset_wait"
+        return
+    fi
+
     printf '%s\n' "$RATE_LIMIT_DEFAULT_WAIT"
+}
+
+# _wait_until_reset — parse "resets 3pm (America/New_York)" or
+# "resets 3:30pm" from the text and print seconds until that wall-clock
+# time. An unknown or missing zone falls back to local time. Prints nothing
+# when no parseable time is present. A reset that passed less than an hour
+# ago prints 0; an older one is taken to mean the same time tomorrow.
+_wait_until_reset() {
+    local text="$1"
+    local re='[Rr]esets?[[:space:]]+(at[[:space:]]+)?([0-9]{1,2})(:([0-9]{2}))?[[:space:]]*([AaPp][Mm])([[:space:]]*\(([^)]*)\))?'
+    [[ "$text" =~ $re ]] || return 0
+
+    local hour="${BASH_REMATCH[2]}"
+    local min="${BASH_REMATCH[4]:-00}"
+    local ampm="${BASH_REMATCH[5],,}"
+    local zone="${BASH_REMATCH[7]}"
+
+    hour=$((10#$hour))
+    min=$((10#$min))
+    ((hour >= 1 && hour <= 12 && min <= 59)) || return 0
+    ((hour == 12)) && hour=0
+    [[ "$ampm" == pm ]] && hour=$((hour + 12))
+
+    local -a tz_env=()
+    if [[ "$zone" =~ ^[A-Za-z0-9_+/-]+$ && "$zone" != /* && "$zone" != *..* ]]; then
+        local zdir
+        for zdir in /usr/share/zoneinfo /usr/lib/zoneinfo /var/db/timezone/zoneinfo; do
+            if [[ -f "$zdir/$zone" ]]; then
+                tz_env=(env "TZ=$zone")
+                break
+            fi
+        done
+    fi
+
+    local now_h now_m now_s
+    read -r now_h now_m now_s < <("${tz_env[@]}" date '+%H %M %S')
+    local now_secs=$((10#$now_h * 3600 + 10#$now_m * 60 + 10#$now_s))
+    local target=$((hour * 3600 + min * 60))
+    local delta=$((target - now_secs))
+
+    if ((delta < 0)); then
+        if ((delta > -3600)); then
+            delta=0
+        else
+            delta=$((delta + 86400))
+        fi
+    fi
+    printf '%s\n' "$delta"
 }
 
 handle_rate_limit() {
