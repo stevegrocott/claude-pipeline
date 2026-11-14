@@ -804,3 +804,14 @@ _load_deploy_verify_fn() {
 		grep -q 'escalation cap reached' <<< "$output"
 	done
 }
+
+@test "external_termination with unreadable history counts as no prior re-run, with empty stderr" {
+	local sr='{"status":"error","error_kind":"external_termination","model":"sonnet"}'
+	local bad
+	for bad in 'not json' '' '{"a":1}' '"str"'; do
+		run --separate-stderr bash "$DECIDE_ACTION_SCRIPT" "$sr" "$bad"
+		[ "$status" -eq 0 ]
+		[ "$(jq -r '.action' <<< "$output")" = "retry_same" ]
+		[ -z "$stderr" ]
+	done
+}

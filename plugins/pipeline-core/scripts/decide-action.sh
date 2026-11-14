@@ -445,10 +445,13 @@ main() {
 		if [[ "$_kind" == "external_termination" ]]; then
 			_model=$(printf '%s' "$stage_result" \
 				| jq -r '.model // "haiku"')
+			# Unreadable history (invalid JSON, non-array) counts as no
+			# prior re-run, silently: the stage still gets its one re-run.
 			_prior=$(printf '%s' "$history" | \
 				jq --arg m "$_model" \
 				   '[.[] | select(.from_model == $m and .to_model == $m)]
-				    | length')
+				    | length' 2>/dev/null) || _prior=0
+			[[ "$_prior" =~ ^[0-9]+$ ]] || _prior=0
 			if (( _prior == 0 )); then
 				printf '%s\n' \
 					'{"action":"retry_same","reason":"external_termination: killed externally, retrying once at the same model"}'
