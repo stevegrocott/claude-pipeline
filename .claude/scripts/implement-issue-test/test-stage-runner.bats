@@ -2996,20 +2996,50 @@ _repro_full_suite_bats_check() {
 
 @test "full-suite BATS check is not gated to non-bash scope and also runs for bash" {
 	# Static: issue #686 narrows the bash test loop to the PR's changed
-	# suites, so the degraded-signal block must now be reachable for EVERY
-	# scope, bash included, rather than excluding it — and must still run the
-	# full suite via run-tests.sh, mirroring the Jest full-suite check.
+	# suites, so the full-suite check must stay reachable for EVERY scope,
+	# bash included. Anchor on the call-site block in main() — from its
+	# header banner to the _bats_full_suite_outcome call — and require each
+	# landmark to be present and in order, so a moved or renamed block fails
+	# loudly instead of the test inspecting an unrelated window (#1070).
+	local -a landmarks=(
+		'NON-BLOCKING FULL-SUITE BATS CHECK'
+		'local bats_runner='
+		'if [[ -f "$bats_runner" ]]; then'
+		'_run_bounded_process_group'
+		'bash "$bats_runner"'
+		'_bats_full_suite_outcome "$bats_full_rc"'
+	)
+	local landmark
+	local prev_line=0
+	local line
+	local start_line=0
+	local end_line=0
+	local i
+	for i in "${!landmarks[@]}"; do
+		landmark="${landmarks[$i]}"
+		line=$(awk -v n="$prev_line" -v pat="$landmark" \
+			'NR > n && index($0, pat) { print NR; exit }' \
+			"$ORCHESTRATOR_SCRIPT")
+		[ -n "$line" ] || \
+			fail "Call-site landmark missing or out of order after line $prev_line: $landmark"
+		((i == 0)) && start_line=$line
+		end_line=$line
+		prev_line=$line
+	done
+
 	local window
-	local marker_line
-	local start_line
-	marker_line=$(awk '/test:bats_full_suite_red/{print NR; exit}' \
-		"$ORCHESTRATOR_SCRIPT")
-	start_line=$(( marker_line > 200 ? marker_line - 200 : 1 ))
-	window=$(awk -v s="$start_line" -v e="$marker_line" \
+	window=$(awk -v s="$start_line" -v e="$end_line" \
 		'NR >= s && NR <= e' "$ORCHESTRATOR_SCRIPT")
 	[ -n "$window" ] || fail "Could not locate the full-suite BATS check block"
 	[[ "$window" != *'!= "bash"'* ]] || \
 		fail "Full-suite BATS check must no longer exclude the bash scope (#686). Window: $window"
+	# Any scope condition (if/elif/case/[[ ]]/&&/||) in the executable lines
+	# gates the check, whatever the variable name or operator (#1070).
+	local scope_gate
+	scope_gate=$(grep -v '^[[:space:]]*#' <<< "$window" | \
+		grep -E '(\[\[|\bif\b|\belif\b|\bcase\b|&&|\|\|).*scope|scope.*(\]\]|&&|\|\||\bin\b)' || true)
+	[ -z "$scope_gate" ] || \
+		fail "Full-suite BATS check must not be gated on any scope condition. Offending: $scope_gate"
 	[[ "$window" == *run-tests.sh* ]] || \
 		fail "Full-suite BATS check must invoke run-tests.sh (full suite). Window: $window"
 }
