@@ -736,9 +736,17 @@ get_task_wall_time_with_retry() {
 
 check_wall_timeout() {
     local now="${1:-}"
-    local elapsed
+    local elapsed slept=0
     now="${now:-$(date +%s)}"
     elapsed=$(( now - ORCHESTRATOR_START_EPOCH ))
+    # Rate-limit sleep is not work: exclude it from the wall budget.
+    if (( elapsed > MAX_ORCHESTRATOR_WALL_TIME )); then
+        slept=$(rate_limit_slept_since "$ORCHESTRATOR_START_EPOCH")
+        elapsed=$(( elapsed - slept ))
+    fi
+    if (( slept > 0 )); then
+        log "Wall-clock: excluded ${slept}s of rate-limit sleep (effective elapsed: ${elapsed}s)"
+    fi
     if (( elapsed > MAX_ORCHESTRATOR_WALL_TIME )); then
         log_warn "Global wall-clock timeout: ${elapsed}s elapsed (limit: ${MAX_ORCHESTRATOR_WALL_TIME}s). Soft-exiting current loop."
         return 1
