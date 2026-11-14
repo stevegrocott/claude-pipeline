@@ -390,3 +390,33 @@ _clock_at_offset() {
     log_output=$(handle_rate_limit "$rate_limit_output" 2>&1)
     [[ "$log_output" == *"Rate limit hit"* ]] || fail "Expected rate limit log message"
 }
+
+# =============================================================================
+# SLEEP ACCOUNTING
+# =============================================================================
+
+@test "rate_limit_slept_since is 0 when nothing recorded" {
+    run rate_limit_slept_since 0
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
+}
+
+@test "handle_rate_limit records its sleep interval" {
+    sleep() { :; }
+    extract_wait_time() { echo 7; }
+    local expect=$((7 + RATE_LIMIT_BUFFER))
+    emit_event() { :; }
+    handle_rate_limit '{}' ""
+    [ -f "$LOG_BASE/rate-limit-sleeps.log" ]
+    run rate_limit_slept_since 0
+    [ "$output" = "$expect" ]
+}
+
+@test "rate_limit_slept_since sums only entries at or after the time" {
+    printf '%s\n' "100 5" "200 7" "300 11" "bogus line" \
+        > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since 200
+    [ "$output" = "18" ]
+    run rate_limit_slept_since 301
+    [ "$output" = "0" ]
+}

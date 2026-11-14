@@ -3062,7 +3062,42 @@ handle_rate_limit() {
             log_warn "record_inferred_exhaustion failed for $model"
     fi
 
+    _record_rate_limit_sleep "$wait_time"
     sleep "$wait_time"
+}
+
+# _record_rate_limit_sleep <seconds>
+#
+# Append one "<epoch-seconds> <slept-seconds>" line to the run log
+# directory so callers can later account for time spent sleeping.
+_record_rate_limit_sleep() {
+    local seconds="$1"
+    local now
+
+    [[ -n "${LOG_BASE:-}" ]] || return 0
+    printf -v now '%(%s)T' -1
+    printf '%s %s\n' "$now" "$seconds" \
+        >> "$LOG_BASE/rate-limit-sleeps.log" 2>/dev/null || true
+}
+
+# rate_limit_slept_since <epoch-seconds>
+#
+# Print the total seconds slept by handle_rate_limit at or after the given
+# epoch time. Prints 0 when nothing was recorded.
+rate_limit_slept_since() {
+    local since="${1:-0}"
+    local file="${LOG_BASE:-}/rate-limit-sleeps.log"
+    local ts secs total=0
+
+    if [[ -n "${LOG_BASE:-}" && -f "$file" ]]; then
+        while read -r ts secs; do
+            [[ "$ts" =~ ^[0-9]+$ && "$secs" =~ ^[0-9]+$ ]] || continue
+            if ((ts >= since)); then
+                total=$((total + secs))
+            fi
+        done < "$file"
+    fi
+    printf '%s\n' "$total"
 }
 
 # =============================================================================
