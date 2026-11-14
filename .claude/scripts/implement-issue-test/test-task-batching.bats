@@ -4059,7 +4059,10 @@ _setup_status_634() {
 
 	local tasks
 	tasks='[{"id":9,"description":"Modify src.ts","agent":"default","batch":1}]'
-	run execute_batch_parallel 1 "$tasks" "feature/esc-1068" "main"
+	# 3>&-: the stub returns at once, so the per-task watchdog's sleep can
+	# outlive the batch; it must not inherit bats' output fd and hold the
+	# suite open until the sleep ends.
+	run execute_batch_parallel 1 "$tasks" "feature/esc-1068" "main" 3>&-
 
 	git worktree prune 2>/dev/null || true
 	git checkout -q main 2>/dev/null || true
@@ -4084,7 +4087,8 @@ _setup_status_634() {
 
 	local tasks
 	tasks='[{"id":9,"description":"Modify README","agent":"default","batch":1}]'
-	run execute_batch_parallel 1 "$tasks" "feature/trk-1094" "main"
+	# 3>&-: see the #1068 execute_batch_parallel test above
+	run execute_batch_parallel 1 "$tasks" "feature/trk-1094" "main" 3>&-
 
 	local dirty_status
 	dirty_status=$(git status --porcelain -- README.md)
@@ -4118,7 +4122,8 @@ _setup_status_634() {
 
 	# Run A: real _report_primary_checkout_dirt
 	git checkout -q -b feature/stray-a-1094 main
-	run execute_batch_parallel 1 "$tasks" "feature/stray-a-1094" "main"
+	# 3>&-: see the #1068 execute_batch_parallel test above
+	run execute_batch_parallel 1 "$tasks" "feature/stray-a-1094" "main" 3>&-
 	local real_output="$output"
 	local real_present=0 real_content=""
 	if [[ -f "$TEST_TMP/repo/stray-1094.txt" ]]; then
@@ -4133,7 +4138,8 @@ _setup_status_634() {
 	# Run B: identical batch with the check stubbed out
 	_report_primary_checkout_dirt() { :; }
 	git checkout -q -b feature/stray-b-1094 main
-	run execute_batch_parallel 1 "$tasks" "feature/stray-b-1094" "main"
+	# 3>&-: see the #1068 execute_batch_parallel test above
+	run execute_batch_parallel 1 "$tasks" "feature/stray-b-1094" "main" 3>&-
 	local stub_output="$output"
 
 	# Control: the real check did report the stray file
