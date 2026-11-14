@@ -8035,6 +8035,11 @@ run_task_in_worktree() {
 		return 1
 	}
 
+	# Absolute, symlink-resolved worktree path for the prompt's boundary
+	# block (we have just cd'd into it).
+	local wt_abs_path
+	wt_abs_path=$(pwd -P)
+
 	# Baseline for the result-file writer below (issue #794) — captured
 	# before any stage runs so "did this task commit anything?" is answered
 	# from the worktree's own starting point rather than from HEAD~1, which
@@ -8087,6 +8092,14 @@ run_task_in_worktree() {
 		test_discovery_skill=$(load_skill "test-discovery")
 		local background_block
 		background_block=$(build_background_block)
+		local boundary_block
+		boundary_block="
+WORKTREE BOUNDARY:
+Your worktree's absolute path is: $wt_abs_path
+Read and edit files only under that path. Never read or edit the
+main checkout or any other worktree, even if a path you see points
+there; resolve every file relative to the worktree above.
+"
 		local impl_prompt
 		impl_prompt="${PLATFORM_PATTERNS_PREFIX}Implement task $task_id on branch $wt_branch in the current working directory:
 
@@ -8096,7 +8109,7 @@ $test_discovery_skill
 
 ## End Skill Instructions
 
-}$task_desc${line_range_hint}${files_block}${background_block}
+}$task_desc${line_range_hint}${files_block}${background_block}${boundary_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
@@ -8831,6 +8844,67 @@ _task_noop_is_genuine() {
 	[[ "$claimed" == "true" ]]
 }
 
+# `git status --porcelain` for the primary checkout with the run's own log
+# directory (${LOG_BASE}) left out, so files this run writes never count as
+# dirt (issue #1068).  Uses a pathspec exclude so a collapsed untracked
+# directory entry (e.g. `?? logs/`) is filtered too.
+_primary_checkout_status() {
+	local top rel=""
+	top=$(git rev-parse --show-toplevel 2>/dev/null || printf '')
+	# Compare physical paths: git reports the resolved toplevel, while
+	# LOG_BASE may go through a symlink (e.g. macOS /var -> /private/var).
+	local logp
+	logp=$(cd -P "${LOG_BASE:-/nonexistent}" 2>/dev/null && pwd -P || printf '')
+	if [[ -n "$top" && -n "$logp" && "$logp" == "$top"/* ]]; then
+		rel="${logp#"$top"/}"
+	fi
+	if [[ -n "$rel" ]]; then
+		git status --porcelain -- ":/" ":(top,exclude)${rel}" \
+			2>/dev/null || printf ''
+	else
+		git status --porcelain 2>/dev/null || printf ''
+	fi
+}
+
+# Log an error naming primary-checkout paths that changed while a parallel
+# batch ran (issue #1068).  Task agents work in worktrees, so a path that
+# turns dirty in the primary checkout usually means one escaped its worktree,
+# but an operator or another session could equally be the cause.
+#
+# Known limitation: detection compares `git status --porcelain` lines, so
+# further edits to a path that was already dirty before the batch leave the
+# status line identical and are NOT detected.
+#
+# Arguments:
+#   $1 - `_primary_checkout_status` output captured before the batch launched
+#   $2 - batch number (for the message)
+# Returns:
+#   0 when nothing new is dirty, 1 after logging an error
+#
+_report_primary_checkout_dirt() {
+	local baseline="${1:-}"
+	local batch_num="${2:-?}"
+	local now
+	now=$(_primary_checkout_status)
+	[[ -n "$now" ]] || return 0
+
+	local -a fresh=()
+	local line
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		if [[ $'\n'"$baseline"$'\n' != *$'\n'"$line"$'\n'* ]]; then
+			fresh+=("$line")
+		fi
+	done <<< "$now"
+
+	((${#fresh[@]} > 0)) || return 0
+	log_error "Batch $batch_num: primary checkout paths changed during" \
+		"parallel batch (a task may have escaped its worktree, or an" \
+		"operator/another session edited them):" \
+		"$(_porcelain_dirty_paths "$(printf '%s\n' "${fresh[@]}")")"
+	return 1
+}
+
 # Execute a batch of tasks in parallel using worktrees.
 #
 # Arguments:
@@ -8866,6 +8940,9 @@ execute_batch_parallel() {
 	local -a wt_branches=()
 	local -a result_files=()
 	local -a task_walltimes=()
+
+	local primary_baseline
+	primary_baseline=$(_primary_checkout_status)
 
 	local i
 	for ((i = 0; i < batch_count; i++)); do
@@ -8970,6 +9047,8 @@ execute_batch_parallel() {
 
 	log "Batch $batch_num: all tasks finished," \
 		"collecting results"
+
+	_report_primary_checkout_dirt "$primary_baseline" "$batch_num" || true
 
 	# Ensure we are on the feature branch for merges
 	git checkout "$feature_branch" >/dev/null 2>&1 || true

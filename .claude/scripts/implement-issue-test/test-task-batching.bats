@@ -101,6 +101,8 @@ setup() {
 }
 
 teardown() {
+	rm -f "$TEST_TMP/repo"/pre-existing-1068.txt \
+		"$TEST_TMP/repo"/escaped-1068.txt 2>/dev/null || true
 	_restore_acceptance_env
 	teardown_test_env
 }
@@ -3860,4 +3862,153 @@ _setup_status_634() {
 
 	expect_ok "no task is credited" test "$count" = "0"
 	expect_ok "the rejected-commit task stays failed" test "$status" = "failed"
+}
+
+# =============================================================================
+# run_task_in_worktree: worktree boundary block in the task prompt (#1068)
+# =============================================================================
+
+@test "#1068 run_task_in_worktree: prompt carries the worktree's absolute path and boundary" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git branch -D feature/wt-boundary 2>/dev/null || true
+	git branch -D wt-task-97 2>/dev/null || true
+	git checkout -q -b feature/wt-boundary main
+
+	mkdir -p "$LOG_BASE/stages"
+
+	local wt_path="$TEST_TMP/wt-97"
+	rm -rf "$wt_path"
+	git worktree add -q -b wt-task-97 "$wt_path" feature/wt-boundary
+
+	local prompt_file="$TEST_TMP/prompt-97.txt"
+	run_stage() {
+		printf '%s' "$2" > "$TEST_TMP/prompt-97.txt"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"none","summary":"x"}}'
+	}
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	load_skill() { printf '%s' ""; }
+	sanitize_worktree_commits() { return 0; }
+	guard_commit_path_allowlist() { return 0; }
+	should_run_quality_loop() { return 1; }
+
+	local rf="$LOG_BASE/stages/task-97-worktree.log"
+	rm -f "$rf"
+	(
+		run_task_in_worktree 97 "Do the thing" "default" "S" \
+			"$wt_path" "wt-task-97" "feature/wt-boundary" \
+			"$rf" "main"
+	) >/dev/null 2>&1 || true
+
+	cd "$TEST_TMP/repo" || exit 1
+	local abs_path
+	abs_path=$(cd "$wt_path" && pwd -P)
+	local prompt
+	prompt=$(<"$prompt_file")
+
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/wt-boundary 2>/dev/null || true
+	git branch -D wt-task-97 2>/dev/null || true
+
+	[[ "$prompt" == *"WORKTREE BOUNDARY"* ]]
+	[[ "$prompt" == *"absolute path is: $abs_path"* ]]
+	[[ "$prompt" == *"Read and edit files only under that path"* ]]
+}
+
+# =============================================================================
+# _report_primary_checkout_dirt: escaped-worktree detection (#1068)
+# =============================================================================
+
+@test "#1068 _report_primary_checkout_dirt: names newly dirty paths" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	printf 'x' > pre-existing-1068.txt
+	local baseline
+	baseline=$(git status --porcelain)
+	printf 'x' > escaped-1068.txt
+
+	run _report_primary_checkout_dirt "$baseline" 3
+
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"ERROR"* ]]
+	[[ "$output" == *"Batch 3"* ]]
+	[[ "$output" == *"escaped-1068.txt"* ]]
+	[[ "$output" != *"pre-existing-1068.txt"* ]]
+}
+
+@test "#1068 _report_primary_checkout_dirt: silent when nothing new is dirty" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	printf 'x' > pre-existing-1068.txt
+	local baseline
+	baseline=$(git status --porcelain)
+
+	run _report_primary_checkout_dirt "$baseline" 3
+
+	[ "$status" -eq 0 ]
+	[[ -z "$output" ]]
+}
+
+@test "#1068 _report_primary_checkout_dirt: ignores the run's own LOG_BASE inside the repo" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	export LOG_BASE="$TEST_TMP/repo/logs/implement-issue/run-1"
+	mkdir -p "$LOG_BASE"
+	local baseline
+	baseline=$(_primary_checkout_status)
+	printf 'x' > "$LOG_BASE/orchestrator.log"
+	printf 'x' > escaped-1068.txt
+
+	run _report_primary_checkout_dirt "$baseline" 3
+
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"escaped-1068.txt"* ]]
+	[[ "$output" != *"orchestrator.log"* ]]
+	[[ "$output" != *"logs/"* ]]
+}
+
+@test "#1068 _report_primary_checkout_dirt: silent when only LOG_BASE files appear" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q main 2>/dev/null || true
+	export LOG_BASE="$TEST_TMP/repo/logs/implement-issue/run-1"
+	mkdir -p "$LOG_BASE"
+	local baseline
+	baseline=$(_primary_checkout_status)
+	printf 'x' > "$LOG_BASE/orchestrator.log"
+
+	run _report_primary_checkout_dirt "$baseline" 3
+
+	[ "$status" -eq 0 ]
+	[[ -z "$output" ]]
+}
+
+@test "#1068 execute_batch_parallel: logs an error when a task edits the primary checkout" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/esc-1068 main
+	mkdir -p "$LOG_BASE/stages" "$LOG_BASE/worktrees"
+
+	run_task_in_worktree() {
+		local result_file="$8"
+		printf 'x' > "$TEST_TMP/repo/escaped-1068.txt"
+		printf '%s' '{"status":"failed","review_attempts":0}' > "$result_file"
+	}
+	extract_task_size() { printf '%s' "S"; }
+	export -f run_task_in_worktree extract_task_size
+
+	local tasks
+	tasks='[{"id":9,"description":"Modify src.ts","agent":"default","batch":1}]'
+	run execute_batch_parallel 1 "$tasks" "feature/esc-1068" "main"
+
+	git worktree prune 2>/dev/null || true
+	git checkout -q main 2>/dev/null || true
+	git branch -D feature/esc-1068 2>/dev/null || true
+
+	[[ "$output" == *"primary checkout paths changed"* ]]
+	[[ "$output" == *"escaped-1068.txt"* ]]
 }
