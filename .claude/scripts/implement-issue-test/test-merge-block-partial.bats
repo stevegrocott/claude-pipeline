@@ -605,3 +605,62 @@ set_gate_state() {
 	[ "$status" -eq 0 ]
 	[[ "$output" == "|" ]]
 }
+
+@test "gates in order: fix_failed, reason + token, defaults -> convergence gate blocks" {
+	set_gate_state "Review fix failed at review_fix_1: fix errored" \
+		"quality:fix_failed:review_fix_1"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|Review fix failed at review_fix_1: fix errored" ]]
+}
+
+@test "gates in order: fix_failed, token only, defaults -> partial gate blocks" {
+	set_gate_state "" "quality:fix_failed:review_fix_1"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "partial|Review fix failed and committed nothing (degraded_stages: quality:fix_failed:review_fix_1)." ]]
+}
+
+@test "gates in order: fix_failed, reason + token, convergence override -> partial gate blocks" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	set_gate_state "Review fix failed at review_fix_1: fix errored" \
+		"quality:fix_failed:review_fix_1"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == partial\|* ]]
+}
+
+@test "gates in order: fix_failed, token only, convergence override -> partial gate blocks" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	set_gate_state "" "quality:fix_failed:review_fix_1"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == partial\|* ]]
+}
+
+@test "gates in order: fix_failed, token only, partial override -> merge allowed" {
+	export BLOCK_MERGE_ON_PARTIAL=0
+	set_gate_state "" "quality:fix_failed:review_fix_1"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "gates in order: fix_failed, reason + token, partial override -> convergence gate blocks" {
+	export BLOCK_MERGE_ON_PARTIAL=0
+	set_gate_state "Review fix failed at review_fix_1: fix errored" \
+		"quality:fix_failed:review_fix_1"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|Review fix failed at review_fix_1: fix errored" ]]
+}
+
+@test "gates in order: fix_failed with both overrides set -> merge allowed" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	export BLOCK_MERGE_ON_PARTIAL=0
+	set_gate_state "Review fix failed at review_fix_1: fix errored" \
+		"quality:fix_failed:review_fix_1"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}

@@ -15754,6 +15754,11 @@ $complete_summary
                             merge_block_kind="partial"
                             break
                         fi
+                        if [[ "$_dsp" == quality:fix_failed:* ]]; then
+                            merge_blocked_reason="Review fix failed and committed nothing (degraded_stages: $_dsp)."
+                            merge_block_kind="partial"
+                            break
+                        fi
                         if [[ "$_dsp" == pr_review:max_iterations:* || "$_dsp" == pr_review:wall_timeout ]]; then
                             merge_blocked_reason="PR review loop ended without an approved verdict (degraded_stages: $_dsp)."
                             merge_block_kind="partial"
