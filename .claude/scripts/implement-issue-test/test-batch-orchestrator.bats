@@ -6492,3 +6492,210 @@ _source_set_final_state() {
 	_run_state_dispatch "error" "" "implement"
 	[[ "$d_error" == "Script exited with state: error" ]]
 }
+
+# =============================================================================
+# mark_interrupted_if_active — signal handling state (#1067)
+# =============================================================================
+
+source_mark_interrupted() {
+	local func_file="$TEST_TMP/mark_interrupted.bash"
+	_extract_function_body mark_interrupted_if_active \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	_extract_function_body set_state "$BATCH_ORCHESTRATOR_SCRIPT" \
+		>> "$func_file"
+	grep -q 'mark_interrupted_if_active' "$func_file" || return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+	LOCK_FILE="$TEST_TMP/batch.lock"
+}
+
+@test "mark_interrupted_if_active sets interrupted when lock held and running" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	mark_interrupted_if_active
+
+	[[ "$(jq -r .state "$STATUS_FILE")" == "interrupted" ]]
+}
+
+@test "mark_interrupted_if_active sets interrupted when parked on a PR" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"paused_on_pr","paused_on_pr":"7"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	mark_interrupted_if_active
+
+	[[ "$(jq -r .state "$STATUS_FILE")" == "interrupted" ]]
+	[[ "$(jq -r .paused_on_pr "$STATUS_FILE")" == "7" ]]
+}
+
+@test "mark_interrupted_if_active leaves a terminal state untouched" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"completed"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	run mark_interrupted_if_active
+
+	[[ "$status" -ne 0 ]]
+	[[ "$(jq -r .state "$STATUS_FILE")" == "completed" ]]
+}
+
+@test "mark_interrupted_if_active ignores a lock held by another batch" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+	printf '%s\n' "999999" > "$LOCK_FILE"
+
+	run mark_interrupted_if_active
+
+	[[ "$status" -ne 0 ]]
+	[[ "$(jq -r .state "$STATUS_FILE")" == "running" ]]
+}
+
+@test "mark_interrupted_if_active is a no-op without a lock file" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+
+	run mark_interrupted_if_active
+
+	[[ "$status" -ne 0 ]]
+	[[ "$(jq -r .state "$STATUS_FILE")" == "running" ]]
+}
+
+@test "TERM trap calls mark_interrupted_if_active before cleanup" {
+	grep -qE "^trap 'mark_interrupted_if_active; cleanup; exit 143' TERM" \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "mark_interrupted_if_active exit mode rewrites running" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"running"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	mark_interrupted_if_active exit
+
+	[[ "$(jq -r .state "$STATUS_FILE")" == "interrupted" ]]
+}
+
+@test "mark_interrupted_if_active exit mode keeps paused_on_pr" {
+	source_mark_interrupted || fail "helper missing"
+	printf '{"state":"paused_on_pr"}\n' > "$STATUS_FILE"
+	printf '%s\n' "$$" > "$LOCK_FILE"
+
+	run mark_interrupted_if_active exit
+
+	[[ "$status" -ne 0 ]]
+	[[ "$(jq -r .state "$STATUS_FILE")" == "paused_on_pr" ]]
+}
+
+@test "EXIT trap marks interrupted before cleanup releases the lock" {
+	grep -qE "^trap 'mark_interrupted_if_active exit; cleanup' EXIT" \
+		"$BATCH_ORCHESTRATOR_SCRIPT"
+}
+
+@test "cleanup clears the per-issue group id so it is signalled once" {
+	local body
+	body=$(_extract_function_body cleanup "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'ACTIVE_ORCH_PGID=""'* ]]
+	[[ "$body" == *'kill -- -"$pgid"'* ]]
+}
+
+# =============================================================================
+# Real batch + stub per-issue script: SIGTERM end state (#1067)
+# =============================================================================
+
+@test "real batch: SIGTERM leaves state interrupted, lock gone, stub signalled once" {
+	local scripts_copy
+	setup_batch_scripts_copy
+
+	local mock_bin="$TEST_TMP/mockbin"
+	mkdir -p "$mock_bin"
+	cat > "$mock_bin/gh" << 'MOCKGH'
+#!/usr/bin/env bash
+if [[ "$1 $2" == "issue view" ]]; then
+	if [[ "$*" == *"body,labels"* ]]; then
+		printf '%s\n' '{"body":"## Implementation Tasks\n\n- [ ] `[default]` do the thing — `.claude/scripts/x.sh`\n\n## Acceptance Criteria\n\n- it works","labels":[]}'
+	else
+		echo "OPEN"
+	fi
+fi
+exit 0
+MOCKGH
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	# Stub per-issue script: announce readiness, count each TERM it gets.
+	cat > "$scripts_copy/implement-issue-orchestrator.sh" << 'STUB'
+#!/usr/bin/env bash
+: > "$STUB_DIR/terms"
+trap 'printf "x\n" >> "$STUB_DIR/terms"; exit 143' TERM
+: > "$STUB_DIR/ready"
+while :; do
+	sleep 0.1
+done
+STUB
+	chmod +x "$scripts_copy/implement-issue-orchestrator.sh"
+	export STUB_DIR="$TEST_TMP/stub"
+	mkdir -p "$STUB_DIR"
+
+	cd "$TEST_TMP" || fail "cd failed"
+	git init -q . 2>/dev/null
+	"$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test \
+		> "$TEST_TMP/batch.out" 2>&1 &
+	local batch_pid=$!
+
+	local i
+	for i in {1..300}; do
+		[[ -f "$STUB_DIR/ready" ]] && break
+		sleep 0.1
+	done
+	[[ -f "$STUB_DIR/ready" ]] || fail "stub never started: $(cat "$TEST_TMP/batch.out")"
+	[[ -f logs/.batch-orchestrator.lock ]] || fail "lock not held while running"
+
+	kill -TERM "$batch_pid"
+	local batch_exit=0
+	wait "$batch_pid" || batch_exit=$?
+	sleep 0.5
+
+	[[ "$batch_exit" -eq 143 ]]
+	[[ "$(jq -r .state status.json)" == "interrupted" ]]
+	[[ ! -e logs/.batch-orchestrator.lock ]]
+	[[ "$(wc -l < "$STUB_DIR/terms" | tr -d ' ')" -eq 1 ]]
+}
+
+# =============================================================================
+# Lock-refused batch changes no state (#1067)
+# =============================================================================
+
+@test "real batch: lock refused leaves status.json and lock untouched" {
+	local scripts_copy
+	setup_batch_scripts_copy
+
+	cd "$TEST_TMP" || fail "cd failed"
+	git init -q . 2>/dev/null
+	mkdir -p logs
+
+	# A live foreign holder owns the lock; status.json says running.
+	sleep 60 &
+	local holder_pid=$!
+	printf '%s\n' "$holder_pid" > logs/.batch-orchestrator.lock
+	printf '%s\n' '{"state":"running","issues":[]}' > status.json
+	local status_before lock_before
+	status_before=$(cat status.json)
+	lock_before=$(cat logs/.batch-orchestrator.lock)
+
+	run "$scripts_copy/batch-orchestrator.sh" --issues 999999 --branch test
+	kill "$holder_pid" 2>/dev/null
+
+	[[ "$status" -eq 3 ]]
+	[[ "$output" == *"Another batch is running"* ]]
+	[[ "$(cat status.json)" == "$status_before" ]]
+	[[ "$(jq -r .state status.json)" != "interrupted" ]]
+	[[ "$(cat logs/.batch-orchestrator.lock)" == "$lock_before" ]]
+}
+
+@test "handle-issues skill Step 0 names interrupted as a resumable state" {
+	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/handle-issues/SKILL.md"
+	[[ -f "$skill" ]]
+	grep -q '"\$STATE" == "interrupted"' "$skill"
+}

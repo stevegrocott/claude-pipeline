@@ -404,19 +404,57 @@ cleanup_reexec_copy() {
     rm -f "$_BATCH_ORCHESTRATOR_REEXEC_COPY"
 }
 
+# mark_interrupted_if_active — record state "interrupted" in status.json when
+# a signal ends a batch that was still live: this process holds the lock AND
+# the recorded state is "running" or parked ("paused_on_pr"). Terminal states
+# (completed*, circuit_breaker, budget_exceeded, ...) and a lock owned by
+# another batch are left untouched. Never fails; returns 0 when it wrote
+# "interrupted", 1 otherwise. With argument "exit" (EXIT trap, no signal
+# seen) only "running" is rewritten: a normal exit parked on a PR keeps
+# "paused_on_pr". Any other/no argument means a signal ended the batch.
+mark_interrupted_if_active() {
+	local mode="${1:-signal}"
+	local holder=""
+	local current=""
+
+	[[ -f "$LOCK_FILE" ]] || return 1
+	holder=$(cat "$LOCK_FILE" 2>/dev/null)
+	[[ "$holder" == "$$" ]] || return 1
+	[[ -f "$STATUS_FILE" ]] || return 1
+	current=$(jq -r '.state // empty' "$STATUS_FILE" 2>/dev/null) \
+		|| return 1
+
+	case "$current" in
+		running | paused_on_pr)
+			if [[ "$current" == "paused_on_pr" && "$mode" == "exit" ]]; then
+				return 1
+			fi
+			set_state "interrupted" 2>/dev/null || return 1
+			return 0
+			;;
+	esac
+	return 1
+}
+
 # cleanup — kill the active per-issue orchestrator process group (if any),
 # release the lock file, and remove the re-exec private copy (if any).
 # Called from both the TERM and EXIT traps so that a single signal to the
 # batch always terminates the full orchestrator subtree and never leaks the
 # temp snapshot, even on failure.
 cleanup() {
-    [[ -n "$ACTIVE_ORCH_PGID" ]] && kill -- -"$ACTIVE_ORCH_PGID" 2>/dev/null
+    # Signal the per-issue group once: a second TERM would cut short the
+    # orchestrator's own exit trap (#1067). Clear the id after signalling.
+    if [[ -n "$ACTIVE_ORCH_PGID" ]]; then
+        local pgid="$ACTIVE_ORCH_PGID"
+        ACTIVE_ORCH_PGID=""
+        kill -- -"$pgid" 2>/dev/null
+    fi
     release_lock
     cleanup_reexec_copy
 }
 
-trap 'cleanup; exit 143' TERM
-trap cleanup EXIT
+trap 'mark_interrupted_if_active; cleanup; exit 143' TERM
+trap 'mark_interrupted_if_active exit; cleanup' EXIT
 acquire_lock
 
 # =============================================================================

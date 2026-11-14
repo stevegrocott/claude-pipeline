@@ -2733,7 +2733,12 @@ trap 'flush_review_push; _rewrite_running_to_interrupted; write_task_summary_to_
 # is called explicitly here too (issue #778) — not just relied on via the
 # EXIT trap the `exit 143` below also triggers — so a single SIGTERM always
 # removes the private re-exec snapshot even if trap semantics ever change.
-trap '_propagate_sigterm; cleanup_reexec_copy; exit 143' TERM
+#
+# The handler's FIRST action is `trap '' TERM`: once a TERM is being handled,
+# further TERMs (the batch per-issue timeout and an operator Ctrl-C/kill often
+# arrive back to back) are ignored so they cannot re-enter this handler and cut
+# the EXIT trap short mid-cleanup (status rewrite, metrics, lock removal).
+trap "trap '' TERM; _propagate_sigterm; cleanup_reexec_copy; exit 143" TERM
 
 # =============================================================================
 # STATUS SYNC TO LOG DIRECTORY
