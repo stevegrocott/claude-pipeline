@@ -303,4 +303,14 @@ GH
     local final_state
     final_state=$(jq -r '.state' "$status_file")
     [ "$final_state" = "interrupted_during_parse_issue" ]
+
+    # The EXIT trap must also have run export_metrics to completion: the run's
+    # metrics.json exists in the run log dir and is valid, non-empty JSON.
+    local log_dir metrics_file
+    log_dir=$(jq -r '.log_dir // empty' "$status_file")
+    [ -n "$log_dir" ]
+    [[ "$log_dir" == /* ]] || log_dir="$TEST_TMP/$log_dir"
+    metrics_file="$log_dir/metrics.json"
+    [ -f "$metrics_file" ]
+    jq -e 'type == "object" and length > 0' "$metrics_file" > /dev/null
 }
