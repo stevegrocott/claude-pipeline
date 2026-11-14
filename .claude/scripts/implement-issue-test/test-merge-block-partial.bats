@@ -487,3 +487,121 @@ teardown() {
 	expect_ok "pr_review degradation sites still exist (found: $pr_appends)" \
 		test "$pr_appends" -ge 3
 }
+
+# =============================================================================
+# FUNCTIONAL: the real convergence + partial gate blocks, run in order (#1089)
+# =============================================================================
+
+# Extract the real Gate A (convergence) and Gate B (partial) blocks from the
+# orchestrator and run them in order, as main() does, so a state that slips
+# between the two gates is visible.  Prints "<kind>|<reason>".  The blocks are
+# extracted rather than re-implemented, so the test sees any change to them.
+run_gates_in_order() {
+	local gate_a gate_b gate_file
+	gate_a=$(awk '
+		/if \[\[ "\$\{BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1\}" == "0" \]\]; then/ { grab=1 }
+		grab { print }
+		grab && /^        fi$/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	gate_b=$(awk '
+		/# Gate B / { seen=1 }
+		seen && /if \[\[ -z "\$merge_blocked_reason" \]\]; then/ { grab=1 }
+		grab { print }
+		grab && /^        fi$/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	[[ "$gate_a" == *'test:oscillation:*'* ]] || return 98
+	[[ "$gate_b" == *'BLOCK_MERGE_ON_PARTIAL'* ]] || return 99
+
+	gate_file="$TEST_TMP/gates.bash"
+	{
+		printf '_gates_in_order() {\n'
+		printf '\tlocal merge_blocked_reason="" merge_block_kind=""\n'
+		printf '\tlocal _persisted\n'
+		printf '\t_persisted=$(jq -r ".merge_blocked_reason // empty" "$STATUS_FILE")\n'
+		printf '\tlog() { :; }\n'
+		printf '%s\n' "$gate_a"
+		printf '%s\n' "$gate_b"
+		printf '\tprintf "%%s|%%s" "$merge_block_kind" "$merge_blocked_reason"\n'
+		printf '}\n'
+	} > "$gate_file"
+	source "$gate_file"
+	_gates_in_order
+}
+
+# Set the persisted reason (or clear it) and the in-memory degraded stages.
+set_gate_state() {
+	local reason="$1"
+	shift
+	DEGRADED_STAGES=("$@")
+	jq --arg r "$reason" \
+		'if $r == "" then del(.merge_blocked_reason)
+		else .merge_blocked_reason = $r end' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp" &&
+		mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+@test "gates in order: helper extracts both real blocks and allows a clean run" {
+	set_gate_state ""
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "gates in order: max iterations, reason + token, defaults -> convergence gate blocks" {
+	set_gate_state "PR review ended at max iterations" \
+		"pr_review:max_iterations:5"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|PR review ended at max iterations" ]]
+}
+
+@test "gates in order: max iterations, token only, defaults -> partial gate blocks" {
+	set_gate_state "" "pr_review:max_iterations:5"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "partial|PR review loop ended without an approved verdict (degraded_stages: pr_review:max_iterations:5)." ]]
+}
+
+@test "gates in order: max iterations, reason + token, convergence override -> partial gate blocks" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	set_gate_state "PR review ended at max iterations" \
+		"pr_review:max_iterations:5"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "partial|PR review loop ended without an approved verdict (degraded_stages: pr_review:max_iterations:5)." ]]
+}
+
+@test "gates in order: max iterations, token only, convergence override -> partial gate blocks" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	set_gate_state "" "pr_review:max_iterations:5"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == partial\|* ]]
+}
+
+@test "gates in order: max iterations, token only, partial override -> merge allowed" {
+	export BLOCK_MERGE_ON_PARTIAL=0
+	set_gate_state "" "pr_review:max_iterations:5"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "gates in order: max iterations, reason + token, partial override -> convergence gate blocks" {
+	export BLOCK_MERGE_ON_PARTIAL=0
+	set_gate_state "PR review ended at max iterations" \
+		"pr_review:max_iterations:5"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|PR review ended at max iterations" ]]
+}
+
+@test "gates in order: max iterations with both overrides set -> merge allowed" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	export BLOCK_MERGE_ON_PARTIAL=0
+	set_gate_state "PR review ended at max iterations" \
+		"pr_review:max_iterations:5"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
