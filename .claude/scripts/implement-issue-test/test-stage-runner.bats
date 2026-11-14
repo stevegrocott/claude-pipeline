@@ -272,6 +272,25 @@ teardown() {
         || fail "sleep 7 not invoked; sleeps: $(cat "$TEST_TMP/sleeps" 2>/dev/null)"
 }
 
+@test "retry also an API error fails with api_error, no third dispatch (#1072)" {
+    export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
+    echo '{"is_error":true,"api_error_status":500,"result":"API Error: 500 internal"}' \
+        > "$MOCK_CLAUDE_RESPONSE"
+    export API_ERROR_RETRY_WAIT=0
+
+    run run_stage "test" "prompt" "test-schema.json"
+
+    [ "$status" -ne 0 ]
+    [ "$(printf '%s' "$output" | grep '^{' | tail -1 | jq -r '.error_kind')" = "api_error" ] \
+        || fail "Expected error_kind api_error; got: $output"
+    [ "$(printf '%s' "$output" | grep -c 'action=retry_same')" = "1" ] \
+        || fail "Expected exactly one retry_same dispatch; got: $output"
+    [[ "$output" == *"action=bail"* || "$output" == *"repeated API failure"* ]] \
+        || fail "Expected halt recorded as bail; got: $output"
+    [[ "$output" != *"action=escalate"* ]] \
+        || fail "api_error must not escalate: $output"
+}
+
 @test "run_stage keeps rate_limit ahead of api_error for a 429 envelope" {
     export MOCK_CLAUDE_RESPONSE="$TEST_TMP/mock-response.json"
     echo '{"is_error":true,"api_error_status":429,"result":"API Error: 429 too many requests, retry-after 1"}' \

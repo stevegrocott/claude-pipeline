@@ -2839,6 +2839,21 @@ detect_rate_limit() {
     return 1
 }
 
+# detect_api_error — true when the CLI envelope is an API-error result:
+# is_error is true and either api_error_status is a non-null number or the
+# result text starts with "API Error".  Callers check detect_rate_limit
+# first, so a 429 is classified rate_limit, not api_error.
+detect_api_error() {
+    local output="$1"
+
+    printf '%s' "$output" | jq -e '
+        (.is_error == true) and
+        ((.api_error_status // null) != null
+         or ((.result // "") | type == "string"
+             and test("^API Error")))
+    ' >/dev/null 2>&1
+}
+
 extract_wait_time() {
     local output="$1"
     local result
@@ -3926,6 +3941,9 @@ for m in re.finditer(r'\[\s*\{', t):
     elif detect_rate_limit "$output"; then
         handle_rate_limit "$output" "$model"
         _error_kind="rate_limit"
+    elif detect_api_error "$output"; then
+        log_error "Stage $stage_name — API error envelope from $model"
+        _error_kind="api_error"
     elif [[ -z "$structured" && -z "$_fallback_result" ]]; then
         # No parseable output of any kind
         local output_byte_count output_preview
@@ -4221,6 +4239,15 @@ for m in re.finditer(r'\[\s*\{', t):
                 return 1
             fi
 
+            # An api_error is a transient upstream failure: back off before
+            # the one same-model retry so it doesn't hit the same outage.
+            if [[ "${_error_kind:-}" == "api_error" ]]; then
+                local _api_wait="${API_ERROR_RETRY_WAIT:-300}"
+                [[ "$_api_wait" =~ ^[0-9]+$ ]] || _api_wait=300
+                log "  api_error: waiting ${_api_wait}s before same-model retry"
+                sleep "$_api_wait"
+            fi
+
             # handle_rate_limit() was already called during error_kind
             # classification above; emit the retry/model_call events now.
             emit_event "retry" \
@@ -4371,6 +4398,21 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$result_model" "null" \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
                     "$_stage_usage" "${complexity:-}")
+            elif detect_api_error "$(_extract_cli_envelope "$output")"; then
+                # Issue #1072: the retry was also an API error.  Fail the
+                # stage as api_error and halt — no third dispatch, and
+                # never escalate (the model tier is not at fault).
+                log_error "Stage $stage_name hit an API error again on" \
+                    "the same-model retry — failing"
+                _sr_retry=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"api_error"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage" "${complexity:-}")
+                _apply_stage_action "$_sr_retry" "bail" \
+                    "api_error: repeated API failure, not escalating"
+                return $?
             elif (( _retry_exit_code == 143 )); then
                 # Issue #1054: the re-run was also killed from outside (an
                 # unmarked 143 survived _classify_143).  Fail the stage with

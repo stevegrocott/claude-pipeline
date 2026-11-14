@@ -427,8 +427,9 @@ main() {
 	local _status
 	_status=$(printf '%s' "$stage_result" | jq -r '.status // empty' 2>/dev/null)
 
-	# external_termination (issue #1054): the stage was killed from outside
-	# (not by the watchdog), so the model tier is not at fault.  Retry once at
+	# external_termination (issue #1054) and api_error: the stage was killed
+	# from outside (not by the watchdog) or hit an API failure, so the model
+	# tier is not at fault.  Retry once at
 	# the same model, then bail — never escalate.  Handled here, before either
 	# backend, so the bash and skill-native paths agree.  Only a same-model
 	# entry (from_model == to_model) counts as the prior attempt: the history
@@ -442,7 +443,8 @@ main() {
 	if [[ "$_status" != "success" ]]; then
 		local _kind _model _prior
 		_kind=$(printf '%s' "$stage_result" | jq -r '.error_kind // empty')
-		if [[ "$_kind" == "external_termination" ]]; then
+		if [[ "$_kind" == "external_termination" \
+			|| "$_kind" == "api_error" ]]; then
 			_model=$(printf '%s' "$stage_result" \
 				| jq -r '.model // "haiku"')
 			# Unreadable history (invalid JSON, non-array) counts as no
@@ -453,8 +455,16 @@ main() {
 				    | length' 2>/dev/null) || _prior=0
 			[[ "$_prior" =~ ^[0-9]+$ ]] || _prior=0
 			if (( _prior == 0 )); then
+				if [[ "$_kind" == "api_error" ]]; then
+					printf '%s\n' \
+						'{"action":"retry_same","reason":"api_error: transient API failure, retrying once at the same model"}'
+				else
+					printf '%s\n' \
+						'{"action":"retry_same","reason":"external_termination: killed externally, retrying once at the same model"}'
+				fi
+			elif [[ "$_kind" == "api_error" ]]; then
 				printf '%s\n' \
-					'{"action":"retry_same","reason":"external_termination: killed externally, retrying once at the same model"}'
+					'{"action":"bail","reason":"api_error: repeated API failure, not escalating"}'
 			else
 				printf '%s\n' \
 					'{"action":"bail","reason":"external_termination: repeated external kill, not escalating"}'

@@ -4398,6 +4398,21 @@ for m in re.finditer(r'\[\s*\{', t):
                     "$result_model" "null" \
                     "$(( $(_epoch_ms) - result_start_ms ))" \
                     "$_stage_usage" "${complexity:-}")
+            elif detect_api_error "$(_extract_cli_envelope "$output")"; then
+                # Issue #1072: the retry was also an API error.  Fail the
+                # stage as api_error and halt — no third dispatch, and
+                # never escalate (the model tier is not at fault).
+                log_error "Stage $stage_name hit an API error again on" \
+                    "the same-model retry — failing"
+                _sr_retry=$(_emit_stage_result \
+                    "error" "null" "$output" \
+                    "$(_extract_denials "$output")" \
+                    "$result_model" '"api_error"' \
+                    "$(( $(_epoch_ms) - result_start_ms ))" \
+                    "$_stage_usage" "${complexity:-}")
+                _apply_stage_action "$_sr_retry" "bail" \
+                    "api_error: repeated API failure, not escalating"
+                return $?
             elif (( _retry_exit_code == 143 )); then
                 # Issue #1054: the re-run was also killed from outside (an
                 # unmarked 143 survived _classify_143).  Fail the stage with
