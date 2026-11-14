@@ -307,3 +307,32 @@ intake_verdict_with_class_override() {
     [ "$status" -ne 0 ] || fail "Intake did not follow class->2. Got: $output"
     [[ "$output" == *"src/app.ts"* ]] || fail "Expected path named. Got: $output"
 }
+
+@test "class redefined to 2 refuses an existing and a not-yet-existing path as hard-denied" {
+    commit_paths src/app.ts
+
+    # Existing path: refused with the hard-denied diagnostic.
+    intake_verdict_with_class_override src/app.ts 'return 2'
+    [ "$status" -ne 0 ] || fail "Existing path not refused. Got: $output"
+    [[ "$output" == *"hard-denied path: src/app.ts"* ]] \
+        || fail "Expected hard-denied diagnostic (existing). Got: $output"
+
+    # Not-yet-existing path: same diagnostic, not an unresolved-path error.
+    [[ ! -e "$TEST_TMP/repo/src/not-yet/created.ts" ]]
+    intake_verdict_with_class_override src/not-yet/created.ts 'return 2'
+    [ "$status" -ne 0 ] || fail "Missing path not refused. Got: $output"
+    [[ "$output" == *"hard-denied path: src/not-yet/created.ts"* ]] \
+        || fail "Expected hard-denied diagnostic (missing). Got: $output"
+    [[ "$output" != *"unresolved path"* ]] \
+        || fail "Missing path reported as unresolved. Got: $output"
+}
+
+@test "class redefined to 0 accepts an existing workflow file at intake" {
+    commit_paths .github/workflows/ci.yml
+
+    intake_verdict_with_class_override .github/workflows/ci.yml 'return 0'
+    [ "$status" -eq 0 ] \
+        || fail "Hard-deny branch ignored class->0 for a workflow path. Got: $output"
+    [[ "$output" != *"hard-denied path:"* ]] \
+        || fail "Workflow path still hard-denied under class->0. Got: $output"
+}
