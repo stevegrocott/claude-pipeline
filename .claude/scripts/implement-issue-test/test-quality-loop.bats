@@ -2013,6 +2013,21 @@ _setup_synced_consumer_repo() {
     [[ "$output" == *"status.json"* ]]
 }
 
+@test "verify_fix_stage_commit accepts a no-op fix stage in a never-synced repo with artifacts" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    mkdir -p logs/implement-issue
+    printf 'log\n' > logs/implement-issue/orchestrator.log
+    printf '{}\n' > status.json
+    ensure_pipeline_artifact_excludes "$PWD"
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 0 ]
+    [ "$(git rev-parse HEAD)" = "$head_before" ]
+}
+
 @test "_handle_fix_stage_result posts no success comment when work is uncommitted" {
     _setup_fix_stage_repo
     local head_before
@@ -2577,3 +2592,128 @@ _repro_full_suite_bats_persist_and_extract() {
         fail "A green full-suite BATS run must not record a degraded stage (issue #799 AC5); got: ${DEGRADED_STAGES[*]}"
 }
 
+
+# Issue #1044: plugin consumers never run sync.sh, so the orchestrator itself
+# must exclude artifacts via the common git dir.
+_make_plain_consumer_repo() {
+    cd "$TEST_TMP" || return 1
+    rm -rf plainrepo
+    mkdir plainrepo
+    cd plainrepo || return 1
+    git init -q .
+    git checkout -q -b fix-branch
+    printf 'base\n' > src.ts
+    git add src.ts
+    git commit -q -m "initial"
+    mkdir -p logs/implement-issue
+    printf 'log\n' > logs/implement-issue/orchestrator.log
+    printf '{}\n' > status.json
+    printf '' > status.json.lock
+    mkdir -p status.json.lockdir
+    printf 'x\n' > status.json.lockdir/owner
+}
+
+@test "ensure_pipeline_artifact_excludes makes artifacts invisible without sync.sh" {
+    _make_plain_consumer_repo
+    [ -n "$(git status --porcelain)" ]
+
+    ensure_pipeline_artifact_excludes "$PWD"
+
+    [ -z "$(git status --porcelain)" ] || \
+        fail "artifacts still dirty: $(git status --porcelain)"
+    [ ! -f .gitignore ]
+}
+
+@test "ensure_pipeline_artifact_excludes is honoured inside a linked worktree" {
+    _make_plain_consumer_repo
+    ensure_pipeline_artifact_excludes "$PWD"
+    git worktree add -q "$TEST_TMP/wt" -b wt-branch
+    printf '{}\n' > "$TEST_TMP/wt/status.json"
+    mkdir -p "$TEST_TMP/wt/logs"
+    printf 'x\n' > "$TEST_TMP/wt/logs/a.log"
+
+    [ -z "$(git -C "$TEST_TMP/wt" status --porcelain)" ]
+}
+
+@test "ensure_pipeline_artifact_excludes called from a worktree writes the common dir" {
+    _make_plain_consumer_repo
+    git worktree add -q "$TEST_TMP/wt2" -b wt2-branch
+
+    ensure_pipeline_artifact_excludes "$TEST_TMP/wt2"
+
+    grep -qxF '/status.json.lock' .git/info/exclude
+}
+
+@test "ensure_pipeline_artifact_excludes is idempotent" {
+    _make_plain_consumer_repo
+    printf '# custom\n/my-custom-ignore\n' >> .git/info/exclude
+    ensure_pipeline_artifact_excludes "$PWD"
+    local before after
+    before=$(cksum < .git/info/exclude)
+    ensure_pipeline_artifact_excludes "$PWD"
+    after=$(cksum < .git/info/exclude)
+
+    [ "$before" = "$after" ]
+    [ "$(grep -cxF '/status.json' .git/info/exclude)" -eq 1 ]
+    grep -qxF '/my-custom-ignore' .git/info/exclude
+}
+
+@test "ensure_pipeline_artifact_excludes warns and returns 0 when exclude file is unwritable" {
+    _make_plain_consumer_repo
+    mkdir -p .git/info
+    : > .git/info/exclude
+    chmod 444 .git/info/exclude
+    : > "$LOG_FILE"
+
+    run ensure_pipeline_artifact_excludes "$PWD"
+    chmod 644 .git/info/exclude
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN"*"cannot write"* ]]
+    grep -q "WARN: ensure_pipeline_artifact_excludes" "$LOG_FILE"
+}
+
+@test "ensure_pipeline_artifact_excludes warns and returns 0 when info dir cannot be created" {
+    _make_plain_consumer_repo
+    rm -rf .git/info
+    : > .git/info
+    : > "$LOG_FILE"
+
+    run ensure_pipeline_artifact_excludes "$PWD"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN"*"cannot create"* ]]
+    grep -q "WARN: ensure_pipeline_artifact_excludes" "$LOG_FILE"
+}
+
+@test "ensure_pipeline_artifact_excludes does not hide real edits" {
+    _make_plain_consumer_repo
+    ensure_pipeline_artifact_excludes "$PWD"
+    printf 'more\n' >> src.ts
+    local head_before
+    head_before=$(git rev-parse HEAD)
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"src.ts"* ]]
+}
+
+@test "ensure_pipeline_artifact_excludes is a no-op outside a repository" {
+    mkdir -p "$TEST_TMP/notrepo"
+    run ensure_pipeline_artifact_excludes "$TEST_TMP/notrepo"
+    [ "$status" -eq 0 ]
+}
+
+@test "orchestrator artifact excludes match sync.sh GITIGNORE_PATHS" {
+    local root sync_paths orch_paths
+    root="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
+    sync_paths=$(sed -n '/^readonly -a GITIGNORE_PATHS=(/,/^)/p' "$root/sync.sh" \
+        | grep "^ *'" | tr -d " '" | sort)
+    _make_plain_consumer_repo
+    ensure_pipeline_artifact_excludes "$PWD"
+    orch_paths=$(grep '^/' .git/info/exclude | sed 's#^/##' | sort)
+
+    [ -n "$sync_paths" ]
+    [ "$sync_paths" = "$orch_paths" ]
+}
