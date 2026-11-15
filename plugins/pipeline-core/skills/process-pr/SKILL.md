@@ -391,7 +391,7 @@ For each extracted issue, invoke the platform wrapper `create-followup-issue.sh`
   --type precise   # or: --type vague (adds needs-explore label)
 ```
 
-The wrapper prints the created issue number on stdout — record that number from the command output (do not capture it with `$(…)`).
+The wrapper prints the created issue number on stdout — record that number from the command output (do not capture it with `$(…)`). Exit code 1 means the generated body failed `assert_issue_valid`: nothing was created and nothing was printed, so skip that item (do not retry via `gh issue create`). Exit 3 means a usage error (missing or invalid argument). Collect each number the wrapper printed on a successful run; these numbers fill the `follow_up_issues` array in the final status output.
 
 **`--file-path` is required** — extract it from the `[File:Line]` reference in the review comment. If the review item mentions a function or concept but no file path, use the primary file changed in the PR/MR diff as the fallback. If no file can be determined at all, pass `"."` (the script will infer agent `"default"` and the issue will be valid). Never omit `--file-path`.
 
