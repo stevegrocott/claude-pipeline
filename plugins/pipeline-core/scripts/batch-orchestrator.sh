@@ -510,7 +510,7 @@ warn_permission_denials() {
         | select(.tool_name == "Bash")
         | (.tool_input.command // "" | split("\n")[0])' 2>/dev/null)
 
-    for cmd_line in "${cmd_lines[@]}"; do
+    for cmd_line in ${cmd_lines[@]+"${cmd_lines[@]}"}; do
         [[ -n "$cmd_line" ]] || continue
         if [[ "$cmd_line" == *"create-issue"* \
             || "$cmd_line" == *"create-followup-issue"* \
@@ -970,7 +970,8 @@ _wait_until_reset() {
 
     local hour="${BASH_REMATCH[2]}"
     local min="${BASH_REMATCH[4]:-00}"
-    local ampm="${BASH_REMATCH[5],,}"
+    local ampm
+    ampm=$(printf '%s' "${BASH_REMATCH[5]}" | tr '[:upper:]' '[:lower:]')
     local zone="${BASH_REMATCH[7]}"
 
     hour=$((10#$hour))
@@ -991,7 +992,7 @@ _wait_until_reset() {
     fi
 
     local now_h now_m now_s
-    read -r now_h now_m now_s < <("${tz_env[@]}" date '+%H %M %S')
+    read -r now_h now_m now_s < <(${tz_env[@]+"${tz_env[@]}"} date '+%H %M %S')
     local now_secs=$((10#$now_h * 3600 + 10#$now_m * 60 + 10#$now_s))
     local target=$((hour * 3600 + min * 60))
     local delta=$((target - now_secs))

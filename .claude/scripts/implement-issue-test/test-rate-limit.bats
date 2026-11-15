@@ -149,10 +149,10 @@ _clock_at_offset() {
     local -a tz_env=()
     [[ -n "$zone" ]] && tz_env=(env "TZ=$zone")
     local fmt
-    fmt=$("${tz_env[@]}" date -r "$epoch" '+%I:%M%p' 2>/dev/null \
-        || "${tz_env[@]}" date -d "@$epoch" '+%I:%M%p')
+    fmt=$(${tz_env[@]+"${tz_env[@]}"} date -r "$epoch" '+%I:%M%p' 2>/dev/null \
+        || ${tz_env[@]+"${tz_env[@]}"} date -d "@$epoch" '+%I:%M%p')
     fmt="${fmt#0}"
-    printf '%s' "${fmt,,}"
+    printf '%s' "$fmt" | tr '[:upper:]' '[:lower:]'
 }
 
 @test "extract_wait_time reads resets <time> (<zone>) for a known zone" {
@@ -460,4 +460,32 @@ _clock_at_offset() {
     run rate_limit_slept_since 0
     [ "$status" -eq 0 ]
     [ "$output" = "40" ]
+}
+
+# =============================================================================
+# BASH 3.2 PORTABILITY (#1110)
+# =============================================================================
+
+@test "#1110: _wait_until_reset runs under /bin/bash 3.2 -u with no zone and PM" {
+    [[ -x /bin/bash ]] || skip "no /bin/bash"
+    local func_file="$TEST_TMP/wur.bash"
+    _extract_function_body _wait_until_reset "$ORCHESTRATOR_SCRIPT" > "$func_file"
+    [[ -s "$func_file" ]]
+    run /bin/bash -u -c 'source "$1"; _wait_until_reset "resets 3PM"' _ "$func_file"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ ^[0-9]+$ ]]
+    [[ "$output" != *"unbound"* && "$output" != *"bad substitution"* ]]
+}
+
+@test "#1110: _wait_until_reset treats 3PM and 3pm alike under /bin/bash" {
+    [[ -x /bin/bash ]] || skip "no /bin/bash"
+    local func_file="$TEST_TMP/wur.bash"
+    _extract_function_body _wait_until_reset "$ORCHESTRATOR_SCRIPT" > "$func_file"
+    local upper lower
+    upper=$(/bin/bash -u -c 'source "$1"; _wait_until_reset "resets 3PM"' _ "$func_file")
+    lower=$(/bin/bash -u -c 'source "$1"; _wait_until_reset "resets 3pm"' _ "$func_file")
+    [[ "$upper" =~ ^[0-9]+$ ]]
+    # Both read the clock a moment apart; allow a few seconds of drift
+    [ "$((upper - lower))" -le 5 ]
+    [ "$((lower - upper))" -le 5 ]
 }
