@@ -523,7 +523,7 @@ teardown() {
 $hits"
 }
 
-@test "#1110: tz_env and cmd_lines expansions are guarded against empty arrays (set -u, bash 3.2)" {
+@test "#1110: tz_env and records expansions are guarded against empty arrays (set -u, bash 3.2)" {
 	local root="$BATS_TEST_DIRNAME/../../.."
 	local dir f
 	for dir in .claude/scripts plugins/pipeline-core/scripts; do
@@ -533,12 +533,12 @@ $hits"
 			# No unguarded expansion of the possibly-empty arrays.
 			# Remove the guarded form first, then look for any bare expansion left.
 			local bare
-			bare=$(sed -E 's/\$\{(tz_env|cmd_lines)\[@\]\+"\$\{(tz_env|cmd_lines)\[@\]\}"\}//g' "$path" \
-				| grep -nE '\$\{(tz_env|cmd_lines)\[@\]\}' || true)
-			[[ -z "$bare" ]] || fail "$dir/$f has an unguarded tz_env/cmd_lines expansion: $bare"
+			bare=$(sed -E 's/\$\{(tz_env|records)\[@\]\+"\$\{(tz_env|records)\[@\]\}"\}//g' "$path" \
+				| grep -nE '\$\{(tz_env|records)\[@\]\}' || true)
+			[[ -z "$bare" ]] || fail "$dir/$f has an unguarded tz_env/records expansion: $bare"
 		done
-		grep -qE '\$\{cmd_lines\[@\]\+' "$root/$dir/batch-orchestrator.sh" \
-			|| fail "$dir/batch-orchestrator.sh: cmd_lines not guarded"
+		grep -qE '\$\{records\[@\]\+' "$root/$dir/batch-orchestrator.sh" \
+			|| fail "$dir/batch-orchestrator.sh: records not guarded"
 		grep -qE '\$\{tz_env\[@\]\+' "$root/$dir/batch-orchestrator.sh" \
 			|| fail "$dir/batch-orchestrator.sh: tz_env not guarded"
 		grep -qE '\$\{tz_env\[@\]\+' "$root/$dir/implement-issue-orchestrator.sh" \
