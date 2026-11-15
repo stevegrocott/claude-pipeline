@@ -216,3 +216,83 @@ teardown() {
 	expect_glob "$record_block" '*e2e_verify:unmeasured*' \
 		"the marker must be conditional on this run's degraded verdict"
 }
+
+# =============================================================================
+# run_tests: scoped E2E run (issue #1060)
+# =============================================================================
+
+# Build a repo whose branch diverges from "main" by the given files.
+_make_branch_repo() {
+	local file
+
+	git init -q -b main "$TEST_TMP/repo"
+	cd "$TEST_TMP/repo" || return 1
+	git config user.email t@example.com
+	git config user.name t
+	git commit -q --allow-empty -m base
+	git checkout -q -b feature
+	for file in "$@"; do
+		mkdir -p "${file%/*}"
+		printf 'x\n' > "$file"
+	done
+	git add -A
+	git commit -q --allow-empty -m change
+}
+
+# A runner stub that records its argv, one argument per line.
+_make_runner_stub() {
+	mkdir -p "$TEST_TMP/bin"
+	cat > "$TEST_TMP/bin/e2e-runner" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$RUNNER_ARGS_FILE"
+exit "${RUNNER_EXIT:-0}"
+STUB
+	chmod +x "$TEST_TMP/bin/e2e-runner"
+	export RUNNER_ARGS_FILE="$TEST_TMP/runner-args"
+	export PATH="$TEST_TMP/bin:$PATH"
+}
+
+@test "run_tests scopes TEST_E2E_CMD to the branch's changed specs" {
+	_make_branch_repo tests/e2e/a.spec.ts tests/e2e/b.spec.ts src/app.ts
+	_make_runner_stub
+	export TEST_UNIT_CMD=""
+	export TEST_E2E_CMD="e2e-runner --reporter=line"
+	export BASE_BRANCH=main
+
+	run_tests
+
+	local args
+	args=$(<"$RUNNER_ARGS_FILE")
+	[[ "$args" == *"tests/e2e/a.spec.ts"* ]]
+	[[ "$args" == *"tests/e2e/b.spec.ts"* ]]
+	[[ "$args" != *"src/app.ts"* ]]
+}
+
+@test "run_tests falls back to the full command when no spec changed" {
+	_make_branch_repo src/app.ts
+	_make_runner_stub
+	export TEST_UNIT_CMD=""
+	export TEST_E2E_CMD="e2e-runner --reporter=line"
+	export BASE_BRANCH=main
+
+	run_tests
+
+	local args
+	args=$(<"$RUNNER_ARGS_FILE")
+	[[ "$args" == "--reporter=line" ]]
+}
+
+@test "run_tests fails when the scoped run executes zero tests" {
+	_make_branch_repo tests/e2e/a.spec.ts
+	_make_runner_stub
+	export TEST_UNIT_CMD=""
+	export TEST_E2E_CMD="e2e-runner"
+	export BASE_BRANCH=main
+	export RUNNER_EXIT=1
+
+	local rc=0
+	run_tests || rc=$?
+
+	((rc != 0))
+	[[ -f "$RUNNER_ARGS_FILE" ]]
+}
