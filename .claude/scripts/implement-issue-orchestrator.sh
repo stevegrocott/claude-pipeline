@@ -13594,7 +13594,9 @@ _log_blocking_worktree_state() {
 # the main checkout AND every linked worktree, whereas the per-worktree git dir
 # (rev-parse --git-dir) is NOT read.  Nothing tracked is touched.  Keep this
 # list in step with GITIGNORE_PATHS in sync.sh.  Idempotent; failure is
-# non-fatal.
+# non-fatal (a warning is logged and start-up continues).  Entries are
+# root-anchored (/logs/, /status.json) on purpose: only the repo-root pipeline
+# artifacts are hidden, never same-named files deeper in the tree.
 ensure_pipeline_artifact_excludes() {
     local dir="${1:-.}"
     local common_dir exclude_file path
@@ -13605,10 +13607,16 @@ ensure_pipeline_artifact_excludes() {
     [[ "$common_dir" == /* ]] || common_dir="$dir/$common_dir"
 
     exclude_file="$common_dir/info/exclude"
-    mkdir -p "$common_dir/info" 2>/dev/null || return 0
+    if ! mkdir -p "$common_dir/info" 2>/dev/null; then
+        log_warn "ensure_pipeline_artifact_excludes: cannot create $common_dir/info; pipeline artifacts may show as dirty"
+        return 0
+    fi
     for path in "${paths[@]}"; do
         if ! grep -qxF -- "/$path" "$exclude_file" 2>/dev/null; then
-            printf '/%s\n' "$path" >> "$exclude_file" 2>/dev/null || return 0
+            if ! printf '/%s\n' "$path" >> "$exclude_file" 2>/dev/null; then
+                log_warn "ensure_pipeline_artifact_excludes: cannot write $exclude_file; pipeline artifacts may show as dirty"
+                return 0
+            fi
         fi
     done
     return 0

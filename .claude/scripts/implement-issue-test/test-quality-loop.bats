@@ -2013,6 +2013,21 @@ _setup_synced_consumer_repo() {
     [[ "$output" == *"status.json"* ]]
 }
 
+@test "verify_fix_stage_commit accepts a no-op fix stage in a never-synced repo with artifacts" {
+    _setup_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    mkdir -p logs/implement-issue
+    printf 'log\n' > logs/implement-issue/orchestrator.log
+    printf '{}\n' > status.json
+    ensure_pipeline_artifact_excludes "$PWD"
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 0 ]
+    [ "$(git rev-parse HEAD)" = "$head_before" ]
+}
+
 @test "_handle_fix_stage_result posts no success comment when work is uncommitted" {
     _setup_fix_stage_repo
     local head_before
@@ -2631,10 +2646,44 @@ _make_plain_consumer_repo() {
 
 @test "ensure_pipeline_artifact_excludes is idempotent" {
     _make_plain_consumer_repo
+    printf '# custom\n/my-custom-ignore\n' >> .git/info/exclude
     ensure_pipeline_artifact_excludes "$PWD"
+    local before after
+    before=$(cksum < .git/info/exclude)
     ensure_pipeline_artifact_excludes "$PWD"
+    after=$(cksum < .git/info/exclude)
 
+    [ "$before" = "$after" ]
     [ "$(grep -cxF '/status.json' .git/info/exclude)" -eq 1 ]
+    grep -qxF '/my-custom-ignore' .git/info/exclude
+}
+
+@test "ensure_pipeline_artifact_excludes warns and returns 0 when exclude file is unwritable" {
+    _make_plain_consumer_repo
+    mkdir -p .git/info
+    : > .git/info/exclude
+    chmod 444 .git/info/exclude
+    : > "$LOG_FILE"
+
+    run ensure_pipeline_artifact_excludes "$PWD"
+    chmod 644 .git/info/exclude
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN"*"cannot write"* ]]
+    grep -q "WARN: ensure_pipeline_artifact_excludes" "$LOG_FILE"
+}
+
+@test "ensure_pipeline_artifact_excludes warns and returns 0 when info dir cannot be created" {
+    _make_plain_consumer_repo
+    rm -rf .git/info
+    : > .git/info
+    : > "$LOG_FILE"
+
+    run ensure_pipeline_artifact_excludes "$PWD"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN"*"cannot create"* ]]
+    grep -q "WARN: ensure_pipeline_artifact_excludes" "$LOG_FILE"
 }
 
 @test "ensure_pipeline_artifact_excludes does not hide real edits" {
