@@ -299,10 +299,16 @@ GH
     local rc=0
     wait "$pid" 2>/dev/null || rc=$?
 
-    [ "$rc" -eq 143 ]
     local final_state
-    final_state=$(jq -r '.state' "$status_file")
+    final_state=$(jq -r '.state' "$status_file" 2>/dev/null || echo "<unreadable>")
+    if [[ "$final_state" != "interrupted_during_parse_issue" || "$rc" -ne 143 ]]; then
+        echo "two-SIGTERM diagnostics: observed state='$final_state' (expected 'interrupted_during_parse_issue'), exit code=$rc (expected 143)" >&3
+        echo "--- orchestrator output tail (last 20 lines) ---" >&3
+        tail -n 20 "$TEST_TMP/orch2.out" >&3 2>/dev/null || true
+        echo "--- end output tail ---" >&3
+    fi
     [ "$final_state" = "interrupted_during_parse_issue" ]
+    [ "$rc" -eq 143 ]
 
     # The EXIT trap must also have run export_metrics to completion: the run's
     # metrics.json exists in the run log dir and is valid, non-empty JSON.
