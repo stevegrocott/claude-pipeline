@@ -483,16 +483,22 @@ log_warn() {
 }
 
 # Log a WARN naming each tool denied in a claude result's permission_denials,
-# followed by one line per denied Bash command (first line only). A denied
-# issue-creation call is logged at ERROR: the issue was never created.
+# followed by one line per denial naming its tool. A Bash denial shows the
+# first line of the command cut to 160 characters; a denial without a command
+# gets a line naming the tool alone. A denied Bash command naming an
+# issue-creation call on ANY line is logged at ERROR: the issue was never
+# created.
 # Usage: warn_permission_denials <result_json> <stage> <issue_num>
 warn_permission_denials() {
     local result_json="$1"
     local stage="$2"
     local issue_num="$3"
     local denials
+    local tool
+    local is_create
     local cmd_line
-    local -a cmd_lines=()
+    local record
+    local -a records=()
 
     denials=$(printf '%s' "$result_json" | jq -r '
         (.permission_denials // [])
@@ -502,22 +508,30 @@ warn_permission_denials() {
     fi
     log_warn "Issue #$issue_num: $stage had permission_denials: $denials"
 
-    # First line of each denied Bash command, newline-collapsed by jq
-    while IFS= read -r cmd_line; do
-        cmd_lines+=("$cmd_line")
+    # One tab-separated record per denial: tool, creation flag (any line of
+    # the command names an issue-creation call), first line cut to 160 chars
+    while IFS= read -r record; do
+        records+=("$record")
     done < <(printf '%s' "$result_json" | jq -r '
         (.permission_denials // [])[]
-        | select(.tool_name == "Bash")
-        | (.tool_input.command // "" | split("\n")[0])' 2>/dev/null)
+        | (.tool_name // "unknown") as $tool
+        | (if $tool == "Bash" then (.tool_input.command // "" | tostring)
+           else "" end) as $cmd
+        | [$tool,
+           (if ($cmd | test("create-issue|create-followup-issue|gh issue create"))
+            then "1" else "0" end),
+           ($cmd | split("\n")[0] | .[0:160])]
+        | join("\t")' 2>/dev/null)
 
-    for cmd_line in ${cmd_lines[@]+"${cmd_lines[@]}"}; do
-        [[ -n "$cmd_line" ]] || continue
-        if [[ "$cmd_line" == *"create-issue"* \
-            || "$cmd_line" == *"create-followup-issue"* \
-            || "$cmd_line" == *"gh issue create"* ]]; then
-            log_error "Issue #$issue_num: $stage issue-creation denied: $cmd_line"
+    # ${arr[@]+...} guard: empty-array expansion fails on bash 3.2 (#1110)
+    for record in ${records[@]+"${records[@]}"}; do
+        IFS=$'\t' read -r tool is_create cmd_line <<< "$record"
+        if [[ "$is_create" == "1" ]]; then
+            log_error "Issue #$issue_num: $stage issue-creation denied: $tool: $cmd_line"
+        elif [[ -n "$cmd_line" ]]; then
+            log_warn "Issue #$issue_num: $stage denied $tool command: $cmd_line"
         else
-            log_warn "Issue #$issue_num: $stage denied command: $cmd_line"
+            log_warn "Issue #$issue_num: $stage denied $tool"
         fi
     done
 }

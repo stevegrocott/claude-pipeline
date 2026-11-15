@@ -6298,7 +6298,7 @@ source_warn_permission_denials() {
 
 	warn_permission_denials "$result_json" "process-pr" 174
 
-	grep -q 'WARN: .*denied command: FOO=\$(date)' "$TEST_TMP/log.out" \
+	grep -q 'WARN: .*denied Bash command: FOO=\$(date)' "$TEST_TMP/log.out" \
 		|| fail "first line of denied command not logged: $(cat "$TEST_TMP/log.out")"
 	! grep -q 'second-line-secret' "$TEST_TMP/log.out" \
 		|| fail "later lines of the command leaked into the log"
@@ -6316,9 +6316,54 @@ source_warn_permission_denials() {
 
 	warn_permission_denials "$result_json" "process-pr" 174
 
-	grep -q 'ERROR: .*issue-creation denied: .*create-issue.sh' \
+	grep -q 'ERROR: .*issue-creation denied: Bash: .*create-issue.sh' \
 		"$TEST_TMP/log.out" \
 		|| fail "issue-creation denial not logged at ERROR: $(cat "$TEST_TMP/log.out")"
+}
+
+@test "#1111: a denial for a non-Bash tool gets a line naming the tool" {
+	source_warn_permission_denials \
+		|| skip "warn_permission_denials() not yet present"
+	_capture_log
+
+	local result_json
+	result_json=$(jq -nc '{permission_denials:[{tool_name:"Edit",tool_input:{file_path:"/x"}}]}')
+
+	warn_permission_denials "$result_json" "process-pr" 174
+
+	grep -qE 'WARN: .*process-pr denied Edit$' "$TEST_TMP/log.out" \
+		|| fail "no per-denial line for Edit: $(cat "$TEST_TMP/log.out")"
+}
+
+@test "#1111: the logged first line is cut to 160 characters" {
+	source_warn_permission_denials \
+		|| skip "warn_permission_denials() not yet present"
+	_capture_log
+
+	local long result_json
+	long=$(printf 'a%.0s' {1..400})
+	result_json=$(jq -nc --arg c "$long" '{permission_denials:[{tool_name:"Bash",tool_input:{command:$c}}]}')
+
+	warn_permission_denials "$result_json" "process-pr" 174
+
+	grep -q "denied Bash command: $(printf 'a%.0s' {1..160})\$" \
+		"$TEST_TMP/log.out" \
+		|| fail "line not cut to 160: $(cat "$TEST_TMP/log.out")"
+}
+
+@test "#1111: an issue-creation call on a later line is logged at ERROR" {
+	source_warn_permission_denials \
+		|| skip "warn_permission_denials() not yet present"
+	_capture_log
+
+	local result_json
+	result_json=$(jq -nc '{permission_denials:[{tool_name:"Bash",tool_input:{command:"cd /tmp\ncreate-followup-issue.sh --title x"}}]}')
+
+	warn_permission_denials "$result_json" "process-pr" 174
+
+	grep -q 'ERROR: .*issue-creation denied: Bash: cd /tmp' \
+		"$TEST_TMP/log.out" \
+		|| fail "later-line creation not logged at ERROR: $(cat "$TEST_TMP/log.out")"
 }
 
 @test "AC3(#1020): process_issue wires warn_permission_denials to process-pr result" {
