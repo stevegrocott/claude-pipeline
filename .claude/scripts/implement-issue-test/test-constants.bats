@@ -506,3 +506,42 @@ teardown() {
     # The while loop condition must use the pre-computed variable
     [[ "$script_content" == *'review_attempts < max_attempts'* ]]
 }
+
+# =============================================================================
+# #1110: bash 3.2 portability (static; independent of the running bash)
+# =============================================================================
+
+@test "#1110: no bash 4 case-conversion expansion in shipped scripts" {
+	local root="$BATS_TEST_DIRNAME/../../.."
+	local hits
+	# ${var,,} ${var^^} ${var,} ${var^} fail with "bad substitution" on bash 3.2.
+	# Comment-only lines are excluded.
+	hits=$(grep -rnE '\$\{[A-Za-z_0-9]+(,,|\^\^|,|\^)[^}]*\}' \
+		"$root/.claude/scripts" "$root/plugins/pipeline-core/scripts" \
+		--include='*.sh' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+	[[ -z "$hits" ]] || fail "bash 4 case conversion found:
+$hits"
+}
+
+@test "#1110: tz_env and cmd_lines expansions are guarded against empty arrays (set -u, bash 3.2)" {
+	local root="$BATS_TEST_DIRNAME/../../.."
+	local dir f
+	for dir in .claude/scripts plugins/pipeline-core/scripts; do
+		for f in batch-orchestrator.sh implement-issue-orchestrator.sh; do
+			local path="$root/$dir/$f"
+			[[ -f "$path" ]] || fail "missing $path"
+			# No unguarded expansion of the possibly-empty arrays.
+			# Remove the guarded form first, then look for any bare expansion left.
+			local bare
+			bare=$(sed -E 's/\$\{(tz_env|cmd_lines)\[@\]\+"\$\{(tz_env|cmd_lines)\[@\]\}"\}//g' "$path" \
+				| grep -nE '\$\{(tz_env|cmd_lines)\[@\]\}' || true)
+			[[ -z "$bare" ]] || fail "$dir/$f has an unguarded tz_env/cmd_lines expansion: $bare"
+		done
+		grep -qE '\$\{cmd_lines\[@\]\+' "$root/$dir/batch-orchestrator.sh" \
+			|| fail "$dir/batch-orchestrator.sh: cmd_lines not guarded"
+		grep -qE '\$\{tz_env\[@\]\+' "$root/$dir/batch-orchestrator.sh" \
+			|| fail "$dir/batch-orchestrator.sh: tz_env not guarded"
+		grep -qE '\$\{tz_env\[@\]\+' "$root/$dir/implement-issue-orchestrator.sh" \
+			|| fail "$dir/implement-issue-orchestrator.sh: tz_env not guarded"
+	done
+}
