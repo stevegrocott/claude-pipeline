@@ -520,7 +520,7 @@ warn_permission_denials() {
         | [$tool,
            (if ($cmd | test("create-issue|create-followup-issue|gh issue create"))
             then "1" else "0" end),
-           ($cmd | split("\n")[0] | .[0:160])]
+           ($cmd | split("\n")[0] // "" | gsub("[\u0001-\u001f\u007f]"; " ") | .[0:160])]
         | join("\t")' 2>/dev/null)
 
     # ${arr[@]+...} guard: empty-array expansion fails on bash 3.2 (#1110)

@@ -230,6 +230,8 @@ ${validated_body}"
 	local step
 	step=$(awk '/^### Step 4g/{f=1;next} /^### |^## /{f=0} f' "$PROCESS_PR_SKILL")
 	grep -qE 'Exit code 1 means .*failed `assert_issue_valid`' <<<"$step"
+	grep -qE 'duplicate' <<<"$step"
+	grep -qE 'not a failure' <<<"$step"
 	grep -qE 'nothing was created' <<<"$step"
 	grep -qE 'numbers .*fill the `follow_up_issues`' <<<"$step"
 }

@@ -391,7 +391,7 @@ For each extracted issue, invoke the platform wrapper `create-followup-issue.sh`
   --type precise   # or: --type vague (adds needs-explore label)
 ```
 
-The wrapper prints the created issue number on stdout — record that number from the command output (do not capture it with `$(…)`). Exit code 1 means the generated body failed `assert_issue_valid`: nothing was created and nothing was printed, so skip that item (do not retry via `gh issue create`). Exit 3 means a usage error (missing or invalid argument). Collect each number the wrapper printed on a successful run; these numbers fill the `follow_up_issues` array in the final status output.
+The wrapper prints the created issue number on stdout — record that number from the command output (do not capture it with `$(…)`). Exit code 1 means either a duplicate (a similar open issue already exists) or an invalid body (the generated body failed `assert_issue_valid`): nothing was created and nothing was printed. This is not a failure of the review or merge; log the item and skip it (do not retry via `gh issue create`). Exit 3 means a usage error (missing or invalid argument). Collect each number the wrapper printed on a successful run; these numbers fill the `follow_up_issues` array in the final status output.
 
 **Never put a line starting with `#` inside a quoted argument.** A multi-line quoted argument (such as `--description` or `--task-description`) with a line that begins with a hash is denied by the Bash permission check, because it can hide a comment from the command parser. If the text needs such a line (a markdown heading, say), do not inline it in a double-quoted string. Pass it with the quoted heredoc form instead, which keeps the text literal:
 
