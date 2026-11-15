@@ -6123,6 +6123,32 @@ MOCK_CLAUDE
 	run jq -r '.state' "$summary"
 	[ "$output" == "completed" ] \
 		|| fail "summary.json reported state='$output', not 'completed' — an early exit or skipped issue must fail this test"
+
+	# #1116: the per-issue output fifo is removed once the run is over.
+	local leftover
+	leftover=$(find "$PWD/logs" -name '*.fifo' | head -1)
+	[[ -z "$leftover" ]] \
+		|| fail "output fifo left behind after the run: $leftover"
+}
+
+# #1116: both fifo ends open lazily in background children, so the name must
+# be unlinked only after tee has been waited on -- never right after launch.
+@test "process_issue removes the output fifo only after waiting on tee" {
+	local body
+	body=$(_extract_function_body process_issue "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$body" ]] || fail "could not extract process_issue"
+
+	local wait_line rm_line
+	wait_line=$(grep -n 'wait "\$tee_pid"' <<< "$body" | head -1 | cut -d: -f1)
+	rm_line=$(grep -n 'rm -f "\$orch_out_fifo"' <<< "$body" | tail -1 | cut -d: -f1)
+	[[ -n "$wait_line" ]] || fail "no wait on tee_pid found"
+	[[ -n "$rm_line" ]] || fail "no fifo removal found"
+	((rm_line > wait_line)) \
+		|| fail "fifo removed (line $rm_line) before wait on tee (line $wait_line)"
+
+	# Exactly two removals: the pre-mkfifo stale cleanup and the final one.
+	[[ "$(grep -c 'rm -f "\$orch_out_fifo"' <<< "$body")" -eq 2 ]] \
+		|| fail "expected exactly two fifo removals"
 }
 
 # =============================================================================

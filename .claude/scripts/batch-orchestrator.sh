@@ -1947,14 +1947,16 @@ process_issue() {
     orch_pgid=$orch_pid  # setsid: pid == pgid for the new session leader
     ACTIVE_ORCH_PGID=$orch_pgid  # expose to batch-level TERM/EXIT trap (#394)
 
-    # The fifo name is no longer needed; both ends hold open file descriptors.
-    rm -f "$orch_out_fifo"
-
     log "Orchestrator PID=$orch_pid PGID=$orch_pgid (issue #$issue_num)"
 
     wait "$orch_pid"
     impl_exit=$?
     wait "$tee_pid"  # Flush tee before reading status file
+
+    # Remove the fifo name only now. Both ends open it lazily in their
+    # background children, so unlinking earlier can leave tee blocked
+    # forever on a pipe the writer never found (#1116).
+    rm -f "$orch_out_fifo"
 
     ACTIVE_ORCH_PGID=""  # Clear: orchestrator has exited
     printf '%s\n' "=== exit code: $impl_exit ===" >> "$issue_log"
