@@ -225,6 +225,15 @@ ${validated_body}"
 	grep -q 'prints the created issue number' "$PROCESS_PR_SKILL"
 }
 
+@test "process-pr SKILL.md Step 4g states exit 1 meaning and that printed numbers fill follow_up_issues" {
+	[[ -f "$PROCESS_PR_SKILL" ]]
+	local step
+	step=$(awk '/^### Step 4g/{f=1;next} /^### |^## /{f=0} f' "$PROCESS_PR_SKILL")
+	grep -qE 'Exit code 1 means .*failed `assert_issue_valid`' <<<"$step"
+	grep -qE 'nothing was created' <<<"$step"
+	grep -qE 'numbers .*fill the `follow_up_issues`' <<<"$step"
+}
+
 @test "approved + major adjacent issue: create-issue.sh receives needs-explore" {
 	local review_result
 	review_result=$(jq -n '{
