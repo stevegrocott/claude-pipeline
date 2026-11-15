@@ -393,6 +393,22 @@ For each extracted issue, invoke the platform wrapper `create-followup-issue.sh`
 
 The wrapper prints the created issue number on stdout — record that number from the command output (do not capture it with `$(…)`). Exit code 1 means the generated body failed `assert_issue_valid`: nothing was created and nothing was printed, so skip that item (do not retry via `gh issue create`). Exit 3 means a usage error (missing or invalid argument). Collect each number the wrapper printed on a successful run; these numbers fill the `follow_up_issues` array in the final status output.
 
+**Never put a line starting with `#` inside a quoted argument.** A multi-line quoted argument (such as `--description` or `--task-description`) with a line that begins with a hash is denied by the Bash permission check, because it can hide a comment from the command parser. If the text needs such a line (a markdown heading, say), do not inline it in a double-quoted string. Pass it with the quoted heredoc form instead, which keeps the text literal:
+
+```bash
+"<PLATFORM_DIR>/create-followup-issue.sh" \
+  --title "Short title" \
+  --description "$(cat <<'EOF'
+## Context
+Text that may contain lines starting with a hash.
+EOF
+)" \
+  --file-path "path/to/file" \
+  --pr-number "$PR_NUMBER" \
+  --issue-number "$ISSUE_NUMBER" \
+  --type precise
+```
+
 **`--file-path` is required** — extract it from the `[File:Line]` reference in the review comment. If the review item mentions a function or concept but no file path, use the primary file changed in the PR/MR diff as the fallback. If no file can be determined at all, pass `"."` (the script will infer agent `"default"` and the issue will be valid). Never omit `--file-path`.
 
 Log each: `Created follow-up issue #XXX: "$TITLE"` (or `"$TITLE" (needs-explore)` for vague items).

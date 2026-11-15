@@ -234,6 +234,14 @@ ${validated_body}"
 	grep -qE 'numbers .*fill the `follow_up_issues`' <<<"$step"
 }
 
+@test "process-pr SKILL.md Step 4g forbids a hash-leading line in a quoted argument and shows the quoted heredoc form" {
+	[[ -f "$PROCESS_PR_SKILL" ]]
+	local step
+	step=$(awk '/^### Step 4g/{f=1;next} /^### |^## /{f=0} f' "$PROCESS_PR_SKILL")
+	grep -qE 'Never put a line starting with `#` inside a quoted argument' <<<"$step"
+	grep -qF "cat <<'EOF'" <<<"$step"
+}
+
 @test "approved + major adjacent issue: create-issue.sh receives needs-explore" {
 	local review_result
 	review_result=$(jq -n '{
