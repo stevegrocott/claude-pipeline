@@ -587,6 +587,48 @@ _wait_for_file() {
     [ "$branch" = "after-kill" ] || fail "update lost after stale-lock recovery: $branch"
 }
 
+@test "status_json_write: proceeds when mkdir lock is held by its own pid (#1117)" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=3
+    init_status
+
+    # Simulate an interrupted write whose trap handler writes status again.
+    _status_lock_acquire
+
+    local start=$SECONDS
+    # Called directly, not via `run`: that forks a subshell with a new pid.
+    status_json_write --arg v "reentrant" '.branch = $v' \
+        || fail "self-held lock blocked the write"
+    ((SECONDS - start < 2)) || fail "write waited on its own lock"
+
+    local branch
+    branch=$(jq -r '.branch' "$STATUS_FILE")
+    [ "$branch" = "reentrant" ] || fail "update lost: $branch"
+}
+
+@test "status_json_write: still waits on a different live lock holder (#1117)" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=1
+    init_status
+
+    (
+        _status_lock_acquire
+        : > "$TEST_TMP/holder-ready"
+        sleep 30
+    ) &
+    local holder=$!
+    _wait_for_file "$TEST_TMP/holder-ready" 10
+
+    run status_json_write --arg v "blocked" '.branch = $v'
+    kill -9 "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null || true
+
+    [ "$status" -ne 0 ] || fail "write proceeded despite a live foreign holder"
+    local branch
+    branch=$(jq -r '.branch' "$STATUS_FILE")
+    [ "$branch" != "blocked" ] || fail "foreign-held lock was bypassed"
+}
+
 # =============================================================================
 # SYNC_STATUS_TO_LOG (issue #1057 — cp race fix)
 # =============================================================================

@@ -1273,11 +1273,20 @@ _status_lock_acquire() {
     # function bodies, so the top-level assignment may not be in scope. An
     # empty value would make the deadline check below fire immediately.
     local timeout="${STATUS_LOCK_TIMEOUT:-10}"
+    local self_pid="${BASHPID:-$(exec sh -c 'echo $PPID')}"
 
     while ! mkdir "$lockdir" 2>/dev/null; do
         if [[ -f "$pidfile" ]]; then
             local lock_pid
             lock_pid=$(cat "$pidfile" 2>/dev/null)
+            # Re-entrant: a lock held by THIS process can only be waited on
+            # forever (e.g. an exit/signal trap writing status while the
+            # interrupted write still holds the lock — issue #1117).  The
+            # holder cannot make progress while we wait, so proceed.  A
+            # different live holder is still waited on below.
+            if [[ "$lock_pid" == "$self_pid" ]]; then
+                return 0
+            fi
             # Require a real pid before trusting kill -0: a blank or 0 pidfile
             # (partial write) would otherwise make `kill -0 0` signal our own
             # process group and report the dead lock as alive forever.
@@ -1318,7 +1327,6 @@ _status_lock_acquire() {
         sleep "0.$(( (RANDOM % 4) + 1 ))"
     done
 
-    local self_pid="${BASHPID:-$(exec sh -c 'echo $PPID')}"
     # Grouped so a failed redirection (lockdir removed under us) is silenced
     # too — `2>/dev/null` on the bare printf is applied after the redirection
     # that fails, so the shell's error would still leak to stderr.
