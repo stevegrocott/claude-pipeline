@@ -6889,3 +6889,28 @@ _source_batch_rate_limit() {
 	_source_batch_rate_limit
 	[[ "$(extract_wait_time '{"result":"nothing"}')" == "1234" ]]
 }
+
+# -----------------------------------------------------------------------------
+# bash 3.2 portability: empty-array expansion under set -u, no ${var,,} (#1110)
+# -----------------------------------------------------------------------------
+
+@test "#1110: _wait_until_reset runs under /bin/bash 3.2 -u with no zone and PM" {
+	[[ -x /bin/bash ]] || skip "no /bin/bash"
+	local func_file="$TEST_TMP/wur.bash"
+	_extract_function_body _wait_until_reset \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	run /bin/bash -u -c 'source "$1"; _wait_until_reset "resets 3PM"' _ "$func_file"
+	[[ "$status" -eq 0 ]]
+	[[ "$output" =~ ^[0-9]+$ ]]
+	[[ "$output" != *"bad substitution"* && "$output" != *"unbound"* ]]
+}
+
+@test "#1110: warn_permission_denials with no Bash denials survives bash -u" {
+	[[ -x /bin/bash ]] || skip "no /bin/bash"
+	local func_file="$TEST_TMP/wpd.bash"
+	_extract_function_body warn_permission_denials \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	run /bin/bash -u -c 'log_warn() { :; }; log_error() { :; }; source "$1"; warn_permission_denials "{\"permission_denials\":[{\"tool_name\":\"Read\"}]}" process-pr 1; echo ok' _ "$func_file"
+	[[ "$status" -eq 0 ]]
+	[[ "$output" == *ok ]]
+}
