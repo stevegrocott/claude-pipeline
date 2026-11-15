@@ -2906,8 +2906,16 @@ run_tests() {
     fi
 
     if [[ $exit_code -eq 0 ]] && [[ -n "${TEST_E2E_CMD:-}" ]]; then
-        log "Running E2E tests: $TEST_E2E_CMD"
-        eval "$TEST_E2E_CMD" || exit_code=$?
+        local e2e_cmd="$TEST_E2E_CMD"
+        if [[ -n "${BASE_BRANCH:-}" ]]; then
+            # Target the branch's changed specs. The helper emits one spec
+            # per line; a newline would end the command under eval, so
+            # fold the result onto a single line.
+            e2e_cmd=$(_build_targeted_e2e_cmd "$BASE_BRANCH")
+            e2e_cmd="${e2e_cmd//$'\n'/ }"
+        fi
+        log "Running E2E tests: $e2e_cmd"
+        eval "$e2e_cmd" || exit_code=$?
     fi
 
     return $exit_code
