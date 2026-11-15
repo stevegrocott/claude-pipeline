@@ -239,6 +239,8 @@ sync_consumer_config() {
 # Marked block of pipeline artifact paths seeded into the consumer .gitignore.
 readonly GITIGNORE_BEGIN='# >>> claude-pipeline artifacts (managed by sync.sh) >>>'
 readonly GITIGNORE_END='# <<< claude-pipeline artifacts <<<'
+# Keep in step with ensure_pipeline_artifact_excludes() in
+# .claude/scripts/implement-issue-orchestrator.sh (issue #1044).
 readonly -a GITIGNORE_PATHS=(
     'logs/'
     'status.json'

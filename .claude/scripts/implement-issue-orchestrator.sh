@@ -13586,6 +13586,34 @@ _log_blocking_worktree_state() {
     fi
 }
 
+# Exclude the pipeline's own runtime artifacts locally (issue #1044).
+#
+# Plugin-installed consumers never run `sync.sh to`, so nothing seeds their
+# .gitignore; an un-ignored artifact makes verify_fix_stage_commit see a dirty
+# tree.  The paths go to <git-common-dir>/info/exclude: git reads that file in
+# the main checkout AND every linked worktree, whereas the per-worktree git dir
+# (rev-parse --git-dir) is NOT read.  Nothing tracked is touched.  Keep this
+# list in step with GITIGNORE_PATHS in sync.sh.  Idempotent; failure is
+# non-fatal.
+ensure_pipeline_artifact_excludes() {
+    local dir="${1:-.}"
+    local common_dir exclude_file path
+    local -a paths=('logs/' 'status.json' 'status.json.lock' 'status.json.lockdir')
+
+    common_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 0
+    [[ -n "$common_dir" ]] || return 0
+    [[ "$common_dir" == /* ]] || common_dir="$dir/$common_dir"
+
+    exclude_file="$common_dir/info/exclude"
+    mkdir -p "$common_dir/info" 2>/dev/null || return 0
+    for path in "${paths[@]}"; do
+        if ! grep -qxF -- "/$path" "$exclude_file" 2>/dev/null; then
+            printf '/%s\n' "$path" >> "$exclude_file" 2>/dev/null || return 0
+        fi
+    done
+    return 0
+}
+
 main() {
     # Declare local variables used throughout main
     local branch tasks_json task_count completed_tasks max_task_size="" pipeline_profile=""
@@ -13593,6 +13621,8 @@ main() {
     # Flag a config gap that would otherwise silently skip E2E coverage
     # (see warn_if_frontend_patterns_missing() for the full rationale).
     warn_if_frontend_patterns_missing
+
+    ensure_pipeline_artifact_excludes .
 
     # -------------------------------------------------------------------------
     # RESUME VS FRESH START INITIALIZATION
