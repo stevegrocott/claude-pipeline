@@ -4471,6 +4471,20 @@ JSON
     [ "$(jq -r '.state' "$STATUS_FILE")" = "error" ]
 }
 
+@test "_halt_if_api_error leaves halt uncommented when the comment fails" {
+    _seed_api_halt_status
+    comment_issue() { return 1; }
+    export -f comment_issue
+
+    run _halt_if_api_error
+
+    [ "$status" -eq 1 ]
+    [ "$(jq -r '.api_error_halt.commented // false' "$STATUS_FILE")" \
+        = "false" ] \
+        || fail "marked commented despite failed post: $(cat "$STATUS_FILE")"
+    [ "$(jq -r '.state' "$STATUS_FILE")" = "error" ]
+}
+
 @test "_halt_if_api_error is a no-op without a halt record (#1072)" {
     _seed_api_halt_status
     jq 'del(.api_error_halt)' "$STATUS_FILE" > "$STATUS_FILE.t" \
