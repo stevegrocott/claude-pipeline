@@ -1983,7 +1983,22 @@ process_issue() {
 
     wait "$orch_pid"
     impl_exit=$?
-    wait "$tee_pid"  # Flush tee before reading status file
+
+    # Flush tee before reading status file. The orchestrator has already
+    # exited, so tee should drain promptly. If the writer never opened the
+    # fifo (e.g. setsid failed before the redirect), tee blocks forever on
+    # open(), so bound the wait and kill it after a grace period.
+    local tee_wait="${TEE_FLUSH_TIMEOUT:-30}"
+    local tee_waited=0
+    while kill -0 "$tee_pid" 2>/dev/null && ((tee_waited < tee_wait)); do
+        sleep 1
+        ((tee_waited++))
+    done
+    if kill -0 "$tee_pid" 2>/dev/null; then
+        log_error "tee (PID=$tee_pid) did not exit ${tee_wait}s after orchestrator exit; killing (issue #$issue_num)"
+        kill "$tee_pid" 2>/dev/null
+    fi
+    wait "$tee_pid" 2>/dev/null
 
     # Remove the fifo name only now. Both ends open it lazily in their
     # background children, so unlinking earlier can leave tee blocked
