@@ -7805,6 +7805,9 @@ compute_task_batches() {
 	# it declared `depends-on:` for.
 	local -a task_ids
 	local -a task_deps
+	# task_docs_only[i]=1 when every file the task declares is documentation
+	# (*.md or docs/**).  Such a task describes behaviour other tasks change.
+	local -a task_docs_only
 	local i
 	for ((i = 0; i < task_count; i++)); do
 		local desc
@@ -7853,6 +7856,13 @@ compute_task_batches() {
 		combined=$(printf '%s\n%s' "$desc_files" "$aug_files" \
 			| sort -u | grep -v '^[[:space:]]*$')
 		task_files[$i]="$combined"
+		task_docs_only[$i]=0
+		if [[ -n "$combined" ]] \
+			&& ! printf '%s\n' "$combined" \
+				| grep -vE '(\.md$|^docs/|/docs/)' \
+				| grep -q .; then
+			task_docs_only[$i]=1
+		fi
 		if [[ -n "$combined" ]]; then
 			log "  Task $((i+1)) files: $(echo "$combined" | tr '\n' ', ')"
 		else
@@ -7897,6 +7907,19 @@ compute_task_batches() {
 					"dependent in the Implementation Tasks section."
 			fi
 		done
+
+		# Docs-only floor (issue #1080).  A documentation task's file set is
+		# disjoint from every code path, so file-conflict detection puts it
+		# in batch 1 where it runs in an isolated worktree that cannot see
+		# the behaviour it documents.  Treat it as depending on every
+		# earlier task: start above the highest earlier batch.
+		if [[ "${task_docs_only[$i]:-0}" == 1 ]]; then
+			for ((j = 0; j < i; j++)); do
+				if ((task_batch_idx[j] + 1 > b)); then
+					b=$((task_batch_idx[j] + 1))
+				fi
+			done
+		fi
 
 		local placed=0
 		while [[ $placed -eq 0 && $b -lt 1000 ]]; do

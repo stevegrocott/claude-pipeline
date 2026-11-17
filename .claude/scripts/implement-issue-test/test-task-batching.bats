@@ -305,6 +305,115 @@ _restore_acceptance_env() {
 	[ "$nulls" -eq 0 ]
 }
 
+# -----------------------------------------------------------------------------
+# docs-only task placement (issue #1080)
+#
+# A task whose declared files are all documentation overlaps no code path, so
+# file-overlap batching alone puts it in batch 1 beside the code it documents,
+# in a worktree that cannot see that code.  A docs-only task must instead be
+# batched after every earlier task.
+# -----------------------------------------------------------------------------
+
+@test "compute_task_batches: docs-only task is batched after all earlier code tasks" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result b1 b2 b3
+	tasks='[
+		{"id":1,"description":"Modify src/alpha.ts","agent":"default"},
+		{"id":2,"description":"Modify src/beta.ts","agent":"default"},
+		{"id":3,"description":"Document the change in `README.md`","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	b3=$(printf '%s' "$result" | jq '.[2].batch')
+	[ "$b1" -eq 1 ]
+	[ "$b2" -eq 1 ]
+	[ "$b3" -eq 2 ]
+}
+
+@test "compute_task_batches: docs-only task lands after the LATEST earlier batch" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result b4
+	tasks='[
+		{"id":1,"description":"Update src/shared.ts","agent":"default"},
+		{"id":2,"description":"Also update src/shared.ts","agent":"default"},
+		{"id":3,"description":"Modify src/other.ts","agent":"default"},
+		{"id":4,"description":"Describe it in `docs/guide.md`","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b4=$(printf '%s' "$result" | jq '.[3].batch')
+	# Task 2 is in batch 2, so the docs task must be in batch 3 or later.
+	[ "$b4" -ge 3 ]
+}
+
+@test "compute_task_batches: docs-only task is detected from affected_files" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result b1 b2
+	tasks='[
+		{"id":1,"description":"Change behaviour","agent":"default","affected_files":["src/alpha.ts"]},
+		{"id":2,"description":"Write it up","agent":"default","affected_files":["docs/usage/overview.md"]}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	[ "$b1" -eq 1 ]
+	[ "$b2" -eq 2 ]
+}
+
+@test "compute_task_batches: task touching docs AND code is not serialised as docs-only" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result b1 b2
+	tasks='[
+		{"id":1,"description":"Modify src/alpha.ts","agent":"default"},
+		{"id":2,"description":"Modify src/beta.ts and update `README.md`","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	[ "$b1" -eq 1 ]
+	[ "$b2" -eq 1 ]
+}
+
+@test "compute_task_batches: a plan of only docs-only tasks is not serialised behind nothing" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result b1
+	tasks='[
+		{"id":1,"description":"Rewrite `README.md`","agent":"default"},
+		{"id":2,"description":"Rewrite `docs/guide.md`","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	# The first task has no earlier task to wait for.
+	[ "$b1" -eq 1 ]
+}
+
+@test "compute_task_batches: docs-only task listed first stays in batch 1" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result b1 b2
+	tasks='[
+		{"id":1,"description":"Document in `README.md`","agent":"default"},
+		{"id":2,"description":"Modify src/alpha.ts","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b1=$(printf '%s' "$result" | jq '.[0].batch')
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	# "Earlier tasks" only: ordering in the list is what the rule keys on.
+	[ "$b1" -eq 1 ]
+	[ "$b2" -eq 1 ]
+}
+
+@test "compute_task_batches: a task with no detected files is not treated as docs-only" {
+	cd "$TEST_TMP/repo" || exit 1
+	local tasks result b2
+	tasks='[
+		{"id":1,"description":"Modify src/alpha.ts","agent":"default"},
+		{"id":2,"description":"Do something unspecified","agent":"default"}
+	]'
+	result=$(compute_task_batches "$tasks" main)
+	b2=$(printf '%s' "$result" | jq '.[1].batch')
+	[ "$b2" -eq 1 ]
+}
+
 # =============================================================================
 # filter_batch_by_dependencies
 # =============================================================================
