@@ -2125,7 +2125,7 @@ _iso_seconds_ago() {
 	[[ -z "$_RECONCILE_PR" ]]
 }
 
-@test "functional: check_issue_pr_merged reconciles a closed issue with no merged PR" {
+@test "functional: check_issue_pr_merged does NOT reconcile a closed issue with no merged PR (#985)" {
 	source_check_issue_pr_merged \
 		|| skip "check_issue_pr_merged() not yet present"
 
@@ -2145,8 +2145,8 @@ GHEOF
 	local rc=0
 	check_issue_pr_merged 695 || rc=$?
 
-	[[ "$rc" -eq 0 ]]
-	[[ "$_RECONCILE_REASON" == *'closed'* ]]
+	[[ "$rc" -eq 1 ]]
+	[[ -z "$_RECONCILE_REASON" ]]
 	[[ -z "$_RECONCILE_PR" ]]
 }
 
@@ -7006,4 +7006,199 @@ _source_batch_rate_limit() {
 	run /bin/bash -u -c 'log_warn() { :; }; log_error() { :; }; source "$1"; warn_permission_denials "{\"permission_denials\":[{\"tool_name\":\"Read\"}]}" process-pr 1; echo ok' _ "$func_file"
 	[[ "$status" -eq 0 ]]
 	[[ "$output" == *ok ]]
+}
+
+# =============================================================================
+# ISSUE #985: the CLOSED-issue branch of failure-site reconciliation is bounded
+# =============================================================================
+#
+# check_issue_pr_merged() returned 0 as soon as the issue read CLOSED, with no
+# reference to the run. implement-issue merges and closes BEFORE process-pr
+# runs, so a process-pr failure always saw a closed issue and was excused —
+# a batch logged "processed successfully" for a stage that did nothing, and
+# the follow-up issues it exists to create were silently dropped.
+#
+# #740 stays intact: process-pr merging a PR and then timing out still
+# reconciles, because that merge falls inside the run.
+
+# Mocked `gh` serving both reconciliation calls through the PRODUCTION jq
+# filters: `gh issue view --json ... --jq <f>` runs <f> over an issue
+# fixture ({state, closedAt}), and `gh pr list --jq <f>` over the PR list.
+# Serving real JSON (rather than echoing CLOSED) keeps the test valid
+# whichever fields the shipped code asks for.
+_stub_gh_issue_and_prs() {
+	local issue_json="$1"
+	local prs_json="$2"
+	local mock_bin="$TEST_TMP/mock-bin-985-$$-$RANDOM"
+	mkdir -p "$mock_bin"
+	printf '%s\n' "$issue_json" > "$mock_bin/issue.json"
+	printf '%s\n' "$prs_json" > "$mock_bin/prs.json"
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+mock_dir="$(cd "$(dirname "$0")" && pwd)"
+kind="$1"
+filter="."
+while [[ $# -gt 0 ]]; do
+	if [[ "$1" == "--jq" ]]; then
+		filter="$2"
+		break
+	fi
+	shift
+done
+case "$kind" in
+	issue) jq -r "$filter" "$mock_dir/issue.json" ;;
+	pr) jq -r "$filter" "$mock_dir/prs.json" ;;
+	*) echo "unexpected gh invocation: $kind" >&2; exit 1 ;;
+esac
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+}
+
+@test "AC1(#985): process-pr failure is NOT reconciled by an issue closed before the run began" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# Closed (and its PR merged) three days before this run started: stale
+	# evidence about prior work, exactly the #817 shape for the CLOSED branch.
+	_stub_gh_issue_and_prs \
+		'{"state":"CLOSED","closedAt":"2026-08-13T20:44:30Z"}' \
+		'[{"number":211,"mergedAt":"2026-08-13T20:44:24Z"}]'
+	_write_status_started_at 208 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 208 || rc=$?
+
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a stale closed issue excused the failure (rc=$rc)"
+	[[ -z "$_RECONCILE_PR" ]] \
+		|| fail "_RECONCILE_PR set to '$_RECONCILE_PR'"
+	[[ -z "$_RECONCILE_REASON" ]] \
+		|| fail "_RECONCILE_REASON set to '$_RECONCILE_REASON'"
+}
+
+@test "AC1(#985): a closed issue with no merged PR from this run does not reconcile" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# Closed manually before the run, no PR on the branch at all: nothing
+	# in this run resolved it, so the reported failure must stand.
+	_stub_gh_issue_and_prs \
+		'{"state":"CLOSED","closedAt":"2026-08-10T01:00:00Z"}' \
+		'[]'
+	_write_status_started_at 208 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 208 || rc=$?
+
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a stale closed issue with no PR excused the failure (rc=$rc)"
+}
+
+@test "AC2(#985): #740 still reconciles - merge inside the run, close not yet propagated" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# process-pr merged PR 735 four minutes into the run, then timed out
+	# before the close propagated: the issue still reads OPEN.
+	_stub_gh_issue_and_prs \
+		'{"state":"OPEN","closedAt":null}' \
+		'[{"number":735,"mergedAt":"2026-08-17T04:05:00Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "#740 case no longer reconciles (rc=$rc)"
+	[[ "$_RECONCILE_PR" == "735" ]] \
+		|| fail "_RECONCILE_PR was '$_RECONCILE_PR', expected 735"
+}
+
+@test "AC1(#985): an issue closed by an earlier stage of the same run does not reconcile" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# #208 incident: implement-issue merged and closed ~50s into the run,
+	# then process-pr failed. Everything is inside the run window, but the
+	# close belongs to an earlier stage, not the failing one.
+	_stub_gh_issue_and_prs \
+		'{"state":"CLOSED","closedAt":"2026-08-17T04:02:31Z"}' \
+		'[]'
+	_write_status_started_at 208 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 208 || rc=$?
+
+	[[ "$rc" -eq 1 ]] \
+		|| fail "a same-run close excused the process-pr failure (rc=$rc)"
+	[[ -z "$_RECONCILE_REASON" ]] \
+		|| fail "_RECONCILE_REASON set to '$_RECONCILE_REASON'"
+}
+
+@test "AC2(#985): a closed issue whose PR merged inside the run still reconciles" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# Same #740 case once the close HAS propagated: the evidence belongs to
+	# this run, so tightening the CLOSED branch must not reject it.
+	_stub_gh_issue_and_prs \
+		'{"state":"CLOSED","closedAt":"2026-08-17T04:05:05Z"}' \
+		'[{"number":735,"mergedAt":"2026-08-17T04:05:00Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 0 ]] \
+		|| fail "an in-run merge+close failed to reconcile (rc=$rc)"
+}
+
+@test "AC1(#985): the CLOSED check applies the same tolerance as the merged-PR check" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# One second outside the 120s skew tolerance for BOTH the close and the
+	# merge: the two branches must agree on what "this run" means.
+	_stub_gh_issue_and_prs \
+		'{"state":"CLOSED","closedAt":"2026-08-17T03:59:40Z"}' \
+		'[{"number":735,"mergedAt":"2026-08-17T03:59:40Z"}]'
+	_write_status_started_at 695 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 695 || rc=$?
+
+	[[ "$rc" -eq 1 ]] \
+		|| fail "CLOSED branch accepted evidence outside the tolerance (rc=$rc)"
+}
+
+@test "AC1(#985): an unknown mergedAt accepts and the WARN names it" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# Unparseable mergedAt on an open issue: the merged-PR branch accepts
+	# and its WARN names mergedAt.
+	_stub_gh_issue_and_prs \
+		'{"state":"OPEN","closedAt":null}' \
+		'[{"number":211,"mergedAt":"garbage"}]'
+	_write_status_started_at 208 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+	local rc=0
+	check_issue_pr_merged 208 || rc=$?
+	[[ "$rc" -eq 0 ]] || fail "unknown mergedAt did not accept (rc=$rc)"
+	grep -q 'merged PR mergedAt ("garbage")' "$TEST_TMP/log.out" \
+		|| fail "WARN did not name mergedAt: $(cat "$TEST_TMP/log.out")"
 }
