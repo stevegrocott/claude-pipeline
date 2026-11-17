@@ -12019,6 +12019,39 @@ finalize_e2e_verify_stage_status() {
 	return 0
 }
 
+# _merge_block_is_review_verdict_reason() — true when a merge-block reason
+# came from an unresolved PR-review verdict (failed review fix, or a review
+# loop that ended unapproved) rather than a convergence failure.
+# Arguments:
+#   $1 - the merge-block reason text
+# Returns:
+#   0 when the reason is a review-verdict reason, 1 otherwise
+_merge_block_is_review_verdict_reason() {
+	local reason="$1"
+	[[ "$reason" == "Review fix failed at "* \
+		|| "$reason" == *"(pr_review:max_iterations:"* \
+		|| "$reason" == *"(pr_review:wall_timeout)"* \
+		|| "$reason" == "Review fix failed and committed nothing"* \
+		|| "$reason" == "PR review loop ended without an approved verdict"* ]]
+}
+
+# _convergence_override_hint() — the override sentence for the convergence
+# merge-block comment. A review-verdict reason can reach the convergence gate
+# through a persisted reason, yet it is also governed by BLOCK_MERGE_ON_PARTIAL,
+# so both overrides are named; any other reason names only the convergence one.
+# Arguments:
+#   $1 - the merge-block reason text
+# Outputs:
+#   The override sentence on stdout
+_convergence_override_hint() {
+	local reason="$1"
+	if _merge_block_is_review_verdict_reason "$reason"; then
+		printf '%s' 'To override this gate and merge anyway, re-run with `BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0` or `BLOCK_MERGE_ON_PARTIAL=0` (this reason is a review verdict, which either gate can block).'
+	else
+		printf '%s' 'To override this gate and merge anyway, re-run with `BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0`.'
+	fi
+}
+
 # _e2e_verify_merge_block_reason() — merge gate for an e2e_verify that never
 # executed this branch's spec (issue #872).
 #
@@ -15831,7 +15864,15 @@ $complete_summary
             if [[ "${BLOCK_MERGE_ON_PARTIAL:-1}" == "0" ]]; then
                 log "BLOCK_MERGE_ON_PARTIAL=0 — skipping partial/pr-review merge-block check"
             else
-                if [[ "$_persisted" == "Partial implementation:"* ]]; then
+                # A persisted review-verdict reason (failed review fix, or a
+                # review loop that ended unapproved) blocks here too, so a
+                # resumed run — which has the reason but not the in-memory
+                # tokens — answers the same as the run that recorded it, and
+                # the persisted text (error kind, denied tools) is reported.
+                if [[ "$_persisted" == "Partial implementation:"* \
+                    || "$_persisted" == "Review fix failed at "* \
+                    || "$_persisted" == *"(pr_review:max_iterations:"* \
+                    || "$_persisted" == *"(pr_review:wall_timeout)"* ]]; then
                     merge_blocked_reason="$_persisted"
                     merge_block_kind="partial"
                 else
@@ -15985,7 +16026,7 @@ $merge_blocked_reason${_task_summary_line:+
 
 $_task_summary_line}
 
-To override this gate and merge anyway, re-run with \`BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0\`." \
+$(_convergence_override_hint "$merge_blocked_reason")" \
                 "default"
             comment_issue "Merge: Blocked" \
                 "🚫 Merge of PR #$pr_number blocked — unresolved quality feedback. PR left open for human review.${merge_blocked_reason:+

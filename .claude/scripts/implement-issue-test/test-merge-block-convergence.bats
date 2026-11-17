@@ -1050,3 +1050,32 @@ _set_tasks() {
 	run _task_declared_files 99
 	[ -z "$output" ]
 }
+
+# =============================================================================
+# OVERRIDE HINT: review-verdict reasons name both overrides
+# =============================================================================
+
+@test "override hint names both overrides for a persisted review-fix reason" {
+	run _convergence_override_hint "Review fix failed at quality (error_kind=x)"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *'BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0'* ]]
+	[[ "$output" == *'BLOCK_MERGE_ON_PARTIAL=0'* ]]
+}
+
+@test "override hint names both overrides for pr_review max_iterations reason" {
+	run _convergence_override_hint "PR review ended (pr_review:max_iterations:3)"
+	[[ "$output" == *'BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0'* ]]
+	[[ "$output" == *'BLOCK_MERGE_ON_PARTIAL=0'* ]]
+}
+
+@test "override hint names only the convergence override for a convergence reason" {
+	run _convergence_override_hint "Quality loop convergence failure: 50% of issues repeating"
+	[[ "$output" == *'BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0'* ]]
+	[[ "$output" != *'BLOCK_MERGE_ON_PARTIAL'* ]]
+}
+
+@test "convergence comment uses the override hint function" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+	[[ "$script_content" == *'$(_convergence_override_hint "$merge_blocked_reason")'* ]]
+}

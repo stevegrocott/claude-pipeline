@@ -627,7 +627,7 @@ set_gate_state() {
 		"quality:fix_failed:review_fix_1"
 	run run_gates_in_order
 	[ "$status" -eq 0 ]
-	[[ "$output" == partial\|* ]]
+	[[ "$output" == "partial|Review fix failed at review_fix_1: fix errored" ]]
 }
 
 @test "gates in order: fix_failed, token only, convergence override -> partial gate blocks" {
@@ -663,4 +663,50 @@ set_gate_state() {
 	run run_gates_in_order
 	[ "$status" -eq 0 ]
 	[[ "$output" == "|" ]]
+}
+
+# =============================================================================
+# FUNCTIONAL: persisted review-verdict reason with NO in-memory tokens (#1112)
+# =============================================================================
+
+@test "gates in order: fix_failed reason, no tokens, convergence override -> partial gate blocks with that text" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	set_gate_state "Review fix failed at review_fix_1: fix errored (error_kind=x, denied_tools=Bash)"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "partial|Review fix failed at review_fix_1: fix errored (error_kind=x, denied_tools=Bash)" ]]
+}
+
+@test "gates in order: max iterations reason, no tokens, convergence override -> partial gate blocks with that text" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	local reason="PR review loop ended without an approved verdict after max iterations (pr_review:max_iterations:iter=2)."
+	set_gate_state "$reason"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "partial|$reason" ]]
+}
+
+@test "gates in order: wall timeout reason, no tokens, convergence override -> partial gate blocks with that text" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	local reason="PR review loop hit the wall-clock budget (pr_review:wall_timeout)."
+	set_gate_state "$reason"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "partial|$reason" ]]
+}
+
+@test "gates in order: review reason, no tokens, both overrides -> merge allowed" {
+	export BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0
+	export BLOCK_MERGE_ON_PARTIAL=0
+	set_gate_state "Review fix failed at review_fix_1: fix errored"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "gates in order: review reason, no tokens, defaults -> convergence gate blocks" {
+	set_gate_state "Review fix failed at review_fix_1: fix errored"
+	run run_gates_in_order
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|Review fix failed at review_fix_1: fix errored" ]]
 }
