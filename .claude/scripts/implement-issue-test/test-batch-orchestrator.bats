@@ -4396,8 +4396,11 @@ _gh_call_count() {
 	local state pr
 	state=$(jq -r '.state' "$STATUS_FILE")
 	pr=$(jq -r '.paused_on_pr' "$STATUS_FILE")
-	[[ "$state" == "paused_on_pr" ]] \
-		|| fail "state is \"$state\", expected paused_on_pr"
+	# #1033: the park times out here (MAX=3, PR stays OPEN), and park_timeout is
+	# the final state recorded after a timeout; paused_on_pr must still carry
+	# the PR number.
+	[[ "$state" == "park_timeout" ]] \
+		|| fail "state is \"$state\", expected park_timeout"
 	[[ "$pr" == "1234" ]] \
 		|| fail "paused_on_pr is \"$pr\", expected the PR number 1234"
 }
