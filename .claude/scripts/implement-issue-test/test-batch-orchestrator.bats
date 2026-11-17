@@ -6944,6 +6944,27 @@ STUB
 	grep -q '`interrupted` is terminal' "$skill"
 }
 
+@test "handle-issues skill lists every terminal set_state value from batch-orchestrator.sh" {
+	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/handle-issues/SKILL.md"
+	local script="$BATS_TEST_DIRNAME/../batch-orchestrator.sh"
+	[[ -f "$skill" && -f "$script" ]]
+	local sentence state states n=0
+	sentence="$(grep -A3 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
+	states="$(grep -oE '^[[:space:]]*set_state "[a-z_]+"' "$script" | sed -E 's/.*"([a-z_]+)"/\1/' | sort -u)"
+	for state in $states; do
+		# running is the only non-terminal value; paused_on_pr is conditionally terminal.
+		[[ "$state" == running ]] && continue
+		n=$((n + 1))
+		if [[ "$state" == paused_on_pr ]]; then
+			grep -q '^| `paused_on_pr` |' "$skill" || { echo "missing table row: $state"; return 1; }
+			continue
+		fi
+		[[ "$sentence" == *"\`$state\`"* ]] || { echo "sentence missing: $state"; return 1; }
+		grep -q "^| \`$state\` | yes" "$skill" || { echo "table missing: $state"; return 1; }
+	done
+	((n >= 8))
+}
+
 # -----------------------------------------------------------------------------
 # Rate-limit envelope parity with implement-issue-orchestrator (#1088)
 # -----------------------------------------------------------------------------

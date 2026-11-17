@@ -638,7 +638,7 @@ fi
 ```
 
 If `STATE` is **not** `completed`, `completed_with_errors`, `completed_with_skips`, `circuit_breaker`,
-`budget_exceeded`, `halted_on_manual_merge`, or `interrupted` — and is not a `paused_on_pr` whose
+`budget_exceeded`, `halted_on_manual_merge`, `park_timeout`, or `interrupted` — and is not a `paused_on_pr` whose
 orchestrator has exited (see the table) — call `ScheduleWakeup` again with `delaySeconds=270`.
 Otherwise run the **completion block** below (`interrupted` is terminal — the orchestrator stopped;
 Step 0 offers resume on the next run).
@@ -653,6 +653,7 @@ Step 0 offers resume on the next run).
 | `circuit_breaker` | yes | Halted after consecutive failures. |
 | `budget_exceeded` | yes | Halted: batch token/cost ceiling breached. |
 | `halted_on_manual_merge` | yes | Halted: a PR is held open by `REQUIRE_MANUAL_MERGE`. |
+| `park_timeout` | yes | Halted: an open PR was still unmerged after the park timeout. |
 | `interrupted` | yes | Orchestrator received a signal and stopped. |
 
 **Completion block** — run once when the batch reaches a terminal state:
