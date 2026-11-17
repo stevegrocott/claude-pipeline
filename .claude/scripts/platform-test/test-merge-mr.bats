@@ -6,6 +6,8 @@
 
 load 'helpers/test-helper'
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     setup_test_env
     install_mocks
@@ -150,6 +152,51 @@ GH_EOF
     [ "$status" -eq 0 ]
     grep -q -e 'gh api -X DELETE repos/{owner}/{repo}/git/refs/heads/feature/x' \
         "$TEST_TMP/mock_calls.log"
+}
+
+# gh mock whose merge SUCCEEDS and which answers the head-branch query, so a
+# remote-head delete on the success path would be reachable (and recorded).
+install_succeeding_merge_gh_with_head() {
+    cat > "$TEST_TMP/bin/gh" << 'GH_EOF'
+#!/usr/bin/env bash
+echo "gh $*" >> "$TEST_TMP/mock_calls.log"
+case "$2" in
+  merge) exit 0 ;;
+  view)
+    if [[ "$*" == *"--json headRefName"* ]]; then
+      echo "feature/x false"
+    elif [[ "$*" == *"--json state"* ]]; then
+      echo OPEN
+    else
+      echo '{"mergeStateStatus":"CLEAN","statusCheckRollup":[]}'
+    fi
+    ;;
+esac
+GH_EOF
+    chmod +x "$TEST_TMP/bin/gh"
+}
+
+@test "merge-mr github: success path never deletes the remote head even when the head query is answerable" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    install_succeeding_merge_gh_with_head
+    run run_platform_script merge-mr.sh 99
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'gh pr merge' "$TEST_TMP/mock_calls.log")" = "1" ]
+    [ "$(grep -c 'gh api' "$TEST_TMP/mock_calls.log")" = "0" ]
+    [ "$(grep -c 'headRefName' "$TEST_TMP/mock_calls.log")" = "0" ]
+}
+
+@test "merge-mr github: cleanup-failed warning goes to stderr and says treating as success" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    install_failing_merge_gh MERGED
+    run --separate-stderr run_platform_script merge-mr.sh 99
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"post-merge branch cleanup failed"* ]]
+    [[ "$stderr" == *"treating as success"* ]]
+    [[ "$output" != *"post-merge branch cleanup failed"* ]]
+    [[ "$output" != *"treating as success"* ]]
 }
 
 @test "merge-mr github: cleanup-failed merge skips fork PR branch delete" {
