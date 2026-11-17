@@ -6142,17 +6142,22 @@ MOCK_CLAUDE
 	body=$(_extract_function_body process_issue "$BATCH_ORCHESTRATOR_SCRIPT")
 	[[ -n "$body" ]] || fail "could not extract process_issue"
 
-	local wait_line rm_line
+	local wait_line rm_line mkfifo_line stale_rm_line
 	wait_line=$(grep -n 'wait "\$tee_pid"' <<< "$body" | head -1 | cut -d: -f1)
-	rm_line=$(grep -n 'rm -f "\$orch_out_fifo"' <<< "$body" | tail -1 | cut -d: -f1)
+	mkfifo_line=$(grep -n 'mkfifo "\$orch_out_fifo"' <<< "$body" | head -1 | cut -d: -f1)
 	[[ -n "$wait_line" ]] || fail "no wait on tee_pid found"
-	[[ -n "$rm_line" ]] || fail "no fifo removal found"
+	[[ -n "$mkfifo_line" ]] || fail "no mkfifo found"
+
+	# The pre-mkfifo stale cleanup: the first removal, before mkfifo.
+	stale_rm_line=$(grep -n 'rm -f "\$orch_out_fifo"' <<< "$body" | head -1 | cut -d: -f1)
+	[[ -n "$stale_rm_line" ]] || fail "no pre-mkfifo fifo removal found"
+	((stale_rm_line < mkfifo_line)) \
+		|| fail "stale removal (line $stale_rm_line) not before mkfifo (line $mkfifo_line)"
+
+	# The final removal (last one) must come after waiting on tee.
+	rm_line=$(grep -n 'rm -f "\$orch_out_fifo"' <<< "$body" | tail -1 | cut -d: -f1)
 	((rm_line > wait_line)) \
 		|| fail "fifo removed (line $rm_line) before wait on tee (line $wait_line)"
-
-	# Exactly two removals: the pre-mkfifo stale cleanup and the final one.
-	[[ "$(grep -c 'rm -f "\$orch_out_fifo"' <<< "$body")" -eq 2 ]] \
-		|| fail "expected exactly two fifo removals"
 }
 
 # =============================================================================
