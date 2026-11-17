@@ -15808,7 +15808,15 @@ $complete_summary
             if [[ "${BLOCK_MERGE_ON_PARTIAL:-1}" == "0" ]]; then
                 log "BLOCK_MERGE_ON_PARTIAL=0 — skipping partial/pr-review merge-block check"
             else
-                if [[ "$_persisted" == "Partial implementation:"* ]]; then
+                # A persisted review-verdict reason (failed review fix, or a
+                # review loop that ended unapproved) blocks here too, so a
+                # resumed run — which has the reason but not the in-memory
+                # tokens — answers the same as the run that recorded it, and
+                # the persisted text (error kind, denied tools) is reported.
+                if [[ "$_persisted" == "Partial implementation:"* \
+                    || "$_persisted" == "Review fix failed at "* \
+                    || "$_persisted" == *"(pr_review:max_iterations:"* \
+                    || "$_persisted" == *"(pr_review:wall_timeout)"* ]]; then
                     merge_blocked_reason="$_persisted"
                     merge_block_kind="partial"
                 else
