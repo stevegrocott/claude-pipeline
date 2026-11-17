@@ -1439,7 +1439,7 @@ _iso_to_epoch() {
 	printf '%s\n' "$epoch"
 }
 
-# _merged_pr_within_run <issue_num> <merged_at>
+# _merged_pr_within_run <issue_num> <merged_at|closed_at>
 #
 # #817: bound failure-site reconciliation by merge time. #740's rationale
 # holds only for a PR merged during the run that just executed. A PR merged
@@ -1536,12 +1536,25 @@ check_issue_pr_merged() {
 
 	[[ "${GIT_HOST:-github}" == "github" ]] || return 1
 
-	local issue_state=""
-	issue_state=$(gh issue view "$issue_num" --json state \
-		--jq '.state' 2>/dev/null) || true
+	# "<state>\t<closedAt>" — tab-joined, same pattern as the up-front gate.
+	local issue_meta="" issue_state="" closed_at=""
+	issue_meta=$(gh issue view "$issue_num" --json state,closedAt \
+		--jq '(.state // "") + "\t" + (.closedAt // "")' \
+		2>/dev/null) || true
+	IFS=$'\t' read -r issue_state closed_at <<< "$issue_meta"
+
+	# #985: bound the CLOSED branch exactly as #817 bounds the merged-PR
+	# one. A close that predates this run is stale evidence; an unknown
+	# closedAt accepts with a WARN (see _merged_pr_within_run). A stale
+	# close falls through so an in-run merged PR can still reconcile.
 	if [[ "$issue_state" == "CLOSED" ]]; then
-		_RECONCILE_REASON="issue already closed on GitHub"
-		return 0
+		if _merged_pr_within_run "$issue_num" "$closed_at"; then
+			_RECONCILE_REASON="issue already closed on GitHub"
+			return 0
+		fi
+
+		log "Issue #$issue_num: closed at $closed_at, before" \
+			"this run began — stale evidence (#985)"
 	fi
 
 	# "<number> <mergedAt>" for the most recently merged PR on the branch.
