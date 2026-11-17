@@ -2972,7 +2972,8 @@ detect_rate_limit() {
 }
 
 # detect_api_error — true when the CLI envelope is an API-error result:
-# is_error is true and either api_error_status is non-null or the result
+# is_error is true and either api_error_status is non-null (any status code
+# counts, 4xx included, e.g. 403) or the result
 # text starts with "API Error" or "Failed to authenticate", or
 # terminal_reason is "api_error".  Text matching is anchored to the start of
 # result (a mid-text mention does not match) and every branch requires
