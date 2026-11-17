@@ -2959,8 +2959,11 @@ wait_for_pr_merged() {
 			"${elapsed}s/${max}s elapsed)"
 	done
 
-	# Leave state paused_on_pr and .paused_on_pr set: the batch is stopping
-	# BECAUSE of this PR, and the operator needs to see which one.
+	# Leave .paused_on_pr set (the batch is stopping BECAUSE of this PR, and
+	# the operator needs to see which one) but move the state off
+	# "paused_on_pr", which is non-terminal: a batch that has stopped must
+	# not look like one still waiting. "park_timeout" is the final state.
+	set_state "park_timeout"
 	log_error "WAIT-FOR-MERGE TIMEOUT: PR #$pr for issue #$issue_num is" \
 		"still open after ${max}s. Stopping batch."
 	return 1
