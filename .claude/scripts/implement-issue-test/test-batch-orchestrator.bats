@@ -4396,8 +4396,11 @@ _gh_call_count() {
 	local state pr
 	state=$(jq -r '.state' "$STATUS_FILE")
 	pr=$(jq -r '.paused_on_pr' "$STATUS_FILE")
-	[[ "$state" == "paused_on_pr" ]] \
-		|| fail "state is \"$state\", expected paused_on_pr"
+	# #1033: the park times out here (MAX=3, PR stays OPEN), and park_timeout is
+	# the final state recorded after a timeout; paused_on_pr must still carry
+	# the PR number.
+	[[ "$state" == "park_timeout" ]] \
+		|| fail "state is \"$state\", expected park_timeout"
 	[[ "$pr" == "1234" ]] \
 		|| fail "paused_on_pr is \"$pr\", expected the PR number 1234"
 }
@@ -4489,9 +4492,10 @@ _gh_call_count() {
 		|| fail "expected a bounded failure, got status $status"
 	grep -q "WAIT-FOR-MERGE TIMEOUT" "$TEST_TMP/batch.log" \
 		|| fail "the timeout was not reported: $(cat "$TEST_TMP/batch.log")"
-	# The halt state names the PR the operator has to deal with.
-	[[ "$(jq -r '.state' "$STATUS_FILE")" == "paused_on_pr" ]] \
-		|| fail "the timeout cleared the paused_on_pr state"
+	# The halt state is distinct from the non-terminal paused_on_pr and
+	# still names the PR the operator has to deal with.
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "park_timeout" ]] \
+		|| fail "the timeout did not record the park_timeout state"
 	[[ "$(jq -r '.paused_on_pr' "$STATUS_FILE")" == "1234" ]] \
 		|| fail "the timeout cleared the PR number"
 }
@@ -6929,14 +6933,40 @@ STUB
 	grep -q '"\$STATE" == "interrupted"' "$skill"
 }
 
-@test "handle-issues skill monitor terminal-state sentence names interrupted as terminal" {
+@test "handle-issues skill monitor terminal-state sentence names every terminal state" {
 	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/handle-issues/SKILL.md"
 	[[ -f "$skill" ]]
-	local sentence
-	sentence="$(grep -A1 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
-	[[ "$sentence" == *'`interrupted`'* ]]
-	[[ "$sentence" == *'`completed_with_errors`, `circuit_breaker`, or `interrupted`'* ]]
+	local sentence state
+	sentence="$(grep -A3 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
+	for state in completed completed_with_errors completed_with_skips circuit_breaker \
+		budget_exceeded halted_on_manual_merge interrupted; do
+		[[ "$sentence" == *"\`$state\`"* ]]
+		grep -q "^| \`$state\` | yes" "$skill"
+	done
+	grep -q '^| `paused_on_pr` | no |' "$skill"
 	grep -q '`interrupted` is terminal' "$skill"
+}
+
+@test "handle-issues skill lists every terminal set_state value from batch-orchestrator.sh" {
+	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/handle-issues/SKILL.md"
+	local script="$BATS_TEST_DIRNAME/../batch-orchestrator.sh"
+	[[ -f "$skill" && -f "$script" ]]
+	local sentence state states n=0
+	sentence="$(grep -A3 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
+	states="$(grep -oE '^[[:space:]]*set_state "[a-z_]+"' "$script" | sed -E 's/.*"([a-z_]+)"/\1/' | sort -u)"
+	for state in $states; do
+		# running and paused_on_pr are the two non-terminal values.
+		[[ "$state" == running ]] && continue
+		n=$((n + 1))
+		if [[ "$state" == paused_on_pr ]]; then
+			grep -q '^| `paused_on_pr` | no |' "$skill" || { echo "table must mark non-terminal: $state"; return 1; }
+			[[ "$sentence" != *"\`$state\`"* ]] || { echo "sentence lists non-terminal: $state"; return 1; }
+			continue
+		fi
+		[[ "$sentence" == *"\`$state\`"* ]] || { echo "sentence missing: $state"; return 1; }
+		grep -q "^| \`$state\` | yes" "$skill" || { echo "table missing: $state"; return 1; }
+	done
+	((n >= 8))
 }
 
 # -----------------------------------------------------------------------------
