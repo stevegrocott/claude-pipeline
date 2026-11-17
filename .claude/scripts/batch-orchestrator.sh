@@ -1550,19 +1550,14 @@ check_issue_pr_merged() {
 		2>/dev/null) || true
 	IFS=$'\t' read -r issue_state closed_at <<< "$issue_meta"
 
-	# #985: bound the CLOSED branch exactly as #817 bounds the merged-PR
-	# one. A close that predates this run is stale evidence; an unknown
-	# closedAt accepts with a WARN (see _merged_pr_within_run). A stale
-	# close falls through so an in-run merged PR can still reconcile.
+	# #985: a CLOSED issue is NOT evidence on its own. implement-issue closes
+	# the issue in an earlier stage of the same run (the #208 incident: closed
+	# ~50s in), so bounding closedAt by the run start still excuses a
+	# process-pr that did nothing. Only a PR merged inside the run counts
+	# (below); #740's merge-then-timeout case reconciles via that PR.
 	if [[ "$issue_state" == "CLOSED" ]]; then
-		if _merged_pr_within_run "$issue_num" "$closed_at" \
-			"issue closedAt"; then
-			_RECONCILE_REASON="issue already closed on GitHub"
-			return 0
-		fi
-
-		log "Issue #$issue_num: closed at $closed_at, before" \
-			"this run began — stale evidence (#985)"
+		log "Issue #$issue_num: closed at $closed_at — a close alone" \
+			"is not evidence the failing stage did the work (#985)"
 	fi
 
 	# "<number> <mergedAt>" for the most recently merged PR on the branch.
