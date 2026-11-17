@@ -7160,3 +7160,34 @@ GHEOF
 	[[ "$rc" -eq 1 ]] \
 		|| fail "CLOSED branch accepted evidence outside the tolerance (rc=$rc)"
 }
+
+@test "AC1(#985): both branches share one run window and name their own evidence on an unknown timestamp" {
+	source_check_issue_pr_merged \
+		|| skip "check_issue_pr_merged() not yet present"
+
+	# Unparseable closedAt: the CLOSED branch accepts (rc 0) and its WARN
+	# names the closedAt, not a merged PR.
+	_stub_gh_issue_and_prs \
+		'{"state":"CLOSED","closedAt":"garbage"}' '[]'
+	_write_status_started_at 208 "2026-08-17T14:01:41+10:00"
+	GIT_HOST=github
+	_capture_log
+
+	local rc=0
+	check_issue_pr_merged 208 || rc=$?
+	[[ "$rc" -eq 0 ]] || fail "unknown closedAt did not accept (rc=$rc)"
+	grep -q 'issue closedAt ("garbage")' "$TEST_TMP/log.out" \
+		|| fail "WARN did not name closedAt: $(cat "$TEST_TMP/log.out")"
+
+	# Unparseable mergedAt on an open issue: the merged-PR branch accepts
+	# and its WARN names mergedAt.
+	_stub_gh_issue_and_prs \
+		'{"state":"OPEN","closedAt":null}' \
+		'[{"number":211,"mergedAt":"garbage"}]'
+	_capture_log
+	rc=0
+	check_issue_pr_merged 208 || rc=$?
+	[[ "$rc" -eq 0 ]] || fail "unknown mergedAt did not accept (rc=$rc)"
+	grep -q 'merged PR mergedAt ("garbage")' "$TEST_TMP/log.out" \
+		|| fail "WARN did not name mergedAt: $(cat "$TEST_TMP/log.out")"
+}
