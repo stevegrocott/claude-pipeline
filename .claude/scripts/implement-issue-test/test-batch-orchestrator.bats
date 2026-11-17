@@ -6929,13 +6929,17 @@ STUB
 	grep -q '"\$STATE" == "interrupted"' "$skill"
 }
 
-@test "handle-issues skill monitor terminal-state sentence names interrupted as terminal" {
+@test "handle-issues skill monitor terminal-state sentence names every terminal state" {
 	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/handle-issues/SKILL.md"
 	[[ -f "$skill" ]]
-	local sentence
-	sentence="$(grep -A1 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
-	[[ "$sentence" == *'`interrupted`'* ]]
-	[[ "$sentence" == *'`completed_with_errors`, `circuit_breaker`, or `interrupted`'* ]]
+	local sentence state
+	sentence="$(grep -A3 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
+	for state in completed completed_with_errors completed_with_skips circuit_breaker \
+		budget_exceeded halted_on_manual_merge interrupted; do
+		[[ "$sentence" == *"\`$state\`"* ]]
+		grep -q "^| \`$state\` | yes" "$skill"
+	done
+	grep -q '^| `paused_on_pr` |' "$skill"
 	grep -q '`interrupted` is terminal' "$skill"
 }
 

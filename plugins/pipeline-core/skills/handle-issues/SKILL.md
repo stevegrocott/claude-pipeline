@@ -637,9 +637,23 @@ if [[ "$CURR_SNAPSHOT" != "$PREV_SNAPSHOT" ]]; then
 fi
 ```
 
-If `STATE` is **not** `completed`, `completed_with_errors`, `circuit_breaker`, or `interrupted`, call
-`ScheduleWakeup` again with `delaySeconds=270`. Otherwise run the **completion block** below
-(`interrupted` is terminal — the orchestrator stopped; Step 0 offers resume on the next run).
+If `STATE` is **not** `completed`, `completed_with_errors`, `completed_with_skips`, `circuit_breaker`,
+`budget_exceeded`, `halted_on_manual_merge`, or `interrupted` — and is not a `paused_on_pr` whose
+orchestrator has exited (see the table) — call `ScheduleWakeup` again with `delaySeconds=270`.
+Otherwise run the **completion block** below (`interrupted` is terminal — the orchestrator stopped;
+Step 0 offers resume on the next run).
+
+| `state` | Terminal? | Meaning |
+|---|---|---|
+| `running` | no | Orchestrator is processing issues. |
+| `paused_on_pr` | no while the orchestrator is alive; **yes** once it has exited | Waiting for an open PR to merge before the next issue. After the park timeout the orchestrator stops and leaves this state set. Check `kill -0 "$(cat logs/handle-issues/.orchestrator.pid)"`; if the process is gone, treat as terminal. |
+| `completed` | yes | All issues finished successfully. |
+| `completed_with_errors` | yes | Finished; at least one issue failed. |
+| `completed_with_skips` | yes | Finished; no failures, but at least one issue was skipped (e.g. already closed). |
+| `circuit_breaker` | yes | Halted after consecutive failures. |
+| `budget_exceeded` | yes | Halted: batch token/cost ceiling breached. |
+| `halted_on_manual_merge` | yes | Halted: a PR is held open by `REQUIRE_MANUAL_MERGE`. |
+| `interrupted` | yes | Orchestrator received a signal and stopped. |
 
 **Completion block** — run once when the batch reaches a terminal state:
 
