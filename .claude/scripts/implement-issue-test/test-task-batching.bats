@@ -4438,3 +4438,47 @@ _setup_status_634() {
 	git checkout -q main
 	git branch -D feature/serial-halt 2>/dev/null || true
 }
+
+@test "execute_batch_serial: API error on task 3 dispatches it exactly once and never depends-on:3 task 4" {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/serial-halt3 main
+	mkdir -p "$LOG_BASE/stages"
+
+	export STATUS_FILE="$TEST_TMP/status.json"
+	export DISPATCH_LOG="$TEST_TMP/dispatched.log"
+	printf '%s' '{"state":"running"}' > "$STATUS_FILE"
+	: > "$DISPATCH_LOG"
+
+	run_stage() {
+		printf '%s\n' "$1" >> "$DISPATCH_LOG"
+		if [[ "$1" == implement-task-3* ]]; then
+			jq '.api_error_halt = {stage: "implement-task-3",
+				status: "500", detail: "x"}' "$STATUS_FILE" \
+				> "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+			printf '%s' '{"status":"error","error":"api_error"}'
+		else
+			printf '%s' '{"status":"success"}'
+		fi
+	}
+	comment_issue() { :; }
+	set_final_state() { :; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks
+	tasks='[{"id":1,"description":"First","agent":"default"},'
+	tasks+='{"id":2,"description":"Second","agent":"default"},'
+	tasks+='{"id":3,"description":"Third","agent":"default"},'
+	tasks+='{"id":4,"description":"Fourth `depends-on:3`","agent":"default"}]'
+	run execute_batch_serial "$tasks" "feature/serial-halt3" "main"
+
+	[ "$status" -eq 1 ]
+	[ "$(grep -c '^implement-task-3' "$DISPATCH_LOG")" -eq 1 ]
+	[ "$(grep -c '^implement-task-4' "$DISPATCH_LOG")" -eq 0 ]
+
+	git checkout -q main
+	git branch -D feature/serial-halt3 2>/dev/null || true
+}

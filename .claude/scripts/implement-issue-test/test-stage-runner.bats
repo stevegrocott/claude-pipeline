@@ -263,6 +263,11 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "detect_api_error does not match a mid-text Failed to authenticate" {
+    run detect_api_error '{"is_error":true,"result":"Step 2: Failed to authenticate was logged"}'
+    [ "$status" -eq 1 ]
+}
+
 @test "detect_api_error ignores terminal_reason api_error when is_error is false" {
     run detect_api_error '{"is_error":false,"terminal_reason":"api_error","result":"ok"}'
     [ "$status" -eq 1 ]
@@ -4469,6 +4474,44 @@ JSON
     [ "$(wc -l < "$TEST_TMP/comments.txt" | tr -d ' ')" = "1" ] \
         || fail "expected exactly one comment: $(cat "$TEST_TMP/comments.txt")"
     [ "$(jq -r '.state' "$STATUS_FILE")" = "error" ]
+}
+
+@test "_halt_if_api_error keeps the api_error: reason prefix on a repeated call" {
+    _seed_api_halt_status
+    comment_issue() { :; }
+    export -f comment_issue
+
+    run _halt_if_api_error
+    [ "$status" -eq 1 ]
+    [[ "$(jq -r '.final_state_reason' "$STATUS_FILE")" == "api_error:"*"403"* ]] \
+        || fail "bad first reason: $(cat "$STATUS_FILE")"
+    run _halt_if_api_error
+    [ "$status" -eq 1 ]
+    [[ "$(jq -r '.final_state_reason' "$STATUS_FILE")" == "api_error:"*"403"* ]] \
+        || fail "bad repeated reason: $(cat "$STATUS_FILE")"
+}
+
+@test "_halt_if_api_error posts a new comment after resume and a second halt" {
+    _seed_api_halt_status
+    comment_issue() { printf 'x\n' >> "$TEST_TMP/comments.txt"; }
+    export -f comment_issue
+
+    run _halt_if_api_error
+    [ "$status" -eq 1 ]
+    [ "$(wc -l < "$TEST_TMP/comments.txt" | tr -d ' ')" = "1" ]
+
+    # Resume clears the record; a fresh halt record must comment again.
+    load_resume_state "$STATUS_FILE"
+    [ "$(jq 'has("api_error_halt")' "$STATUS_FILE")" = "false" ]
+    jq '.state = "running"
+        | .api_error_halt = {stage: "implement-task-1", status: "403",
+            detail: "again"}' "$STATUS_FILE" > "$STATUS_FILE.t" \
+        && mv "$STATUS_FILE.t" "$STATUS_FILE"
+
+    run _halt_if_api_error
+    [ "$status" -eq 1 ]
+    [ "$(wc -l < "$TEST_TMP/comments.txt" | tr -d ' ')" = "2" ] \
+        || fail "expected a second comment: $(cat "$TEST_TMP/comments.txt")"
 }
 
 @test "_halt_if_api_error leaves halt uncommented when the comment fails" {
