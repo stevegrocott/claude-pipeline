@@ -438,6 +438,15 @@ _clock_at_offset() {
     [ "$output" = "0" ]
 }
 
+@test "rate_limit_slept_since adds two separate sleeps inside the window" {
+    local now; printf -v now '%(%s)T' -1
+    printf '%s\n' "$((now-90)) $((now-70))" "$((now-50)) $((now-20))" \
+        > "$LOG_BASE/rate-limit-sleeps.log"
+    run rate_limit_slept_since "$((now-100))"
+    [ "$status" -eq 0 ]
+    [ "$output" = "50" ]
+}
+
 @test "sleep accounting reads the clock without the printf time format (bash 3.2)" {
     # bash 3.2 rejects the %(...)T format; reject it here too so a clock read
     # that depends on it fails under bash 5 as it would on stock macOS.
