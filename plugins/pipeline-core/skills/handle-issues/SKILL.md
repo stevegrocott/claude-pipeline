@@ -638,15 +638,14 @@ fi
 ```
 
 If `STATE` is **not** `completed`, `completed_with_errors`, `completed_with_skips`, `circuit_breaker`,
-`budget_exceeded`, `halted_on_manual_merge`, `park_timeout`, or `interrupted` — and is not a `paused_on_pr` whose
-orchestrator has exited (see the table) — call `ScheduleWakeup` again with `delaySeconds=270`.
-Otherwise run the **completion block** below (`interrupted` is terminal — the orchestrator stopped;
-Step 0 offers resume on the next run).
+`budget_exceeded`, `halted_on_manual_merge`, `park_timeout`, or `interrupted`, call `ScheduleWakeup`
+again with `delaySeconds=270`. Otherwise run the **completion block** below
+(`interrupted` is terminal — the orchestrator stopped; Step 0 offers resume on the next run).
 
 | `state` | Terminal? | Meaning |
 |---|---|---|
 | `running` | no | Orchestrator is processing issues. |
-| `paused_on_pr` | no while the orchestrator is alive; **yes** once it has exited | Waiting for an open PR to merge before the next issue. After the park timeout the orchestrator stops and leaves this state set. Check `kill -0 "$(cat logs/handle-issues/.orchestrator.pid)"`; if the process is gone, treat as terminal. |
+| `paused_on_pr` | no | Waiting for an open PR to merge before the next issue. Returns to `running` when the PR merges or is closed; becomes `park_timeout` if the PR is still open at the park timeout. |
 | `completed` | yes | All issues finished successfully. |
 | `completed_with_errors` | yes | Finished; at least one issue failed. |
 | `completed_with_skips` | yes | Finished; no failures, but at least one issue was skipped (e.g. already closed). |

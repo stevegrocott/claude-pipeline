@@ -354,8 +354,10 @@ STUB
 	[[ "$sleeps" -gt 0 ]] || fail "convergence block never polled"
 	grep -q 'pausing the batch' "$TEST_TMP/batch.log" \
 		|| fail "convergence block did not log the park start"
-	[[ "$(jq -r .state "$STATUS_FILE")" == "paused_on_pr" ]] \
-		|| fail "convergence block did not set state paused_on_pr"
+	# The park ran to its ceiling, so the state has moved from the non-terminal
+	# paused_on_pr to the final park_timeout (#1033).
+	[[ "$(jq -r .state "$STATUS_FILE")" == "park_timeout" ]] \
+		|| fail "convergence block did not end in state park_timeout"
 }
 
 @test "#1006 AC3: partial and e2e blocks also still park exactly as before" {

@@ -6943,7 +6943,7 @@ STUB
 		[[ "$sentence" == *"\`$state\`"* ]]
 		grep -q "^| \`$state\` | yes" "$skill"
 	done
-	grep -q '^| `paused_on_pr` |' "$skill"
+	grep -q '^| `paused_on_pr` | no |' "$skill"
 	grep -q '`interrupted` is terminal' "$skill"
 }
 
@@ -6955,11 +6955,12 @@ STUB
 	sentence="$(grep -A3 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
 	states="$(grep -oE '^[[:space:]]*set_state "[a-z_]+"' "$script" | sed -E 's/.*"([a-z_]+)"/\1/' | sort -u)"
 	for state in $states; do
-		# running is the only non-terminal value; paused_on_pr is conditionally terminal.
+		# running and paused_on_pr are the two non-terminal values.
 		[[ "$state" == running ]] && continue
 		n=$((n + 1))
 		if [[ "$state" == paused_on_pr ]]; then
-			grep -q '^| `paused_on_pr` |' "$skill" || { echo "missing table row: $state"; return 1; }
+			grep -q '^| `paused_on_pr` | no |' "$skill" || { echo "table must mark non-terminal: $state"; return 1; }
+			[[ "$sentence" != *"\`$state\`"* ]] || { echo "sentence lists non-terminal: $state"; return 1; }
 			continue
 		fi
 		[[ "$sentence" == *"\`$state\`"* ]] || { echo "sentence missing: $state"; return 1; }
