@@ -263,6 +263,11 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "detect_api_error does not match a mid-text Failed to authenticate" {
+    run detect_api_error '{"is_error":true,"result":"Step 2: Failed to authenticate was logged"}'
+    [ "$status" -eq 1 ]
+}
+
 @test "detect_api_error ignores terminal_reason api_error when is_error is false" {
     run detect_api_error '{"is_error":false,"terminal_reason":"api_error","result":"ok"}'
     [ "$status" -eq 1 ]
