@@ -4489,9 +4489,10 @@ _gh_call_count() {
 		|| fail "expected a bounded failure, got status $status"
 	grep -q "WAIT-FOR-MERGE TIMEOUT" "$TEST_TMP/batch.log" \
 		|| fail "the timeout was not reported: $(cat "$TEST_TMP/batch.log")"
-	# The halt state names the PR the operator has to deal with.
-	[[ "$(jq -r '.state' "$STATUS_FILE")" == "paused_on_pr" ]] \
-		|| fail "the timeout cleared the paused_on_pr state"
+	# The halt state is distinct from the non-terminal paused_on_pr and
+	# still names the PR the operator has to deal with.
+	[[ "$(jq -r '.state' "$STATUS_FILE")" == "park_timeout" ]] \
+		|| fail "the timeout did not record the park_timeout state"
 	[[ "$(jq -r '.paused_on_pr' "$STATUS_FILE")" == "1234" ]] \
 		|| fail "the timeout cleared the PR number"
 }
