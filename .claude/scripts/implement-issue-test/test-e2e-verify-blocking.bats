@@ -173,10 +173,19 @@ teardown() {
 		capture && /^ *exit 0$/ { exit }
 	' "$ORCHESTRATOR_SCRIPT")
 
-	if [[ "$branch" == *'merge-mr.sh'* ]]; then
-		printf 'FAIL: the e2e block branch must not invoke a merge\n' >&2
-		exit 1
-	fi
+	# An empty capture would pass every negative check below vacuously.
+	expect_glob "$branch" '*set_final_state "merge_blocked"*' \
+		"the e2e block branch must be captured before it is searched"
+
+	local pattern
+	for pattern in 'merge-mr.sh' 'gh pr merge' 'glab mr merge' \
+		'gh api' 'git merge' 'git push'; do
+		if [[ "$branch" == *"$pattern"* ]]; then
+			printf 'FAIL: e2e block branch must not run: %s\n' \
+				"$pattern" >&2
+			exit 1
+		fi
+	done
 }
 
 # The gate is evaluated last so it cannot displace a convergence or partial
