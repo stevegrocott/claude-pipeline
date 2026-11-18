@@ -1439,13 +1439,12 @@ _iso_to_epoch() {
 	printf '%s\n' "$epoch"
 }
 
-# _merged_pr_within_run <issue_num> <evidence_ts> [evidence_label]
+# _merged_pr_within_run <issue_num> <merged_at>
 #
-# The single definition of "this run" shared by both reconciliation
-# branches of check_issue_pr_merged: the CLOSED-issue branch passes
-# closedAt (label "issue closedAt"), the merged-PR branch passes mergedAt
-# (label "merged PR mergedAt", the default). Same window, same tolerance,
-# same accept-on-unknown rule (#985).
+# The single definition of "this run" for check_issue_pr_merged: a merged
+# PR's mergedAt is compared against the issue's started_at window, with
+# one tolerance and one accept-on-unknown rule (#985). A CLOSED issue is
+# not evidence on its own, so only the merged-PR branch calls this.
 #
 # #817: bound failure-site reconciliation by merge time. #740's rationale
 # holds only for a PR merged during the run that just executed. A PR merged
@@ -1469,7 +1468,6 @@ _iso_to_epoch() {
 _merged_pr_within_run() {
 	local issue_num="$1"
 	local merged_at="$2"
-	local evidence_label="${3:-merged PR mergedAt}"
 	local tolerance="${RECONCILE_SKEW_SECS:-120}"
 
 	local started_at=""
@@ -1484,7 +1482,7 @@ _merged_pr_within_run() {
 	started_epoch=$(_iso_to_epoch "$started_at") || started_epoch=""
 	if [[ -z "$started_epoch" ]]; then
 		log_warn "issue #$issue_num has no parseable started_at" \
-			"(\"$started_at\") — accepting the $evidence_label" \
+			"(\"$started_at\") — accepting the merged PR mergedAt" \
 			"reconciliation unbounded (#817)"
 		return 0
 	fi
@@ -1493,7 +1491,7 @@ _merged_pr_within_run() {
 	merged_epoch=$(_iso_to_epoch "$merged_at") || merged_epoch=""
 	if [[ -z "$merged_epoch" ]]; then
 		log_warn "issue #$issue_num has no parseable" \
-			"$evidence_label (\"$merged_at\") — accepting the" \
+			"merged PR mergedAt (\"$merged_at\") — accepting the" \
 			"reconciliation unbounded (#817)"
 		return 0
 	fi
@@ -1576,8 +1574,7 @@ check_issue_pr_merged() {
 			merged_at="${merged_row#* }"
 		fi
 
-		if _merged_pr_within_run "$issue_num" "$merged_at" \
-			"merged PR mergedAt"; then
+		if _merged_pr_within_run "$issue_num" "$merged_at"; then
 			_RECONCILE_REASON="PR #$merged_pr already merged"
 			_RECONCILE_PR="$merged_pr"
 			return 0
