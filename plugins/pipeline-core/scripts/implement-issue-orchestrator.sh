@@ -10436,10 +10436,22 @@ _is_playwright_spec() {
 _build_targeted_e2e_cmd() {
     local base="$1"
     local pw_specs=""
+    local diff_err_file diff_rc=0
+    # Decision: if the diff itself fails we cannot tell which specs changed.
+    # Fall back to the full TEST_E2E_CMD (never fail the run, never skip
+    # E2E): running more specs is safe, running none would hide breakage.
+    diff_err_file=$(mktemp)
     pw_specs=$(git diff "$base"...HEAD --name-only \
         -- 'tests/e2e/*.spec.*' 'test/e2e/*.spec.*' \
            'e2e/*.spec.*' '**/e2e/*.spec.*' \
-        2>/dev/null || true)
+        2>"$diff_err_file") || diff_rc=$?
+    if ((diff_rc != 0)); then
+        log_warn "_build_targeted_e2e_cmd: git diff ${base}...HEAD failed" \
+            "(exit ${diff_rc}): $(tr '\n' ' ' < "$diff_err_file")" \
+            "— falling back to the full E2E command"
+        pw_specs=""
+    fi
+    rm -f "$diff_err_file"
     if [[ -n "$pw_specs" ]]; then
         log "Targeted E2E: running changed spec files only"
         # Quote each path (printf %q) so spaces/metacharacters survive eval
