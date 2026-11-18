@@ -2708,8 +2708,8 @@ _make_plain_consumer_repo() {
 @test "orchestrator artifact excludes match sync.sh GITIGNORE_PATHS" {
     local root sync_paths orch_paths
     root="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
-    sync_paths=$(sed -n '/^readonly -a GITIGNORE_PATHS=(/,/^)/p' "$root/sync.sh" \
-        | grep "^ *'" | tr -d " '" | sort)
+    sync_paths=$(bash -c 'source "$1" && printf "%s\n" "${GITIGNORE_PATHS[@]}"' \
+        _ "$root/sync.sh" | sort)
     _make_plain_consumer_repo
     ensure_pipeline_artifact_excludes "$PWD"
     orch_paths=$(grep '^/' .git/info/exclude | sed 's#^/##' | sort)

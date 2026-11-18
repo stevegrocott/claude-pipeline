@@ -888,6 +888,12 @@ report_unsynced_hooks() {
 # Main
 # ---------------------------------------------------------------------------
 
+# When sourced (tests read GITIGNORE_PATHS this way), define everything above
+# and skip command dispatch.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
 [[ $# -lt 1 ]] && usage
 
 COMMAND="$1"
