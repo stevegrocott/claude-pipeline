@@ -10442,7 +10442,13 @@ _build_targeted_e2e_cmd() {
         2>/dev/null || true)
     if [[ -n "$pw_specs" ]]; then
         log "Targeted E2E: running changed spec files only"
-        printf '%s -- %s' "$TEST_E2E_CMD" "$pw_specs"
+        # Quote each path (printf %q) so spaces/metacharacters survive eval
+        local quoted_specs="" spec
+        while IFS= read -r spec; do
+            [[ -n "$spec" ]] || continue
+            quoted_specs+="${quoted_specs:+ }$(printf '%q' "$spec")"
+        done <<< "$pw_specs"
+        printf '%s -- %s' "$TEST_E2E_CMD" "$quoted_specs"
     else
         printf '%s' "$TEST_E2E_CMD"
     fi
