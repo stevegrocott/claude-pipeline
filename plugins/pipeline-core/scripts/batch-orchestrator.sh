@@ -1503,7 +1503,7 @@ _merged_pr_within_run() {
 	return 1
 }
 
-# check_issue_pr_merged <issue_num>
+# check_issue_pr_merged <issue_num> [permission_denial_count]
 #
 # Post-hoc failure-site reconciliation (#740): a stage reported a failure —
 # did the work in fact land anyway? Unlike the up-front gate above, a
@@ -1530,16 +1530,29 @@ _merged_pr_within_run() {
 # A gh failure (network error, unauthenticated) is non-fatal: the empty
 # result falls through to "not resolved" so the reported failure stands.
 #
+# The optional second argument is the failing stage's permission_denials
+# count. A stage whose tools were denied never ran, so a merged PR found on
+# GitHub is not evidence about it: any count above zero returns 1 without
+# consulting GitHub, so a never-ran stage is not reconciled as success.
+#
 # Returns:
 #   0 — the work landed; caller should record `completed`. Sets
 #       _RECONCILE_REASON, and _RECONCILE_PR when a merged PR was found.
 #   1 — not resolved; caller should record the failure as reported.
 check_issue_pr_merged() {
 	local issue_num="$1"
+	local denial_count="${2:-0}"
 	_RECONCILE_REASON=""
 	_RECONCILE_PR=""
 
 	[[ "${GIT_HOST:-github}" == "github" ]] || return 1
+
+	if [[ "$denial_count" =~ ^[0-9]+$ ]] && ((denial_count > 0)); then
+		log_warn "Issue #$issue_num: stage had $denial_count" \
+			"permission denial(s) — it never ran, so a merged PR" \
+			"is not reconciled as success"
+		return 1
+	fi
 
 	# "<state>\t<closedAt>" — tab-joined, same pattern as the up-front gate.
 	local issue_meta="" issue_state="" closed_at=""
@@ -2417,6 +2430,13 @@ process_issue() {
 
     warn_permission_denials "$proc_last_json" "process-pr" "$issue_num"
 
+    # Denied tools mean the stage never ran: reconciliation must not credit
+    # a merged PR to it. A jq failure yields 0 (the pre-existing behaviour).
+    local proc_denials
+    proc_denials=$(printf '%s' "$proc_last_json" \
+        | jq -r '(.permission_denials // []) | length' 2>/dev/null) \
+        || proc_denials=0
+
     case "$proc_status" in
         approved)
             # The review passed and the skill deliberately did NOT merge
@@ -2470,7 +2490,7 @@ process_issue() {
             # helper the error arm below already uses for exactly this — so
             # both arms agree on what "the work landed" means.
             log "Issue #$issue_num: changes were requested and addressed"
-            if check_issue_pr_merged "$issue_num"; then
+            if check_issue_pr_merged "$issue_num" "$proc_denials"; then
                 log "Issue #$issue_num: merge confirmed — $_RECONCILE_REASON"
                 update_issue_field "$issue_num" "status" "completed"
                 update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
@@ -2495,7 +2515,7 @@ process_issue() {
             ;;
         error|rate_limit|*)
             log_error "process-pr failed for #$issue_num: ${proc_error:-status was $proc_status}"
-            if check_issue_pr_merged "$issue_num"; then
+            if check_issue_pr_merged "$issue_num" "$proc_denials"; then
                 log "Issue #$issue_num: reported failure reconciled — $_RECONCILE_REASON"
                 update_issue_field "$issue_num" "status" "completed"
                 update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
