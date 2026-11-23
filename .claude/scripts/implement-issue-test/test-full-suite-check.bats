@@ -187,3 +187,91 @@ _load_bats_outcome_fns() {
 	_bats_full_suite_outcome 0 "ok 1 a" "$TEST_TMP/log"
 	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
 }
+
+# =============================================================================
+# ROOT tests/*.bats RUN (#1160)
+# =============================================================================
+
+# Load _run_root_bats_full_suite with a mock bounded runner that records the
+# budget it was given and runs the mock command.
+_load_root_run_fns() {
+	_load_bats_outcome_fns
+	local orch="$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh"
+	# shellcheck disable=SC1090
+	source <(awk '/^_run_root_bats_full_suite\(\) \{/ {g=1} g {print} g && /^}/ {exit}' "$orch")
+	LOG_BASE="$TEST_TMP/logs"
+	mkdir -p "$LOG_BASE/stages"
+	BOUNDED_CALLS="$TEST_TMP/bounded-calls"
+	: > "$BOUNDED_CALLS"
+	next_stage_log() { echo "$1.log"; }
+	_run_bounded_process_group() {
+		local budget="$1" out="$3"
+		shift 3
+		printf '%s|%s\n' "$budget" "$*" >> "$BOUNDED_CALLS"
+		"$@" > "$out" 2>&1
+	}
+	# Mock `bats` so no real suite runs; behaviour set via MOCK_BATS_RC/OUT.
+	bats() { printf '%s\n' "${MOCK_BATS_OUT:-}"; return "${MOCK_BATS_RC:-0}"; }
+}
+
+@test "root run starts nothing when no tests/*.bats exists" {
+	_load_root_run_fns
+	_run_root_bats_full_suite bash
+	[ ! -s "$BOUNDED_CALLS" ]
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "root run uses its own bound and stage log when tests/*.bats exists" {
+	_load_root_run_fns
+	mkdir tests
+	: > tests/a.bats
+	FULL_SUITE_ROOT_BATS_TIMEOUT=77
+	MOCK_BATS_OUT="ok 1 a"
+	_run_root_bats_full_suite bash
+	[ "$(< "$BOUNDED_CALLS")" = "77|bats tests/" ]
+	[ -f "$LOG_BASE/stages/bats_root_suite.log" ]
+	grep -q 'exit code: 0' "$LOG_BASE/stages/bats_root_suite.log"
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
+
+@test "root run default bound is 600 seconds" {
+	_load_root_run_fns
+	mkdir tests
+	: > tests/a.bats
+	unset FULL_SUITE_ROOT_BATS_TIMEOUT
+	_run_root_bats_full_suite bash
+	[[ "$(< "$BOUNDED_CALLS")" == 600'|'* ]]
+}
+
+@test "failing root test records the red mark" {
+	_load_root_run_fns
+	mkdir tests
+	: > tests/a.bats
+	MOCK_BATS_RC=1
+	MOCK_BATS_OUT="not ok 1 root broken"
+	# The orchestrator runs without errexit; the mock's non-zero rc is data.
+	set +e
+	_run_root_bats_full_suite bash
+	[ "${DEGRADED_STAGES[0]}" = "test:bats_full_suite_red" ]
+	grep -q 'root broken' "$COMMENT_FILE"
+}
+
+@test "green root run does not supersede a runner timeout incomplete mark" {
+	_load_root_run_fns
+	mkdir tests
+	: > tests/a.bats
+	DEGRADED_STAGES=("test:bats_incomplete:full_suite")
+	MOCK_BATS_OUT="ok 1 a"
+	_run_root_bats_full_suite bash
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_incomplete:full_suite" ]
+}
+
+@test "orchestrator calls the root run after the runner-based check" {
+	local orch="$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh"
+	local runner_line root_line
+	runner_line=$(grep -n '"\$bats_full_log" "\$bats_runner"' "$orch" | head -1 | cut -d: -f1)
+	root_line=$(grep -n '^        _run_root_bats_full_suite "\$branch_scope"' "$orch" | head -1 | cut -d: -f1)
+	[ -n "$runner_line" ]
+	[ -n "$root_line" ]
+	(( root_line > runner_line ))
+}

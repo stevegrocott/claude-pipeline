@@ -390,6 +390,13 @@ E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 # control to main() rather than blocking it (issue #926 AC3).
 FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"
 
+# Wall-clock cap (seconds) on the root `tests/*.bats` run that follows the
+# runner-based full-suite BATS check (#1160). The runner covers only
+# .claude/scripts/implement-issue-test; CI runs `bats tests/` as a separate
+# step (~135s locally), so it gets its own, much smaller bound and its own
+# stage log. Same outcome classification as the runner arm.
+FULL_SUITE_ROOT_BATS_TIMEOUT="${FULL_SUITE_ROOT_BATS_TIMEOUT:-600}"
+
 # Wall-clock cap (seconds) on the informational full-suite npm/test-runner
 # check (`bash -c "${TEST_UNIT_CMD:-npm test}"`) that main() runs right
 # before its BATS sibling above. NOT unconditional, despite what this
@@ -10584,7 +10591,38 @@ _supersede_bats_incomplete_marks() {
 	return 0
 }
 
-# _bats_full_suite_outcome RC OUTPUT LOG_PATH [RUNNER] [SCOPE]
+# _run_root_bats_full_suite SCOPE
+#
+# Runs the root tests/*.bats files (which the runner-based check does not
+# cover) as a second bounded run under FULL_SUITE_ROOT_BATS_TIMEOUT, with its
+# own stage log, and classifies it with _bats_full_suite_outcome. Starts
+# nothing when no tests/*.bats file exists. Non-blocking: always returns 0.
+_run_root_bats_full_suite() {
+    local scope="${1:-}"
+    local root_tmp root_out root_rc root_log
+
+    compgen -G "tests/*.bats" > /dev/null || return 0
+
+    log "Running informational root tests/ BATS check (non-blocking)..."
+    root_tmp=$(mktemp)
+    _run_bounded_process_group "${FULL_SUITE_ROOT_BATS_TIMEOUT:-600}" \
+        "${FULL_SUITE_KILL_GRACE:-10}" "$root_tmp" \
+        bats tests/
+    root_rc=$?
+    root_out=$(< "$root_tmp")
+    rm -f "$root_tmp"
+
+    root_log="$LOG_BASE/stages/$(next_stage_log "bats_root_suite")"
+    printf '%s\n' "$root_out" >> "$root_log"
+    printf '%s\n' "=== exit code: $root_rc ===" >> "$root_log"
+    log "  Log: $root_log"
+
+    _bats_full_suite_outcome "$root_rc" "$root_out" "$root_log" \
+        "bats tests/" "$scope" "${FULL_SUITE_ROOT_BATS_TIMEOUT:-600}" false
+    return 0
+}
+
+# _bats_full_suite_outcome RC OUTPUT LOG_PATH [RUNNER] [SCOPE] [TIMEOUT] [SUPERSEDE]
 #
 # Classifies the informational full-suite BATS run (timeout / unmeasured /
 # red / green), records the matching DEGRADED_STAGES marker and posts the
@@ -10595,6 +10633,10 @@ _bats_full_suite_outcome() {
     local log_path="$3"
     local runner="${4:-.claude/scripts/implement-issue-test/run-tests.sh}"
     local scope="${5:-}"
+    local budget="${6:-${FULL_SUITE_BATS_TIMEOUT:-2700}}"
+    # SUPERSEDE=false: a green run is not the whole suite, so it must not
+    # clear incomplete marks (the root run, #1160).
+    local supersede="${7:-true}"
     local failure_names failure_total failure_shown
 
     if (( rc == 124 )); then
@@ -10608,9 +10650,12 @@ _bats_full_suite_outcome() {
         # through — this check is informational and must always
         # return control to main() rather than blocking it.
         log_warn "Full-suite BATS check timed out after" \
-            "${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
+            "${budget}s — treating as" \
             "unmeasured, not red (non-blocking)"
         DEGRADED_STAGES+=("test:bats_full_suite_timeout")
+        # The suite never reached a verdict, so a deferred run leaves the
+        # branch unmeasured: record the blocking incomplete mark too.
+        DEGRADED_STAGES+=("test:bats_incomplete:full_suite")
     elif (( rc != 0 )) \
         && (( $(_bats_full_suite_failure_count \
             "$output") == 0 )); then
@@ -10622,6 +10667,9 @@ _bats_full_suite_outcome() {
         # reconcile_failed_tasks_with_branch_evidence() treat it as
         # proof of a real regression.
         DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")
+        # The suite never reached a verdict, so a deferred run leaves the
+        # branch unmeasured: record the blocking incomplete mark too.
+        DEGRADED_STAGES+=("test:bats_incomplete:full_suite")
         # State the evidence in the warning itself, so a killed runner
         # can be told from a setup error without opening the log.
         local ok_seen not_ok_seen plan_size
@@ -10670,7 +10718,7 @@ $failure_shown
 </details>" "default"
         log "WARN: Full-suite BATS check found failures (non-blocking, recorded as degraded)"
     else
-        _supersede_bats_incomplete_marks
+        [[ "$supersede" == true ]] && _supersede_bats_incomplete_marks
         log "Full-suite BATS check passed — pipeline BATS tests are green on this branch"
     fi
     return 0
@@ -11209,6 +11257,7 @@ run_test_loop() {
     local jest_test_files=""
     local playwright_test_files=""
     local changed_test_pattern=""
+    local changed_test_detection_unreliable=false
     case "$change_scope" in
         typescript|mixed|ts-frontend)
             changed_test_pattern='\.test\.[jt]sx?$|\.spec\.[jt]sx?$'
@@ -11227,11 +11276,27 @@ run_test_loop() {
         if (( _tl_git_exit == 124 )); then
             log_warn "test_loop: git diff timed out after ${TEST_LOOP_GIT_TIMEOUT}s — using --changedSince fallback"
             _tl_git_raw=""
+            changed_test_detection_unreliable=true
         fi
         changed_test_files=$(printf '%s' "$_tl_git_raw" \
             | grep -E "$changed_test_pattern" \
             | filter_out_integration_tests \
             || true)
+    fi
+
+    # Bash scope with no changed .bats file: the targeted run has nothing
+    # to target, and main() runs the FULL suite once after this loop when
+    # the runner is present. Running an agent over the whole suite here
+    # would only duplicate that check (and, being cut short, record a
+    # spurious test:bats_incomplete mark). Defer to the full-suite check:
+    # no agent run, no incomplete mark. An unreliable (timed-out) diff
+    # does not prove the list is empty, so it never defers.
+    if [[ "$change_scope" == "bash" && -z "$changed_test_files" \
+            && "$changed_test_detection_unreliable" != true \
+            && -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
+        log "No changed BATS test files and the full-suite runner is present — deferring the suite to the full-suite check"
+        comment_issue "Test Loop: Deferred" "⏭️ No .bats files changed on this branch. The BATS suite is deferred to the full-suite check that runs after the test loop." ""
+        return 0
     fi
 
     if [[ "$change_scope" == "bash" ]]; then
@@ -14925,6 +14990,10 @@ $full_scope_failures
             _bats_full_suite_outcome "$bats_full_rc" "$bats_full_output" \
                 "$bats_full_log" "$bats_runner" "$branch_scope"
         fi
+
+        # Root tests/*.bats are not covered by the runner above (#1160);
+        # run them under their own bound and stage log.
+        _run_root_bats_full_suite "$branch_scope"
 
         # ---------------------------------------------------------------------
         # E2E-UNVALIDATED GUARD: the test loop above is unit-only when
