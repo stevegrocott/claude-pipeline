@@ -433,6 +433,10 @@ FULL_SUITE_KILL_GRACE="${FULL_SUITE_KILL_GRACE:-10}"
 
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
+
+# True only when run_test_loop deferred the BATS suite to the full-suite
+# check (no changed .bats files); reset to false at the start of every loop.
+BATS_SUITE_DEFERRED=false
 # The run-budget soft-threshold warning is emitted at most once per run
 # (issue #583).  The latch lives in status.json (.run_budget_soft_warned), NOT a
 # shell global: check_run_budget() runs inside the run_stage command-substitution
@@ -11249,6 +11253,8 @@ run_test_loop() {
     max_test_iter=$(apply_profile_to_test_max_iter \
         "$loop_profile" "$MAX_TEST_ITERATIONS")
 
+    BATS_SUITE_DEFERRED=false
+
     log "Starting test loop after all tasks complete"
 
     # -------------------------------------------------------------------------
@@ -11339,6 +11345,7 @@ run_test_loop() {
             && -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
         log "No changed BATS test files and the full-suite runner is present — deferring the suite to the full-suite check"
         comment_issue "Test Loop: Deferred" "⏭️ No .bats files changed on this branch. The BATS suite is deferred to the full-suite check that runs after the test loop." ""
+        BATS_SUITE_DEFERRED=true
         return 0
     fi
 

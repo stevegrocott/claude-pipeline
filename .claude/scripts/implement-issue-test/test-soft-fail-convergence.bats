@@ -1063,3 +1063,42 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 	_bats_full_suite_outcome 1 $'1..2\nnot ok 1 a' "$TEST_TMP/l.log"
 	[[ "${DEGRADED_STAGES[*]}" != *bats_incomplete* ]]
 }
+
+# =============================================================================
+# BATS_SUITE_DEFERRED FLAG
+# =============================================================================
+
+@test "BATS_SUITE_DEFERRED is declared globally as false" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *$'\nBATS_SUITE_DEFERRED=false\n'* ]]
+}
+
+@test "run_test_loop resets BATS_SUITE_DEFERRED to false before the deferral" {
+	local body
+	body=$(sed -n '/^run_test_loop() {/,/^}/p' "$ORCHESTRATOR_SCRIPT")
+
+	local before_reset="${body%%BATS_SUITE_DEFERRED=false*}"
+	local before_true="${body%%BATS_SUITE_DEFERRED=true*}"
+
+	[[ "$body" == *'BATS_SUITE_DEFERRED=false'* ]]
+	[[ "$body" == *'BATS_SUITE_DEFERRED=true'* ]]
+	((${#before_reset} < ${#before_true}))
+	# The reset precedes the first early return from the loop.
+	[[ "$before_reset" != *'return 0'* ]]
+}
+
+@test "BATS_SUITE_DEFERRED is set true only at the deferral return" {
+	local body
+	body=$(sed -n '/^run_test_loop() {/,/^}/p' "$ORCHESTRATOR_SCRIPT")
+
+	local count
+	count=$(grep -c 'BATS_SUITE_DEFERRED=true' <<< "$body")
+	((count == 1))
+
+	local after="${body#*BATS_SUITE_DEFERRED=true}"
+	local next_line
+	next_line=$(sed -n '2p' <<< "BATS_SUITE_DEFERRED=true$after")
+	[[ "$next_line" == *'return 0'* ]]
+}
