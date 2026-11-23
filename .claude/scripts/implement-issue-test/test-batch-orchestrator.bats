@@ -7377,3 +7377,42 @@ _run_startup_env() {
 	[[ "$output" != *"unknown"* ]]
 	[[ "$output" != *"WARN:"* ]]
 }
+
+# The batch's REAL pin line (grepped out of the script, not re-typed) plus the
+# real dispatch_composition/run_composition_standard, with a stub `claude`
+# that prints the PATH it was launched with. Removing the pin call from
+# batch-orchestrator.sh must make this fail.
+@test "startup: dispatch_composition launches claude with running version bin first on PATH (#1168)" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_make_plugin_version "$cache" 0.8.10
+	mkdir -p "$TEST_TMP/stub"
+	printf '#!/usr/bin/env bash\nprintf "CLAUDE_PATH=%%s\\n" "$PATH"\n' \
+		> "$TEST_TMP/stub/claude"
+	chmod +x "$TEST_TMP/stub/claude"
+
+	local pin_line="$TEST_TMP/pin.sh" fns="$TEST_TMP/dispatch.sh"
+	grep -x 'pipeline_pin_bin_first || true' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$pin_line"
+	[ -s "$pin_line" ]
+	awk '/^(run_composition_standard|dispatch_composition)\(\)/,/^\}$/' \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$fns"
+
+	local stale_path="$cache/0.8.10/bin:$TEST_TMP/stub:/usr/bin:/bin"
+	run bash -c '
+		scripts="$1"; pin="$2"; fns="$3"; PATH="$4"
+		source "$scripts/resolve-pipeline-root.sh"
+		SCRIPT_DIR="$scripts"
+		source "$pin"
+		log() { :; }
+		context_mode_claude_args() { :; }
+		timeout() { shift; "$@"; }
+		ISSUE_TIMEOUT=5
+		unset COMPOSITION_BACKEND
+		source "$fns"
+		dispatch_composition "hello" false
+	' _ "$cache/0.8.19/scripts" "$pin_line" "$fns" "$stale_path"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"CLAUDE_PATH=$cache/0.8.19/bin:"* ]]
+	[[ "$output" != *"$cache/0.8.10/bin"* ]]
+}
