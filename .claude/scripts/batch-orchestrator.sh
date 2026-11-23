@@ -504,7 +504,8 @@ log_startup_environment() {
     bin_dir="$root/bin"
 
     local -a path_entries
-    IFS=: read -r -a path_entries <<< "$PATH"
+    # Sibling-version bins dropped by pipeline_pin_bin_first are still noted.
+    IFS=: read -r -a path_entries <<< "${PATH}:${PIPELINE_PIN_REMOVED:-}"
     for entry in "${path_entries[@]}"; do
         [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
         [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \

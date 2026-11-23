@@ -230,17 +230,36 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
     #   so every session the run starts resolves the pipeline-core-* shims to
     #   the version that is running — not to a stale entry inherited from a
     #   long-lived session. A no-op returning non-zero when there is no bin/
-    #   next to this library (repo-local layout).
+    #   next to this library (repo-local layout). Sibling-version bins
+    #   (<cache>/<other version>/bin) are dropped too and listed, colon
+    #   separated, in PIPELINE_PIN_REMOVED; other plugins' bins are kept.
     pipeline_pin_bin_first() {
         local bin_dir
         bin_dir="$(cd "${_PIPELINE_SCRIPTS_DIR}/../bin" 2>/dev/null && pwd)" \
             || return 1
-        local rest=":${PATH}:"
-        rest="${rest//:${bin_dir}:/:}"
-        rest="${rest#:}"
-        rest="${rest%:}"
-        PATH="${bin_dir}${rest:+:${rest}}"
-        export PATH
+        local cache_dir="${bin_dir%/*/bin}"
+        local entry ver
+        local -a kept=()
+        local -a removed=()
+        local -a entries=()
+        IFS=: read -r -a entries <<< "$PATH"
+        for entry in "${entries[@]}"; do
+            [[ "$entry" == "$bin_dir" ]] && continue
+            # Sibling version bin: <cache>/<numeric version>/bin
+            if [[ "$entry" == "${cache_dir}"/*/bin ]]; then
+                ver="${entry#"${cache_dir}"/}"
+                ver="${ver%/bin}"
+                if [[ "$ver" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+                    removed+=("$entry")
+                    continue
+                fi
+            fi
+            kept+=("$entry")
+        done
+        local IFS=:
+        PATH="${bin_dir}${kept[*]:+:${kept[*]}}"
+        PIPELINE_PIN_REMOVED="${removed[*]}"
+        export PATH PIPELINE_PIN_REMOVED
     }
 
     # pipeline_version

@@ -1176,7 +1176,8 @@ log_startup_environment() {
     root=$(pipeline_plugin_root 2>/dev/null) || return 0
     bin_dir="$root/bin"
 
-    IFS=: read -r -a path_entries <<< "$PATH"
+    # Sibling-version bins dropped by pipeline_pin_bin_first are still noted.
+    IFS=: read -r -a path_entries <<< "${PATH}:${PIPELINE_PIN_REMOVED:-}"
     for entry in "${path_entries[@]}"; do
         [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
         [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
