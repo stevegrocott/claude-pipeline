@@ -11829,7 +11829,11 @@ Output both test results and validation findings in one structured response.
         # itself is always non-empty regardless of scope, so it cannot be
         # used as the key here — a future informational-only bats_section
         # that stops embedding a runnable command must update this guard too.
-        if [[ -n "$bats_section" && -z "$bats_status" ]]; then
+        # Exception: when the suite was deferred to the full-suite check, no
+        # BATS command ran by design, so a skipped or missing bats_result is
+        # expected and adds no bats_incomplete:iter mark.
+        if [[ -n "$bats_section" && -z "$bats_status" \
+                && "$BATS_SUITE_DEFERRED" != true ]]; then
             bats_status="incomplete"
             bats_summary_out="${bats_summary_out:-No bats_result reported for this iteration.}"
         fi

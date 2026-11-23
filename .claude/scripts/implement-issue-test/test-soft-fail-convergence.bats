@@ -693,6 +693,35 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 	! grep -qF "run-tests.sh" "$PROMPT_CAPTURE_FILE"
 }
 
+# A deferred suite runs no BATS command, so an agent that omits bats_result
+# must not produce a test:bats_incomplete:iter mark.
+@test "bash scope: deferred suite with missing bats_result adds no bats_incomplete mark" {
+	_setup_test_loop_repo
+	mkdir -p .claude/scripts/implement-issue-test
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/implement-issue-test/run-tests.sh
+	git add .claude
+	git commit -q -m "runner on main"
+
+	git checkout -q -b feature-deferred-missing
+	printf '#!/usr/bin/env bash\necho changed\n' > .claude/scripts/thing.sh
+	git add .claude
+	git commit -q -m "change a script only"
+
+	run_stage() {
+		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","validation_result":"passed"}}'
+	}
+	export -f run_stage
+	comment_issue() { :; }
+	export -f comment_issue
+
+	run_test_loop "$TEST_TMP/repo" "feature-deferred-missing" "" "bash"
+	local rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ "${DEGRADED_STAGES[*]:-}" != *bats_incomplete* ]]
+	grep -q "deferring the suite" "$LOG_FILE"
+}
+
 @test "bash scope: no changed .bats but runner absent still runs the test stage" {
 	_setup_test_loop_repo
 	git checkout -q -b feature-no-runner
