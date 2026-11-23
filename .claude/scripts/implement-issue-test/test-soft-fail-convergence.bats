@@ -652,9 +652,10 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 		grep -q "Narrowed BATS command:.*tests/new-suite.bats" "$LOG_FILE"
 }
 
-# No changed .bats file + runner present: the loop defers to main()'s
-# full-suite check — no agent run, no bats_incomplete mark.
-@test "bash scope: no changed .bats and runner present defers the suite without an agent run or incomplete mark" {
+# No changed .bats file + runner present: the loop defers the suite to
+# main()'s full-suite check. The test stage still runs (STEP 2 validation
+# stays) with no suite command and bats_result 'skipped' requested.
+@test "bash scope: deferred suite still runs the test stage with no suite command and bats_result skipped" {
 	_setup_test_loop_repo
 	mkdir -p .claude/scripts/implement-issue-test
 	printf '#!/usr/bin/env bash\n' > .claude/scripts/implement-issue-test/run-tests.sh
@@ -667,11 +668,13 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 	git commit -q -m "change a script only"
 
 	STAGE_CALLS="$TEST_TMP/stage_calls"
-	export STAGE_CALLS
+	PROMPT_CAPTURE_FILE="$TEST_TMP/deferred_prompt"
+	export STAGE_CALLS PROMPT_CAPTURE_FILE
 	: > "$STAGE_CALLS"
 	run_stage() {
 		printf '%s\n' "$1" >> "$STAGE_CALLS"
-		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","bats_result":"incomplete"}}'
+		printf '%s' "$2" > "$PROMPT_CAPTURE_FILE"
+		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","validation_result":"passed","bats_result":"skipped"}}'
 	}
 	export -f run_stage
 	comment_issue() { :; }
@@ -681,7 +684,40 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 	local rc=$?
 
 	[[ "$rc" -eq 0 ]]
-	[[ ! -s "$STAGE_CALLS" ]]
+	[[ "$(wc -l < "$STAGE_CALLS")" -eq 1 ]]
+	[[ "${DEGRADED_STAGES[*]:-}" != *bats_incomplete* ]]
+	grep -q "deferring the suite" "$LOG_FILE"
+	grep -qF "NO SUITE COMMAND" "$PROMPT_CAPTURE_FILE"
+	grep -qF "Set bats_result to 'skipped'" "$PROMPT_CAPTURE_FILE"
+	grep -qF "STEP 2 — TEST VALIDATION" "$PROMPT_CAPTURE_FILE"
+	! grep -qF "run-tests.sh" "$PROMPT_CAPTURE_FILE"
+}
+
+# A deferred suite runs no BATS command, so an agent that omits bats_result
+# must not produce a test:bats_incomplete:iter mark.
+@test "bash scope: deferred suite with missing bats_result adds no bats_incomplete mark" {
+	_setup_test_loop_repo
+	mkdir -p .claude/scripts/implement-issue-test
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/implement-issue-test/run-tests.sh
+	git add .claude
+	git commit -q -m "runner on main"
+
+	git checkout -q -b feature-deferred-missing
+	printf '#!/usr/bin/env bash\necho changed\n' > .claude/scripts/thing.sh
+	git add .claude
+	git commit -q -m "change a script only"
+
+	run_stage() {
+		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","validation_result":"passed"}}'
+	}
+	export -f run_stage
+	comment_issue() { :; }
+	export -f comment_issue
+
+	run_test_loop "$TEST_TMP/repo" "feature-deferred-missing" "" "bash"
+	local rc=$?
+
+	[[ "$rc" -eq 0 ]]
 	[[ "${DEGRADED_STAGES[*]:-}" != *bats_incomplete* ]]
 	grep -q "deferring the suite" "$LOG_FILE"
 }
@@ -878,9 +914,31 @@ _repro_full_suite_npm_check() {
 
 @test "#926: a timed-out BATS full-suite run records the timeout marker, never red" {
 	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
 	_bats_full_suite_outcome 124 $'ok 1 a\nnot ok 2 b' "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout test:bats_incomplete:full_suite" ]]
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout test:bats_incomplete:deferred" ]]
 	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
+}
+
+@test "timed-out BATS full-suite run records no incomplete mark when not deferred" {
+	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=false
+	_bats_full_suite_outcome 124 "" "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout" ]]
+}
+
+@test "unmeasured BATS full-suite run records incomplete:deferred only when deferred" {
+	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
+	_bats_full_suite_outcome 1 $'ok 1 a' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured test:bats_incomplete:deferred" ]]
+}
+
+@test "unmeasured BATS full-suite run records no incomplete mark when not deferred" {
+	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=false
+	_bats_full_suite_outcome 1 $'ok 1 a' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured" ]]
 }
 
 @test "#926: a timed-out npm full-suite check does not exit or return before the BATS check runs" {
@@ -965,14 +1023,16 @@ BATS_UNMEASURED_TITLE="Full-Suite BATS Check: pipeline tests UNMEASURED (no fail
 BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 
 @test "BATS full-suite killed run (rc 137, no failing test) is unmeasured, not red" {
+	BATS_SUITE_DEFERRED=true
 	_bats_outcome_captured 137 $'1..3\nok 1 a'
-	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured test:bats_incomplete:full_suite" ]
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured test:bats_incomplete:deferred" ]
 	[ "$(< "$TEST_TMP/title")" = "$BATS_UNMEASURED_TITLE" ]
 }
 
 @test "BATS full-suite setup error (rc 1, no TAP at all) is unmeasured, not red" {
+	BATS_SUITE_DEFERRED=true
 	_bats_outcome_captured 1 "bats: command not found"
-	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured test:bats_incomplete:full_suite" ]
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured test:bats_incomplete:deferred" ]
 	[ "$(< "$TEST_TMP/title")" = "$BATS_UNMEASURED_TITLE" ]
 }
 
@@ -989,8 +1049,9 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 }
 
 @test "BATS full-suite timed-out run (rc 124) records only the timeout marker and posts no comment" {
+	BATS_SUITE_DEFERRED=true
 	_bats_outcome_captured 124 $'1..5\nok 1 a\nnot ok 2 broken'
-	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_timeout test:bats_incomplete:full_suite" ]
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_timeout test:bats_incomplete:deferred" ]
 	[ ! -e "$TEST_TMP/title" ]
 }
 
@@ -1008,6 +1069,7 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 }
 
 @test "BATS full-suite unmeasured warning says so when no TAP plan was printed" {
+	BATS_SUITE_DEFERRED=true
 	_bats_outcome_captured 1 "bats: command not found"
 	grep -qF 'Results seen: 0 ok, 0 not ok' "$TEST_TMP/warn"
 	grep -qF 'TAP plan size: none reported' "$TEST_TMP/warn"
@@ -1027,14 +1089,16 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 
 @test "_bats_full_suite_outcome: rc 124 records the timeout marker" {
 	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
 	_bats_full_suite_outcome 124 "" "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout test:bats_incomplete:full_suite" ]]
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout test:bats_incomplete:deferred" ]]
 }
 
 @test "_bats_full_suite_outcome: non-zero rc with no failing test is unmeasured" {
 	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
 	_bats_full_suite_outcome 1 "runner aborted" "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured test:bats_incomplete:full_suite" ]]
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured test:bats_incomplete:deferred" ]]
 }
 
 @test "_bats_full_suite_outcome: failing test records red and names it" {
@@ -1053,13 +1117,54 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 
 @test "full-suite timeout and unmeasured both record a blocking bats_incomplete mark; red does not" {
 	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
 	local rc out
 	for rc in 124 137; do
 		DEGRADED_STAGES=()
 		_bats_full_suite_outcome "$rc" $'1..3\nok 1 a' "$TEST_TMP/l.log"
-		[[ "${DEGRADED_STAGES[*]}" == *"test:bats_incomplete:full_suite"* ]]
+		[[ "${DEGRADED_STAGES[*]}" == *"test:bats_incomplete:deferred"* ]]
 	done
 	DEGRADED_STAGES=()
 	_bats_full_suite_outcome 1 $'1..2\nnot ok 1 a' "$TEST_TMP/l.log"
 	[[ "${DEGRADED_STAGES[*]}" != *bats_incomplete* ]]
+}
+
+# =============================================================================
+# BATS_SUITE_DEFERRED FLAG
+# =============================================================================
+
+@test "BATS_SUITE_DEFERRED is declared globally as false" {
+	local script_content
+	script_content=$(< "$ORCHESTRATOR_SCRIPT")
+
+	[[ "$script_content" == *$'\nBATS_SUITE_DEFERRED=false\n'* ]]
+}
+
+@test "run_test_loop resets BATS_SUITE_DEFERRED to false before the deferral" {
+	local body
+	body=$(sed -n '/^run_test_loop() {/,/^}/p' "$ORCHESTRATOR_SCRIPT")
+
+	local before_reset="${body%%BATS_SUITE_DEFERRED=false*}"
+	local before_true="${body%%BATS_SUITE_DEFERRED=true*}"
+
+	[[ "$body" == *'BATS_SUITE_DEFERRED=false'* ]]
+	[[ "$body" == *'BATS_SUITE_DEFERRED=true'* ]]
+	((${#before_reset} < ${#before_true}))
+	# The reset precedes the first early return from the loop.
+	[[ "$before_reset" != *'return 0'* ]]
+}
+
+@test "BATS_SUITE_DEFERRED is set true once and the deferral falls through to the test stage" {
+	local body
+	body=$(sed -n '/^run_test_loop() {/,/^}/p' "$ORCHESTRATOR_SCRIPT")
+
+	local count
+	count=$(grep -c 'BATS_SUITE_DEFERRED=true' <<< "$body")
+	((count == 1))
+
+	local after="${body#*BATS_SUITE_DEFERRED=true}"
+	local next_line
+	next_line=$(sed -n '2p' <<< "BATS_SUITE_DEFERRED=true$after")
+	[[ "$next_line" != *'return 0'* ]]
+	[[ "$next_line" == "    fi" ]]
 }

@@ -433,6 +433,10 @@ FULL_SUITE_KILL_GRACE="${FULL_SUITE_KILL_GRACE:-10}"
 
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
+
+# True only when run_test_loop deferred the BATS suite to the full-suite
+# check (no changed .bats files); reset to false at the start of every loop.
+BATS_SUITE_DEFERRED=false
 # The run-budget soft-threshold warning is emitted at most once per run
 # (issue #583).  The latch lives in status.json (.run_budget_soft_warned), NOT a
 # shell global: check_run_budget() runs inside the run_stage command-substitution
@@ -10681,6 +10685,12 @@ _bats_full_suite_outcome() {
     # clear incomplete marks (the root run, #1160).
     local supersede="${7:-true}"
     local failure_names failure_total failure_shown
+    # Unmeasured/timeout runs only block the merge when the BATS suite was
+    # deferred to this check (test:bats_incomplete:deferred is recorded).
+    local gate_note="non-blocking"
+    if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+        gate_note="blocking: suite deferred"
+    fi
 
     if (( rc == 124 )); then
         # A timeout (rc 124) is neither a real failure nor a pass —
@@ -10694,11 +10704,13 @@ _bats_full_suite_outcome() {
         # return control to main() rather than blocking it.
         log_warn "Full-suite BATS check timed out after" \
             "${budget}s — treating as" \
-            "unmeasured, not red (non-blocking)"
+            "unmeasured, not red ($gate_note)"
         DEGRADED_STAGES+=("test:bats_full_suite_timeout")
-        # The suite never reached a verdict, so a deferred run leaves the
-        # branch unmeasured: record the blocking incomplete mark too.
-        DEGRADED_STAGES+=("test:bats_incomplete:full_suite")
+        # Only a run whose BATS suite was deferred to this check is left
+        # unmeasured by it; otherwise the test loop already measured it.
+        if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+            DEGRADED_STAGES+=("test:bats_incomplete:deferred")
+        fi
     elif (( rc != 0 )) \
         && (( $(_bats_full_suite_failure_count \
             "$output") == 0 )); then
@@ -10710,9 +10722,11 @@ _bats_full_suite_outcome() {
         # reconcile_failed_tasks_with_branch_evidence() treat it as
         # proof of a real regression.
         DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")
-        # The suite never reached a verdict, so a deferred run leaves the
-        # branch unmeasured: record the blocking incomplete mark too.
-        DEGRADED_STAGES+=("test:bats_incomplete:full_suite")
+        # Only a run whose BATS suite was deferred to this check is left
+        # unmeasured by it; otherwise the test loop already measured it.
+        if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+            DEGRADED_STAGES+=("test:bats_incomplete:deferred")
+        fi
         # State the evidence in the warning itself, so a killed runner
         # can be told from a setup error without opening the log.
         local ok_seen not_ok_seen plan_size
@@ -10724,7 +10738,7 @@ _bats_full_suite_outcome() {
         plan_size="${plan_size:-none reported}"
         log_warn "Full-suite BATS check exited $rc with" \
             "no failing test reported — treating as unmeasured," \
-            "not red (non-blocking). Results seen: $ok_seen ok," \
+            "not red ($gate_note). Results seen: $ok_seen ok," \
             "$not_ok_seen not ok; TAP plan size: $plan_size;" \
             "stage log: $log_path"
         comment_issue "Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)" \
@@ -11249,6 +11263,8 @@ run_test_loop() {
     max_test_iter=$(apply_profile_to_test_max_iter \
         "$loop_profile" "$MAX_TEST_ITERATIONS")
 
+    BATS_SUITE_DEFERRED=false
+
     log "Starting test loop after all tasks complete"
 
     # -------------------------------------------------------------------------
@@ -11332,17 +11348,21 @@ run_test_loop() {
     # the runner is present. Running an agent over the whole suite here
     # would only duplicate that check (and, being cut short, record a
     # spurious test:bats_incomplete mark). Defer to the full-suite check:
-    # no agent run, no incomplete mark. An unreliable (timed-out) diff
+    # no suite command, no incomplete mark. The test stage itself STILL
+    # runs so STEP 2 (test validation) is not lost; it is told to report
+    # bats_result 'skipped'. An unreliable (timed-out) diff
     # does not prove the list is empty, so it never defers.
     if [[ "$change_scope" == "bash" && -z "$changed_test_files" \
             && "$changed_test_detection_unreliable" != true \
             && -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
         log "No changed BATS test files and the full-suite runner is present — deferring the suite to the full-suite check"
         comment_issue "Test Loop: Deferred" "⏭️ No .bats files changed on this branch. The BATS suite is deferred to the full-suite check that runs after the test loop." ""
-        return 0
+        BATS_SUITE_DEFERRED=true
     fi
 
-    if [[ "$change_scope" == "bash" ]]; then
+    if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+        bash_test_command=""
+    elif [[ "$change_scope" == "bash" ]]; then
         # Pass the detected changed BATS files into the builder so it can
         # narrow the command to just the PR-changed suites. The builder
         # falls back to the full-suite command on its own when the list is
@@ -11394,7 +11414,11 @@ run_test_loop() {
 
     case "$change_scope" in
         bash)
-            test_command="cd $safe_dir && $bash_test_command"
+            if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+                test_command=""
+            else
+                test_command="cd $safe_dir && $bash_test_command"
+            fi
             ;;
         unknown-code)
             # Code this pipeline cannot classify, so Jest is a guess and
@@ -11543,7 +11567,14 @@ run_test_loop() {
         # bash scope (.claude/scripts changes): BLOCKING — failures fail the stage.
         # mixed scope: informational only — failures are reported but non-blocking.
         local bats_section=""
-        if [[ "$change_scope" == "bash" ]]; then
+        if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+            bats_section="STEP 1c — PIPELINE BATS TESTS (DEFERRED)
+The BATS suite is deferred to the full-suite check that runs after this loop.
+Do NOT run any BATS command. Set bats_result to 'skipped' and bats_summary to
+'BATS suite deferred to the full-suite check'.
+
+"
+        elif [[ "$change_scope" == "bash" ]]; then
             bats_section="STEP 1c — PIPELINE BATS TESTS (BLOCKING)
 Run the pipeline BATS tests:
 cd $safe_dir && $bash_test_command
@@ -11705,6 +11736,19 @@ $precheck_json
         local test_validation_skill
         test_validation_skill=$(load_skill "test-validation")
 
+        local step1_section="STEP 1 — TEST EXECUTION
+Run the following command:
+$test_command
+
+Report pass/fail with test counts and failure details.
+If tests fail, set validation_result to 'skipped' (no point validating failing tests)."
+        if [[ -z "$test_command" ]]; then
+            step1_section="STEP 1 — TEST EXECUTION: NO SUITE COMMAND
+There is no suite command to run for this iteration (the BATS suite is deferred).
+Do NOT run any test command. Set result to 'passed' and summarize that no suite
+was run, then continue to the remaining steps."
+        fi
+
         local test_prompt="${test_validation_skill:+## Skill Instructions — READ AND FOLLOW THESE
 
 $test_validation_skill
@@ -11713,12 +11757,7 @@ $test_validation_skill
 
 }Run the test suite and validate test quality in working directory $safe_dir.
 
-STEP 1 — TEST EXECUTION
-Run the following command:
-$test_command
-
-Report pass/fail with test counts and failure details.
-If tests fail, set validation_result to 'skipped' (no point validating failing tests).
+$step1_section
 ${playwright_notice}
 ${e2e_section}${bats_section}$validation_section${precheck_section}
 
@@ -11790,7 +11829,11 @@ Output both test results and validation findings in one structured response.
         # itself is always non-empty regardless of scope, so it cannot be
         # used as the key here — a future informational-only bats_section
         # that stops embedding a runnable command must update this guard too.
-        if [[ -n "$bats_section" && -z "$bats_status" ]]; then
+        # Exception: when the suite was deferred to the full-suite check, no
+        # BATS command ran by design, so a skipped or missing bats_result is
+        # expected and adds no bats_incomplete:iter mark.
+        if [[ -n "$bats_section" && -z "$bats_status" \
+                && "$BATS_SUITE_DEFERRED" != true ]]; then
             bats_status="incomplete"
             bats_summary_out="${bats_summary_out:-No bats_result reported for this iteration.}"
         fi
@@ -15032,11 +15075,12 @@ $full_scope_failures
 
             _bats_full_suite_outcome "$bats_full_rc" "$bats_full_output" \
                 "$bats_full_log" "$bats_runner" "$branch_scope"
-        fi
 
-        # Root tests/*.bats are not covered by the runner above (#1160);
-        # run them under their own bound and stage log.
-        _run_root_bats_full_suite "$branch_scope"
+            # Root tests/*.bats are not covered by the runner above (#1160);
+            # run them under their own bound and stage log. Only started
+            # when the runner exists: a repo without it has no BATS suite.
+            _run_root_bats_full_suite "$branch_scope"
+        fi
 
         # ---------------------------------------------------------------------
         # E2E-UNVALIDATED GUARD: the test loop above is unit-only when
