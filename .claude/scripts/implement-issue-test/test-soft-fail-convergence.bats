@@ -878,9 +878,31 @@ _repro_full_suite_npm_check() {
 
 @test "#926: a timed-out BATS full-suite run records the timeout marker, never red" {
 	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
 	_bats_full_suite_outcome 124 $'ok 1 a\nnot ok 2 b' "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout test:bats_incomplete:full_suite" ]]
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout test:bats_incomplete:deferred" ]]
 	[[ "${DEGRADED_STAGES[*]}" != *full_suite_red* ]]
+}
+
+@test "timed-out BATS full-suite run records no incomplete mark when not deferred" {
+	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=false
+	_bats_full_suite_outcome 124 "" "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout" ]]
+}
+
+@test "unmeasured BATS full-suite run records incomplete:deferred only when deferred" {
+	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
+	_bats_full_suite_outcome 1 $'ok 1 a' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured test:bats_incomplete:deferred" ]]
+}
+
+@test "unmeasured BATS full-suite run records no incomplete mark when not deferred" {
+	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=false
+	_bats_full_suite_outcome 1 $'ok 1 a' "$TEST_TMP/l.log"
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured" ]]
 }
 
 @test "#926: a timed-out npm full-suite check does not exit or return before the BATS check runs" {
@@ -965,14 +987,16 @@ BATS_UNMEASURED_TITLE="Full-Suite BATS Check: pipeline tests UNMEASURED (no fail
 BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 
 @test "BATS full-suite killed run (rc 137, no failing test) is unmeasured, not red" {
+	BATS_SUITE_DEFERRED=true
 	_bats_outcome_captured 137 $'1..3\nok 1 a'
-	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured test:bats_incomplete:full_suite" ]
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured test:bats_incomplete:deferred" ]
 	[ "$(< "$TEST_TMP/title")" = "$BATS_UNMEASURED_TITLE" ]
 }
 
 @test "BATS full-suite setup error (rc 1, no TAP at all) is unmeasured, not red" {
+	BATS_SUITE_DEFERRED=true
 	_bats_outcome_captured 1 "bats: command not found"
-	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured test:bats_incomplete:full_suite" ]
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_unmeasured test:bats_incomplete:deferred" ]
 	[ "$(< "$TEST_TMP/title")" = "$BATS_UNMEASURED_TITLE" ]
 }
 
@@ -989,8 +1013,9 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 }
 
 @test "BATS full-suite timed-out run (rc 124) records only the timeout marker and posts no comment" {
+	BATS_SUITE_DEFERRED=true
 	_bats_outcome_captured 124 $'1..5\nok 1 a\nnot ok 2 broken'
-	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_timeout test:bats_incomplete:full_suite" ]
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_full_suite_timeout test:bats_incomplete:deferred" ]
 	[ ! -e "$TEST_TMP/title" ]
 }
 
@@ -1008,6 +1033,7 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 }
 
 @test "BATS full-suite unmeasured warning says so when no TAP plan was printed" {
+	BATS_SUITE_DEFERRED=true
 	_bats_outcome_captured 1 "bats: command not found"
 	grep -qF 'Results seen: 0 ok, 0 not ok' "$TEST_TMP/warn"
 	grep -qF 'TAP plan size: none reported' "$TEST_TMP/warn"
@@ -1027,14 +1053,16 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 
 @test "_bats_full_suite_outcome: rc 124 records the timeout marker" {
 	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
 	_bats_full_suite_outcome 124 "" "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout test:bats_incomplete:full_suite" ]]
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_timeout test:bats_incomplete:deferred" ]]
 }
 
 @test "_bats_full_suite_outcome: non-zero rc with no failing test is unmeasured" {
 	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
 	_bats_full_suite_outcome 1 "runner aborted" "$TEST_TMP/l.log"
-	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured test:bats_incomplete:full_suite" ]]
+	[[ "${DEGRADED_STAGES[*]}" == "test:bats_full_suite_unmeasured test:bats_incomplete:deferred" ]]
 }
 
 @test "_bats_full_suite_outcome: failing test records red and names it" {
@@ -1053,11 +1081,12 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 
 @test "full-suite timeout and unmeasured both record a blocking bats_incomplete mark; red does not" {
 	comment_issue() { :; }
+	BATS_SUITE_DEFERRED=true
 	local rc out
 	for rc in 124 137; do
 		DEGRADED_STAGES=()
 		_bats_full_suite_outcome "$rc" $'1..3\nok 1 a' "$TEST_TMP/l.log"
-		[[ "${DEGRADED_STAGES[*]}" == *"test:bats_incomplete:full_suite"* ]]
+		[[ "${DEGRADED_STAGES[*]}" == *"test:bats_incomplete:deferred"* ]]
 	done
 	DEGRADED_STAGES=()
 	_bats_full_suite_outcome 1 $'1..2\nnot ok 1 a' "$TEST_TMP/l.log"
