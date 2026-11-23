@@ -10611,6 +10611,9 @@ _bats_full_suite_outcome() {
             "${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
             "unmeasured, not red (non-blocking)"
         DEGRADED_STAGES+=("test:bats_full_suite_timeout")
+        # The suite never reached a verdict, so a deferred run leaves the
+        # branch unmeasured: record the blocking incomplete mark too.
+        DEGRADED_STAGES+=("test:bats_incomplete:full_suite")
     elif (( rc != 0 )) \
         && (( $(_bats_full_suite_failure_count \
             "$output") == 0 )); then
@@ -10622,6 +10625,9 @@ _bats_full_suite_outcome() {
         # reconcile_failed_tasks_with_branch_evidence() treat it as
         # proof of a real regression.
         DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")
+        # The suite never reached a verdict, so a deferred run leaves the
+        # branch unmeasured: record the blocking incomplete mark too.
+        DEGRADED_STAGES+=("test:bats_incomplete:full_suite")
         # State the evidence in the warning itself, so a killed runner
         # can be told from a setup error without opening the log.
         local ok_seen not_ok_seen plan_size
