@@ -105,7 +105,7 @@ digraph process_pr {
 
 **Two command shapes are refused by the Bash permission check, whatever the allowlist says. Never emit either one in this skill:**
 
-1. **Assignment prefix** — a command that starts with `VAR=` or `VAR="$(…)"` (e.g. `PLATFORM_DIR="$(pipeline-core-platform-dir)"`).
+1. **Assignment prefix** — a command that starts with `VAR=` or `VAR="$(…)"` (e.g. capturing the output of `pipeline-core-platform-dir` into a variable).
 2. **Default expansion** — any `${VAR:-default}` (or `:=`, `:+`) in a command (e.g. `"${PLATFORM_DIR:-.claude/scripts/platform}/merge-mr.sh"`).
 
 Write every command literally: run each as its own bare command with real values and literal paths substituted for the `<PLACEHOLDERS>`, and read results from the command output rather than capturing them into variables. Pipes and `;` are fine.
