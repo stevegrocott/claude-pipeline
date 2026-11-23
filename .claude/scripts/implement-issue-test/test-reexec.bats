@@ -451,8 +451,8 @@ _run_orch_startup_env() {
 	_make_plugin_version "$cache" 0.8.19
 	_run_orch_startup_env "$cache" 0.8.19 "/usr/bin:/bin"
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"LOG: Pipeline version: 0.8.19"* ]]
-	[[ "$output" == *"LOG: Pipeline script dir: $cache/0.8.19/scripts"* ]]
+	[[ "$output" == *"LOG: Pipeline version: 0.8.19 (script dir: $cache/0.8.19/scripts)"* ]]
+	[ "$(grep -c 'LOG: Pipeline' <<< "$output")" -eq 1 ]
 	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
 	[[ "$output" != *"WARN:"* ]]
 }
@@ -464,7 +464,8 @@ _run_orch_startup_env() {
 	_make_plugin_version "$cache" 0.8.20
 	_run_orch_startup_env "$cache" 0.8.19 "$cache/0.8.10/bin:/usr/bin"
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"Note: inherited PATH entry"*"$cache/0.8.10/bin"* ]]
+	[[ "$output" == *"WARN: Pipeline 0.8.19 running; removed other-version bin"*"$cache/0.8.10/bin"* ]]
+	[[ "$output" != *"Note: inherited"* ]]
 	[[ "$output" == *"WARN: Newer pipeline version cached: 0.8.20"* ]]
 	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
 }
@@ -485,9 +486,26 @@ _run_orch_startup_env() {
 	local cache="$TEST_TMP/cache"
 	_make_plugin_version "$cache" 0.8.19
 	_make_plugin_version "$cache" 0.8.20
-	unset _PIPELINE_BATCH_LOGGED_STARTUP
 	_run_orch_startup_env "$cache" 0.8.19 "$cache/0.8.19/bin:/usr/bin"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"LOG: Pipeline version: 0.8.19"* ]]
 	[[ "$output" == *"WARN: Newer pipeline version cached: 0.8.20"* ]]
+}
+
+@test "orchestrator startup: repo-local layout logs repo-local, no warnings" {
+	local fn="$TEST_TMP/fn.sh"
+	sed -n '/^log_startup_environment() {/,/^}/p' \
+		"$REAL_SCRIPTS_DIR/implement-issue-orchestrator.sh" > "$fn"
+	run bash -c '
+		source "$1/resolve-pipeline-root.sh"
+		SCRIPT_DIR="$1"
+		_PIPELINE_BIN_ALREADY_PINNED=false
+		log() { printf "LOG: %s\n" "$*"; }
+		log_warn() { printf "WARN: %s\n" "$*"; }
+		source "$2"
+		log_startup_environment
+	' _ "$REAL_SCRIPTS_DIR" "$fn"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"LOG: Pipeline version: repo-local (script dir: $REAL_SCRIPTS_DIR)"* ]]
+	[[ "$output" != *"WARN:"* ]]
 }

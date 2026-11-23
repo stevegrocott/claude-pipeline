@@ -137,15 +137,28 @@ _install_versioned() {
     printf '%s\n' "$cache/$ver/scripts/resolve-pipeline-root.sh"
 }
 
-@test "pipeline_pin_bin_first puts this version's bin first and drops duplicates of it" {
+@test "pipeline_pin_bin_first puts this version's bin first and drops sibling-version bins" {
     local cache="$TEST_TMP/cache"
     local resolver
     resolver="$(_install_versioned "$cache" 0.8.22)"
     mkdir -p "$cache/0.8.12/bin"
 
-    run bash -c "PATH='$cache/0.8.12/bin:/usr/bin:$cache/0.8.22/bin:/bin'; source '$resolver'; pipeline_pin_bin_first; printf '%s\n' \"\$PATH\""
+    run bash -c "PATH='$cache/0.8.12/bin:/usr/bin:$cache/0.8.22/bin:/bin'; source '$resolver'; pipeline_pin_bin_first; printf '%s\n' \"\$PATH\"; printf 'removed=%s\n' \"\$PIPELINE_PIN_REMOVED\""
     [ "$status" -eq 0 ]
-    [ "$output" = "$cache/0.8.22/bin:$cache/0.8.12/bin:/usr/bin:/bin" ]
+    [ "${lines[0]}" = "$cache/0.8.22/bin:/usr/bin:/bin" ]
+    [ "${lines[1]}" = "removed=$cache/0.8.12/bin" ]
+}
+
+@test "pipeline_pin_bin_first keeps other plugins' bins" {
+    local cache="$TEST_TMP/cache"
+    local other="$TEST_TMP/other-plugin/1.2.3/bin"
+    local resolver
+    resolver="$(_install_versioned "$cache" 0.8.22)"
+
+    run bash -c "PATH='$other:/usr/bin'; source '$resolver'; pipeline_pin_bin_first; printf '%s\n' \"\$PATH\"; printf 'removed=%s\n' \"\$PIPELINE_PIN_REMOVED\""
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "$cache/0.8.22/bin:$other:/usr/bin" ]
+    [ "${lines[1]}" = "removed=" ]
 }
 
 @test "pipeline_pin_bin_first fails and leaves PATH alone with no bin dir" {
