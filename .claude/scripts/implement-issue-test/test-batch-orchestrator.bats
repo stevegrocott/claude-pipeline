@@ -7284,3 +7284,93 @@ _batch_wur_at() {
 	[ -n "$a" ]
 	[ "$a" = "$b" ]
 }
+
+# =============================================================================
+# ISSUE #1158: start-up pins PATH, logs version/script dir, warns on drift
+# =============================================================================
+
+# Build <cache>/<version>/{bin,scripts,.claude-plugin/plugin.json} with a copy
+# of the real resolver.
+_make_plugin_version() {
+	local cache="$1" version="$2"
+	mkdir -p "$cache/$version/bin" "$cache/$version/scripts" \
+		"$cache/$version/.claude-plugin"
+	printf '{\n  "version": "%s"\n}\n' "$version" \
+		> "$cache/$version/.claude-plugin/plugin.json"
+	cp "$SCRIPT_DIR/resolve-pipeline-root.sh" "$cache/$version/scripts/"
+}
+
+# Run log_startup_environment from the plugin copy of <version> with PATH=<path>.
+_run_startup_env() {
+	local cache="$1" version="$2" path_value="$3"
+	local fn="$TEST_TMP/fn.sh"
+	_extract_function_body log_startup_environment \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$fn"
+	run bash -c '
+		scripts="$1"; fn="$2"; PATH="$3"
+		source "$scripts/resolve-pipeline-root.sh"
+		SCRIPT_DIR="$scripts"
+		log() { printf "LOG: %s\n" "$*"; }
+		log_warn() { printf "WARN: %s\n" "$*"; }
+		source "$fn"
+		pipeline_pin_bin_first
+		log_startup_environment
+		printf "PATH0=%s\n" "${PATH%%:*}"
+	' _ "$cache/$version/scripts" "$fn" "$path_value"
+}
+
+@test "startup: pins running version bin first and logs version and script dir" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_run_startup_env "$cache" 0.8.19 "/usr/bin:/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"LOG: Pipeline version: 0.8.19"* ]]
+	[[ "$output" == *"LOG: Pipeline script dir: $cache/0.8.19/scripts"* ]]
+	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
+	[[ "$output" != *"WARN:"* ]]
+}
+
+@test "startup: warns on a stale PATH entry from another version" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_make_plugin_version "$cache" 0.8.10
+	_run_startup_env "$cache" 0.8.19 "$cache/0.8.10/bin:/usr/bin:/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"WARN: Stale PATH entry"*"$cache/0.8.10/bin"* ]]
+	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
+}
+
+@test "startup: warns when a newer version is cached" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_make_plugin_version "$cache" 0.8.20
+	_run_startup_env "$cache" 0.8.19 "/usr/bin:/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"WARN: Newer pipeline version cached: 0.8.20"* ]]
+}
+
+@test "startup: no newer-version warning when running the newest" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_make_plugin_version "$cache" 0.8.9
+	_run_startup_env "$cache" 0.8.19 "/usr/bin:/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"Newer pipeline version"* ]]
+}
+
+@test "startup: repo-local layout logs unknown version without warnings" {
+	local fn="$TEST_TMP/fn.sh"
+	_extract_function_body log_startup_environment \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$fn"
+	run bash -c '
+		source "$1/resolve-pipeline-root.sh"
+		SCRIPT_DIR="$1"
+		log() { printf "LOG: %s\n" "$*"; }
+		log_warn() { printf "WARN: %s\n" "$*"; }
+		source "$2"
+		log_startup_environment
+	' _ "$SCRIPT_DIR" "$fn"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"LOG: Pipeline version: unknown"* ]]
+	[[ "$output" != *"WARN:"* ]]
+}

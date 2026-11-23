@@ -135,6 +135,10 @@ SCRIPT_DIR="${_BATCH_ORCHESTRATOR_SCRIPT_DIR:-$(
 SCHEMA_DIR="$SCRIPT_DIR/schemas"
 # shellcheck source=resolve-pipeline-root.sh
 source "$SCRIPT_DIR/resolve-pipeline-root.sh"
+# Pin THIS version's bin/ first on PATH so every session the batch dispatches
+# resolves the pipeline-core-* shims to the running version, not a stale entry
+# inherited from a long-lived session (#1158). No-op in the repo-local layout.
+pipeline_pin_bin_first || true
 PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
     echo "FATAL: platform.sh not found (checked \$PIPELINE_CONFIG_DIR," \
         "<repo-root>/.claude/config/, and the legacy fallback)." \
@@ -480,6 +484,42 @@ log_warn() {
     local msg="[$(date -Iseconds)] WARN: $*"
     printf '%s\n' "$msg" >> "$LOG_FILE"
     printf '%s\n' "$msg" >&2
+}
+
+# Log the running pipeline version and script dir, and WARN about conditions
+# that make dispatched sessions run a different version than this batch:
+#   - a stale PATH entry: another versioned plugin bin/ dir still on PATH
+#     after pinning this version's bin/ first;
+#   - a newer version sitting in the plugin cache (this run uses the old one).
+# Advisory only: never fails the batch.
+log_startup_environment() {
+    local version root bin_dir entry newer
+    local -a newer_versions=()
+    version=$(pipeline_version 2>/dev/null) || version=""
+    log "Pipeline version: ${version:-unknown (repo-local layout)}"
+    log "Pipeline script dir: $SCRIPT_DIR"
+
+    [[ -n "$version" ]] || return 0
+    root=$(pipeline_plugin_root 2>/dev/null) || return 0
+    bin_dir="$root/bin"
+
+    local -a path_entries
+    IFS=: read -r -a path_entries <<< "$PATH"
+    for entry in "${path_entries[@]}"; do
+        [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
+        [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
+            && "${entry%/bin}" != "$root" ]] || continue
+        log_warn "Stale PATH entry from another pipeline version: $entry" \
+            "(running $version from $bin_dir)"
+    done
+
+    while IFS= read -r newer; do
+        [[ -n "$newer" ]] && newer_versions+=("$newer")
+    done < <(pipeline_newer_versions 2>/dev/null)
+    if ((${#newer_versions[@]} > 0)); then
+        log_warn "Newer pipeline version cached: ${newer_versions[*]}" \
+            "(this batch runs $version); start a fresh session to use it"
+    fi
 }
 
 # Log a WARN naming each tool denied in a claude result's permission_denials,
@@ -2986,6 +3026,7 @@ wait_for_pr_merged() {
 log "=========================================="
 log "Batch Orchestrator Starting"
 log "=========================================="
+log_startup_environment
 log "Issues: ${ISSUE_ARRAY[*]}"
 log "Branch: $BRANCH"
 log "Implement agent: ${AGENT:-default}"
