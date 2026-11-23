@@ -508,3 +508,43 @@ _valid_stage_end() {
 	[ "$status" -eq 3 ]
 	[ ! -s "$LOG_DIR/events.jsonl" ]
 }
+
+@test "(f) lock fallback: stale break file is dropped, emit lands" {
+	export EVENT_EMIT_LOCK_IMPL=mkdir
+	export LOCK_STALE_AGE=5
+	local lockdir="$LOG_DIR/events.jsonl.lock"
+	mkdir -p "$lockdir"
+	sleep 60 &
+	local dead=$!
+	kill -9 "$dead" 2>/dev/null
+	wait "$dead" 2>/dev/null || true
+	printf '%d\n' "$dead" > "$lockdir/pid"
+	: > "$LOG_DIR/events.jsonl.lock.break"
+	touch -t 200001010000 "$LOG_DIR/events.jsonl.lock.break"
+
+	local ev='{"ts":"2026-01-01T00:06:00Z","run_id":"brk",'
+	ev+='"stage":"test","event":"stage_start","model":"m"}'
+	run bash "$EVENT_EMIT_SCRIPT" "$ev"
+	[ "$status" -eq 0 ]
+	[ "$(wc -l < "$LOG_DIR/events.jsonl")" -eq 1 ]
+	[ ! -e "$LOG_DIR/events.jsonl.lock.break" ]
+}
+
+@test "(f) lock fallback: fresh break file is kept; times out exit 3" {
+	export EVENT_EMIT_LOCK_IMPL=mkdir
+	export LOCK_STALE_AGE=3600
+	local lockdir="$LOG_DIR/events.jsonl.lock"
+	mkdir -p "$lockdir"
+	sleep 60 &
+	local dead=$!
+	kill -9 "$dead" 2>/dev/null
+	wait "$dead" 2>/dev/null || true
+	printf '%d\n' "$dead" > "$lockdir/pid"
+	: > "$LOG_DIR/events.jsonl.lock.break"
+
+	local ev='{"ts":"2026-01-01T00:07:00Z","run_id":"brk2",'
+	ev+='"stage":"test","event":"stage_start","model":"m"}'
+	run bash "$EVENT_EMIT_SCRIPT" "$ev"
+	[ "$status" -eq 3 ]
+	[ -e "$LOG_DIR/events.jsonl.lock.break" ]
+}
