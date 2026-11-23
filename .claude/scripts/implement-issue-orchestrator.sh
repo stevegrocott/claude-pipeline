@@ -125,6 +125,15 @@ source "$SCRIPT_DIR/committable-path-lib.sh"
 source "$SCRIPT_DIR/prompts/triage-prompt.sh"
 # shellcheck source=resolve-pipeline-root.sh
 source "$SCRIPT_DIR/resolve-pipeline-root.sh"
+# Pin THIS version's bin/ first on PATH so every session this run dispatches
+# resolves the pipeline-core-* shims to the running version (#1158). When the
+# caller (batch-orchestrator.sh) already logged the version and warned, it
+# exports _PIPELINE_BATCH_LOGGED_STARTUP=1 and we stay silent. An explicit
+# marker is used (not a PATH inference) so standalone runs whose bin is already
+# first on PATH still log. No-op in the repo-local layout.
+_PIPELINE_BIN_ALREADY_PINNED=false
+[[ "${_PIPELINE_BATCH_LOGGED_STARTUP:-}" == 1 ]] && _PIPELINE_BIN_ALREADY_PINNED=true
+pipeline_pin_bin_first || true
 
 # Resolve the consumer repo's platform.sh via resolve_consumer_file() (checks
 # $PIPELINE_CONFIG_DIR, <repo-root>/.claude/config/, then the legacy
@@ -1144,6 +1153,41 @@ log_warn() {
         printf '%s\n' "$msg" >> "$LOG_FILE"
     fi
     printf '%s\n' "$msg" >&2
+}
+
+# Log the running pipeline version and script dir, and WARN about conditions
+# that make dispatched sessions run a different version than this run: a stale
+# PATH entry from another versioned plugin bin/, or a newer cached version.
+# Silent when the caller already pinned this version (#1158). Advisory only.
+log_startup_environment() {
+    local version root bin_dir entry newer
+    local -a newer_versions=()
+    local -a path_entries
+    [[ "$_PIPELINE_BIN_ALREADY_PINNED" == true ]] && return 0
+    version=$(pipeline_version 2>/dev/null) || version=""
+    log "Pipeline version: ${version:-unknown (repo-local layout)}"
+    log "Pipeline script dir: $SCRIPT_DIR"
+
+    [[ -n "$version" ]] || return 0
+    root=$(pipeline_plugin_root 2>/dev/null) || return 0
+    bin_dir="$root/bin"
+
+    IFS=: read -r -a path_entries <<< "$PATH"
+    for entry in "${path_entries[@]}"; do
+        [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
+        [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
+            && "${entry%/bin}" != "$root" ]] || continue
+        log "Note: inherited PATH entry from another pipeline version: $entry" \
+            "(harmless, $version's bin is pinned first; running from $bin_dir)"
+    done
+
+    while IFS= read -r newer; do
+        [[ -n "$newer" ]] && newer_versions+=("$newer")
+    done < <(pipeline_newer_versions 2>/dev/null)
+    if ((${#newer_versions[@]} > 0)); then
+        log_warn "Newer pipeline version cached: ${newer_versions[*]}" \
+            "(this run uses $version); start a fresh session to use it"
+    fi
 }
 
 next_stage_log() {
@@ -2709,6 +2753,7 @@ LOG_FILE="$LOG_BASE/orchestrator.log"
 STAGE_COUNTER=0
 _CONSECUTIVE_TIMEOUTS=0
 _TIMED_OUT_STAGE_NAMES=""
+log_startup_environment
 
 # Registry of top-level background task PIDs.  Populated as each parallel
 # subshell is launched so the TERM handler can forward SIGTERM before

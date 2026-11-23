@@ -410,3 +410,84 @@ MOCKCMD
 	expect_no_substring "$output" "Usage: $REEXEC_TMPDIR/" \
 		"usage does not name the private temp copy"
 }
+
+# =============================================================================
+# ISSUE #1158: start-up pins PATH, logs version/script dir, warns on drift
+# =============================================================================
+
+_make_plugin_version() {
+	local cache="$1" version="$2"
+	mkdir -p "$cache/$version/bin" "$cache/$version/scripts" \
+		"$cache/$version/.claude-plugin"
+	printf '{\n  "version": "%s"\n}\n' "$version" \
+		> "$cache/$version/.claude-plugin/plugin.json"
+	cp "$REAL_SCRIPTS_DIR/resolve-pipeline-root.sh" \
+		"$cache/$version/scripts/"
+}
+
+# Run the real pin block + log_startup_environment from the plugin copy.
+_run_orch_startup_env() {
+	local cache="$1" version="$2" path_value="$3"
+	local fn="$TEST_TMP/fn.sh" pin="$TEST_TMP/pin.sh"
+	local orch="$REAL_SCRIPTS_DIR/implement-issue-orchestrator.sh"
+	sed -n '/^log_startup_environment() {/,/^}/p' "$orch" > "$fn"
+	sed -n '/^_PIPELINE_BIN_ALREADY_PINNED=false/,/^pipeline_pin_bin_first/p' \
+		"$orch" > "$pin"
+	run bash -c '
+		scripts="$1"; fn="$2"; pin="$3"; PATH="$4"
+		source "$scripts/resolve-pipeline-root.sh"
+		SCRIPT_DIR="$scripts"
+		log() { printf "LOG: %s\n" "$*"; }
+		log_warn() { printf "WARN: %s\n" "$*"; }
+		source "$pin"
+		source "$fn"
+		log_startup_environment
+		printf "PATH0=%s\n" "${PATH%%:*}"
+	' _ "$cache/$version/scripts" "$fn" "$pin" "$path_value"
+}
+
+@test "orchestrator startup: pins bin first, logs version and script dir" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_run_orch_startup_env "$cache" 0.8.19 "/usr/bin:/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"LOG: Pipeline version: 0.8.19"* ]]
+	[[ "$output" == *"LOG: Pipeline script dir: $cache/0.8.19/scripts"* ]]
+	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
+	[[ "$output" != *"WARN:"* ]]
+}
+
+@test "orchestrator startup: warns on stale PATH entry and newer version" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_make_plugin_version "$cache" 0.8.10
+	_make_plugin_version "$cache" 0.8.20
+	_run_orch_startup_env "$cache" 0.8.19 "$cache/0.8.10/bin:/usr/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"Note: inherited PATH entry"*"$cache/0.8.10/bin"* ]]
+	[[ "$output" == *"WARN: Newer pipeline version cached: 0.8.20"* ]]
+	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
+}
+
+@test "orchestrator startup: silent when batch marked startup as logged" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_make_plugin_version "$cache" 0.8.20
+	_PIPELINE_BATCH_LOGGED_STARTUP=1 \
+		_run_orch_startup_env "$cache" 0.8.19 "$cache/0.8.19/bin:/usr/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"LOG:"* ]]
+	[[ "$output" != *"WARN:"* ]]
+	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
+}
+
+@test "orchestrator startup: standalone run with bin already first still logs and warns" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_make_plugin_version "$cache" 0.8.20
+	unset _PIPELINE_BATCH_LOGGED_STARTUP
+	_run_orch_startup_env "$cache" 0.8.19 "$cache/0.8.19/bin:/usr/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"LOG: Pipeline version: 0.8.19"* ]]
+	[[ "$output" == *"WARN: Newer pipeline version cached: 0.8.20"* ]]
+}

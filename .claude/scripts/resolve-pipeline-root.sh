@@ -212,4 +212,72 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
 
         return 1
     }
+
+    # pipeline_plugin_root
+    #   Prints the plugin root (the dir holding bin/, scripts/ and
+    #   .claude-plugin/) when this library lives in a plugin bundle, i.e. the
+    #   parent of the scripts dir has .claude-plugin/plugin.json. Returns
+    #   non-zero (printing nothing) in the repo-local .claude/scripts layout.
+    pipeline_plugin_root() {
+        local root
+        root="$(cd "${_PIPELINE_SCRIPTS_DIR}/.." && pwd)" || return 1
+        [[ -f "${root}/.claude-plugin/plugin.json" ]] || return 1
+        printf '%s\n' "$root"
+    }
+
+    # pipeline_pin_bin_first
+    #   Puts THIS version's bin/ first on PATH (de-duplicated) and exports it,
+    #   so every session the run starts resolves the pipeline-core-* shims to
+    #   the version that is running — not to a stale entry inherited from a
+    #   long-lived session. A no-op returning non-zero when there is no bin/
+    #   next to this library (repo-local layout).
+    pipeline_pin_bin_first() {
+        local bin_dir
+        bin_dir="$(cd "${_PIPELINE_SCRIPTS_DIR}/../bin" 2>/dev/null && pwd)" \
+            || return 1
+        local rest=":${PATH}:"
+        rest="${rest//:${bin_dir}:/:}"
+        rest="${rest#:}"
+        rest="${rest%:}"
+        PATH="${bin_dir}${rest:+:${rest}}"
+        export PATH
+    }
+
+    # pipeline_version
+    #   Prints the running plugin's version from .claude-plugin/plugin.json.
+    #   Returns non-zero (printing nothing) when it cannot be determined.
+    pipeline_version() {
+        local root version
+        root="$(pipeline_plugin_root)" || return 1
+        version="$(sed -n \
+            's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "${root}/.claude-plugin/plugin.json" | head -n 1)"
+        [[ -n "$version" ]] || return 1
+        printf '%s\n' "$version"
+    }
+
+    # pipeline_newer_versions
+    #   Prints (one per line, ascending) the sibling plugin versions in the
+    #   cache dir that are newer than the running one. Prints nothing and
+    #   returns 0 when the running version is the newest or there are no
+    #   versioned siblings; returns non-zero if the version is unknown.
+    pipeline_newer_versions() {
+        local root version parent dir name
+        local -a found=()
+        root="$(pipeline_plugin_root)" || return 1
+        version="$(pipeline_version)" || return 1
+        parent="${root%/*}"
+        for dir in "$parent"/*/; do
+            [[ -d "$dir" ]] || continue
+            dir="${dir%/}"
+            name="${dir##*/}"
+            [[ "$name" =~ ^[0-9]+(\.[0-9]+)*$ ]] || continue
+            [[ "$name" == "$version" ]] && continue
+            found+=("$name")
+        done
+        ((${#found[@]} > 0)) || return 0
+        printf '%s\n' "${found[@]}" "$version" \
+            | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n \
+            | awk -v v="$version" 'seen { print } $0 == v { seen = 1 }'
+    }
 fi
