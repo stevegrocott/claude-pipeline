@@ -647,6 +647,42 @@ _wait_for_file() {
         "expected $n increments after dead-lock break, got $count"
 }
 
+@test "status lock: stale break file is removed and the stale lock broken" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=10
+    export LOCK_STALE_AGE=5
+    init_status
+
+    mkdir -p "${STATUS_FILE}.lockdir"
+    printf '%s\n' 999999 > "${STATUS_FILE}.lockdir/pid"
+    : > "${STATUS_FILE}.lockdir.break"
+    touch -t 200001010000 "${STATUS_FILE}.lockdir.break"
+
+    run status_json_write --arg v "after-break" '.branch = $v'
+    [ "$status" -eq 0 ] || fail "write blocked by orphaned break file: $output"
+    [ "$(jq -r '.branch' "$STATUS_FILE")" = "after-break" ] \
+        || fail "update lost after stale break file removal"
+    [ ! -e "${STATUS_FILE}.lockdir.break" ] || fail "break file left behind"
+}
+
+@test "status lock: fresh break file makes the waiter time out, not spin" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=2
+    export LOCK_STALE_AGE=3600
+    init_status
+
+    mkdir -p "${STATUS_FILE}.lockdir"
+    printf '%s\n' 999999 > "${STATUS_FILE}.lockdir/pid"
+    : > "${STATUS_FILE}.lockdir.break"
+
+    local start=$SECONDS
+    run _status_lock_acquire
+    [ "$status" -eq 1 ] || fail "expected timeout (1), got $status: $output"
+    (( SECONDS - start >= 2 )) || fail "returned before the deadline"
+    (( SECONDS - start < 8 )) || fail "overran the deadline"
+    [ -e "${STATUS_FILE}.lockdir.break" ] || fail "fresh break file removed"
+}
+
 @test "status_json_write: proceeds when mkdir lock is held by its own pid (#1117)" {
     export STATUS_LOCK_IMPL=mkdir
     export STATUS_LOCK_TIMEOUT=3

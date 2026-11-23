@@ -1382,8 +1382,22 @@ _status_lock_acquire() {
                         rm -f "$pidfile" 2>/dev/null || true
                     fi
                     rm -f "$break_mutex" 2>/dev/null || true
+                    continue
                 fi
-                continue
+                # Failed to take the break mutex: another waiter holds it, or
+                # a breaker died leaving it behind.  Remove a break file older
+                # than LOCK_STALE_AGE, then fall through to the deadline check
+                # and sleep instead of spinning (and ignoring the timeout).
+                local bmtime bnow stale_age="${LOCK_STALE_AGE:-30}"
+                bmtime=$(stat -c %Y "$break_mutex" 2>/dev/null \
+                    || stat -f %m "$break_mutex" 2>/dev/null) || bmtime=
+                if [[ "$bmtime" =~ ^[0-9]+$ ]]; then
+                    printf -v bnow '%(%s)T' -1
+                    if (( bnow - bmtime > stale_age )); then
+                        rm -f "$break_mutex" 2>/dev/null || true
+                        continue
+                    fi
+                fi
             fi
         fi
 
