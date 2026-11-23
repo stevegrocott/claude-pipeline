@@ -844,6 +844,36 @@ run_gate_a() {
 	done
 }
 
+@test "Gate A: superseded bats_incomplete mark does not block merge (#1152)" {
+	DEGRADED_STAGES=("test:bats_incomplete_superseded:iter=1")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "Gate A: bats_incomplete mark is not blocked after a green full suite (#1152)" {
+	local fn
+	fn=$(awk '/^_supersede_bats_incomplete_marks\(\) \{/ {g=1} g {print} g && /^}/ {exit}' "$ORCHESTRATOR_SCRIPT")
+	[[ -n "$fn" ]] || return 99
+	eval "$fn"
+
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1")
+	run run_gate_a
+	[[ "$output" == convergence\|* ]]
+
+	_supersede_bats_incomplete_marks
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "Gate A: bats_incomplete mark stays blocked when the full suite was not green (#1152)" {
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1" "test:bats_full_suite_red")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|Test loop convergence failure recorded in degraded_stages: test:bats_incomplete:iter=1" ]]
+}
+
 @test "Gate A does not block on non-loop test markers or an empty DEGRADED_STAGES" {
 	DEGRADED_STAGES=()
 	run run_gate_a
