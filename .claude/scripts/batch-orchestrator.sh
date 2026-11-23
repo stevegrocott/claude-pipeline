@@ -2906,10 +2906,24 @@ comment_paused_on_pr() {
 # merge_blocked stays only for PRs still open or closed unmerged.
 mark_issue_completed_on_merge() {
 	local issue_num="$1" pr="$2"
+	local prior=""
+	# Read BEFORE the write below: a run that already ended completed went
+	# through the process-pr dispatch, so it has nothing left to file.
+	prior=$(jq -r --arg num "$issue_num" \
+		'.issues[] | select(.number == $num) | .status // empty' \
+		"$STATUS_FILE" 2>/dev/null) || prior=""
 	update_issue_field "$issue_num" "status" "completed"
 	update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
 	update_issue_field "$issue_num" "pr" "$pr" "true"
 	update_progress
+	if [[ "$prior" == "completed" ]]; then
+		return 0
+	fi
+	if [[ "${BATCH_FOLLOWUPS_ON_MERGE:-1}" == "0" ]]; then
+		log "Issue #$issue_num: BATCH_FOLLOWUPS_ON_MERGE=0 —" \
+			"skipping the followups-only pass"
+		return 0
+	fi
 	# Non-fatal: a failed followups pass never un-completes the issue.
 	dispatch_followups_only_pass "$issue_num" "$pr" \
 		|| log_warn "Issue #$issue_num: followups-only pass for PR #$pr" \

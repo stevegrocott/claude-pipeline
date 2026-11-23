@@ -7487,3 +7487,49 @@ _load_followups_pass() {
 	[[ ! -s "$TEST_TMP/dispatch.log" ]] \
 		|| fail "pass re-dispatched despite recorded follow_ups"
 }
+
+@test "#1157: no pass when the issue was already completed" {
+	_load_followups_pass
+	jq -n '{state:"running", issues:[{number:"5980", status:"completed",
+		pr:"1234", follow_ups:[]}],
+		progress:{total:1, completed:1, pending:0, failed:0}}' > "$STATUS_FILE"
+	dispatch_composition() { printf 'called\n' >> "$TEST_TMP/dispatch.log"; }
+
+	mark_issue_completed_on_merge 5980 1234
+
+	[[ ! -s "$TEST_TMP/dispatch.log" ]] \
+		|| fail "pass dispatched for an already completed issue"
+}
+
+@test "#1157: no pass when the parked PR is closed unmerged" {
+	_load_wait_for_merge_functions
+	_load_followups_pass
+	_seed_status_with_open_pr
+	_stub_comment_issue
+	_stub_gh_pr_states CLOSED
+	dispatch_composition() { printf 'called\n' >> "$TEST_TMP/dispatch.log"; }
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]]
+	[[ ! -s "$TEST_TMP/dispatch.log" ]] \
+		|| fail "pass dispatched for a PR closed without merging"
+	[[ "$(jq -r '.issues[] | select(.number == "5980") | .completed_at // "none"' \
+		"$STATUS_FILE")" == "none" ]] \
+		|| fail "issue was marked completed for a closed PR"
+}
+
+@test "#1157: no pass when BATCH_FOLLOWUPS_ON_MERGE=0 opts out" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	dispatch_composition() { printf 'called\n' >> "$TEST_TMP/dispatch.log"; }
+
+	BATCH_FOLLOWUPS_ON_MERGE=0 mark_issue_completed_on_merge 5980 1234
+
+	[[ ! -s "$TEST_TMP/dispatch.log" ]] \
+		|| fail "pass dispatched despite the opt-out"
+	[[ "$(jq -r '.issues[] | select(.number == "5980") | .status' \
+		"$STATUS_FILE")" == "completed" ]]
+}
