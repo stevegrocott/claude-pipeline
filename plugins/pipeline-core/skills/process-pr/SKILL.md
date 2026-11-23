@@ -54,10 +54,12 @@ Read PR/MR review comments and act accordingly: if approved, create follow-up is
 - `$1` — PR/MR number (required)
 - `$2` — Issue number that the PR/MR addresses (required)
 - `$3` — Base branch for re-implementation if needed (required)
+- `--followups-only` — optional flag; see "Followups-only mode" below
 
 **Examples:**
 - `/process-pr 142 130 aw-next`
 - `/process-pr 456 123 main`
+- `/process-pr 142 130 main --followups-only`
 
 ## Process
 
@@ -100,6 +102,10 @@ digraph process_pr {
 ```
 
 **Why merge first:** Follow-up issues should only be created if the merge succeeds. Creating issues before merge can leave orphaned issues if merge fails (conflict, permissions, etc.). Merging first ensures we only create follow-ups for work that actually landed.
+
+### Followups-only mode
+
+When invoked with `--followups-only`, the PR/MR is already merged and only its dropped follow-ups need filing. Run Step 0 (resolve the platform directory) and Step 2 (fetch the PR/MR comments, which may be on a merged PR), then run **only Step 4f and Step 4g**. Skip Step 1's open-state checks, Step 3 (review status), Step 4a through 4e (merge block, merge, issue comment, issue close, branch delete) and Step 5 (re-implementation): nothing is merged, commented on as completed, closed, or deleted. Output the final result with status `merged` and the created issue numbers in `follow_up_issues`.
 
 ### Step 0: Resolve the Platform Directory
 

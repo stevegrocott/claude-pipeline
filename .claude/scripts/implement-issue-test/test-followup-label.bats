@@ -113,6 +113,18 @@ teardown() {
 	grep -qF "cat <<'EOF'" <<<"$step"
 }
 
+@test "process-pr SKILL.md documents a followups-only mode running only steps 4f and 4g" {
+	[[ -f "$PROCESS_PR_SKILL" ]]
+	local mode
+	mode=$(awk '/^### Followups-only mode/{f=1;next} /^### |^## /{f=0} f' "$PROCESS_PR_SKILL")
+	[[ -n "$mode" ]]
+	grep -qF -- '--followups-only' "$PROCESS_PR_SKILL"
+	grep -qE 'only Step 4f and Step 4g' <<<"$mode"
+	grep -qE 'Skip .*Step 4a through 4e' <<<"$mode"
+	grep -qE 'Step 5' <<<"$mode"
+	grep -qE 'already merged' <<<"$mode"
+}
+
 @test "process-pr SKILL.md bash blocks have no leading assignment and no default expansion" {
 	[[ -f "$PROCESS_PR_SKILL" ]]
 	# The --allowedTools matcher refuses a command that starts with VAR=...
