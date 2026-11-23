@@ -652,9 +652,10 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 		grep -q "Narrowed BATS command:.*tests/new-suite.bats" "$LOG_FILE"
 }
 
-# No changed .bats file + runner present: the loop defers to main()'s
-# full-suite check — no agent run, no bats_incomplete mark.
-@test "bash scope: no changed .bats and runner present defers the suite without an agent run or incomplete mark" {
+# No changed .bats file + runner present: the loop defers the suite to
+# main()'s full-suite check. The test stage still runs (STEP 2 validation
+# stays) with no suite command and bats_result 'skipped' requested.
+@test "bash scope: deferred suite still runs the test stage with no suite command and bats_result skipped" {
 	_setup_test_loop_repo
 	mkdir -p .claude/scripts/implement-issue-test
 	printf '#!/usr/bin/env bash\n' > .claude/scripts/implement-issue-test/run-tests.sh
@@ -667,11 +668,13 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 	git commit -q -m "change a script only"
 
 	STAGE_CALLS="$TEST_TMP/stage_calls"
-	export STAGE_CALLS
+	PROMPT_CAPTURE_FILE="$TEST_TMP/deferred_prompt"
+	export STAGE_CALLS PROMPT_CAPTURE_FILE
 	: > "$STAGE_CALLS"
 	run_stage() {
 		printf '%s\n' "$1" >> "$STAGE_CALLS"
-		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","bats_result":"incomplete"}}'
+		printf '%s' "$2" > "$PROMPT_CAPTURE_FILE"
+		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","validation_result":"passed","bats_result":"skipped"}}'
 	}
 	export -f run_stage
 	comment_issue() { :; }
@@ -681,9 +684,13 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 	local rc=$?
 
 	[[ "$rc" -eq 0 ]]
-	[[ ! -s "$STAGE_CALLS" ]]
+	[[ "$(wc -l < "$STAGE_CALLS")" -eq 1 ]]
 	[[ "${DEGRADED_STAGES[*]:-}" != *bats_incomplete* ]]
 	grep -q "deferring the suite" "$LOG_FILE"
+	grep -qF "NO SUITE COMMAND" "$PROMPT_CAPTURE_FILE"
+	grep -qF "Set bats_result to 'skipped'" "$PROMPT_CAPTURE_FILE"
+	grep -qF "STEP 2 — TEST VALIDATION" "$PROMPT_CAPTURE_FILE"
+	! grep -qF "run-tests.sh" "$PROMPT_CAPTURE_FILE"
 }
 
 @test "bash scope: no changed .bats but runner absent still runs the test stage" {
@@ -1118,7 +1125,7 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 	[[ "$before_reset" != *'return 0'* ]]
 }
 
-@test "BATS_SUITE_DEFERRED is set true only at the deferral return" {
+@test "BATS_SUITE_DEFERRED is set true once and the deferral falls through to the test stage" {
 	local body
 	body=$(sed -n '/^run_test_loop() {/,/^}/p' "$ORCHESTRATOR_SCRIPT")
 
@@ -1129,5 +1136,6 @@ BATS_RED_TITLE="Full-Suite BATS Check: pipeline tests are RED (non-blocking)"
 	local after="${body#*BATS_SUITE_DEFERRED=true}"
 	local next_line
 	next_line=$(sed -n '2p' <<< "BATS_SUITE_DEFERRED=true$after")
-	[[ "$next_line" == *'return 0'* ]]
+	[[ "$next_line" != *'return 0'* ]]
+	[[ "$next_line" == "    fi" ]]
 }

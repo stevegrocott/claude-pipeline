@@ -11348,7 +11348,9 @@ run_test_loop() {
     # the runner is present. Running an agent over the whole suite here
     # would only duplicate that check (and, being cut short, record a
     # spurious test:bats_incomplete mark). Defer to the full-suite check:
-    # no agent run, no incomplete mark. An unreliable (timed-out) diff
+    # no suite command, no incomplete mark. The test stage itself STILL
+    # runs so STEP 2 (test validation) is not lost; it is told to report
+    # bats_result 'skipped'. An unreliable (timed-out) diff
     # does not prove the list is empty, so it never defers.
     if [[ "$change_scope" == "bash" && -z "$changed_test_files" \
             && "$changed_test_detection_unreliable" != true \
@@ -11356,10 +11358,11 @@ run_test_loop() {
         log "No changed BATS test files and the full-suite runner is present — deferring the suite to the full-suite check"
         comment_issue "Test Loop: Deferred" "⏭️ No .bats files changed on this branch. The BATS suite is deferred to the full-suite check that runs after the test loop." ""
         BATS_SUITE_DEFERRED=true
-        return 0
     fi
 
-    if [[ "$change_scope" == "bash" ]]; then
+    if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+        bash_test_command=""
+    elif [[ "$change_scope" == "bash" ]]; then
         # Pass the detected changed BATS files into the builder so it can
         # narrow the command to just the PR-changed suites. The builder
         # falls back to the full-suite command on its own when the list is
@@ -11411,7 +11414,11 @@ run_test_loop() {
 
     case "$change_scope" in
         bash)
-            test_command="cd $safe_dir && $bash_test_command"
+            if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+                test_command=""
+            else
+                test_command="cd $safe_dir && $bash_test_command"
+            fi
             ;;
         unknown-code)
             # Code this pipeline cannot classify, so Jest is a guess and
@@ -11560,7 +11567,14 @@ run_test_loop() {
         # bash scope (.claude/scripts changes): BLOCKING — failures fail the stage.
         # mixed scope: informational only — failures are reported but non-blocking.
         local bats_section=""
-        if [[ "$change_scope" == "bash" ]]; then
+        if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+            bats_section="STEP 1c — PIPELINE BATS TESTS (DEFERRED)
+The BATS suite is deferred to the full-suite check that runs after this loop.
+Do NOT run any BATS command. Set bats_result to 'skipped' and bats_summary to
+'BATS suite deferred to the full-suite check'.
+
+"
+        elif [[ "$change_scope" == "bash" ]]; then
             bats_section="STEP 1c — PIPELINE BATS TESTS (BLOCKING)
 Run the pipeline BATS tests:
 cd $safe_dir && $bash_test_command
@@ -11722,6 +11736,19 @@ $precheck_json
         local test_validation_skill
         test_validation_skill=$(load_skill "test-validation")
 
+        local step1_section="STEP 1 — TEST EXECUTION
+Run the following command:
+$test_command
+
+Report pass/fail with test counts and failure details.
+If tests fail, set validation_result to 'skipped' (no point validating failing tests)."
+        if [[ -z "$test_command" ]]; then
+            step1_section="STEP 1 — TEST EXECUTION: NO SUITE COMMAND
+There is no suite command to run for this iteration (the BATS suite is deferred).
+Do NOT run any test command. Set result to 'passed' and summarize that no suite
+was run, then continue to the remaining steps."
+        fi
+
         local test_prompt="${test_validation_skill:+## Skill Instructions — READ AND FOLLOW THESE
 
 $test_validation_skill
@@ -11730,12 +11757,7 @@ $test_validation_skill
 
 }Run the test suite and validate test quality in working directory $safe_dir.
 
-STEP 1 — TEST EXECUTION
-Run the following command:
-$test_command
-
-Report pass/fail with test counts and failure details.
-If tests fail, set validation_result to 'skipped' (no point validating failing tests).
+$step1_section
 ${playwright_notice}
 ${e2e_section}${bats_section}$validation_section${precheck_section}
 
