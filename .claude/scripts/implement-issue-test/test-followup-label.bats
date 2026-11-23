@@ -10,7 +10,8 @@
 #   2. Static: process-pr SKILL.md classification table: precise row
 #      specifies no needs-explore label (AC4)
 #   3. Static: process-pr SKILL.md Step 4g wrapper contract
-#   4. PR review comment body formatting
+#   4. PR review comment body: verdict, summary, findings, reviewer
+#      comments (posted through a stubbed comment_pr)
 #
 # The orchestrator's former adjacent_issues block was unreachable (the
 # reviewer never emits adjacent_issues) and was removed along with the
@@ -24,6 +25,9 @@ load 'helpers/test-helper.bash'
 # restructure.
 PROCESS_PR_SKILL="$SCRIPT_DIR/../../plugins/pipeline-core/skills/process-pr/SKILL.md"
 [[ -f "$PROCESS_PR_SKILL" ]] || PROCESS_PR_SKILL="$SCRIPT_DIR/../skills/process-pr/SKILL.md"
+
+# Resolved before setup: source_orchestrator_functions clobbers SCRIPT_DIR.
+REVIEW_SCHEMA="$SCRIPT_DIR/schemas/implement-issue-review.json"
 
 setup() {
 	setup_test_env
@@ -110,43 +114,134 @@ teardown() {
 }
 
 # =============================================================================
-# PR review comment body: findings then reviewer comments
+# PR review comment body: verdict, summary, findings, reviewer comments
 # =============================================================================
 
-@test "review comment lists every finding with severity, file:line and description" {
-	local review_result body
-	review_result=$(jq -n '{output: {issues: [
-		{severity: "major", file: "src/a.sh", line: 12, description: "Unquoted var"},
-		{severity: "minor", file: "src/b.sh", description: "Naming nit"}
-	]}}')
-
-	body=$(_format_pr_review_comment "changes_requested" "$review_result" \
-		"Needs work" "R")
-
-	[[ "$body" == *'**major** `src/a.sh:12` — Unquoted var'* ]]
-	[[ "$body" == *'**minor** `src/b.sh` — Naming nit'* ]]
+# Fails unless the review output ($1, the stage result) uses only the
+# schema's field names and enum values.
+_assert_review_schema() {
+	jq -e --slurpfile s "$REVIEW_SCHEMA" '
+		($s[0].properties) as $p
+		| (.output | keys - ($p | keys)) == []
+		and ($s[0].required - (.output | keys)) == []
+		and ([.output.result] - $p.result.enum) == []
+		and ([.output.issues // [] | .[].severity]
+			- $p.issues.items.properties.severity.enum) == []
+		and ([.output.issues // [] | .[] | keys[]]
+			- ($p.issues.items.properties | keys)) == []
+	' <<<"$1" >/dev/null
 }
 
-@test "review comment puts findings before the reviewer comments" {
-	local review_result body
-	review_result=$(jq -n '{output: {issues: [
-		{severity: "major", file: "a.sh", line: 1, description: "Bad"}
-	]}}')
+# Posts a review result the way the PR review stage does: the real
+# _format_pr_review_comment output handed to comment_pr, here stubbed to
+# record its arguments under $TEST_TMP/posted.
+_post_review() {
+	local review_result="$1"
+	local verdict review_summary review_icon review_comment_body
 
-	body=$(_format_pr_review_comment "approved" "$review_result" \
-		"Overall fine" "OK")
+	verdict=$(jq -r '.output.result' <<<"$review_result")
+	review_summary=$(jq -r '.output.summary' <<<"$review_result")
+	review_icon="✅"
+	[[ "$verdict" == "changes_requested" ]] && review_icon="🔄"
 
-	[[ "$body" == "OK **Result:** approved"* ]]
-	local before_findings="${body%%### Findings*}"
-	local before_comments="${body%%### Reviewer comments*}"
-	(( ${#before_findings} < ${#before_comments} ))
-	[[ "$body" == *'### Reviewer comments'$'\n\n''Overall fine' ]]
+	comment_pr() {
+		mkdir -p "$TEST_TMP/posted"
+		printf '%s' "$1" > "$TEST_TMP/posted/pr"
+		printf '%s' "$2" > "$TEST_TMP/posted/title"
+		printf '%s' "$3" > "$TEST_TMP/posted/body"
+		printf '%s' "$4" > "$TEST_TMP/posted/agent"
+	}
+
+	review_comment_body=$(_format_pr_review_comment "$verdict" \
+		"$review_result" "$review_summary" "$review_icon")
+	comment_pr 7 "PR Review (Iteration 1)" "$review_comment_body" \
+		"code-reviewer"
 }
 
-@test "review comment omits findings section when there are none" {
-	local body
-	body=$(_format_pr_review_comment "approved" '{"output":{}}' "LGTM" "OK")
+@test "review comment posts verdict, summary, every finding and the reviewer comments" {
+	local review_result body
+	review_result=$(jq -n '{output: {
+		result: "changes_requested",
+		summary: "Needs work",
+		issues: [
+			{severity: "major", file: "src/a.sh", line: 12,
+				description: "Unquoted var"},
+			{severity: "minor", file: "src/b.sh", line: 3,
+				description: "Naming nit"}
+		],
+		comments: "Consider a helper for the retry loop."
+	}}')
+	_assert_review_schema "$review_result"
 
-	[[ "$body" != *"### Findings"* ]]
-	[[ "$body" == *"LGTM" ]]
+	_post_review "$review_result"
+
+	body=$(< "$TEST_TMP/posted/body")
+	[[ "$body" == "🔄 **Result:** changes_requested"$'\n\n''Needs work'* ]]
+	[[ "$body" == *$'\n''- **major** `src/a.sh:12` — Unquoted var'$'\n'* ]]
+	[[ "$body" == *$'\n''- **minor** `src/b.sh:3` — Naming nit'$'\n'* ]]
+	[[ "$body" == *'Consider a helper for the retry loop.' ]]
+	[ "$(< "$TEST_TMP/posted/title")" = "PR Review (Iteration 1)" ]
+	[ "$(< "$TEST_TMP/posted/agent")" = "code-reviewer" ]
+}
+
+@test "review comment with no findings and no comments is verdict and summary only" {
+	local review_result case_json
+	printf '✅ **Result:** approved\n\nLGTM' > "$TEST_TMP/expected"
+
+	for case_json in '{issues: [], comments: ""}' '{comments: " \n\t "}' '{}'; do
+		review_result=$(jq -n "{output: ({result: \"approved\",
+			summary: \"LGTM\"} + $case_json)}")
+		_assert_review_schema "$review_result"
+		rm -rf "$TEST_TMP/posted"
+
+		_post_review "$review_result"
+
+		run cmp "$TEST_TMP/expected" "$TEST_TMP/posted/body"
+		[ "$status" -eq 0 ]
+		run grep -cE 'Findings|Reviewer comments' "$TEST_TMP/posted/body"
+		[ "$output" = "0" ]
+	done
+}
+
+@test "review comment layout is summary, then findings, then reviewer comments" {
+	local review_result
+	review_result=$(jq -n '{output: {
+		result: "approved",
+		summary: "Overall fine",
+		issues: [{severity: "minor", file: "a.sh", line: 1,
+			description: "Bad"}],
+		comments: "Nice tests."
+	}}')
+	_assert_review_schema "$review_result"
+
+	_post_review "$review_result"
+
+	printf '%s\n' '✅ **Result:** approved' '' 'Overall fine' '' \
+		'### Findings' '' '- **minor** `a.sh:1` — Bad' '' \
+		'### Reviewer comments' '' > "$TEST_TMP/expected"
+	printf 'Nice tests.' >> "$TEST_TMP/expected"
+	run cmp "$TEST_TMP/expected" "$TEST_TMP/posted/body"
+	[ "$status" -eq 0 ]
+}
+
+@test "review comment posts backticks, command substitution and newlines as literal text" {
+	local marker="$TEST_TMP/executed-marker"
+	local desc comments review_result body
+	desc="Run \`touch $marker\` or \$(touch $marker)"$'\n''second line'
+	comments="Also \`touch $marker\` and \$(touch $marker)"$'\n''%s %d end'
+	review_result=$(jq -n --arg d "$desc" --arg c "$comments" '{output: {
+		result: "changes_requested",
+		summary: "See findings",
+		issues: [{severity: "major", file: "x.sh", line: 5,
+			description: $d}],
+		comments: $c
+	}}')
+	_assert_review_schema "$review_result"
+
+	_post_review "$review_result"
+
+	[ ! -e "$marker" ]
+	body=$(< "$TEST_TMP/posted/body")
+	[[ "$body" == *'- **major** `x.sh:5` — '"$desc"$'\n\n'* ]]
+	[[ "$body" == *'### Reviewer comments'$'\n\n'"$comments" ]]
 }

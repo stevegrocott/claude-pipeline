@@ -6568,12 +6568,15 @@ _parse_task_lines() {
 	printf '%s\n' "$tasks_json"
 }
 
-# Renders the body of a PR review comment: the verdict line, every finding
-# (severity, file:line, description), then the reviewer's comments.
+# Renders the body of a PR review comment: the verdict line, the summary,
+# every finding (severity, file:line, description), then the reviewer's
+# comments. The Findings and Reviewer comments sections appear only when
+# non-empty, so a clean review keeps the plain verdict + summary body.
 #
 # Arguments:
 #   $1  verdict         review verdict (e.g. approved, changes_requested)
-#   $2  review_result   stage result JSON (reads .output.issues)
+#   $2  review_result   stage result JSON (reads .output.issues and
+#                       .output.comments)
 #   $3  summary         reviewer's summary text
 #   $4  icon            leading verdict icon
 _format_pr_review_comment() {
@@ -6582,6 +6585,7 @@ _format_pr_review_comment() {
 	local summary="$3"
 	local icon="$4"
 	local findings
+	local comments
 
 	findings=$(printf '%s' "$review_result" | jq -r '
 		[.output.issues // [] | .[] |
@@ -6591,12 +6595,16 @@ _format_pr_review_comment() {
 			else "(no file)" end) +
 			"` — " + (.description // "")
 		] | join("\n")' 2>/dev/null || true)
+	comments=$(printf '%s' "$review_result" \
+		| jq -r '.output.comments // ""' 2>/dev/null || true)
 
-	printf '%s **Result:** %s\n\n' "$icon" "$verdict"
+	printf '%s **Result:** %s\n\n%s' "$icon" "$verdict" "$summary"
 	if [[ -n "$findings" ]]; then
-		printf '### Findings\n\n%s\n\n' "$findings"
+		printf '\n\n### Findings\n\n%s' "$findings"
 	fi
-	printf '### Reviewer comments\n\n%s' "$summary"
+	if [[ -n "${comments//[[:space:]]/}" ]]; then
+		printf '\n\n### Reviewer comments\n\n%s' "$comments"
+	fi
 }
 
 # Builds a well-formed issue body for an adjacent follow-up issue.
@@ -15708,12 +15716,10 @@ ${major_descriptions}"
         local review_icon="✅"
         [[ "$review_verdict" == "changes_requested" ]] && review_icon="🔄"
 
-        local followup_comment=""
-
         local review_comment_body
         review_comment_body=$(_format_pr_review_comment "$review_verdict" \
             "$review_result" "$review_summary" "$review_icon")
-        comment_pr "$pr_number" "PR Review (Iteration $pr_iteration)" "${review_comment_body}${followup_comment}" "code-reviewer"
+        comment_pr "$pr_number" "PR Review (Iteration $pr_iteration)" "$review_comment_body" "code-reviewer"
 
         if [[ "$review_verdict" == "approved" ]]; then
             pr_approved=true
