@@ -124,3 +124,78 @@ _install_resolver() {
     [ "$status" -eq 0 ]
     [ "$output" = "$scripts_dir/prompts/triage-prompt.sh" ]
 }
+
+# --- version pinning helpers (issue #1158) ---------------------------------
+
+# Build <cache>/<ver>/{scripts,bin,.claude-plugin/plugin.json}; echo scripts dir.
+_install_versioned() {
+    local cache="$1" ver="$2"
+    mkdir -p "$cache/$ver/bin" "$cache/$ver/.claude-plugin"
+    printf '{\n  "name": "pipeline-core",\n  "version": "%s"\n}\n' "$ver" \
+        > "$cache/$ver/.claude-plugin/plugin.json"
+    _install_resolver "$cache/$ver/scripts" > /dev/null
+    printf '%s\n' "$cache/$ver/scripts/resolve-pipeline-root.sh"
+}
+
+@test "pipeline_pin_bin_first puts this version's bin first and drops stale copies" {
+    local cache="$TEST_TMP/cache"
+    local resolver
+    resolver="$(_install_versioned "$cache" 0.8.22)"
+    mkdir -p "$cache/0.8.12/bin"
+
+    run bash -c "PATH='$cache/0.8.12/bin:/usr/bin:$cache/0.8.22/bin:/bin'; source '$resolver'; pipeline_pin_bin_first; printf '%s\n' \"\$PATH\""
+    [ "$status" -eq 0 ]
+    [ "$output" = "$cache/0.8.22/bin:$cache/0.8.12/bin:/usr/bin:/bin" ]
+}
+
+@test "pipeline_pin_bin_first fails and leaves PATH alone with no bin dir" {
+    local resolver
+    resolver="$(_install_resolver "$TEST_TMP/.claude/scripts")"
+
+    run bash -c "PATH='/usr/bin:/bin'; source '$resolver'; pipeline_pin_bin_first || echo rc=\$?; printf '%s\n' \"\$PATH\""
+    [[ "$output" == *"rc=1"* ]]
+    [[ "$output" == *"/usr/bin:/bin" ]]
+}
+
+@test "pipeline_version reports the version from plugin.json" {
+    local resolver
+    resolver="$(_install_versioned "$TEST_TMP/cache" 0.8.22)"
+
+    run bash -c "source '$resolver'; pipeline_version"
+    [ "$status" -eq 0 ]
+    [ "$output" = "0.8.22" ]
+}
+
+@test "pipeline_version fails in the repo-local layout" {
+    local resolver
+    resolver="$(_install_resolver "$TEST_TMP/.claude/scripts")"
+
+    run bash -c "source '$resolver'; pipeline_version"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "pipeline_newer_versions lists only newer siblings in version order" {
+    local cache="$TEST_TMP/cache"
+    local resolver
+    resolver="$(_install_versioned "$cache" 0.8.12)"
+    _install_versioned "$cache" 0.8.9 > /dev/null
+    _install_versioned "$cache" 0.8.22 > /dev/null
+    _install_versioned "$cache" 0.8.13 > /dev/null
+
+    run bash -c "source '$resolver'; pipeline_newer_versions"
+    [ "$status" -eq 0 ]
+    [ "$output" = $'0.8.13\n0.8.22' ]
+}
+
+@test "pipeline_newer_versions prints nothing when running the newest" {
+    local cache="$TEST_TMP/cache"
+    local resolver
+    resolver="$(_install_versioned "$cache" 0.8.22)"
+    _install_versioned "$cache" 0.8.12 > /dev/null
+    mkdir -p "$cache/not-a-version"
+
+    run bash -c "source '$resolver'; pipeline_newer_versions"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
