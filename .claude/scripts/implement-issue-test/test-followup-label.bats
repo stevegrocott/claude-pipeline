@@ -113,6 +113,24 @@ teardown() {
 	grep -qF "cat <<'EOF'" <<<"$step"
 }
 
+@test "process-pr SKILL.md bash blocks have no leading assignment and no default expansion" {
+	[[ -f "$PROCESS_PR_SKILL" ]]
+	# The --allowedTools matcher refuses a command that starts with VAR=...
+	# and any ${VAR:-x} default expansion, so no bash block may contain one.
+	local offenders
+	offenders=$(awk '
+		/^```bash[[:space:]]*$/ { inb = 1; next }
+		/^```/ { inb = 0; next }
+		inb && (/^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/ || /\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=+?]/) {
+			printf "%d: %s\n", NR, $0
+		}
+	' "$PROCESS_PR_SKILL")
+	if [[ -n "$offenders" ]]; then
+		printf 'refused command shapes in bash blocks:\n%s\n' "$offenders" >&2
+		return 1
+	fi
+}
+
 # =============================================================================
 # PR review comment body: verdict, summary, findings, reviewer comments
 # =============================================================================
