@@ -133,15 +133,36 @@ _load_bats_outcome_fns() {
 	comment_issue() { printf '%s\n%s\n' "$1" "$2" >> "$COMMENT_FILE"; }
 }
 
-@test "green BATS full suite swaps bats_incomplete for superseded" {
+@test "green BATS full suite collapses bats_incomplete marks into exactly one superseded entry" {
 	_load_bats_outcome_fns
 	DEGRADED_STAGES=("test:bats_incomplete:iter=1" "test:other" \
 		"test:bats_incomplete:iter=2")
 	_bats_full_suite_outcome 0 "ok 1 a" "$TEST_TMP/log"
-	[ "${#DEGRADED_STAGES[@]}" -eq 3 ]
-	[ "${DEGRADED_STAGES[0]}" = "test:bats_incomplete_superseded:iter=1" ]
-	[ "${DEGRADED_STAGES[1]}" = "test:other" ]
-	[ "${DEGRADED_STAGES[2]}" = "test:bats_incomplete_superseded:iter=2" ]
+	[ "${#DEGRADED_STAGES[@]}" -eq 2 ]
+	[ "${DEGRADED_STAGES[0]}" = "test:other" ]
+	[ "${DEGRADED_STAGES[1]}" = "test:bats_incomplete_superseded" ]
+	[ -s "$COMMENT_FILE" ]
+	grep -q 'supersede' "$COMMENT_FILE"
+}
+
+@test "green BATS full suite syncs the superseded list to the status file" {
+	_load_bats_outcome_fns
+	STATUS_FILE="$TEST_TMP/status.json"
+	echo '{"degraded_stages":["test:bats_incomplete:iter=1","test:other"]}' > "$STATUS_FILE"
+	status_json_write() { local t; t=$(jq "$@" "$STATUS_FILE") && printf '%s' "$t" > "$STATUS_FILE"; }
+	sync_status_to_log() { :; }
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1" "test:other")
+	_bats_full_suite_outcome 0 "ok 1 a" "$TEST_TMP/log"
+	[ "$(jq -c '.degraded_stages' "$STATUS_FILE")" = '["test:other","test:bats_incomplete_superseded"]' ]
+}
+
+@test "unmeasured BATS full suite leaves bats_incomplete marks intact and posts no supersede comment" {
+	_load_bats_outcome_fns
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1")
+	_bats_full_suite_outcome 1 "" "$TEST_TMP/log"
+	[ "${DEGRADED_STAGES[0]}" = "test:bats_incomplete:iter=1" ]
+	[ "${DEGRADED_STAGES[1]}" = "test:bats_full_suite_unmeasured" ]
+	! grep -q 'supersede' "$COMMENT_FILE" || return 1
 }
 
 @test "red BATS full suite leaves bats_incomplete marks intact" {
@@ -157,6 +178,7 @@ _load_bats_outcome_fns() {
 	DEGRADED_STAGES=("test:bats_incomplete:iter=1")
 	_bats_full_suite_outcome 124 "" "$TEST_TMP/log"
 	[ "${DEGRADED_STAGES[0]}" = "test:bats_incomplete:iter=1" ]
+	[ "${DEGRADED_STAGES[1]}" = "test:bats_full_suite_timeout" ]
 }
 
 @test "green BATS full suite with empty DEGRADED_STAGES stays empty" {
