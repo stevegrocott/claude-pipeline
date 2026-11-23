@@ -453,3 +453,58 @@ _valid_stage_end() {
 		return 1
 	}
 }
+
+# =============================================================================
+# (f) MKDIR/NOCLOBBER LOCK FALLBACK (#1151)
+# =============================================================================
+
+@test "(f) lock fallback: concurrent emits all land under noclobber lock" {
+	export EVENT_EMIT_LOCK_IMPL=mkdir
+	local pids=() i ev
+	for i in {1..10}; do
+		ev='{"ts":"2026-01-01T00:03:00Z","run_id":"nc-'"$i"'",'
+		ev+='"stage":"test","event":"stage_start","model":"m"}'
+		LOG_DIR="$LOG_DIR" bash "$EVENT_EMIT_SCRIPT" "$ev" &
+		pids+=($!)
+	done
+	for i in "${pids[@]}"; do
+		wait "$i" || return 1
+	done
+	[ "$(wc -l < "$LOG_DIR/events.jsonl")" -eq 10 ]
+	[ ! -e "$LOG_DIR/events.jsonl.lock/pid" ]
+}
+
+@test "(f) lock fallback: stale lock from dead pid is broken, emits land" {
+	export EVENT_EMIT_LOCK_IMPL=mkdir
+	local lockdir="$LOG_DIR/events.jsonl.lock"
+	mkdir -p "$lockdir"
+	sleep 60 &
+	local dead=$!
+	kill -9 "$dead" 2>/dev/null
+	wait "$dead" 2>/dev/null || true
+	printf '%d\n' "$dead" > "$lockdir/pid"
+
+	local pids=() i ev
+	for i in {1..6}; do
+		ev='{"ts":"2026-01-01T00:04:00Z","run_id":"st-'"$i"'",'
+		ev+='"stage":"test","event":"stage_start","model":"m"}'
+		LOG_DIR="$LOG_DIR" bash "$EVENT_EMIT_SCRIPT" "$ev" &
+		pids+=($!)
+	done
+	for i in "${pids[@]}"; do
+		wait "$i" || return 1
+	done
+	[ "$(wc -l < "$LOG_DIR/events.jsonl")" -eq 6 ]
+}
+
+@test "(f) lock fallback: live holder is not broken; times out exit 3" {
+	export EVENT_EMIT_LOCK_IMPL=mkdir
+	local lockdir="$LOG_DIR/events.jsonl.lock"
+	mkdir -p "$lockdir"
+	printf '%d\n' "$$" > "$lockdir/pid"
+	local ev='{"ts":"2026-01-01T00:05:00Z","run_id":"live",'
+	ev+='"stage":"test","event":"stage_start","model":"m"}'
+	run bash "$EVENT_EMIT_SCRIPT" "$ev"
+	[ "$status" -eq 3 ]
+	[ ! -s "$LOG_DIR/events.jsonl" ]
+}

@@ -117,33 +117,49 @@ _mkdir_locked_append() {
 	local data="$2"
 	local lockdir="${file}.lock"
 	local pidfile="${lockdir}/pid"
+	local break_mutex="${lockdir}.break"
 	local attempts=0
 
-	while ! mkdir "$lockdir" 2>/dev/null; do
+	# The mutex is the O_EXCL (noclobber) create of the pidfile, NOT
+	# mkdir: uutils coreutils' mkdir is not exclusive, so several racing
+	# callers could all "win" it (issue #1151).  The subshell keeps
+	# noclobber from leaking into the caller.
+	while ! { mkdir -p "$lockdir" 2>/dev/null \
+		&& (set -o noclobber; printf '%d\n' "$$" > "$pidfile") \
+			2>/dev/null; }; do
+		local lock_pid=""
 		if [[ -f "$pidfile" ]]; then
-			local lock_pid
-			lock_pid=$(cat "$pidfile" 2>/dev/null)
-			if [[ -n "$lock_pid" ]] \
-				&& ! kill -0 "$lock_pid" 2>/dev/null; then
-				rm -rf "$lockdir" 2>/dev/null || true
-				continue
+			lock_pid=$(cat "$pidfile" 2>/dev/null) || true
+		fi
+		if [[ -n "$lock_pid" ]] \
+			&& ! kill -0 "$lock_pid" 2>/dev/null; then
+			# Only one waiter may break a stale lock, and it must
+			# re-read the pid under the break mutex so it never
+			# removes a lock re-acquired since it was sampled.
+			if (set -o noclobber; : > "$break_mutex") 2>/dev/null; then
+				local recheck_pid=""
+				recheck_pid=$(cat "$pidfile" 2>/dev/null) || true
+				if [[ "$recheck_pid" == "$lock_pid" ]] \
+					&& ! kill -0 "$lock_pid" 2>/dev/null; then
+					rm -f "$pidfile" 2>/dev/null || true
+				fi
+				rm -f "$break_mutex" 2>/dev/null || true
 			fi
+			continue
 		fi
 
 		if (( attempts >= 10 )); then
 			_err "timed out waiting for lock on $file"
 			return 1
 		fi
-		sleep 1
+		sleep "0.$(( (RANDOM % 4) + 1 ))"
 		(( attempts++ )) || true
 	done
 
-	# Record our PID so stale-lock cleanup works if this process dies
-	printf '%d\n' "$$" > "$pidfile" 2>/dev/null || true
-
 	printf '%s\n' "$data" >> "$file"
 	local rc=$?
-	rm -rf "$lockdir" 2>/dev/null || true
+	rm -f "$pidfile" 2>/dev/null || true
+	rmdir "$lockdir" 2>/dev/null || true
 	return $rc
 }
 
@@ -156,7 +172,8 @@ append_event() {
 		return 3
 	fi
 
-	if command -v flock > /dev/null 2>&1; then
+	if [[ "${EVENT_EMIT_LOCK_IMPL:-}" != "mkdir" ]] \
+		&& command -v flock > /dev/null 2>&1; then
 		(
 			flock -x -w 10 9 || {
 				_err "timed out waiting for lock on $events_file"
