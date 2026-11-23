@@ -390,6 +390,13 @@ E2E_VERIFY_BLOCKING="${E2E_VERIFY_BLOCKING:-1}"
 # control to main() rather than blocking it (issue #926 AC3).
 FULL_SUITE_BATS_TIMEOUT="${FULL_SUITE_BATS_TIMEOUT:-2700}"
 
+# Wall-clock cap (seconds) on the root `tests/*.bats` run that follows the
+# runner-based full-suite BATS check (#1160). The runner covers only
+# .claude/scripts/implement-issue-test; CI runs `bats tests/` as a separate
+# step (~135s locally), so it gets its own, much smaller bound and its own
+# stage log. Same outcome classification as the runner arm.
+FULL_SUITE_ROOT_BATS_TIMEOUT="${FULL_SUITE_ROOT_BATS_TIMEOUT:-600}"
+
 # Wall-clock cap (seconds) on the informational full-suite npm/test-runner
 # check (`bash -c "${TEST_UNIT_CMD:-npm test}"`) that main() runs right
 # before its BATS sibling above. NOT unconditional, despite what this
@@ -10584,7 +10591,38 @@ _supersede_bats_incomplete_marks() {
 	return 0
 }
 
-# _bats_full_suite_outcome RC OUTPUT LOG_PATH [RUNNER] [SCOPE]
+# _run_root_bats_full_suite SCOPE
+#
+# Runs the root tests/*.bats files (which the runner-based check does not
+# cover) as a second bounded run under FULL_SUITE_ROOT_BATS_TIMEOUT, with its
+# own stage log, and classifies it with _bats_full_suite_outcome. Starts
+# nothing when no tests/*.bats file exists. Non-blocking: always returns 0.
+_run_root_bats_full_suite() {
+    local scope="${1:-}"
+    local root_tmp root_out root_rc root_log
+
+    compgen -G "tests/*.bats" > /dev/null || return 0
+
+    log "Running informational root tests/ BATS check (non-blocking)..."
+    root_tmp=$(mktemp)
+    _run_bounded_process_group "${FULL_SUITE_ROOT_BATS_TIMEOUT:-600}" \
+        "${FULL_SUITE_KILL_GRACE:-10}" "$root_tmp" \
+        bats tests/
+    root_rc=$?
+    root_out=$(< "$root_tmp")
+    rm -f "$root_tmp"
+
+    root_log="$LOG_BASE/stages/$(next_stage_log "bats_root_suite")"
+    printf '%s\n' "$root_out" >> "$root_log"
+    printf '%s\n' "=== exit code: $root_rc ===" >> "$root_log"
+    log "  Log: $root_log"
+
+    _bats_full_suite_outcome "$root_rc" "$root_out" "$root_log" \
+        "bats tests/" "$scope" "${FULL_SUITE_ROOT_BATS_TIMEOUT:-600}" false
+    return 0
+}
+
+# _bats_full_suite_outcome RC OUTPUT LOG_PATH [RUNNER] [SCOPE] [TIMEOUT] [SUPERSEDE]
 #
 # Classifies the informational full-suite BATS run (timeout / unmeasured /
 # red / green), records the matching DEGRADED_STAGES marker and posts the
@@ -10595,6 +10633,10 @@ _bats_full_suite_outcome() {
     local log_path="$3"
     local runner="${4:-.claude/scripts/implement-issue-test/run-tests.sh}"
     local scope="${5:-}"
+    local budget="${6:-${FULL_SUITE_BATS_TIMEOUT:-2700}}"
+    # SUPERSEDE=false: a green run is not the whole suite, so it must not
+    # clear incomplete marks (the root run, #1160).
+    local supersede="${7:-true}"
     local failure_names failure_total failure_shown
 
     if (( rc == 124 )); then
@@ -10608,7 +10650,7 @@ _bats_full_suite_outcome() {
         # through — this check is informational and must always
         # return control to main() rather than blocking it.
         log_warn "Full-suite BATS check timed out after" \
-            "${FULL_SUITE_BATS_TIMEOUT:-2700}s — treating as" \
+            "${budget}s — treating as" \
             "unmeasured, not red (non-blocking)"
         DEGRADED_STAGES+=("test:bats_full_suite_timeout")
         # The suite never reached a verdict, so a deferred run leaves the
@@ -10676,7 +10718,7 @@ $failure_shown
 </details>" "default"
         log "WARN: Full-suite BATS check found failures (non-blocking, recorded as degraded)"
     else
-        _supersede_bats_incomplete_marks
+        [[ "$supersede" == true ]] && _supersede_bats_incomplete_marks
         log "Full-suite BATS check passed — pipeline BATS tests are green on this branch"
     fi
     return 0
@@ -14948,6 +14990,10 @@ $full_scope_failures
             _bats_full_suite_outcome "$bats_full_rc" "$bats_full_output" \
                 "$bats_full_log" "$bats_runner" "$branch_scope"
         fi
+
+        # Root tests/*.bats are not covered by the runner above (#1160);
+        # run them under their own bound and stage log.
+        _run_root_bats_full_suite "$branch_scope"
 
         # ---------------------------------------------------------------------
         # E2E-UNVALIDATED GUARD: the test loop above is unit-only when
