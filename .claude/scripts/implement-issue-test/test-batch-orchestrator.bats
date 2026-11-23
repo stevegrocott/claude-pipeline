@@ -7237,3 +7237,50 @@ GHEOF
 	grep -q 'merged PR mergedAt ("garbage")' "$TEST_TMP/log.out" \
 		|| fail "WARN did not name mergedAt: $(cat "$TEST_TMP/log.out")"
 }
+
+# =============================================================================
+# _wait_until_reset: clock-pinned reset math (issue #1156)
+# =============================================================================
+
+# Run the batch copy of _wait_until_reset with `date` pinned to HH MM SS.
+_batch_wur_at() {
+	local clock="$1" text="$2"
+	local func_file="$TEST_TMP/wur-batch.bash"
+	_extract_function_body _wait_until_reset "$BATCH_ORCHESTRATOR_SCRIPT" \
+		> "$func_file"
+	PINNED_CLOCK="$clock" bash -c 'date() { printf "%s\n" "$PINNED_CLOCK"; }
+		source "$1"; _wait_until_reset "$2"' _ "$func_file" "$text" 2>&1
+}
+
+@test "batch _wait_until_reset: reset 45 minutes ago across midnight gives 0" {
+	run _batch_wur_at "00 30 00" "resets 11:45pm"
+	[ "$status" -eq 0 ]
+	[ "$output" = "0" ]
+}
+
+@test "batch _wait_until_reset: reset 45 minutes ago same day gives 0" {
+	run _batch_wur_at "15 30 00" "resets 2:45pm"
+	[ "$status" -eq 0 ]
+	[ "$output" = "0" ]
+}
+
+@test "batch _wait_until_reset: reset over an hour ago means tomorrow" {
+	run _batch_wur_at "15 30 00" "resets 2:00pm"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$((22 * 3600 + 1800))" ]
+}
+
+@test "batch _wait_until_reset: future reset across midnight counts forward" {
+	run _batch_wur_at "23 30 00" "resets 1am"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$((1 * 3600 + 1800))" ]
+}
+
+@test "_wait_until_reset body is identical in batch and implement-issue copies" {
+	local a b
+	a=$(_extract_function_body _wait_until_reset "$BATCH_ORCHESTRATOR_SCRIPT")
+	b=$(_extract_function_body _wait_until_reset \
+		"$SCRIPT_DIR/implement-issue-orchestrator.sh")
+	[ -n "$a" ]
+	[ "$a" = "$b" ]
+}

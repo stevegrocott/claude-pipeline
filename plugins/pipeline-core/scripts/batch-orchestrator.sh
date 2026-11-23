@@ -1011,13 +1011,11 @@ _wait_until_reset() {
     local target=$((hour * 3600 + min * 60))
     local delta=$((target - now_secs))
 
-    if ((delta < 0)); then
-        if ((delta > -3600)); then
-            delta=0
-        else
-            delta=$((delta + 86400))
-        fi
-    fi
+    # Normalise to seconds-ahead on a 24h clock, then treat a reset that
+    # passed under an hour ago as 0. Doing this after wrapping keeps it
+    # correct across midnight (now 00:30, reset "11:45pm").
+    ((delta < 0)) && delta=$((delta + 86400))
+    ((delta > 86400 - 3600)) && delta=0
     printf '%s\n' "$delta"
 }
 
