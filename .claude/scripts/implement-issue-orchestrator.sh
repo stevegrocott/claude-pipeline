@@ -1359,8 +1359,22 @@ _status_lock_acquire() {
             # Require a real pid before trusting kill -0: a blank or 0 pidfile
             # (partial write) would otherwise make `kill -0 0` signal our own
             # process group and report the dead lock as alive forever.
-            if [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]] \
-                && ! kill -0 "$lock_pid" 2>/dev/null; then
+            # An EMPTY pidfile is a writer that died between creating it and
+            # writing its pid, or one still mid-write: only break it once it
+            # is older than LOCK_STALE_AGE, otherwise wait on it.
+            local is_stale=0
+            if [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]]; then
+                kill -0 "$lock_pid" 2>/dev/null || is_stale=1
+            elif [[ -z "$lock_pid" ]]; then
+                local pmtime pnow
+                pmtime=$(stat -c %Y "$pidfile" 2>/dev/null \
+                    || stat -f %m "$pidfile" 2>/dev/null) || pmtime=
+                if [[ "$pmtime" =~ ^[0-9]+$ ]]; then
+                    printf -v pnow '%(%s)T' -1
+                    (( pnow - pmtime > ${LOCK_STALE_AGE:-30} )) && is_stale=1
+                fi
+            fi
+            if (( is_stale )); then
                 # Owning process is gone — stale lock. Only the waiter that
                 # wins this secondary noclobber-create mutex (O_EXCL, not
                 # mkdir, which is not exclusive on uutils) may break it, so two
