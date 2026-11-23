@@ -65,6 +65,8 @@ IMPL="$(command -v pipeline-core-implement || echo .claude/scripts/implement-iss
   --agent react-frontend-developer
 ```
 
+**Stale-version warning:** the orchestrator logs the running pipeline version at startup and logs a `WARN` if a stale `pipeline-core` bin/ entry is still on `PATH` or a newer version is cached. A long-lived session keeps its old `PATH`, so it may run an older version than the one installed. If you see the warning, restart the Claude session and relaunch; a fresh session clears it.
+
 ## Monitoring
 
 Check progress via status.json:

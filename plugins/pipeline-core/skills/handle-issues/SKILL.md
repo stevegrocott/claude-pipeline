@@ -508,6 +508,8 @@ echo "Status file: status.json"
 echo "Logs: logs/batch-*/"
 ```
 
+**Stale-version warning:** at startup the orchestrator logs the running pipeline version and script dir, and logs a `WARN` if a stale `pipeline-core` bin/ entry is still on `PATH` or a newer version sits in the plugin cache. A long-lived session keeps the `PATH` it started with, so dispatched sessions can run an older version than the one installed. Check the first lines of the orchestrator log after launch. If you see the warning, restart the Claude session (so it picks up the current plugin bin) and relaunch; a fresh session clears it.
+
 The orchestrator will:
 - Use the specified agent for `implement-issue` stage
 - Always use `code-reviewer` agent for `process-pr` stage (it must exist in `.claude/agents/`; see Agent Selection)
