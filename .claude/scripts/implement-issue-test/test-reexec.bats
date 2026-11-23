@@ -485,7 +485,6 @@ _run_orch_startup_env() {
 	local cache="$TEST_TMP/cache"
 	_make_plugin_version "$cache" 0.8.19
 	_make_plugin_version "$cache" 0.8.20
-	unset _PIPELINE_BATCH_LOGGED_STARTUP
 	_run_orch_startup_env "$cache" 0.8.19 "$cache/0.8.19/bin:/usr/bin"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"LOG: Pipeline version: 0.8.19"* ]]

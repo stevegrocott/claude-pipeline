@@ -99,6 +99,12 @@ setup_test_env() {
     # resolution. Tests that need it set it explicitly in their own body.
     unset CLAUDE_CLI
 
+    # The batch orchestrator exports _PIPELINE_BATCH_LOGGED_STARTUP=1 so child
+    # orchestrators stay silent about start-up; inherited into a test, it
+    # would suppress the start-up LOG/WARN lines those tests assert. Scrub it;
+    # the "batch marked startup as logged" test sets it explicitly.
+    unset _PIPELINE_BATCH_LOGGED_STARTUP
+
     TEST_TMP=$(mktemp -d)
     export TEST_TMP
 
