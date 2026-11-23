@@ -612,6 +612,35 @@ _wait_for_file() {
     [ "$branch" = "after-kill" ] || fail "update lost after stale-lock recovery: $branch"
 }
 
+@test "status lock: several waiters on a dead lock all land, none lost (#1151)" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=20
+    init_status
+
+    (
+        _status_lock_acquire
+        : > "$TEST_TMP/holder-ready"
+        sleep 60
+    ) &
+    local holder=$!
+    _wait_for_file "$TEST_TMP/holder-ready" 10
+    kill -9 "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null || true
+
+    local n=8 i
+    local -a pids=()
+    for ((i = 1; i <= n; i++)); do
+        increment_quality_iteration &
+        pids+=("$!")
+    done
+    _wait_pids_or_fail 40 "${pids[@]}"
+
+    local count
+    count=$(jq -r '.quality_iterations' "$STATUS_FILE")
+    [ "$count" = "$n" ] || fail \
+        "expected $n increments after dead-lock break, got $count"
+}
+
 @test "status_json_write: proceeds when mkdir lock is held by its own pid (#1117)" {
     export STATUS_LOCK_IMPL=mkdir
     export STATUS_LOCK_TIMEOUT=3

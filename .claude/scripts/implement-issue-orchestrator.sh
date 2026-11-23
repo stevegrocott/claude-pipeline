@@ -1302,7 +1302,8 @@ _status_lock_acquire() {
             if [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]] \
                 && ! kill -0 "$lock_pid" 2>/dev/null; then
                 # Owning process is gone — stale lock. Only the waiter that
-                # wins this secondary mkdir mutex may break it, so two
+                # wins this secondary noclobber-create mutex (O_EXCL, not
+                # mkdir, which is not exclusive on uutils) may break it, so two
                 # waiters can never both rm -rf the same lockdir and briefly
                 # both believe they hold the lock.
                 if (set -o noclobber; : > "$break_mutex") 2>/dev/null; then
