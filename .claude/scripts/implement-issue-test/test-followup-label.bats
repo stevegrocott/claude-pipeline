@@ -117,6 +117,10 @@ teardown() {
 	[[ -f "$PROCESS_PR_SKILL" ]]
 	# The --allowedTools matcher refuses a command that starts with VAR=...
 	# and any ${VAR:-x} default expansion, so no bash block may contain one.
+	# No bash block at all means the scan below checked nothing.
+	local blocks
+	blocks=$(grep -c '^```bash[[:space:]]*$' "$PROCESS_PR_SKILL" || true)
+	[ "$blocks" -gt 0 ]
 	local offenders
 	offenders=$(awk '
 		/^```bash[[:space:]]*$/ { inb = 1; next }

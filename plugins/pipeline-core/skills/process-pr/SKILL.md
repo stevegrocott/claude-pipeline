@@ -204,7 +204,7 @@ jq -r '(.degraded_stages // [])[] | select(startswith("quality:fix_failed"))' st
 - `pr_review:max_iterations` — the PR-review loop exhausted its iterations without an approved verdict.
 - `quality:fix_failed` — a quality-loop fix stage failed, so the findings were never resolved.
 
-**If any command printed a block reason:** post a comment on the PR explaining why it was not merged, using the quoted heredoc form with the reason written in literally:
+**If any command printed a block reason:** report it in your output as `MERGE BLOCKED: <the text the command printed>`, then post a comment on the PR explaining why it was not merged, using the quoted heredoc form with the reason written in literally:
 
 ```bash
 "<PLATFORM_DIR>/comment-mr.sh" <PR_NUMBER> "$(cat <<'EOF'
