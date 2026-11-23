@@ -11209,6 +11209,7 @@ run_test_loop() {
     local jest_test_files=""
     local playwright_test_files=""
     local changed_test_pattern=""
+    local changed_test_detection_unreliable=false
     case "$change_scope" in
         typescript|mixed|ts-frontend)
             changed_test_pattern='\.test\.[jt]sx?$|\.spec\.[jt]sx?$'
@@ -11227,11 +11228,27 @@ run_test_loop() {
         if (( _tl_git_exit == 124 )); then
             log_warn "test_loop: git diff timed out after ${TEST_LOOP_GIT_TIMEOUT}s — using --changedSince fallback"
             _tl_git_raw=""
+            changed_test_detection_unreliable=true
         fi
         changed_test_files=$(printf '%s' "$_tl_git_raw" \
             | grep -E "$changed_test_pattern" \
             | filter_out_integration_tests \
             || true)
+    fi
+
+    # Bash scope with no changed .bats file: the targeted run has nothing
+    # to target, and main() runs the FULL suite once after this loop when
+    # the runner is present. Running an agent over the whole suite here
+    # would only duplicate that check (and, being cut short, record a
+    # spurious test:bats_incomplete mark). Defer to the full-suite check:
+    # no agent run, no incomplete mark. An unreliable (timed-out) diff
+    # does not prove the list is empty, so it never defers.
+    if [[ "$change_scope" == "bash" && -z "$changed_test_files" \
+            && "$changed_test_detection_unreliable" != true \
+            && -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
+        log "No changed BATS test files and the full-suite runner is present — deferring the suite to the full-suite check"
+        comment_issue "Test Loop: Deferred" "⏭️ No .bats files changed on this branch. The BATS suite is deferred to the full-suite check that runs after the test loop." ""
+        return 0
     fi
 
     if [[ "$change_scope" == "bash" ]]; then

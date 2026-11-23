@@ -652,6 +652,64 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 		grep -q "Narrowed BATS command:.*tests/new-suite.bats" "$LOG_FILE"
 }
 
+# No changed .bats file + runner present: the loop defers to main()'s
+# full-suite check — no agent run, no bats_incomplete mark.
+@test "bash scope: no changed .bats and runner present defers the suite without an agent run or incomplete mark" {
+	_setup_test_loop_repo
+	mkdir -p .claude/scripts/implement-issue-test
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/implement-issue-test/run-tests.sh
+	git add .claude
+	git commit -q -m "runner on main"
+
+	git checkout -q -b feature-deferred
+	printf '#!/usr/bin/env bash\necho changed\n' > .claude/scripts/thing.sh
+	git add .claude
+	git commit -q -m "change a script only"
+
+	STAGE_CALLS="$TEST_TMP/stage_calls"
+	export STAGE_CALLS
+	: > "$STAGE_CALLS"
+	run_stage() {
+		printf '%s\n' "$1" >> "$STAGE_CALLS"
+		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","bats_result":"incomplete"}}'
+	}
+	export -f run_stage
+	comment_issue() { :; }
+	export -f comment_issue
+
+	run_test_loop "$TEST_TMP/repo" "feature-deferred" "" "bash"
+	local rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ ! -s "$STAGE_CALLS" ]]
+	[[ "${DEGRADED_STAGES[*]:-}" != *bats_incomplete* ]]
+	grep -q "deferring the suite" "$LOG_FILE"
+}
+
+@test "bash scope: no changed .bats but runner absent still runs the test stage" {
+	_setup_test_loop_repo
+	git checkout -q -b feature-no-runner
+	mkdir -p .claude/scripts
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/thing.sh
+	git add .claude
+	git commit -q -m "change a script only"
+
+	STAGE_CALLS="$TEST_TMP/stage_calls"
+	export STAGE_CALLS
+	: > "$STAGE_CALLS"
+	run_stage() {
+		printf '%s\n' "$1" >> "$STAGE_CALLS"
+		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","validation_result":"skipped","bats_result":"passed"}}'
+	}
+	export -f run_stage
+	comment_issue() { :; }
+	export -f comment_issue
+
+	run_test_loop "$TEST_TMP/repo" "feature-no-runner" "" "bash"
+
+	grep -q "test-iter-1" "$STAGE_CALLS"
+}
+
 # =============================================================================
 # FULL-SUITE CHECK: RUNNER SCOPE AND EXIT-STATUS CAPTURE (#905, #908)
 # =============================================================================
