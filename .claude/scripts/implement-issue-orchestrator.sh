@@ -1166,11 +1166,12 @@ log_warn() {
 log_startup_environment() {
     local version root bin_dir entry newer
     local -a newer_versions=()
+    local -a stale_bins=()
     local -a path_entries
     [[ "$_PIPELINE_BIN_ALREADY_PINNED" == true ]] && return 0
     version=$(pipeline_version 2>/dev/null) || version=""
-    log "Pipeline version: ${version:-unknown (repo-local layout)}"
-    log "Pipeline script dir: $SCRIPT_DIR"
+    log "Pipeline version: ${version:-repo-local}" \
+        "(script dir: $SCRIPT_DIR)"
 
     [[ -n "$version" ]] || return 0
     root=$(pipeline_plugin_root 2>/dev/null) || return 0
@@ -1182,9 +1183,12 @@ log_startup_environment() {
         [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
         [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
             && "${entry%/bin}" != "$root" ]] || continue
-        log "Note: inherited PATH entry from another pipeline version: $entry" \
-            "(harmless, $version's bin is pinned first; running from $bin_dir)"
+        stale_bins+=("$entry")
     done
+    if ((${#stale_bins[@]} > 0)); then
+        log_warn "Pipeline $version running; removed other-version bin" \
+            "from PATH: ${stale_bins[*]}"
+    fi
 
     while IFS= read -r newer; do
         [[ -n "$newer" ]] && newer_versions+=("$newer")
