@@ -10548,6 +10548,42 @@ _parse_e2e_report_counts() {
 		"$failed"
 }
 
+# _supersede_bats_incomplete_marks
+#
+# A green full-suite BATS run (#1152) is a measured verdict for the same
+# branch, so any test:bats_incomplete:* marker recorded earlier by the test
+# loop is stale. Drop them all and record one test:bats_incomplete_superseded — the
+# evidence stays visible, but it no longer matches test:bats_incomplete:*
+# (merge gate, stage-status downgrade).
+# Globals:
+#   DEGRADED_STAGES - marks rewritten in place
+_supersede_bats_incomplete_marks() {
+	local _sup_mark _sup_removed=0
+	local -a _sup_kept=()
+	for _sup_mark in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		if [[ "$_sup_mark" == test:bats_incomplete:* ]]; then
+			_sup_removed=$((_sup_removed + 1))
+			continue
+		fi
+		_sup_kept+=("$_sup_mark")
+	done
+	(( _sup_removed > 0 )) || return 0
+	_sup_kept+=("test:bats_incomplete_superseded")
+	DEGRADED_STAGES=("${_sup_kept[@]}")
+	# Keep the persisted degraded list in step with the in-memory one.
+	if [[ -f "${STATUS_FILE:-}" ]]; then
+		local _sup_json
+		_sup_json=$(printf '%s\n' "${DEGRADED_STAGES[@]}" | jq -R . | jq -s .)
+		status_json_write --argjson stages "$_sup_json" \
+			'.degraded_stages = $stages | .last_update = (now | todate)'
+		sync_status_to_log
+	fi
+	log "Full-suite BATS green — superseded $_sup_removed test:bats_incomplete mark(s)"
+	comment_issue "Full-Suite BATS Check: green supersedes bats_incomplete" \
+		"✅ The full BATS suite passed on this branch, so $_sup_removed earlier \`test:bats_incomplete\` mark(s) are superseded by this measured verdict (recorded as \`test:bats_incomplete_superseded\`)." "default"
+	return 0
+}
+
 # _bats_full_suite_outcome RC OUTPUT LOG_PATH [RUNNER] [SCOPE]
 #
 # Classifies the informational full-suite BATS run (timeout / unmeasured /
@@ -10634,6 +10670,7 @@ $failure_shown
 </details>" "default"
         log "WARN: Full-suite BATS check found failures (non-blocking, recorded as degraded)"
     else
+        _supersede_bats_incomplete_marks
         log "Full-suite BATS check passed — pipeline BATS tests are green on this branch"
     fi
     return 0

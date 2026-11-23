@@ -844,6 +844,68 @@ run_gate_a() {
 	done
 }
 
+@test "Gate A: superseded bats_incomplete mark does not block merge (#1152)" {
+	DEGRADED_STAGES=("test:bats_incomplete_superseded:iter=1")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+_load_bats_outcome_for_gate() {
+	local fn
+	for fn in _supersede_bats_incomplete_marks \
+		_bats_full_suite_outcome _bats_full_suite_failure_count; do
+		eval "$(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{" {g=1} g {print} g && /^}/ {exit}' "$ORCHESTRATOR_SCRIPT")"
+	done
+	log() { :; }
+	log_warn() { :; }
+	comment_issue() { :; }
+}
+
+@test "Gate A: bats_incomplete mark is not blocked after a green full suite (#1152)" {
+	_load_bats_outcome_for_gate
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1")
+	run run_gate_a
+	[[ "$output" == convergence\|* ]]
+
+	_bats_full_suite_outcome 0 "ok 1 a" "$BATS_TEST_TMPDIR/log"
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "|" ]]
+}
+
+@test "Gate A: bats_incomplete mark stays blocked after a timed-out full suite (#1152)" {
+	_load_bats_outcome_for_gate
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1")
+	_bats_full_suite_outcome 124 "" "$BATS_TEST_TMPDIR/log"
+	run run_gate_a
+	[[ "$output" == convergence\|*test:bats_incomplete:iter=1 ]]
+}
+
+@test "Gate A: bats_incomplete mark stays blocked after an unmeasured full suite (#1152)" {
+	_load_bats_outcome_for_gate
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1")
+	_bats_full_suite_outcome 1 "" "$BATS_TEST_TMPDIR/log"
+	run run_gate_a
+	[[ "$output" == convergence\|*test:bats_incomplete:iter=1 ]]
+}
+
+@test "Gate A: max_iterations still blocks after a green full suite supersedes bats_incomplete (#1152)" {
+	_load_bats_outcome_for_gate
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1" "test:max_iterations:iter=5")
+	_bats_full_suite_outcome 0 "ok 1 a" "$BATS_TEST_TMPDIR/log"
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|Test loop convergence failure recorded in degraded_stages: test:max_iterations:iter=5" ]]
+}
+
+@test "Gate A: bats_incomplete mark stays blocked when the full suite was not green (#1152)" {
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1" "test:bats_full_suite_red")
+	run run_gate_a
+	[ "$status" -eq 0 ]
+	[[ "$output" == "convergence|Test loop convergence failure recorded in degraded_stages: test:bats_incomplete:iter=1" ]]
+}
+
 @test "Gate A does not block on non-loop test markers or an empty DEGRADED_STAGES" {
 	DEGRADED_STAGES=()
 	run run_gate_a
