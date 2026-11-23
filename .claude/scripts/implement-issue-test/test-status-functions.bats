@@ -553,6 +553,31 @@ _wait_for_file() {
         "(lost update, or waiters starved by a fixed-cadence backoff)"
 }
 
+@test "status lock: exactly one of N racing acquirers wins (#1151)" {
+	export STATUS_LOCK_IMPL=mkdir
+	export STATUS_LOCK_TIMEOUT=0
+	init_status
+
+	local n=12 i
+	local -a pids=()
+	for ((i = 1; i <= n; i++)); do
+		(
+			if _status_lock_acquire 2>/dev/null; then
+				: > "$TEST_TMP/winner-$i"
+			fi
+			sleep 5
+		) &
+		pids+=("$!")
+	done
+	sleep 2
+
+	local -a winners=("$TEST_TMP"/winner-*)
+	kill "${pids[@]}" 2>/dev/null
+	wait "${pids[@]}" 2>/dev/null || true
+	[ "${#winners[@]}" -eq 1 ] || fail \
+		"expected exactly 1 lock winner, got ${#winners[@]}: ${winners[*]}"
+}
+
 @test "status_json_write: mkdir lock left by a killed writer is broken as stale" {
     export STATUS_LOCK_IMPL=mkdir
     export STATUS_LOCK_TIMEOUT=5
@@ -585,6 +610,35 @@ _wait_for_file() {
     local branch
     branch=$(jq -r '.branch' "$STATUS_FILE")
     [ "$branch" = "after-kill" ] || fail "update lost after stale-lock recovery: $branch"
+}
+
+@test "status lock: several waiters on a dead lock all land, none lost (#1151)" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=20
+    init_status
+
+    (
+        _status_lock_acquire
+        : > "$TEST_TMP/holder-ready"
+        sleep 60
+    ) &
+    local holder=$!
+    _wait_for_file "$TEST_TMP/holder-ready" 10
+    kill -9 "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null || true
+
+    local n=8 i
+    local -a pids=()
+    for ((i = 1; i <= n; i++)); do
+        increment_quality_iteration &
+        pids+=("$!")
+    done
+    _wait_pids_or_fail 40 "${pids[@]}"
+
+    local count
+    count=$(jq -r '.quality_iterations' "$STATUS_FILE")
+    [ "$count" = "$n" ] || fail \
+        "expected $n increments after dead-lock break, got $count"
 }
 
 @test "status_json_write: proceeds when mkdir lock is held by its own pid (#1117)" {

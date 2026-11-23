@@ -1275,10 +1275,19 @@ _status_lock_acquire() {
     local timeout="${STATUS_LOCK_TIMEOUT:-10}"
     local self_pid="${BASHPID:-$(exec sh -c 'echo $PPID')}"
 
-    while ! mkdir "$lockdir" 2>/dev/null; do
+    # The mutex is the O_EXCL create of the pidfile, NOT mkdir: uutils
+    # coreutils' mkdir (ubuntu-26.04 runners) is not exclusive, so several
+    # racing callers could all "win" it (issue #1151).  noclobber makes the
+    # shell open the file with O_CREAT|O_EXCL, which the kernel guarantees
+    # for exactly one creator.  The lockdir only hosts the pidfile.
+    # Inlined (not a helper): test fixtures extract these functions by name.
+    # The subshell keeps noclobber from leaking into the caller's shell.
+    while ! { mkdir -p "$lockdir" 2>/dev/null \
+        && (set -o noclobber; printf '%s\n' "$self_pid" > "$pidfile") \
+            2>/dev/null; }; do
         if [[ -f "$pidfile" ]]; then
             local lock_pid
-            lock_pid=$(cat "$pidfile" 2>/dev/null)
+            lock_pid=$(cat "$pidfile" 2>/dev/null) || true
             # Re-entrant: a lock held by THIS process can only be waited on
             # forever (e.g. an exit/signal trap writing status while the
             # interrupted write still holds the lock — issue #1117).  The
@@ -1293,10 +1302,11 @@ _status_lock_acquire() {
             if [[ "$lock_pid" =~ ^[1-9][0-9]*$ ]] \
                 && ! kill -0 "$lock_pid" 2>/dev/null; then
                 # Owning process is gone — stale lock. Only the waiter that
-                # wins this secondary mkdir mutex may break it, so two
+                # wins this secondary noclobber-create mutex (O_EXCL, not
+                # mkdir, which is not exclusive on uutils) may break it, so two
                 # waiters can never both rm -rf the same lockdir and briefly
                 # both believe they hold the lock.
-                if mkdir "$break_mutex" 2>/dev/null; then
+                if (set -o noclobber; : > "$break_mutex") 2>/dev/null; then
                     # Re-read under the break mutex before destroying anything:
                     # between sampling $lock_pid and getting here the dead
                     # holder's lock may have been released and legitimately
@@ -1306,12 +1316,12 @@ _status_lock_acquire() {
                     # succeeded after the old lockdir was removed) or a
                     # different pid, so both cases fail this equality check.
                     local recheck_pid
-                    recheck_pid=$(cat "$pidfile" 2>/dev/null)
+                    recheck_pid=$(cat "$pidfile" 2>/dev/null) || true
                     if [[ "$recheck_pid" == "$lock_pid" ]] \
                         && ! kill -0 "$lock_pid" 2>/dev/null; then
-                        rm -rf "$lockdir" 2>/dev/null || true
+                        rm -f "$pidfile" 2>/dev/null || true
                     fi
-                    rmdir "$break_mutex" 2>/dev/null || true
+                    rm -f "$break_mutex" 2>/dev/null || true
                 fi
                 continue
             fi
@@ -1326,22 +1336,21 @@ _status_lock_acquire() {
         # on the same 1s cadence and starve each other under load.
         sleep "0.$(( (RANDOM % 4) + 1 ))"
     done
-
-    # Grouped so a failed redirection (lockdir removed under us) is silenced
-    # too — `2>/dev/null` on the bare printf is applied after the redirection
-    # that fails, so the shell's error would still leak to stderr.
-    { printf '%s\n' "$self_pid" > "$pidfile"; } 2>/dev/null || true
 }
 
 _status_lock_release() {
     local lockdir="${STATUS_FILE}.lockdir"
     local self_pid="${BASHPID:-$(exec sh -c 'echo $PPID')}"
     local held_pid
-    held_pid=$(cat "${lockdir}/pid" 2>/dev/null)
+    held_pid=$(cat "${lockdir}/pid" 2>/dev/null) || true
     # Only remove the lockdir if it's still the one we created — guards
     # against releasing a lock a different holder acquired after ours was
     # broken as stale out from under us.
-    [[ "$held_pid" == "$self_pid" ]] && rm -rf "$lockdir" 2>/dev/null || true
+    if [[ "$held_pid" == "$self_pid" ]]; then
+        rm -f "${lockdir}/pid" 2>/dev/null || true
+        rmdir "$lockdir" 2>/dev/null || true
+    fi
+    return 0
 }
 
 # status_json_write - Atomically update $STATUS_FILE via jq (issue #642).
