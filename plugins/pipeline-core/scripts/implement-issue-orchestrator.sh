@@ -15708,61 +15708,7 @@ ${major_descriptions}"
         local review_icon="✅"
         [[ "$review_verdict" == "changes_requested" ]] && review_icon="🔄"
 
-        # Create follow-up GH issues for adjacent_issues with major severity
         local followup_comment=""
-        if [[ "$review_verdict" == "approved" ]]; then
-            local adjacent_json adj_count
-            adjacent_json=$(printf '%s' "$review_result" | \
-                jq -c '[.adjacent_issues // [] | .[] | select(.severity == "major")]' \
-                2>/dev/null || echo "[]")
-            adj_count=$(printf '%s' "$adjacent_json" | jq 'length' 2>/dev/null || echo "0")
-            if (( adj_count > 0 )); then
-                local created_nums=()
-                while IFS= read -r adj_item; do
-                    local adj_title adj_body
-                    adj_title=$(printf '%s' "$adj_item" | jq -r '.title // ""')
-                    adj_body=$(printf '%s' "$adj_item" | jq -r '.body // ""')
-                    [[ -z "$adj_title" ]] && continue
-
-                    # Deduplication: skip if an open issue with the same title already exists
-                    local dup_count
-                    dup_count=$(gh issue list --state open --json title \
-                        2>/dev/null | jq --arg t "$adj_title" '[.[] | select(.title == $t)] | length' \
-                        2>/dev/null || echo "0")
-                    if (( dup_count > 0 )); then
-                        log "Skipping duplicate follow-up issue (title already open): $adj_title"
-                        continue
-                    fi
-
-                    # Validate/build body to enforce canonical task format
-                    local validated_body
-                    validated_body=$(_build_adj_body "$adj_body" "$adj_title")
-                    validated_body="<!-- pipeline-autocreated -->
-${validated_body}"
-
-                    local new_num
-                    new_num=$("$PLATFORM_DIR/create-issue.sh" \
-                        --title "$adj_title" --body "$validated_body" \
-                        --labels "pipeline-followup,needs-explore" \
-                        2>/dev/null || true)
-                    if [[ -n "$new_num" ]]; then
-                        created_nums+=("#$new_num")
-                        log "Created follow-up issue #$new_num: $adj_title"
-                    else
-                        log "WARN: failed to create follow-up issue for: $adj_title"
-                    fi
-                done < <(printf '%s' "$adjacent_json" | jq -c '.[]'  2>/dev/null)
-                if (( ${#created_nums[@]} > 0 )); then
-                    local nums_joined
-                    nums_joined=$(printf '%s, ' "${created_nums[@]}")
-                    nums_joined="${nums_joined%, }"
-                    followup_comment="
-
----
-📋 **Follow-up issues created:** $nums_joined"
-                fi
-            fi
-        fi
 
         local review_comment_body
         review_comment_body=$(_format_pr_review_comment "$review_verdict" \
