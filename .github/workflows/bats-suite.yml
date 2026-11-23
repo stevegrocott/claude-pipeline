@@ -49,7 +49,11 @@ jobs:
     # that. fail-fast is off so one failing shard does not hide failures in
     # the others; a red shard is usually not the only red shard.
     name: Bats Suite (shard ${{ matrix.shard }}/4)
-    runs-on: ubuntu-latest
+    # Pinned: mkdir on the ubuntu-26.04 image (uutils coreutils) is not
+    # exclusive under concurrency, so the status lock test in
+    # test-status-functions.bats fails on about half of runs. Remove the
+    # pin when the lock no longer relies on mkdir (#1151).
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
