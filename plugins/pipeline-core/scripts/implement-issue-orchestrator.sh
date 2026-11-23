@@ -10548,6 +10548,28 @@ _parse_e2e_report_counts() {
 		"$failed"
 }
 
+# _supersede_bats_incomplete_marks
+#
+# A green full-suite BATS run (#1152) is a measured verdict for the same
+# branch, so any test:bats_incomplete:* marker recorded earlier by the test
+# loop is stale. Swap each for test:bats_incomplete_superseded:* — the
+# evidence stays visible, but it no longer matches test:bats_incomplete:*
+# (merge gate, stage-status downgrade).
+# Globals:
+#   DEGRADED_STAGES - marks rewritten in place
+_supersede_bats_incomplete_marks() {
+	local _sup_mark
+	local -a _sup_kept=()
+	for _sup_mark in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		if [[ "$_sup_mark" == test:bats_incomplete:* ]]; then
+			_sup_mark="test:bats_incomplete_superseded:${_sup_mark#test:bats_incomplete:}"
+		fi
+		_sup_kept+=("$_sup_mark")
+	done
+	DEGRADED_STAGES=("${_sup_kept[@]+"${_sup_kept[@]}"}")
+	return 0
+}
+
 # _bats_full_suite_outcome RC OUTPUT LOG_PATH [RUNNER] [SCOPE]
 #
 # Classifies the informational full-suite BATS run (timeout / unmeasured /
@@ -10634,6 +10656,7 @@ $failure_shown
 </details>" "default"
         log "WARN: Full-suite BATS check found failures (non-blocking, recorded as degraded)"
     else
+        _supersede_bats_incomplete_marks
         log "Full-suite BATS check passed — pipeline BATS tests are green on this branch"
     fi
     return 0

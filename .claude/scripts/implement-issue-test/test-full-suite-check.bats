@@ -115,3 +115,53 @@ exit 134'
 	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
 	[ ! -s "$COMMENT_FILE" ]
 }
+
+# =============================================================================
+# GREEN BATS FULL SUITE SUPERSEDES bats_incomplete MARKS (#1152)
+# =============================================================================
+
+_load_bats_outcome_fns() {
+	local orch="$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh"
+	local fn
+	for fn in _supersede_bats_incomplete_marks \
+		_bats_full_suite_outcome _bats_full_suite_failure_count; do
+		# shellcheck disable=SC1090
+		source <(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{" {g=1} g {print} g && /^}/ {exit}' "$orch")
+	done
+	log() { :; }
+	log_warn() { :; }
+	comment_issue() { printf '%s\n%s\n' "$1" "$2" >> "$COMMENT_FILE"; }
+}
+
+@test "green BATS full suite swaps bats_incomplete for superseded" {
+	_load_bats_outcome_fns
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1" "test:other" \
+		"test:bats_incomplete:iter=2")
+	_bats_full_suite_outcome 0 "ok 1 a" "$TEST_TMP/log"
+	[ "${#DEGRADED_STAGES[@]}" -eq 3 ]
+	[ "${DEGRADED_STAGES[0]}" = "test:bats_incomplete_superseded:iter=1" ]
+	[ "${DEGRADED_STAGES[1]}" = "test:other" ]
+	[ "${DEGRADED_STAGES[2]}" = "test:bats_incomplete_superseded:iter=2" ]
+}
+
+@test "red BATS full suite leaves bats_incomplete marks intact" {
+	_load_bats_outcome_fns
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1")
+	_bats_full_suite_outcome 1 "not ok 1 broken" "$TEST_TMP/log" r.sh x
+	[ "${DEGRADED_STAGES[0]}" = "test:bats_incomplete:iter=1" ]
+	[ "${DEGRADED_STAGES[1]}" = "test:bats_full_suite_red" ]
+}
+
+@test "timed-out BATS full suite leaves bats_incomplete marks intact" {
+	_load_bats_outcome_fns
+	DEGRADED_STAGES=("test:bats_incomplete:iter=1")
+	_bats_full_suite_outcome 124 "" "$TEST_TMP/log"
+	[ "${DEGRADED_STAGES[0]}" = "test:bats_incomplete:iter=1" ]
+}
+
+@test "green BATS full suite with empty DEGRADED_STAGES stays empty" {
+	_load_bats_outcome_fns
+	DEGRADED_STAGES=()
+	_bats_full_suite_outcome 0 "ok 1 a" "$TEST_TMP/log"
+	[ "${#DEGRADED_STAGES[@]}" -eq 0 ]
+}
