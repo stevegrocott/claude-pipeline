@@ -736,7 +736,7 @@ fi
 
 ## Post-Batch Follow-up Enrichment
 
-When a `handle-issues` batch creates follow-up issues (via the `adjacent_issues` path during PR review or the `process-pr` precise path post-merge), those issues are created quickly with a minimal body: parent reference, raw description, and a single synthesised `[default] (M) <title>` task line. They are automatically tagged with the `needs-explore` label and contain a `<!-- pipeline-autocreated -->` HTML comment marker.
+When a `handle-issues` batch creates follow-up issues, the only path is `process-pr` (precise and vague paths, post-merge), which reads the findings and comments the PR review posts on the PR. The orchestrator's PR review loop does not create issues itself (the former `adjacent_issues` path was unreachable and has been removed). Those issues are created quickly with a minimal body: parent reference, raw description, and a single synthesised `[default] (M) <title>` task line. They are automatically tagged with the `needs-explore` label and contain a `<!-- pipeline-autocreated -->` HTML comment marker.
 
 Running `/handle-issues` with `--enrich-followups` (or `batch-orchestrator.sh --enrich-followups`) triggers a post-batch sweep that calls `/enrich-issue N` on each follow-up created during the current batch:
 
