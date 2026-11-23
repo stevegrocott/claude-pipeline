@@ -433,6 +433,10 @@ FULL_SUITE_KILL_GRACE="${FULL_SUITE_KILL_GRACE:-10}"
 
 ORCHESTRATOR_START_EPOCH=$(date +%s)
 declare -a DEGRADED_STAGES=()
+
+# True only when run_test_loop deferred the BATS suite to the full-suite
+# check (no changed .bats files); reset to false at the start of every loop.
+BATS_SUITE_DEFERRED=false
 # The run-budget soft-threshold warning is emitted at most once per run
 # (issue #583).  The latch lives in status.json (.run_budget_soft_warned), NOT a
 # shell global: check_run_budget() runs inside the run_stage command-substitution
@@ -10681,6 +10685,12 @@ _bats_full_suite_outcome() {
     # clear incomplete marks (the root run, #1160).
     local supersede="${7:-true}"
     local failure_names failure_total failure_shown
+    # Unmeasured/timeout runs only block the merge when the BATS suite was
+    # deferred to this check (test:bats_incomplete:deferred is recorded).
+    local gate_note="non-blocking"
+    if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+        gate_note="blocking: suite deferred"
+    fi
 
     if (( rc == 124 )); then
         # A timeout (rc 124) is neither a real failure nor a pass —
@@ -10694,11 +10704,13 @@ _bats_full_suite_outcome() {
         # return control to main() rather than blocking it.
         log_warn "Full-suite BATS check timed out after" \
             "${budget}s — treating as" \
-            "unmeasured, not red (non-blocking)"
+            "unmeasured, not red ($gate_note)"
         DEGRADED_STAGES+=("test:bats_full_suite_timeout")
-        # The suite never reached a verdict, so a deferred run leaves the
-        # branch unmeasured: record the blocking incomplete mark too.
-        DEGRADED_STAGES+=("test:bats_incomplete:full_suite")
+        # Only a run whose BATS suite was deferred to this check is left
+        # unmeasured by it; otherwise the test loop already measured it.
+        if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+            DEGRADED_STAGES+=("test:bats_incomplete:deferred")
+        fi
     elif (( rc != 0 )) \
         && (( $(_bats_full_suite_failure_count \
             "$output") == 0 )); then
@@ -10710,9 +10722,11 @@ _bats_full_suite_outcome() {
         # reconcile_failed_tasks_with_branch_evidence() treat it as
         # proof of a real regression.
         DEGRADED_STAGES+=("test:bats_full_suite_unmeasured")
-        # The suite never reached a verdict, so a deferred run leaves the
-        # branch unmeasured: record the blocking incomplete mark too.
-        DEGRADED_STAGES+=("test:bats_incomplete:full_suite")
+        # Only a run whose BATS suite was deferred to this check is left
+        # unmeasured by it; otherwise the test loop already measured it.
+        if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+            DEGRADED_STAGES+=("test:bats_incomplete:deferred")
+        fi
         # State the evidence in the warning itself, so a killed runner
         # can be told from a setup error without opening the log.
         local ok_seen not_ok_seen plan_size
@@ -10724,7 +10738,7 @@ _bats_full_suite_outcome() {
         plan_size="${plan_size:-none reported}"
         log_warn "Full-suite BATS check exited $rc with" \
             "no failing test reported — treating as unmeasured," \
-            "not red (non-blocking). Results seen: $ok_seen ok," \
+            "not red ($gate_note). Results seen: $ok_seen ok," \
             "$not_ok_seen not ok; TAP plan size: $plan_size;" \
             "stage log: $log_path"
         comment_issue "Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)" \
@@ -11249,6 +11263,8 @@ run_test_loop() {
     max_test_iter=$(apply_profile_to_test_max_iter \
         "$loop_profile" "$MAX_TEST_ITERATIONS")
 
+    BATS_SUITE_DEFERRED=false
+
     log "Starting test loop after all tasks complete"
 
     # -------------------------------------------------------------------------
@@ -11339,6 +11355,7 @@ run_test_loop() {
             && -f "$loop_dir/.claude/scripts/implement-issue-test/run-tests.sh" ]]; then
         log "No changed BATS test files and the full-suite runner is present — deferring the suite to the full-suite check"
         comment_issue "Test Loop: Deferred" "⏭️ No .bats files changed on this branch. The BATS suite is deferred to the full-suite check that runs after the test loop." ""
+        BATS_SUITE_DEFERRED=true
         return 0
     fi
 

@@ -10685,6 +10685,12 @@ _bats_full_suite_outcome() {
     # clear incomplete marks (the root run, #1160).
     local supersede="${7:-true}"
     local failure_names failure_total failure_shown
+    # Unmeasured/timeout runs only block the merge when the BATS suite was
+    # deferred to this check (test:bats_incomplete:deferred is recorded).
+    local gate_note="non-blocking"
+    if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
+        gate_note="blocking: suite deferred"
+    fi
 
     if (( rc == 124 )); then
         # A timeout (rc 124) is neither a real failure nor a pass —
@@ -10698,7 +10704,7 @@ _bats_full_suite_outcome() {
         # return control to main() rather than blocking it.
         log_warn "Full-suite BATS check timed out after" \
             "${budget}s — treating as" \
-            "unmeasured, not red (non-blocking)"
+            "unmeasured, not red ($gate_note)"
         DEGRADED_STAGES+=("test:bats_full_suite_timeout")
         # Only a run whose BATS suite was deferred to this check is left
         # unmeasured by it; otherwise the test loop already measured it.
@@ -10732,7 +10738,7 @@ _bats_full_suite_outcome() {
         plan_size="${plan_size:-none reported}"
         log_warn "Full-suite BATS check exited $rc with" \
             "no failing test reported — treating as unmeasured," \
-            "not red (non-blocking). Results seen: $ok_seen ok," \
+            "not red ($gate_note). Results seen: $ok_seen ok," \
             "$not_ok_seen not ok; TAP plan size: $plan_size;" \
             "stage log: $log_path"
         comment_issue "Full-Suite BATS Check: pipeline tests UNMEASURED (no failing test)" \
