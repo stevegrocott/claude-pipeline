@@ -553,6 +553,31 @@ _wait_for_file() {
         "(lost update, or waiters starved by a fixed-cadence backoff)"
 }
 
+@test "status lock: exactly one of N racing acquirers wins (#1151)" {
+	export STATUS_LOCK_IMPL=mkdir
+	export STATUS_LOCK_TIMEOUT=0
+	init_status
+
+	local n=12 i
+	local -a pids=()
+	for ((i = 1; i <= n; i++)); do
+		(
+			if _status_lock_acquire 2>/dev/null; then
+				: > "$TEST_TMP/winner-$i"
+			fi
+			sleep 5
+		) &
+		pids+=("$!")
+	done
+	sleep 2
+
+	local -a winners=("$TEST_TMP"/winner-*)
+	kill "${pids[@]}" 2>/dev/null
+	wait "${pids[@]}" 2>/dev/null || true
+	[ "${#winners[@]}" -eq 1 ] || fail \
+		"expected exactly 1 lock winner, got ${#winners[@]}: ${winners[*]}"
+}
+
 @test "status_json_write: mkdir lock left by a killed writer is broken as stale" {
     export STATUS_LOCK_IMPL=mkdir
     export STATUS_LOCK_TIMEOUT=5
