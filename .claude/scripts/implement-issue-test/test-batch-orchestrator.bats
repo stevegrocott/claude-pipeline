@@ -7336,7 +7336,7 @@ _run_startup_env() {
 	_make_plugin_version "$cache" 0.8.10
 	_run_startup_env "$cache" 0.8.19 "$cache/0.8.10/bin:/usr/bin:/bin"
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"WARN: Stale PATH entry"*"$cache/0.8.10/bin"* ]]
+	[[ "$output" == *"LOG: Note: inherited PATH entry"*"$cache/0.8.10/bin"* ]]
 	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
 }
 

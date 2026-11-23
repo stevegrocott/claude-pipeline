@@ -137,7 +137,7 @@ _install_versioned() {
     printf '%s\n' "$cache/$ver/scripts/resolve-pipeline-root.sh"
 }
 
-@test "pipeline_pin_bin_first puts this version's bin first and drops stale copies" {
+@test "pipeline_pin_bin_first puts this version's bin first and drops duplicates of it" {
     local cache="$TEST_TMP/cache"
     local resolver
     resolver="$(_install_versioned "$cache" 0.8.22)"

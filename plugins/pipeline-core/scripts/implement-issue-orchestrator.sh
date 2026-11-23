@@ -127,14 +127,12 @@ source "$SCRIPT_DIR/prompts/triage-prompt.sh"
 source "$SCRIPT_DIR/resolve-pipeline-root.sh"
 # Pin THIS version's bin/ first on PATH so every session this run dispatches
 # resolves the pipeline-core-* shims to the running version (#1158). When the
-# caller (e.g. batch-orchestrator.sh) already pinned it, stay silent: the
-# caller has logged and warned already. No-op in the repo-local layout.
+# caller (batch-orchestrator.sh) already logged the version and warned, it
+# exports _PIPELINE_BATCH_LOGGED_STARTUP=1 and we stay silent. An explicit
+# marker is used (not a PATH inference) so standalone runs whose bin is already
+# first on PATH still log. No-op in the repo-local layout.
 _PIPELINE_BIN_ALREADY_PINNED=false
-if _pin_root=$(pipeline_plugin_root 2>/dev/null) \
-    && [[ "${PATH%%:*}" == "$_pin_root/bin" ]]; then
-    _PIPELINE_BIN_ALREADY_PINNED=true
-fi
-unset _pin_root
+[[ "${_PIPELINE_BATCH_LOGGED_STARTUP:-}" == 1 ]] && _PIPELINE_BIN_ALREADY_PINNED=true
 pipeline_pin_bin_first || true
 
 # Resolve the consumer repo's platform.sh via resolve_consumer_file() (checks
@@ -1179,8 +1177,8 @@ log_startup_environment() {
         [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
         [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
             && "${entry%/bin}" != "$root" ]] || continue
-        log_warn "Stale PATH entry from another pipeline version: $entry" \
-            "(running $version from $bin_dir)"
+        log "Note: inherited PATH entry from another pipeline version: $entry" \
+            "(harmless, $version's bin is pinned first; running from $bin_dir)"
     done
 
     while IFS= read -r newer; do

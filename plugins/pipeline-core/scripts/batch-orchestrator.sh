@@ -509,8 +509,8 @@ log_startup_environment() {
         [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
         [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
             && "${entry%/bin}" != "$root" ]] || continue
-        log_warn "Stale PATH entry from another pipeline version: $entry" \
-            "(running $version from $bin_dir)"
+        log "Note: inherited PATH entry from another pipeline version: $entry" \
+            "(harmless, $version's bin is pinned first; running from $bin_dir)"
     done
 
     while IFS= read -r newer; do
@@ -3027,6 +3027,8 @@ log "=========================================="
 log "Batch Orchestrator Starting"
 log "=========================================="
 log_startup_environment
+# Tell the per-issue orchestrators the version/drift check has been logged.
+export _PIPELINE_BATCH_LOGGED_STARTUP=1
 log "Issues: ${ISSUE_ARRAY[*]}"
 log "Branch: $BRANCH"
 log "Implement agent: ${AGENT:-default}"
