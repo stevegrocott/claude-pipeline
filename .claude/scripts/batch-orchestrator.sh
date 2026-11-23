@@ -2910,6 +2910,50 @@ mark_issue_completed_on_merge() {
 	update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
 	update_issue_field "$issue_num" "pr" "$pr" "true"
 	update_progress
+	# Non-fatal: a failed followups pass never un-completes the issue.
+	dispatch_followups_only_pass "$issue_num" "$pr" \
+		|| log_warn "Issue #$issue_num: followups-only pass for PR #$pr" \
+			"failed (non-fatal)"
+	return 0
+}
+
+# After a parked PR is seen merged, its follow-ups were never filed (the
+# process-pr run that parked it did not merge). Dispatch the followups-only
+# pass and record the created issue numbers in the issue's follow_ups.
+# Skipped when follow_ups is already populated. Always returns 0.
+dispatch_followups_only_pass() {
+	local issue_num="$1" pr="$2"
+	local existing="" out="" last_json="" created=""
+	local issue_log="$LOG_BASE/issue-$issue_num.log"
+
+	existing=$(jq -r --arg num "$issue_num" \
+		'.issues[] | select(.number == $num)
+		| (.follow_ups // []) | length' \
+		"$STATUS_FILE" 2>/dev/null) || existing=0
+	if [[ "${existing:-0}" != "0" ]]; then
+		return 0
+	fi
+
+	log "Issue #$issue_num: PR #$pr merged while parked —" \
+		"running the followups-only pass"
+	out=$(dispatch_composition \
+		"/process-pr $pr $issue_num $BRANCH --followups-only" "false" \
+		--agent code-reviewer \
+		--allowedTools "$(process_pr_allowed_tools)" \
+		--output-format json \
+		--json-schema "$PROCESS_SCHEMA" 2>>"$issue_log") || out=""
+	printf '%s\n' "=== followups-only output ===" >> "$issue_log"
+	printf '%s\n' "$out" >> "$issue_log"
+
+	last_json=$(tail -1 <<< "$out")
+	created=$(jq -c '.structured_output.follow_up_issues // []' \
+		<<< "$last_json" 2>/dev/null) || created="[]"
+	[[ -n "$created" ]] || created="[]"
+	if [[ "$created" != "[]" ]]; then
+		update_issue_field "$issue_num" "follow_ups" "$created" "true"
+		log "Issue #$issue_num: recorded follow-ups $created"
+	fi
+	return 0
 }
 
 # Globals:

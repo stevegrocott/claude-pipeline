@@ -7416,3 +7416,74 @@ _run_startup_env() {
 	[[ "$output" == *"CLAUDE_PATH=$cache/0.8.19/bin:"* ]]
 	[[ "$output" != *"$cache/0.8.10/bin"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# #1157: a PR seen MERGED while parked never had its follow-ups filed, so the
+# merge observation dispatches `/process-pr ... --followups-only` and records
+# the created issue numbers in follow_ups. The pass is non-fatal.
+# ---------------------------------------------------------------------------
+
+_load_followups_pass() {
+	_load_status_writers
+	local body
+	body=$(_extract_function_body dispatch_followups_only_pass \
+		"$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$body" ]] \
+		|| fail "dispatch_followups_only_pass() not defined"
+	eval "$body"
+
+	LOG_BASE="$TEST_TMP/logs"
+	mkdir -p "$LOG_BASE"
+	BRANCH=main
+	PROCESS_SCHEMA='{}'
+	log() { :; }
+	log_warn() { :; }
+	process_pr_allowed_tools() { printf '%s\n' 'Bash(gh *)'; }
+	: > "$TEST_TMP/dispatch.log"
+}
+
+@test "#1157: a merge seen while parked dispatches --followups-only and records follow_ups" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	dispatch_composition() {
+		printf '%s\n' "$1" >> "$TEST_TMP/dispatch.log"
+		printf '%s\n' '{"structured_output":{"status":"merged","follow_up_issues":["77","78"]}}'
+	}
+
+	mark_issue_completed_on_merge 5980 1234
+
+	grep -q -- '/process-pr 1234 5980 main --followups-only' \
+		"$TEST_TMP/dispatch.log" \
+		|| fail "followups-only pass not dispatched: $(cat "$TEST_TMP/dispatch.log")"
+	[[ "$(jq -c '.issues[] | select(.number == "5980") | .follow_ups' \
+		"$STATUS_FILE")" == '["77","78"]' ]] \
+		|| fail "follow_ups not recorded: $(cat "$STATUS_FILE")"
+	[[ "$(jq -r '.issues[] | select(.number == "5980") | .status' \
+		"$STATUS_FILE")" == "completed" ]]
+}
+
+@test "#1157: a failing followups pass is non-fatal and the issue stays completed" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	dispatch_composition() { return 1; }
+
+	run mark_issue_completed_on_merge 5980 1234
+	[[ "$status" -eq 0 ]] || fail "failing pass was fatal: $output"
+	[[ "$(jq -r '.issues[] | select(.number == "5980") | .status' \
+		"$STATUS_FILE")" == "completed" ]]
+	[[ "$(jq -c '.issues[] | select(.number == "5980") | .follow_ups // []' \
+		"$STATUS_FILE")" == '[]' ]]
+}
+
+@test "#1157: no second pass when follow_ups are already recorded" {
+	_load_followups_pass
+	jq -n '{state:"running", issues:[{number:"5980", status:"merge_blocked",
+		pr:"1234", follow_ups:["9"]}],
+		progress:{total:1, completed:0, pending:0, failed:0}}' > "$STATUS_FILE"
+	dispatch_composition() { printf 'called\n' >> "$TEST_TMP/dispatch.log"; }
+
+	mark_issue_completed_on_merge 5980 1234
+
+	[[ ! -s "$TEST_TMP/dispatch.log" ]] \
+		|| fail "pass re-dispatched despite recorded follow_ups"
+}
