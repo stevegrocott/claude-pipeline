@@ -497,8 +497,8 @@ log_startup_environment() {
     local -a newer_versions=()
     local -a stale_bins=()
     version=$(pipeline_version 2>/dev/null) || version=""
-    log "Pipeline version: ${version:-unknown (repo-local layout)}"
-    log "Pipeline script dir: $SCRIPT_DIR"
+    log "Pipeline version: ${version:-repo-local}" \
+        "(script dir: $SCRIPT_DIR)"
 
     [[ -n "$version" ]] || return 0
     root=$(pipeline_plugin_root 2>/dev/null) || return 0

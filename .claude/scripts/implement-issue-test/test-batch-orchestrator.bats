@@ -7324,8 +7324,8 @@ _run_startup_env() {
 	_make_plugin_version "$cache" 0.8.19
 	_run_startup_env "$cache" 0.8.19 "/usr/bin:/bin"
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"LOG: Pipeline version: 0.8.19"* ]]
-	[[ "$output" == *"LOG: Pipeline script dir: $cache/0.8.19/scripts"* ]]
+	[[ "$output" == *"LOG: Pipeline version: 0.8.19 (script dir: $cache/0.8.19/scripts)"* ]]
+	[ "$(grep -c 'LOG: Pipeline' <<< "$output")" -eq 1 ]
 	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
 	[[ "$output" != *"WARN:"* ]]
 }
@@ -7360,7 +7360,7 @@ _run_startup_env() {
 	[[ "$output" != *"Newer pipeline version"* ]]
 }
 
-@test "startup: repo-local layout logs unknown version without warnings" {
+@test "startup: repo-local layout logs version repo-local with script dir, no warnings" {
 	local fn="$TEST_TMP/fn.sh"
 	_extract_function_body log_startup_environment \
 		"$BATCH_ORCHESTRATOR_SCRIPT" > "$fn"
@@ -7373,6 +7373,7 @@ _run_startup_env() {
 		log_startup_environment
 	' _ "$SCRIPT_DIR" "$fn"
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"LOG: Pipeline version: unknown"* ]]
+	[[ "$output" == *"LOG: Pipeline version: repo-local (script dir: $SCRIPT_DIR)"* ]]
+	[[ "$output" != *"unknown"* ]]
 	[[ "$output" != *"WARN:"* ]]
 }
