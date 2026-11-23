@@ -128,6 +128,20 @@ _drop_stale_break() {
 	fi
 }
 
+# True when the file exists, is empty, and is older than LOCK_STALE_AGE.
+# A holder that died between creating the pidfile and writing its pid
+# leaves such a file; a younger empty file may be a live holder mid-write.
+_empty_pidfile_stale() {
+	local file="$1"
+	local mtime now
+	[[ -e "$file" && ! -s "$file" ]] || return 1
+	mtime=$(stat -c %Y "$file" 2>/dev/null \
+		|| stat -f %m "$file" 2>/dev/null) || return 1
+	[[ "$mtime" =~ ^[0-9]+$ ]] || return 1
+	printf -v now '%(%s)T' -1
+	(( now - mtime > LOCK_STALE_AGE ))
+}
+
 _mkdir_locked_append() {
 	local file="$1"
 	local data="$2"
@@ -148,7 +162,9 @@ _mkdir_locked_append() {
 			lock_pid=$(cat "$pidfile" 2>/dev/null) || true
 		fi
 		if [[ -n "$lock_pid" ]] \
-			&& ! kill -0 "$lock_pid" 2>/dev/null; then
+			&& ! kill -0 "$lock_pid" 2>/dev/null \
+			|| { [[ -z "$lock_pid" ]] \
+				&& _empty_pidfile_stale "$pidfile"; }; then
 			# Only one waiter may break a stale lock, and it must
 			# re-read the pid under the break mutex so it never
 			# removes a lock re-acquired since it was sampled.

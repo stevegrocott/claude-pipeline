@@ -548,3 +548,33 @@ _valid_stage_end() {
 	[ "$status" -eq 3 ]
 	[ -e "$LOG_DIR/events.jsonl.lock.break" ]
 }
+
+@test "(f) lock fallback: old empty pidfile is stale, broken, emit lands" {
+	export EVENT_EMIT_LOCK_IMPL=mkdir
+	export LOCK_STALE_AGE=5
+	local lockdir="$LOG_DIR/events.jsonl.lock"
+	mkdir -p "$lockdir"
+	: > "$lockdir/pid"
+	touch -t 200001010000 "$lockdir/pid"
+
+	local ev='{"ts":"2026-01-01T00:08:00Z","run_id":"emp1",'
+	ev+='"stage":"test","event":"stage_start","model":"m"}'
+	run bash "$EVENT_EMIT_SCRIPT" "$ev"
+	[ "$status" -eq 0 ]
+	[ "$(wc -l < "$LOG_DIR/events.jsonl")" -eq 1 ]
+}
+
+@test "(f) lock fallback: young empty pidfile is waited on; exit 3" {
+	export EVENT_EMIT_LOCK_IMPL=mkdir
+	export LOCK_STALE_AGE=3600
+	local lockdir="$LOG_DIR/events.jsonl.lock"
+	mkdir -p "$lockdir"
+	: > "$lockdir/pid"
+
+	local ev='{"ts":"2026-01-01T00:09:00Z","run_id":"emp2",'
+	ev+='"stage":"test","event":"stage_start","model":"m"}'
+	run bash "$EVENT_EMIT_SCRIPT" "$ev"
+	[ "$status" -eq 3 ]
+	[ -e "$lockdir/pid" ]
+	[ ! -s "$LOG_DIR/events.jsonl" ]
+}
