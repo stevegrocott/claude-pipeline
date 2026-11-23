@@ -103,7 +103,14 @@ digraph process_pr {
 
 ### Step 0: Resolve the Platform Directory
 
-Run this as its own bare command — no `VAR="$(…)"` assignment, no `||` fallback:
+**Two command shapes are refused by the Bash permission check, whatever the allowlist says. Never emit either one in this skill:**
+
+1. **Assignment prefix** — a command that starts with `VAR=` or `VAR="$(…)"` (e.g. capturing the output of `pipeline-core-platform-dir` into a variable).
+2. **Default expansion** — any `${VAR:-default}` (or `:=`, `:+`) in a command (e.g. `"${PLATFORM_DIR:-.claude/scripts/platform}/merge-mr.sh"`).
+
+Write every command literally: run each as its own bare command with real values and literal paths substituted for the `<PLACEHOLDERS>`, and read results from the command output rather than capturing them into variables. Pipes and `;` are fine.
+
+Run this as its own bare command:
 
 ```bash
 pipeline-core-platform-dir
@@ -115,10 +122,10 @@ Use the path it prints as a literal in every later command, in place of `<PLATFO
 
 ```bash
 # Verify PR/MR exists and is open
-"<PLATFORM_DIR>/read-mr-comments.sh" "$PR_NUMBER"
+"<PLATFORM_DIR>/read-mr-comments.sh" <PR_NUMBER>
 
 # Verify issue exists and is open
-"<PLATFORM_DIR>/read-issue.sh" "$ISSUE_NUMBER"
+"<PLATFORM_DIR>/read-issue.sh" <ISSUE_NUMBER>
 ```
 
 **If validation fails:** Stop and report error.
@@ -127,7 +134,7 @@ Use the path it prints as a literal in every later command, in place of `<PLATFO
 
 ```bash
 # Get PR/MR comments
-"<PLATFORM_DIR>/read-mr-comments.sh" "$PR_NUMBER"
+"<PLATFORM_DIR>/read-mr-comments.sh" <PR_NUMBER>
 ```
 
 **Extract:**
@@ -136,61 +143,17 @@ Use the path it prints as a literal in every later command, in place of `<PLATFO
 
 ### Step 3: Parse Review Status from Comments
 
-**IMPORTANT:** Review status is embedded in PR/MR comments by the `implement-issue` skill. Use this explicit algorithm:
-
-**Step 3a: Fetch all PR/MR comments**
+**IMPORTANT:** Review status is embedded in PR/MR comments by the `implement-issue` skill. Fetch the comments with one bare command and read the status from its output yourself — do not capture it into a variable or pipe it through a shell function:
 
 ```bash
-# Get comments as JSON array
-COMMENTS=$("<PLATFORM_DIR>/read-mr-comments.sh" "$PR_NUMBER" | jq -r '.[]')
+"<PLATFORM_DIR>/read-mr-comments.sh" <PR_NUMBER>
 ```
 
-**Step 3b: Extract status from comments (most recent wins)**
+Scan the comments in chronological order. The LAST comment that carries a status marker wins (it is the most recent review). Match markers in the priority order listed below.
 
-```bash
-# Parse status using explicit algorithm
-parse_review_status() {
-    local comments="$1"
-    local status=""
+If no comment carries any marker, stop and report: `ERROR: No review status found in PR/MR #<PR_NUMBER> comments. Expected a comment containing '**Status: APPROVED**', '**Status: CHANGES_REQUESTED**', or the orchestrator's '**Result:** approved'/'**Result:** changes_requested' format.`
 
-    # Process comments in order (last one wins)
-    while IFS= read -r comment; do
-        # Check for markdown bold format first (preferred)
-        if echo "$comment" | grep -q '\*\*Status: APPROVED\*\*'; then
-            status="APPROVED"
-        elif echo "$comment" | grep -q '\*\*Status: CHANGES_REQUESTED\*\*'; then
-            status="CHANGES_REQUESTED"
-        # Fallback to plain text format
-        elif echo "$comment" | grep -q 'Status: APPROVED'; then
-            status="APPROVED"
-        elif echo "$comment" | grep -q 'Status: CHANGES_REQUESTED'; then
-            status="CHANGES_REQUESTED"
-        # Fallback to the orchestrator's comment_pr Result format
-        # (icon + "**Result:** approved|changes_requested", implement-issue-orchestrator.sh)
-        elif echo "$comment" | grep -qi '\*\*Result:\*\* *approved'; then
-            status="APPROVED"
-        elif echo "$comment" | grep -qi '\*\*Result:\*\* *changes_requested'; then
-            status="CHANGES_REQUESTED"
-        fi
-    done <<< "$comments"
-
-    echo "$status"
-}
-
-REVIEW_STATUS=$(parse_review_status "$COMMENTS")
-```
-
-**Step 3c: Validate status**
-
-```bash
-if [ -z "$REVIEW_STATUS" ]; then
-    echo "ERROR: No review status found in PR/MR #$PR_NUMBER comments"
-    echo "Expected: Comment containing '**Status: APPROVED**', '**Status: CHANGES_REQUESTED**', or the orchestrator's '**Result:** approved'/'**Result:** changes_requested' format"
-    exit 1
-fi
-
-echo "Review status: $REVIEW_STATUS"
-```
+Otherwise note the status (`APPROVED` or `CHANGES_REQUESTED`) and continue.
 
 **Status priority:**
 1. `**Status: APPROVED**` (markdown bold - preferred)
@@ -208,75 +171,55 @@ echo "Review status: $REVIEW_STATUS"
 
 ### Step 4a: Check for Merge Block
 
-Before calling `merge-mr.sh`, read `status.json` to check whether a convergence-failure block is in effect.
+Before the orchestrator merges, check whether a convergence-failure block is in effect. Run each check below as its own bare command, with a literal path (`status.json` in the current directory, or the full path if it lives elsewhere). If the file does not exist, there is no block — skip to Step 4b.
+
+First, check whether the emergency override is set:
 
 ```bash
-STATUS_JSON="${STATUS_JSON_PATH:-status.json}"
-MERGE_BLOCKED_REASON=""
+printenv BLOCK_MERGE_ON_CONVERGENCE_FAILURE
+```
 
-if [[ -f "$STATUS_JSON" ]]; then
-    # Prefer the explicit merge_blocked_reason field (written by the orchestrator)
-    MERGE_BLOCKED_REASON=$(jq -r '.merge_blocked_reason // empty' "$STATUS_JSON" 2>/dev/null)
+If it prints `0`, skip the rest of this step (restores the pre-fix behaviour for emergency overrides) and proceed to Step 4b. If it prints nothing or any other value, continue.
 
-    # Fall back to scanning degraded_stages for a quality:convergence_failure entry
-    if [[ -z "$MERGE_BLOCKED_REASON" ]]; then
-        CONVERGENCE_ENTRY=$(jq -r '(.degraded_stages // [])[] | select(startswith("quality:convergence_failure"))' "$STATUS_JSON" 2>/dev/null | head -1)
-        if [[ -n "$CONVERGENCE_ENTRY" ]]; then
-            MERGE_BLOCKED_REASON="Quality loop convergence failure recorded in degraded_stages: $CONVERGENCE_ENTRY"
-        fi
-    fi
+Then read the block signals, in this order, stopping at the first that produces output:
 
-    # Fall back to scanning degraded_stages for a pr_review:max_iterations entry —
-    # the PR-review loop exhausted its iterations without an approved verdict, so
-    # the review never converged (mirrors the orchestrator merge gate).
-    if [[ -z "$MERGE_BLOCKED_REASON" ]]; then
-        MAX_ITER_ENTRY=$(jq -r '(.degraded_stages // [])[] | select(startswith("pr_review:max_iterations"))' "$STATUS_JSON" 2>/dev/null | head -1)
-        if [[ -n "$MAX_ITER_ENTRY" ]]; then
-            MERGE_BLOCKED_REASON="PR review loop ended without an approved verdict recorded in degraded_stages: $MAX_ITER_ENTRY"
-        fi
-    fi
+```bash
+jq -r '.merge_blocked_reason // empty' status.json
+```
 
-    # Fall back to scanning degraded_stages for a quality:fix_failed entry —
-    # a quality-loop fix stage failed, so the findings were never resolved
-    # (mirrors the orchestrator partial gate).
-    if [[ -z "$MERGE_BLOCKED_REASON" ]]; then
-        FIX_FAILED_ENTRY=$(jq -r '(.degraded_stages // [])[] | select(startswith("quality:fix_failed"))' "$STATUS_JSON" 2>/dev/null | head -1)
-        if [[ -n "$FIX_FAILED_ENTRY" ]]; then
-            MERGE_BLOCKED_REASON="Quality-loop fix stage failed, recorded in degraded_stages: $FIX_FAILED_ENTRY"
-        fi
-    fi
-fi
+```bash
+jq -r '(.degraded_stages // [])[] | select(startswith("quality:convergence_failure"))' status.json
+```
 
-if [[ -n "$MERGE_BLOCKED_REASON" ]]; then
-    echo "MERGE BLOCKED: $MERGE_BLOCKED_REASON"
-    # Post a comment on the PR explaining why it was not merged
-    "<PLATFORM_DIR>/comment-mr.sh" "$PR_NUMBER" "$(cat <<EOF
+```bash
+jq -r '(.degraded_stages // [])[] | select(startswith("pr_review:max_iterations"))' status.json
+```
+
+```bash
+jq -r '(.degraded_stages // [])[] | select(startswith("quality:fix_failed"))' status.json
+```
+
+- `merge_blocked_reason` — the explicit reason written by the orchestrator.
+- `quality:convergence_failure` — the reviewer repeatedly flagged the same issues without resolution.
+- `pr_review:max_iterations` — the PR-review loop exhausted its iterations without an approved verdict.
+- `quality:fix_failed` — a quality-loop fix stage failed, so the findings were never resolved.
+
+**If any command printed a block reason:** report it in your output as `MERGE BLOCKED: <the text the command printed>`, then post a comment on the PR explaining why it was not merged, using the quoted heredoc form with the reason written in literally:
+
+```bash
+"<PLATFORM_DIR>/comment-mr.sh" <PR_NUMBER> "$(cat <<'EOF'
 ## Merge Blocked — Unresolved Quality Feedback
 
-This PR was **not** merged automatically because the quality loop exited with a convergence failure, meaning the reviewer repeatedly flagged the same issues without resolution.
+This PR was **not** merged automatically because the quality loop did not converge.
 
-**Block reason:** $MERGE_BLOCKED_REASON
+**Block reason:** <the text the command printed>
 
 Human review is required before merging. Address the unresolved feedback, then re-run the pipeline or merge manually once the issues are resolved.
 EOF
-    )"
-    # Leave the PR open; do NOT close the issue or delete the branch
-    exit 0  # skill exits with merge_blocked status (see output section)
-fi
+)"
 ```
 
-**`STATUS_JSON_PATH` override:** If `status.json` is not in the current directory (e.g. when invoked from a different working directory), set `STATUS_JSON_PATH` to the full path before calling this skill.
-
-**`BLOCK_MERGE_ON_CONVERGENCE_FAILURE` env var:** When this variable is explicitly set to `0`, skip the check above and proceed directly to merge (restores the pre-fix behaviour for emergency overrides).
-
-```bash
-if [[ "${BLOCK_MERGE_ON_CONVERGENCE_FAILURE:-1}" == "0" ]]; then
-    echo "WARN: BLOCK_MERGE_ON_CONVERGENCE_FAILURE=0 — skipping merge-block check"
-    MERGE_BLOCKED_REASON=""
-fi
-```
-
-**If a merge block is set:** Leave the PR open, post the explanatory comment, and output `merge_blocked` status (see Output section). Do not proceed to close the issue or delete the branch.
+Leave the PR open, do NOT close the issue or delete the branch, and output `merge_blocked` status (see Output section).
 
 ### Step 4b: Do NOT merge — return `approved`
 
@@ -295,7 +238,7 @@ A PreToolUse hook now hard-blocks direct `gh pr merge` / `glab mr merge`, so att
 ### Step 4c: Comment on Issue
 
 ```bash
-"<PLATFORM_DIR>/comment-issue.sh" "$ISSUE_NUMBER" "$(cat <<'EOF'
+"<PLATFORM_DIR>/comment-issue.sh" <ISSUE_NUMBER> "$(cat <<'EOF'
 ## Completed
 
 Resolved via PR/MR #$PR_NUMBER (merged).
@@ -312,7 +255,7 @@ EOF
 ### Step 4d: Close Issue
 
 ```bash
-"<PLATFORM_DIR>/transition-issue.sh" "$ISSUE_NUMBER"
+"<PLATFORM_DIR>/transition-issue.sh" <ISSUE_NUMBER>
 ```
 
 ### Step 4e: Delete Branch
@@ -320,12 +263,12 @@ EOF
 The merge script may handle branch deletion. Verify:
 
 ```bash
-git ls-remote --heads origin $BRANCH_NAME
+git ls-remote --heads origin <BRANCH_NAME>
 ```
 
 If still exists:
 ```bash
-git push origin --delete $BRANCH_NAME
+git push origin --delete <BRANCH_NAME>
 ```
 
 ### Step 4f: Parse Comments for Follow-up Issues
@@ -376,18 +319,18 @@ Examples:
 
 > **CRITICAL — NEVER use `gh issue create` or `create-issue.sh` directly.** Every follow-up issue MUST go through `create-followup-issue.sh`. It runs `assert_issue_valid` fail-closed before creation, ensuring the body has parseable task lines, a known agent, a resolvable file path, and an `## Acceptance Criteria` section. Writing bodies by hand and bypassing this script produces malformed issues that stall the pipeline and require manual remediation. If `create-followup-issue.sh` exits non-zero for any reason (missing argument, validation failure), log the error and skip that item — do NOT fall back to `gh issue create`.
 
-For each extracted issue, invoke the platform wrapper `create-followup-issue.sh` as a bare command, using the literal path resolved in Step 0 (no `VAR="$(…)"` assignment, no `||` fallback):
+For each extracted issue, invoke the platform wrapper `create-followup-issue.sh` as a bare command, using the literal path resolved in Step 0 (no assignment, no default expansion, no `||` fallback):
 
 ```bash
 "<PLATFORM_DIR>/create-followup-issue.sh" \
-  --title "$ISSUE_TITLE" \
-  --description "$EXTRACTED_DESCRIPTION" \
-  --task-description "$INFERRED_TASK_DESCRIPTION" \
-  --file-path "$FILE_PATH" \
-  --pr-number "$PR_NUMBER" \
-  --issue-number "$ISSUE_NUMBER" \
-  --reviewer "$REVIEWER" \
-  --labels "${LABELS}" \
+  --title "<ISSUE_TITLE>" \
+  --description "<EXTRACTED_DESCRIPTION>" \
+  --task-description "<INFERRED_TASK_DESCRIPTION>" \
+  --file-path "<FILE_PATH>" \
+  --pr-number <PR_NUMBER> \
+  --issue-number <ISSUE_NUMBER> \
+  --reviewer "<REVIEWER>" \
+  --labels "<LABELS>" \
   --type precise   # or: --type vague (adds needs-explore label)
 ```
 
@@ -404,8 +347,8 @@ Text that may contain lines starting with a hash.
 EOF
 )" \
   --file-path "path/to/file" \
-  --pr-number "$PR_NUMBER" \
-  --issue-number "$ISSUE_NUMBER" \
+  --pr-number <PR_NUMBER> \
+  --issue-number <ISSUE_NUMBER> \
   --type precise
 ```
 
@@ -424,8 +367,8 @@ When the code reviewer requests changes, spawn a new implementation session:
 ```bash
 claude --dangerously-skip-permissions \
   --print \
-  "/implement-issue $ISSUE_NUMBER $BASE_BRANCH" \
-  2>&1 | tee -a logs/process-pr-rerun-$(date +%Y%m%d-%H%M%S).log
+  "/implement-issue <ISSUE_NUMBER> <BASE_BRANCH>" \
+  2>&1 | tee -a logs/process-pr-rerun.log
 ```
 
 **Notes:**
