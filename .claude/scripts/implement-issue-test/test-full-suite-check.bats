@@ -270,7 +270,7 @@ _load_root_run_fns() {
 	local orch="$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh"
 	local runner_line root_line
 	runner_line=$(grep -n '"\$bats_full_log" "\$bats_runner"' "$orch" | head -1 | cut -d: -f1)
-	root_line=$(grep -n '^        _run_root_bats_full_suite "\$branch_scope"' "$orch" | head -1 | cut -d: -f1)
+	root_line=$(grep -n '^            _run_root_bats_full_suite "\$branch_scope"' "$orch" | head -1 | cut -d: -f1)
 	[ -n "$runner_line" ]
 	[ -n "$root_line" ]
 	(( root_line > runner_line ))
