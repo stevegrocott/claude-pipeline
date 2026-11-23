@@ -260,10 +260,10 @@ _load_root_run_fns() {
 	_load_root_run_fns
 	mkdir tests
 	: > tests/a.bats
-	DEGRADED_STAGES=("test:bats_incomplete:full_suite")
+	DEGRADED_STAGES=("test:bats_incomplete:deferred")
 	MOCK_BATS_OUT="ok 1 a"
 	_run_root_bats_full_suite bash
-	[ "${DEGRADED_STAGES[*]}" = "test:bats_incomplete:full_suite" ]
+	[ "${DEGRADED_STAGES[*]}" = "test:bats_incomplete:deferred" ]
 }
 
 @test "orchestrator calls the root run after the runner-based check" {
@@ -274,4 +274,17 @@ _load_root_run_fns() {
 	[ -n "$runner_line" ]
 	[ -n "$root_line" ]
 	(( root_line > runner_line ))
+}
+
+@test "orchestrator starts the root run only inside the runner-exists guard" {
+	local orch="$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh"
+	local guard_line call_line fi_line
+	guard_line=$(grep -n '^        if \[\[ -f "\$bats_runner" \]\]; then' "$orch" | head -1 | cut -d: -f1)
+	call_line=$(grep -n '_run_root_bats_full_suite "\$branch_scope"' "$orch" | head -1 | cut -d: -f1)
+	[ -n "$guard_line" ]
+	[ -n "$call_line" ]
+	# The first closing `fi` at guard indentation after the guard.
+	fi_line=$(awk -v s="$guard_line" 'NR > s && /^        fi$/ {print NR; exit}' "$orch")
+	(( call_line > guard_line ))
+	(( call_line < fi_line ))
 }

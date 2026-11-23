@@ -15049,11 +15049,12 @@ $full_scope_failures
 
             _bats_full_suite_outcome "$bats_full_rc" "$bats_full_output" \
                 "$bats_full_log" "$bats_runner" "$branch_scope"
-        fi
 
-        # Root tests/*.bats are not covered by the runner above (#1160);
-        # run them under their own bound and stage log.
-        _run_root_bats_full_suite "$branch_scope"
+            # Root tests/*.bats are not covered by the runner above (#1160);
+            # run them under their own bound and stage log. Only started
+            # when the runner exists: a repo without it has no BATS suite.
+            _run_root_bats_full_suite "$branch_scope"
+        fi
 
         # ---------------------------------------------------------------------
         # E2E-UNVALIDATED GUARD: the test loop above is unit-only when
