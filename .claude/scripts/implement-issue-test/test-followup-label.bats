@@ -348,3 +348,45 @@ ${validated_body}"
 
 	[[ ! -f "$CREATE_ISSUE_CALLS_FILE" ]]
 }
+
+# =============================================================================
+# PR review comment body: findings then reviewer comments
+# =============================================================================
+
+@test "review comment lists every finding with severity, file:line and description" {
+	local review_result body
+	review_result=$(jq -n '{output: {issues: [
+		{severity: "major", file: "src/a.sh", line: 12, description: "Unquoted var"},
+		{severity: "minor", file: "src/b.sh", description: "Naming nit"}
+	]}}')
+
+	body=$(_format_pr_review_comment "changes_requested" "$review_result" \
+		"Needs work" "R")
+
+	[[ "$body" == *'**major** `src/a.sh:12` — Unquoted var'* ]]
+	[[ "$body" == *'**minor** `src/b.sh` — Naming nit'* ]]
+}
+
+@test "review comment puts findings before the reviewer comments" {
+	local review_result body
+	review_result=$(jq -n '{output: {issues: [
+		{severity: "major", file: "a.sh", line: 1, description: "Bad"}
+	]}}')
+
+	body=$(_format_pr_review_comment "approved" "$review_result" \
+		"Overall fine" "OK")
+
+	[[ "$body" == "OK **Result:** approved"* ]]
+	local before_findings="${body%%### Findings*}"
+	local before_comments="${body%%### Reviewer comments*}"
+	(( ${#before_findings} < ${#before_comments} ))
+	[[ "$body" == *'### Reviewer comments'$'\n\n''Overall fine' ]]
+}
+
+@test "review comment omits findings section when there are none" {
+	local body
+	body=$(_format_pr_review_comment "approved" '{"output":{}}' "LGTM" "OK")
+
+	[[ "$body" != *"### Findings"* ]]
+	[[ "$body" == *"LGTM" ]]
+}

@@ -6568,6 +6568,37 @@ _parse_task_lines() {
 	printf '%s\n' "$tasks_json"
 }
 
+# Renders the body of a PR review comment: the verdict line, every finding
+# (severity, file:line, description), then the reviewer's comments.
+#
+# Arguments:
+#   $1  verdict         review verdict (e.g. approved, changes_requested)
+#   $2  review_result   stage result JSON (reads .output.issues)
+#   $3  summary         reviewer's summary text
+#   $4  icon            leading verdict icon
+_format_pr_review_comment() {
+	local verdict="$1"
+	local review_result="$2"
+	local summary="$3"
+	local icon="$4"
+	local findings
+
+	findings=$(printf '%s' "$review_result" | jq -r '
+		[.output.issues // [] | .[] |
+			"- **" + (.severity // "unknown") + "** `" +
+			(if (.file // "") != "" then
+				.file + (if .line != null then ":" + (.line | tostring) else "" end)
+			else "(no file)" end) +
+			"` — " + (.description // "")
+		] | join("\n")' 2>/dev/null || true)
+
+	printf '%s **Result:** %s\n\n' "$icon" "$verdict"
+	if [[ -n "$findings" ]]; then
+		printf '### Findings\n\n%s\n\n' "$findings"
+	fi
+	printf '### Reviewer comments\n\n%s' "$summary"
+}
+
 # Builds a well-formed issue body for an adjacent follow-up issue.
 # If the raw body already contains a valid ## Implementation Tasks section
 # with at least one canonical task line, it is returned unchanged.
@@ -15733,9 +15764,10 @@ ${validated_body}"
             fi
         fi
 
-        comment_pr "$pr_number" "PR Review (Iteration $pr_iteration)" "$review_icon **Result:** $review_verdict
-
-$review_summary$followup_comment" "code-reviewer"
+        local review_comment_body
+        review_comment_body=$(_format_pr_review_comment "$review_verdict" \
+            "$review_result" "$review_summary" "$review_icon")
+        comment_pr "$pr_number" "PR Review (Iteration $pr_iteration)" "${review_comment_body}${followup_comment}" "code-reviewer"
 
         if [[ "$review_verdict" == "approved" ]]; then
             pr_approved=true
