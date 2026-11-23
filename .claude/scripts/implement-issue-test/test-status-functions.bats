@@ -571,7 +571,13 @@ _wait_for_file() {
 	done
 	sleep 2
 
-	local -a winners=("$TEST_TMP"/winner-*)
+	# Count only files that exist: an unmatched glob stays literal, which
+	# would make a zero-winner run look like exactly one winner.
+	local -a winners=()
+	local f
+	for f in "$TEST_TMP"/winner-*; do
+		[[ -e "$f" ]] && winners+=("$f")
+	done
 	kill "${pids[@]}" 2>/dev/null
 	wait "${pids[@]}" 2>/dev/null || true
 	[ "${#winners[@]}" -eq 1 ] || fail \
