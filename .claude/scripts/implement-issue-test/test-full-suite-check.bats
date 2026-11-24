@@ -189,6 +189,46 @@ _load_bats_outcome_fns() {
 }
 
 # =============================================================================
+# DEFERRED-SUITE OUTCOME MARKS
+# =============================================================================
+
+@test "timed-out BATS full suite with the suite deferred adds the deferred mark" {
+	_load_bats_outcome_fns
+	BATS_SUITE_DEFERRED=true
+	DEGRADED_STAGES=()
+	_bats_full_suite_outcome 124 "" "$TEST_TMP/log"
+	[[ " ${DEGRADED_STAGES[*]} " == *" test:bats_full_suite_timeout "* ]]
+	[[ " ${DEGRADED_STAGES[*]} " == *" test:bats_incomplete:deferred "* ]]
+}
+
+@test "unmeasured BATS full suite with the suite deferred adds the deferred mark" {
+	_load_bats_outcome_fns
+	BATS_SUITE_DEFERRED=true
+	DEGRADED_STAGES=()
+	_bats_full_suite_outcome 1 "" "$TEST_TMP/log"
+	[[ " ${DEGRADED_STAGES[*]} " == *" test:bats_full_suite_unmeasured "* ]]
+	[[ " ${DEGRADED_STAGES[*]} " == *" test:bats_incomplete:deferred "* ]]
+}
+
+@test "green BATS full suite with the suite deferred adds no deferred mark" {
+	_load_bats_outcome_fns
+	BATS_SUITE_DEFERRED=true
+	DEGRADED_STAGES=()
+	_bats_full_suite_outcome 0 "ok 1 a" "$TEST_TMP/log"
+	[[ " ${DEGRADED_STAGES[*]} " != *"bats_incomplete:deferred"* ]]
+	[[ " ${DEGRADED_STAGES[*]} " != *"bats_full_suite_"* ]]
+}
+
+@test "timed-out BATS full suite without deferral adds no deferred mark" {
+	_load_bats_outcome_fns
+	BATS_SUITE_DEFERRED=false
+	DEGRADED_STAGES=()
+	_bats_full_suite_outcome 124 "" "$TEST_TMP/log"
+	[[ " ${DEGRADED_STAGES[*]} " == *" test:bats_full_suite_timeout "* ]]
+	[[ " ${DEGRADED_STAGES[*]} " != *"bats_incomplete:deferred"* ]]
+}
+
+# =============================================================================
 # ROOT tests/*.bats RUN (#1160)
 # =============================================================================
 
