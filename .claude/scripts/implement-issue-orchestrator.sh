@@ -652,6 +652,78 @@ _wait_for_check_on_head() {
 	done
 }
 
+# _ci_fix_attempt PR CHECK_NAME ITERATION
+#
+# One bounded fix attempt for a failed CI check (#1141). Fetches the check's
+# failed-step log through read-mr-checks.sh, saves it whole under LOG_BASE,
+# and runs a "fix-ci-iter-N" stage whose prompt carries the check name, the
+# failure excerpt, the saved log path and three rules. The commit is then
+# verified (a dirty tree with no commit fails) and passed through the path
+# allowlist guard.
+#
+# Returns 0 only when the stage COMMITTED a fix that passed the guard.
+# Returns 1 for an empty log, a clean no-op, a dirty tree or a guard
+# rejection. Nothing is pushed here. The log path goes in the prompt only.
+_ci_fix_attempt() {
+	local pr="$1" check_name="$2" iteration="$3"
+	local log_text log_path excerpt fix_prompt fix_result
+	local head_before head_after
+
+	log_text=$("$PLATFORM_DIR/read-mr-checks.sh" "$pr" \
+		--failed-log "$check_name" 2>/dev/null || true)
+	if [[ -z "$log_text" ]]; then
+		log_warn "No failed log for check \"$check_name\" —" \
+			"no CI fix attempt"
+		return 1
+	fi
+
+	mkdir -p "$LOG_BASE" 2>/dev/null || true
+	log_path="$LOG_BASE/ci-failed-log-iter-$iteration.log"
+	printf '%s\n' "$log_text" > "$log_path"
+
+	excerpt=$(_ci_failure_excerpt "$log_text")
+
+	fix_prompt="CI check \"$check_name\" failed on PR #$pr for issue #$ISSUE_NUMBER.
+
+Failure excerpt:
+$excerpt
+
+The full failed-step log is saved at: $log_path
+
+Rules:
+1. Make the smallest change that fixes this failure.
+2. Change an existing test only where this issue deliberately changed the behaviour it asserts, and say so in the commit message.
+3. Change nothing if the failure is not caused by this branch.
+
+Fix the failure and commit. Output a summary of the fix applied."
+
+	head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
+
+	fix_result=$(run_stage "fix-ci-iter-$iteration" "$fix_prompt" \
+		"implement-issue-fix.json" "${AGENT:-default}")
+	_halt_if_budget_exceeded
+	_halt_if_api_error
+
+	if ! verify_fix_stage_commit "fix-ci-iter-$iteration" "$head_before"; then
+		return 1
+	fi
+
+	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
+	if [[ -z "$head_after" || "$head_after" == "$head_before" ]]; then
+		log "fix-ci-iter-$iteration committed nothing —" \
+			"no CI fix to push"
+		return 1
+	fi
+
+	if ! guard_commit_path_allowlist "."; then
+		log_error "fix-ci-iter-$iteration: committed paths outside" \
+			"the code/tests allowlist — CI fix rejected"
+		return 1
+	fi
+	: "$fix_result"
+	return 0
+}
+
 # _run_bounded_process_group BUDGET GRACE OUTFILE CMD [ARGS...]
 #
 # Runs CMD in its own process group with stdout+stderr sent to OUTFILE and

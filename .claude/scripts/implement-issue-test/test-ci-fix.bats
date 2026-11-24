@@ -146,3 +146,118 @@ make_log() {
 	run _wait_for_check_on_head 5 new Bats
 	[[ "$status" -eq 0 ]]
 }
+
+# =============================================================================
+# _ci_fix_attempt
+# =============================================================================
+
+# Real git repo plus a run_stage stub. STUB_STAGE_ACTION picks what the fake
+# fix stage does: commit, commit_workflow, dirty or nothing.
+fix_setup() {
+	git init -q "$TEST_TMP/repo"
+	cd "$TEST_TMP/repo" || return 1
+	git config user.email t@example.com
+	git config user.name t
+	printf 'a\n' > a.sh
+	git add a.sh
+	git commit -q -m init
+
+	cat > "$PLATFORM_DIR/read-mr-checks.sh" <<'STUB'
+#!/usr/bin/env bash
+[[ "$2" == "--failed-log" ]] || exit 0
+printf '%s' "$STUB_FAILED_LOG"
+STUB
+	export STUB_FAILED_LOG
+	STUB_FAILED_LOG=$(make_log)
+	STAGE_NAME_FILE="$TEST_TMP/stage-name"
+	STAGE_PROMPT_FILE="$TEST_TMP/stage-prompt"
+	STAGE_SCHEMA_FILE="$TEST_TMP/stage-schema"
+	STUB_STAGE_ACTION=commit
+
+	_halt_if_budget_exceeded() { :; }
+	_halt_if_api_error() { :; }
+	run_stage() {
+		printf '%s' "$1" > "$STAGE_NAME_FILE"
+		printf '%s' "$2" > "$STAGE_PROMPT_FILE"
+		printf '%s' "$3" > "$STAGE_SCHEMA_FILE"
+		case "$STUB_STAGE_ACTION" in
+			commit)
+				printf 'b\n' >> a.sh
+				git commit -q -am "fix ci"
+				;;
+			commit_workflow)
+				mkdir -p .github/workflows
+				printf 'x: 1\n' > .github/workflows/ci.yml
+				git add .github
+				git commit -q -m "touch workflow"
+				;;
+			dirty)
+				printf 'c\n' >> a.sh
+				;;
+		esac
+		printf '{"status":"success"}'
+	}
+}
+
+@test "fix attempt saves the full log and runs a fix-ci-iter stage" {
+	fix_setup
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -eq 0 ]]
+
+	[[ "$(< "$STAGE_NAME_FILE")" == fix-ci-iter-1 ]]
+	[[ "$(< "$STAGE_SCHEMA_FILE")" == implement-issue-fix.json ]]
+	local saved
+	saved=$(< "$LOG_BASE/ci-failed-log-iter-1.log")
+	[[ "$saved" == *'ordinary line 300'* ]]
+}
+
+@test "fix prompt carries the check, excerpt, log path and three rules" {
+	fix_setup
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -eq 0 ]]
+
+	local prompt
+	prompt=$(< "$STAGE_PROMPT_FILE")
+	[[ "$prompt" == *'"Bats Suite"'* ]]
+	[[ "$prompt" == *'not ok 7 an incidental block still parks'* ]]
+	[[ "$prompt" == *"$LOG_BASE/ci-failed-log-iter-1.log"* ]]
+	[[ "$prompt" == *'smallest change that fixes this failure'* ]]
+	[[ "$prompt" == *'Change an existing test only where this issue deliberately changed the behaviour it asserts, and say so in the commit message'* ]]
+	[[ "$prompt" == *'Change nothing if the failure is not caused by this branch'* ]]
+}
+
+@test "fix attempt fails without running a stage when the log is empty" {
+	fix_setup
+	STUB_FAILED_LOG=""
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -ne 0 ]]
+	[[ ! -e "$STAGE_NAME_FILE" ]]
+}
+
+@test "fix attempt fails when the stage commits nothing" {
+	fix_setup
+	STUB_STAGE_ACTION=nothing
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -ne 0 ]]
+}
+
+@test "fix attempt fails when the stage leaves uncommitted changes" {
+	fix_setup
+	STUB_STAGE_ACTION=dirty
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -ne 0 ]]
+}
+
+@test "fix attempt fails when the path guard rejects the commit" {
+	fix_setup
+	STUB_STAGE_ACTION=commit_workflow
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -ne 0 ]]
+	[[ "$output" == *"hard-denied"* || "$output" == *"CI fix rejected"* ]]
+}
