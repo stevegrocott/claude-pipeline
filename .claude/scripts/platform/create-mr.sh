@@ -25,6 +25,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Never publish machine-local absolute paths.
+BODY="$(redact_local_paths "$BODY"; printf x)"
+BODY="${BODY%x}"
+
 case "$GIT_HOST" in
   github)
     gh pr create --head "$SOURCE" --base "$TARGET" --title "$TITLE" --body "$BODY" \
