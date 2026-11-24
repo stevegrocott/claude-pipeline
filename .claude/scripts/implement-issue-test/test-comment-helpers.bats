@@ -541,3 +541,72 @@ JSON
 	[[ "$output" == *"NOT ready"* ]]
 	[[ "$output" == *"e2e_verify:degraded"* ]]
 }
+
+# =============================================================================
+# Complete stage: drives the real stage body with stubbed collaborators
+# =============================================================================
+
+complete_stage_setup() {
+	local body
+	body=$(awk '
+		/set_stage_started "complete"/ { on = 1 }
+		on { print }
+		on && /set_stage_completed "complete"/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	if [[ "$body" != *'extract_changes_bullets'*'completion_footer'* ]]; then
+		echo "complete stage body not found in $ORCHESTRATOR_SCRIPT" >&2
+		return 1
+	fi
+	eval "complete_stage_body() {
+$body
+}"
+	STAGE_OUT="$TEST_TMP/stage-out"
+	: > "$STAGE_OUT"
+	pr_number=7
+	branch=feat
+	RESUME_MODE=""
+	set_stage_started() { :; }
+	set_stage_completed() { :; }
+	revalidate_partial_block_against_branch() { :; }
+	load_skill() { :; }
+	build_complete_prompt() { :; }
+	_halt_if_budget_exceeded() { :; }
+	_halt_if_api_error() { :; }
+	append_reconciled_tally() { printf '%s' "$1"; }
+	run_stage() {
+		jq -n --arg s "$STUB_SUMMARY" '{output: {summary: $s}}'
+	}
+	comment_pr() { printf '%s' "$3" > "$STAGE_OUT"; }
+	STUB_SUMMARY=$'## Changes\n- Adds the retry wrapper\n- TBD\n- <what the first task implemented>\n- Removes the TBD marker from the header'
+	DEGRADED_STAGES=()
+}
+
+@test "complete stage posts filtered bullets and the ready footer" {
+	complete_stage_setup
+	echo '{}' > "$STATUS_FILE"
+
+	run complete_stage_body
+	[ "$status" -eq 0 ]
+	local body
+	body=$(< "$STAGE_OUT")
+	[[ "$body" == *"- Adds the retry wrapper"* ]]
+	[[ "$body" == *"- Removes the TBD marker from the header"* ]]
+	[[ "$body" != *$'\n- TBD'* ]]
+	[[ "$body" != *"<what the first task implemented>"* ]]
+	[[ "$body" == *"ready for human review and merge"* ]]
+}
+
+@test "complete stage footer names a degraded stage instead of ready" {
+	complete_stage_setup
+	echo '{}' > "$STATUS_FILE"
+	DEGRADED_STAGES=("pr_review:max_iterations:iter=2")
+
+	# run would drop the array into a subshell copy; call directly.
+	complete_stage_body
+	local body
+	body=$(< "$STAGE_OUT")
+	[[ "$body" == *"- Adds the retry wrapper"* ]]
+	[[ "$body" != *"ready for human review and merge"* ]]
+	[[ "$body" == *"NOT ready to merge"* ]]
+	[[ "$body" == *"pr_review:max_iterations:iter=2"* ]]
+}
