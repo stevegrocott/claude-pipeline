@@ -758,6 +758,13 @@ _ci_fix_push_and_wait() {
 	local branch="$4" head_before="$5"
 	local local_head remote_head files file_list=""
 
+	# Same pre-push steps as the initial PR push: formatter first, then bundle
+	# regeneration, so neither can leave the fix red on the very check it
+	# fixes. Both run BEFORE the head is resolved so the pushed (and verified)
+	# head includes their commits.
+	run_format_cmd_if_needed "."
+	regenerate_bundle_if_needed "." "${BASE_BRANCH:-main}"
+
 	local_head=$(git rev-parse HEAD 2>/dev/null || printf '')
 	if [[ -z "$local_head" ]]; then
 		log_error "CI fix push: cannot resolve local HEAD"

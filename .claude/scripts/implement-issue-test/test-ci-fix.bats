@@ -317,6 +317,36 @@ push_setup() {
 	[[ "$c" == *'`new.sh`'* ]]
 }
 
+@test "format and bundle steps run before push and their commits are pushed" {
+	push_setup
+	export FORMAT_CMD="printf 'formatted\\n' >> a.sh"
+	regenerate_bundle_if_needed() {
+		printf 'bundle\n' > bundle.txt
+		git add bundle.txt
+		git commit -q -m "chore: bundle"
+	}
+	# The rerun appears on the NEW head (after format + bundle commits).
+	git() {
+		if [[ "$1" == push ]]; then
+			command git push "${@:2}" || return 1
+			printf '{"head_sha":"%s","checks":[{"name":"Bats","status":"queued"}]}\n' \
+				"$(command git rev-parse HEAD)" > "$STUB_CHECKS_JSON"
+			return 0
+		fi
+		command git "$@"
+	}
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 0 ]]
+
+	local remote_log
+	remote_log=$(git --git-dir="$TEST_TMP/origin.git" log --format=%s feat)
+	[[ "$remote_log" == *"style: format"* ]]
+	[[ "$remote_log" == *"chore: bundle"* ]]
+	[[ "$(git ls-remote origin refs/heads/feat | cut -f1)" == "$(git rev-parse HEAD)" ]]
+	[[ -z "$(git status --porcelain)" ]]
+}
+
 @test "push failure returns 1 and posts no comment" {
 	push_setup
 	git remote set-url origin "$TEST_TMP/missing.git"
