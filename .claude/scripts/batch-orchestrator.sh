@@ -2029,6 +2029,12 @@ process_issue() {
     # fifo (e.g. setsid failed before the redirect), tee blocks forever on
     # open(), so bound the wait and kill it after a grace period.
     local tee_wait="${TEE_FLUSH_TIMEOUT:-30}"
+    if [[ ! "$tee_wait" =~ ^[0-9]+$ ]]; then
+        log_warn "TEE_FLUSH_TIMEOUT='$tee_wait' is not a non-negative integer; using 30"
+        tee_wait=30
+    fi
+    # Force base 10 so a leading zero (e.g. 08) is not parsed as octal.
+    tee_wait=$((10#$tee_wait))
     local tee_waited=0
     while kill -0 "$tee_pid" 2>/dev/null && ((tee_waited < tee_wait)); do
         sleep 1
