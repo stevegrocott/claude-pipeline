@@ -824,6 +824,17 @@ _classify_false_absence() {
     [[ "$pr_diff_file_stats" != *"+-/-- lines"* ]]
 }
 
+@test "PR review diff cap reads PR_REVIEW_DIFF_MAX_LINES (default 2000) and names the saved full diff (issue #1185)" {
+	local src
+	src=$(declare -f main)
+	[[ "$src" == *'PR_REVIEW_DIFF_MAX_LINES:-2000'* ]]
+	[[ "$src" == *'head -n "$pr_diff_max_lines"'* ]]
+	[[ "$src" == *'pr-review-full-diff-iter-'* ]]
+	[[ "$src" == *'The full diff is saved at'* ]]
+	[[ "$src" != *'head -500'* ]]
+	[[ "$src" != *'first 500 of'* ]]
+}
+
 # =============================================================================
 # LOGGING
 # =============================================================================

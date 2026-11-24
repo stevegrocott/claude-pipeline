@@ -15958,7 +15958,11 @@ $pr_creation_skill}"
         pr_diff_total_lines=$(printf '%s\n' "$pr_diff_full" | wc -l)
         pr_diff_total_lines="${pr_diff_total_lines//[[:space:]]/}"
         local pr_diff
-        pr_diff=$(printf '%s\n' "$pr_diff_full" | head -500)
+        local pr_diff_max_lines="${PR_REVIEW_DIFF_MAX_LINES:-2000}"
+        [[ "$pr_diff_max_lines" =~ ^[1-9][0-9]*$ ]] \
+            || pr_diff_max_lines=2000
+        pr_diff=$(printf '%s\n' "$pr_diff_full" \
+            | head -n "$pr_diff_max_lines")
 
         # A truncated diff silently hides changes from the reviewer — it
         # sees only the first 500 lines and has no way to know more exists,
@@ -15969,9 +15973,16 @@ $pr_creation_skill}"
         # `git diff --numstat`) so it can at least judge the shape of what
         # it isn't seeing.
         local pr_diff_truncation_note=""
-        if ((pr_diff_total_lines > 500)); then
-            log_warn "PR review diff truncated: showing 500 of" \
+        if ((pr_diff_total_lines > pr_diff_max_lines)); then
+            log_warn "PR review diff truncated: showing" \
+                "$pr_diff_max_lines of" \
                 "$pr_diff_total_lines lines (iteration $pr_iteration)"
+            # Save the full diff so the reviewer can read the rest.
+            local pr_diff_full_path="${LOG_BASE:-${TMPDIR:-/tmp}}"
+            pr_diff_full_path+="/pr-review-full-diff-iter-${pr_iteration}.diff"
+            mkdir -p "${pr_diff_full_path%/*}" 2>/dev/null || true
+            printf '%s\n' "$pr_diff_full" > "$pr_diff_full_path" \
+                2>/dev/null || pr_diff_full_path=""
             local pr_diff_file_stats=""
             local ns_added ns_removed ns_path
             while IFS=$'\t' read -r ns_added ns_removed ns_path; do
@@ -15985,7 +15996,7 @@ $pr_creation_skill}"
                 fi
             done < <(git diff --numstat "$BASE_BRANCH"...HEAD -- 2>/dev/null)
             pr_diff_truncation_note="
-**NOTE: the diff above is truncated — showing the first 500 of ${pr_diff_total_lines} total lines.** Full list of changed files with line counts:
+**NOTE: the diff above is truncated — showing the first ${pr_diff_max_lines} of ${pr_diff_total_lines} total lines.**${pr_diff_full_path:+ The full diff is saved at \`${pr_diff_full_path}\` — read it for the remainder.} Full list of changed files with line counts:
 
 ${pr_diff_file_stats}
 "
