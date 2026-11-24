@@ -416,3 +416,80 @@ EOF
 
     [ -f "$gh_calls" ] || fail "gh should have been called when QUIET=false"
 }
+
+# =============================================================================
+# extract_changes_bullets (issue #1115)
+# =============================================================================
+
+@test "extract_changes_bullets keeps only Changes bullets" {
+	local s=$'Intro prose.\n\n## Changes\n- Added foo\n- Fixed bar\n\n## Quality Gates\n- Tests: passed'
+	run extract_changes_bullets "$s"
+	[ "$status" -eq 0 ]
+	[ "$output" = $'- Added foo\n- Fixed bar' ]
+}
+
+@test "extract_changes_bullets drops bracket placeholders" {
+	local s=$'**Changes**\n- Real change\n- [fill in test outcome]\n- See [doc](http://x)'
+	run extract_changes_bullets "$s"
+	[ "$output" = $'- Real change\n- See [doc](http://x)' ]
+}
+
+@test "extract_changes_bullets falls back for prose-only description" {
+	local s='Generated the comment. Not posted. Quality Gates are placeholders.'
+	run extract_changes_bullets "$s"
+	[ "$output" = "Implementation completed successfully" ]
+}
+
+@test "extract_changes_bullets falls back when all bullets are placeholders" {
+	run extract_changes_bullets $'## Changes\n- [TBD]'
+	[ "$output" = "Implementation completed successfully" ]
+}
+
+@test "extract_changes_bullets falls back on empty input" {
+	run extract_changes_bullets ""
+	[ "$output" = "Implementation completed successfully" ]
+}
+
+# =============================================================================
+# build_complete_prompt (issue #1115)
+# =============================================================================
+
+@test "build_complete_prompt lists each task description and status" {
+	cat > "$STATUS_FILE" <<'JSON'
+{"tasks":[{"id":"1","description":"Add foo","status":"completed"},
+{"id":"2","description":"Fix bar","status":"failed"}]}
+JSON
+	run build_complete_prompt 45 feature/issue-9 "SKILLTEXT"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"PR #45 implementing issue #123 on branch feature/issue-9"* ]]
+	[[ "$output" == *"- Task 1 [completed]: Add foo"* ]]
+	[[ "$output" == *"- Task 2 [failed]: Fix bar"* ]]
+	[[ "$output" == *"SKILLTEXT"* ]]
+}
+
+@test "build_complete_prompt omits skill block when skill empty" {
+	echo '{"tasks":[]}' > "$STATUS_FILE"
+	run build_complete_prompt 1 b ""
+	[[ "$output" == *"(no tasks recorded)"* ]]
+	[[ "$output" != *"Skill Instructions"* ]]
+}
+
+# =============================================================================
+# complete-summary skill asks for the Changes section only (issue #1115)
+# =============================================================================
+
+@test "complete-summary skill requests Changes section only, no gates or placeholders" {
+	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/complete-summary/SKILL.md"
+	[ -f "$skill" ]
+	grep -qF '### Changes' "$skill"
+	grep -qi 'Changes section only' "$skill"
+	grep -qi 'task list' "$skill"
+	# The output template must no longer carry header/footer/gate lines.
+	local fence_block
+	fence_block=$(awk '/^## Output Format/{f=1;next} /^## /{f=0} f' "$skill")
+	[[ "$fence_block" != *"Quality Gates"* ]]
+	[[ "$fence_block" != *"Implementation Complete"* ]]
+	[[ "$fence_block" != *"ready for human review"* ]]
+	[[ "$fence_block" != *"Posted by"* ]]
+	[[ "$fence_block" != *"["*"]"* ]]
+}
