@@ -496,6 +496,21 @@ STUB
 	[[ ! -s "$FIX_CALLS" ]]
 }
 
+@test "a merge conflict decline writes no check_failed and no fix is attempted" {
+	merge_setup
+	cat > "$PLATFORM_DIR/merge-mr.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'run\n' >> "$MERGE_RUNS"
+exit 1
+STUB
+	local rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 1 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 1 ]]
+	[[ ! -s "$FIX_CALLS" ]]
+	[[ -z "$_ci_fix_summary" ]]
+}
+
 @test "merged tip is re-read from origin after the CI fix push" {
 	merge_setup
 	push_setup

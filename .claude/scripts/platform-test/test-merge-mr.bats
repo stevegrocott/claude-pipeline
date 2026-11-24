@@ -263,6 +263,28 @@ GH_EOF
     [ "$(cat "$MERGE_MR_DECLINE_FILE")" = "$(printf 'check_failed\tunit-tests')" ]
 }
 
+@test "merge-mr github: conflict refusal writes no check_failed to MERGE_MR_DECLINE_FILE" {
+	export GIT_HOST="github"
+	export MERGE_STYLE="squash"
+	export MERGE_MR_DECLINE_FILE="$TEST_TMP/decline"
+	export MOCK_GH_PR_VIEW_JSON='{"mergeStateStatus":"DIRTY","statusCheckRollup":[]}'
+	run run_platform_script merge-mr.sh 99
+	[ "$status" -ne 0 ]
+	assert_output_contains "unresolvable merge conflicts"
+	[[ ! -s "$MERGE_MR_DECLINE_FILE" ]]
+}
+
+@test "merge-mr github: pending-check timeout writes no check_failed to MERGE_MR_DECLINE_FILE" {
+	export GIT_HOST="github"
+	export MERGE_STYLE="squash"
+	export MERGE_MR_DECLINE_FILE="$TEST_TMP/decline"
+	export MOCK_GH_PR_VIEW_JSON='{"mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":null}]}'
+	run run_platform_script merge-mr.sh 99
+	[ "$status" -ne 0 ]
+	assert_output_contains "Timed out after"
+	[[ ! -s "$MERGE_MR_DECLINE_FILE" ]]
+}
+
 @test "merge-mr github legacy gate: check refusal writes MERGE_MR_DECLINE_FILE" {
     export GIT_HOST="github"
     export MERGE_STYLE="squash"

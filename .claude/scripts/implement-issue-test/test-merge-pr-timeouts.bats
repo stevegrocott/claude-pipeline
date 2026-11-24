@@ -84,15 +84,37 @@ teardown() {
 # STATIC ANALYSIS: timeout wrapping of each merge_pr sub-command
 # =============================================================================
 
-@test "merge_pr stage wraps merge-mr.sh with timeout" {
-	# Extract merge_pr stage block for focused analysis
+@test "_merge_with_ci_fix wraps merge-mr.sh with MERGE_MR_STEP_TIMEOUT" {
+	local helper
+	helper=$(awk '/^_merge_with_ci_fix\(\) \{/,/^}/' "$ORCHESTRATOR_SCRIPT")
+
+	[[ -n "$helper" ]]
+	[[ "$helper" == *'timeout "$MERGE_MR_STEP_TIMEOUT"'* ]]
+	[[ "$helper" == *'"$PLATFORM_DIR/merge-mr.sh"'* ]]
+}
+
+@test "merge_pr stage calls _merge_with_ci_fix and handles exit 124" {
 	local merge_block
 	merge_block=$(awk \
 		'/set_stage_started "merge_pr"/,/set_final_state "completed"/' \
-		"$ORCHESTRATOR_SCRIPT" 2>/dev/null || true)
+		"$ORCHESTRATOR_SCRIPT")
 
-	[[ "$merge_block" == *'timeout'*'merge-mr.sh'* ]] || \
-		[[ "$merge_block" == *'timeout "$MERGE_MR_STEP_TIMEOUT"'* ]]
+	[[ "$merge_block" == *'_merge_with_ci_fix "$pr_number" "$branch"'* ]]
+	[[ "$merge_block" == *'_merge_exit == 124'* ]]
+	[[ "$merge_block" == *'_handle_merge_pr_timeout "merge-mr.sh"'* ]]
+}
+
+@test "_merge_with_ci_fix returns timeout and non-check declines before any CI fix" {
+	local helper
+	helper=$(awk '/^_merge_with_ci_fix\(\) \{/,/^}/' "$ORCHESTRATOR_SCRIPT")
+
+	# 124 returns before the check_failed gate; the gate precedes _ci_fix_attempt
+	local pos_124 pos_gate pos_fix
+	pos_124=${helper%%'rc == 124'*}
+	pos_gate=${helper%%'"$kind" != "check_failed"'*}
+	pos_fix=${helper%%'_ci_fix_attempt "$pr"'*}
+	(( ${#pos_124} < ${#pos_gate} ))
+	(( ${#pos_gate} < ${#pos_fix} ))
 }
 
 @test "merge_pr stage wraps git fetch with timeout" {
@@ -205,7 +227,7 @@ teardown() {
 
 	# Match the actual invocation (contains PLATFORM_DIR), not log messages
 	local merge_mr_line completed_line
-	merge_mr_line=$(grep -n 'PLATFORM_DIR.*merge-mr\.sh' <<< "$script_content" \
+	merge_mr_line=$(grep -n '_merge_with_ci_fix "\$pr_number"' <<< "$script_content" \
 		| head -1 | cut -d: -f1)
 	completed_line=$(grep -n 'set_stage_completed "merge_pr"' <<< "$script_content" \
 		| head -1 | cut -d: -f1)
