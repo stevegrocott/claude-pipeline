@@ -13972,6 +13972,7 @@ verify_fix_stage_commit() {
 #   $3 - branch name
 #   $4 - branch head SHA captured before the fix stage ran
 #   $5 - fix stage result JSON
+#   $6 - review feedback given to the stage (optional, for the no-op comment)
 # Returns:
 #   0 - fix committed (head moved)
 #   1 - fix left uncommitted; no success comment posted
@@ -13984,6 +13985,7 @@ _handle_fix_stage_result() {
 	local branch="$3"
 	local head_before="$4"
 	local fix_result="$5"
+	local feedback="${6:-}"
 
 	local head_after
 	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
@@ -14008,9 +14010,18 @@ leaving changes in the working tree. The reported fixes have NOT landed on
 				"committed nothing — not a no-op"
 			return 2
 		fi
-		# Genuine no-op: nothing landed, so there is no fix to report.
-		log "No commit from fix-pr-review-iter-$pr_iteration" \
-			"and a clean tree — skipping the fix comment"
+		# Genuine no-op: nothing landed. Say so once, with the feedback the
+		# stage declined to act on, so the PR does not look silently stuck.
+		log_warn "fix-pr-review-iter-$pr_iteration committed nothing" \
+			"and left a clean tree — review feedback not applied"
+		comment_pr "$pr_number" \
+			"⚠️ PR Review Fix made no changes (Iteration $pr_iteration)" \
+			"The fix stage committed nothing for this iteration, so no
+changes were pushed to \`$branch\`.
+
+Feedback it was asked to address:
+${feedback:-"(not recorded)"}" \
+			"$AGENT"
 		return 3
 	fi
 
@@ -16391,7 +16402,8 @@ Fix the issues and commit. Output a summary of fixes applied."
             # its work uncommitted.
             local fix_handle_rc=0
             _handle_fix_stage_result "$pr_number" "$pr_iteration" \
-                "$branch" "$fix_head_before" "$fix_result" || fix_handle_rc=$?
+                "$branch" "$fix_head_before" "$fix_result" \
+                "$review_comments" || fix_handle_rc=$?
             if (( fix_handle_rc == 2 )); then
                 # Errored fix, nothing committed: record the cause (persisted
                 # before any max-iterations reason), arm no push, and stop

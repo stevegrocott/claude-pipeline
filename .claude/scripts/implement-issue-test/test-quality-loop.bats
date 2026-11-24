@@ -2771,3 +2771,42 @@ _make_plain_consumer_repo() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"no details"* ]]
 }
+
+# =============================================================================
+# _handle_fix_stage_result: genuine no-op
+# =============================================================================
+
+@test "no-op fix stage warns and posts one PR comment with feedback" {
+    local head
+    head=$(git -C "$QUALITY_LOOP_DIR" rev-parse HEAD)
+    cd "$QUALITY_LOOP_DIR"
+    AGENT=tester
+    comment_pr() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$TEST_TMP/pr_comment"; }
+    log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/warns"; }
+
+    local rc=0
+    _handle_fix_stage_result 7 2 feature/x "$head" \
+        '{"status":"success"}' "a.sh:3 → bad" || rc=$?
+
+    [ "$rc" -eq 3 ]
+    [ "$(wc -l < "$TEST_TMP/pr_comment")" -ge 1 ]
+    [[ "$(grep -c '^7|' "$TEST_TMP/pr_comment")" == 1 ]]
+    grep -q 'Iteration 2' "$TEST_TMP/pr_comment"
+    grep -q 'a.sh:3 → bad' "$TEST_TMP/pr_comment"
+    grep -q 'committed nothing' "$TEST_TMP/warns"
+    [ "$(wc -l < "$TEST_TMP/warns")" -eq 1 ]
+}
+
+@test "errored fix stage posts no no-op comment" {
+    local head
+    head=$(git -C "$QUALITY_LOOP_DIR" rev-parse HEAD)
+    cd "$QUALITY_LOOP_DIR"
+    comment_pr() { touch "$TEST_TMP/pr_comment"; }
+
+    local rc=0
+    _handle_fix_stage_result 7 1 feature/x "$head" \
+        '{"status":"error"}' "fb" || rc=$?
+
+    [ "$rc" -eq 2 ]
+    [ ! -e "$TEST_TMP/pr_comment" ]
+}
