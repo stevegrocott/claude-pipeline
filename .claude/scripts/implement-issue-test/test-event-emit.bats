@@ -511,7 +511,6 @@ _valid_stage_end() {
 
 @test "(f) lock fallback: stale break file is dropped, emit lands" {
 	export EVENT_EMIT_LOCK_IMPL=mkdir
-	export LOCK_STALE_AGE=5
 	local lockdir="$LOG_DIR/events.jsonl.lock"
 	mkdir -p "$lockdir"
 	sleep 60 &
@@ -551,7 +550,6 @@ _valid_stage_end() {
 
 @test "(f) lock fallback: old empty pidfile is stale, broken, emit lands" {
 	export EVENT_EMIT_LOCK_IMPL=mkdir
-	export LOCK_STALE_AGE=5
 	local lockdir="$LOG_DIR/events.jsonl.lock"
 	mkdir -p "$lockdir"
 	: > "$lockdir/pid"
