@@ -7365,6 +7365,44 @@ reconcile_failed_tasks_with_branch_evidence() {
 	printf '%s\n' "$reconciled"
 }
 
+# extract_changes_bullets SUMMARY
+#
+# Reduces a complete-stage summary to its "Changes" bullets (issue #1115).
+# The model sometimes returns a description of the comment instead of the
+# comment, or fills Quality Gates lines with placeholders; only the bullets
+# under a Changes heading are trustworthy, since the orchestrator supplies
+# the rest. Bullets containing a bracket placeholder ([...] not followed by
+# "(", so markdown links survive) are dropped. When no bullet remains the
+# fallback line is printed.
+extract_changes_bullets() {
+	local summary="${1-}"
+	local line in_changes=0 out=""
+	local fallback="Implementation completed successfully"
+	local placeholder='\[[^]]*\]([^(]|$)'
+	local bullet='^[[:space:]]*[-*+][[:space:]]+'
+
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		if [[ "$line" =~ ^[[:space:]]*(#+|\*\*)[[:space:]]*[^[:alnum:]]*Changes ]]; then
+			in_changes=1
+			continue
+		fi
+		if [[ "$line" =~ ^[[:space:]]*(#+[[:space:]]|\*\*[^*]+\*\*:?[[:space:]]*$) ]]; then
+			in_changes=0
+			continue
+		fi
+		((in_changes)) || continue
+		[[ "$line" =~ $bullet ]] || continue
+		[[ "$line" =~ $placeholder ]] && continue
+		out+="$line"$'\n'
+	done <<< "$summary"
+
+	if [[ -n "$out" ]]; then
+		printf '%s' "$out"
+	else
+		printf '%s\n' "$fallback"
+	fi
+}
+
 # append_reconciled_tally() — appends the reconciled-task tally to the
 # COMPLETE-stage PR comment when non-zero (issue #810 task 2).
 # reconcile_failed_tasks_with_branch_evidence() persists .reconciled_count in
@@ -15962,6 +16000,7 @@ $complete_skill
 
         local complete_summary
         complete_summary=$(printf '%s' "$complete_result" | jq -r '.output.summary // "Implementation completed successfully"')
+        complete_summary=$(extract_changes_bullets "$complete_summary")
 
         # Append the reconciled-task tally via the shared helper (issue #810
         # task 2; extracted to append_reconciled_tally() for issue #914 task

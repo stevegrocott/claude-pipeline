@@ -416,3 +416,36 @@ EOF
 
     [ -f "$gh_calls" ] || fail "gh should have been called when QUIET=false"
 }
+
+# =============================================================================
+# extract_changes_bullets (issue #1115)
+# =============================================================================
+
+@test "extract_changes_bullets keeps only Changes bullets" {
+	local s=$'Intro prose.\n\n## Changes\n- Added foo\n- Fixed bar\n\n## Quality Gates\n- Tests: passed'
+	run extract_changes_bullets "$s"
+	[ "$status" -eq 0 ]
+	[ "$output" = $'- Added foo\n- Fixed bar' ]
+}
+
+@test "extract_changes_bullets drops bracket placeholders" {
+	local s=$'**Changes**\n- Real change\n- [fill in test outcome]\n- See [doc](http://x)'
+	run extract_changes_bullets "$s"
+	[ "$output" = $'- Real change\n- See [doc](http://x)' ]
+}
+
+@test "extract_changes_bullets falls back for prose-only description" {
+	local s='Generated the comment. Not posted. Quality Gates are placeholders.'
+	run extract_changes_bullets "$s"
+	[ "$output" = "Implementation completed successfully" ]
+}
+
+@test "extract_changes_bullets falls back when all bullets are placeholders" {
+	run extract_changes_bullets $'## Changes\n- [TBD]'
+	[ "$output" = "Implementation completed successfully" ]
+}
+
+@test "extract_changes_bullets falls back on empty input" {
+	run extract_changes_bullets ""
+	[ "$output" = "Implementation completed successfully" ]
+}
