@@ -750,6 +750,15 @@ _extract_orchestrator_fn() {
 	}
 }
 
+# Write only the body of main() to $1. Line-order tests grep this rather
+# than the whole file so a call inside a helper function (or a mention in a
+# comment or heredoc elsewhere) cannot satisfy or defeat an ordering check.
+_extract_main_body() {
+	local out="$1"
+
+	_extract_orchestrator_fn main "$out"
+}
+
 # Run the extracted hook with the orchestrator's logging helpers stubbed.
 _run_regen_hook() {
 	local work_dir="$1" base="$2"
@@ -786,15 +795,18 @@ _init_pipeline_git_repo() {
 # it lands before the PR is opened.
 @test "(#632 AC7) the regeneration hook runs before the PR stage" {
 	local call_line pr_line
+	local main_file="$TEST_SCRATCH/main-body.bash"
+
+	_extract_main_body "$main_file" || return 1
 
 	call_line=$(grep -n '^[[:space:]]*regenerate_bundle_if_needed "' \
-		"$ORCHESTRATOR" | head -1 | cut -d: -f1)
+		"$main_file" | head -1 | cut -d: -f1)
 	[[ -n "$call_line" ]] || {
 		printf 'FAIL: regenerate_bundle_if_needed is never called\n' >&2
 		return 1
 	}
 
-	pr_line=$(grep -n 'run_stage "pr" ' "$ORCHESTRATOR" | head -1 | cut -d: -f1)
+	pr_line=$(grep -n 'run_stage "pr" ' "$main_file" | head -1 | cut -d: -f1)
 	[[ -n "$pr_line" ]] || {
 		printf 'FAIL: could not locate the PR stage in %s\n' "$ORCHESTRATOR" >&2
 		return 1
@@ -924,8 +936,11 @@ _init_pipeline_git_repo() {
 @test "(#675) the regeneration hook also runs before the post-PR fix-stage push is queued" {
 	local -a regen_lines
 	local push_line closest_regen line between
+	local main_file="$TEST_SCRATCH/main-body.bash"
 
-	push_line=$(grep -n 'mark_review_push_pending "\$branch"' "$ORCHESTRATOR" \
+	_extract_main_body "$main_file" || return 1
+
+	push_line=$(grep -n 'mark_review_push_pending "\$branch"' "$main_file" \
 		| head -1 | cut -d: -f1)
 	[[ -n "$push_line" ]] || {
 		printf 'FAIL: could not locate the fix-stage push hand-over in %s\n' \
@@ -948,7 +963,7 @@ _init_pipeline_git_repo() {
 	while IFS= read -r line; do
 		regen_lines+=("$line")
 	done < <(grep -n '^[[:space:]]*regenerate_bundle_if_needed "' \
-		"$ORCHESTRATOR" | cut -d: -f1)
+		"$main_file" | cut -d: -f1)
 
 	(( ${#regen_lines[@]} >= 2 )) || {
 		printf 'FAIL: expected a pre-PR call and a fix-stage call, found %d\n' \
@@ -976,7 +991,7 @@ _init_pipeline_git_repo() {
 	# (a commit slipping past the guard) rather than on any code at all
 	# sitting between them.
 	between=$(sed -n "$((closest_regen + 1)),$((push_line - 1))p" \
-		"$ORCHESTRATOR" \
+		"$main_file" \
 		| grep -E '\bgit([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+(commit|add)\b' \
 		|| true)
 	[[ -z "$between" ]] || {
@@ -1666,11 +1681,13 @@ _init_pipeline_git_repo() {
 
 @test "(#1019) run_format_cmd_if_needed is a real call before bundle regen" {
 	local fmt_line regen_line
+	local main_file="$TEST_SCRATCH/main-body.bash"
 
+	_extract_main_body "$main_file" || return 1
 	fmt_line=$(grep -n '^[[:space:]]*run_format_cmd_if_needed "' \
-		"$ORCHESTRATOR" | head -1 | cut -d: -f1)
+		"$main_file" | head -1 | cut -d: -f1)
 	regen_line=$(grep -n '^[[:space:]]*regenerate_bundle_if_needed "' \
-		"$ORCHESTRATOR" | head -1 | cut -d: -f1)
+		"$main_file" | head -1 | cut -d: -f1)
 	[[ -n "$fmt_line" ]]
 	[[ -n "$regen_line" ]]
 	((fmt_line < regen_line))
