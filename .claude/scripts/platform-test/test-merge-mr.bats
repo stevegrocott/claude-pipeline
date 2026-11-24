@@ -253,6 +253,37 @@ GH_EOF
     ! assert_mock_called_with "gh pr merge"
 }
 
+@test "merge-mr github: check refusal writes check_failed and name to MERGE_MR_DECLINE_FILE" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    export MERGE_MR_DECLINE_FILE="$TEST_TMP/decline"
+    export MOCK_GH_PR_VIEW_JSON='{"mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE"}]}'
+    run run_platform_script merge-mr.sh 99
+    [ "$status" -ne 0 ]
+    [ "$(cat "$MERGE_MR_DECLINE_FILE")" = "$(printf 'check_failed\tunit-tests')" ]
+}
+
+@test "merge-mr github legacy gate: check refusal writes MERGE_MR_DECLINE_FILE" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    export MERGE_MR_MERGE_STATE_GATE=0
+    export MERGE_MR_DECLINE_FILE="$TEST_TMP/decline"
+    export MOCK_GH_PR_VIEW_JSON='{"mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"}]}'
+    run run_platform_script merge-mr.sh 99
+    [ "$status" -ne 0 ]
+    [ "$(cat "$MERGE_MR_DECLINE_FILE")" = "$(printf 'check_failed\tlint')" ]
+}
+
+@test "merge-mr github: check refusal without MERGE_MR_DECLINE_FILE writes nothing" {
+    export GIT_HOST="github"
+    export MERGE_STYLE="squash"
+    unset MERGE_MR_DECLINE_FILE
+    export MOCK_GH_PR_VIEW_JSON='{"mergeStateStatus":"BLOCKED","statusCheckRollup":[{"__typename":"CheckRun","name":"unit-tests","status":"COMPLETED","conclusion":"FAILURE"}]}'
+    run run_platform_script merge-mr.sh 99
+    [ "$status" -ne 0 ]
+    assert_output_contains "refusing to wait"
+}
+
 @test "merge-mr github: pending check keeps waiting instead of refusing" {
     export GIT_HOST="github"
     export MERGE_STYLE="squash"

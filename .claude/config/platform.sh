@@ -212,6 +212,8 @@ MAX_TEST_ITERATIONS="${MAX_TEST_ITERATIONS:-7}"
 MAX_PR_REVIEW_ITERATIONS="${MAX_PR_REVIEW_ITERATIONS:-2}"
 MAX_VALIDATION_FIX_ITERATIONS="${MAX_VALIDATION_FIX_ITERATIONS:-2}"
 MAX_E2E_FIX_ITERATIONS="${MAX_E2E_FIX_ITERATIONS:-2}"
+# Bounded CI fix attempts when merge-mr fails on a failing check (#1141); 0 = off
+MAX_CI_FIX_ITERATIONS="${MAX_CI_FIX_ITERATIONS:-1}"
 MAX_ORCHESTRATOR_WALL_TIME="${MAX_ORCHESTRATOR_WALL_TIME:-10800}" # seconds (default 3 hours — long-running issues with many tasks or slow test suites can easily exceed 1 hour)
 MAX_TASK_WALL_TIME_SECS="${MAX_TASK_WALL_TIME_SECS:-1800}"       # seconds per parallel task (default 30 min —
                                                                    # a floor beneath the complexity-derived ceiling:

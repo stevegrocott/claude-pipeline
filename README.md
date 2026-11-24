@@ -393,6 +393,7 @@ The pipeline is platform-agnostic. All issue tracker and git host interactions g
 | `create-mr.sh` | Create PR/MR, returns number |
 | `read-mr-comments.sh` | Read PR/MR comments as JSON array |
 | `comment-mr.sh` | Add comment to PR/MR |
+| `read-mr-checks.sh` | Read PR/MR CI checks as JSON, or a failed check's log by name |
 | `merge-mr.sh` | Merge with configured strategy (squash/merge/rebase) |
 | `find-mr.sh` | Find open PR/MR by branch name |
 | `markdown-to-wiki.py` | Convert Markdown to Jira wiki format |

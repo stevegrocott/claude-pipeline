@@ -600,6 +600,288 @@ _full_suite_cause_lines() {
 	fi
 }
 
+# _ci_failure_excerpt LOG
+#
+# Prints at most 80 lines of a CI failed-step log that name the CAUSE (#1141).
+# A plain tail misses it: the "not ok" line and the "#" lines under it sit
+# well before the closing "Process completed with exit code 1" line. Each
+# "not ok" line is kept together with the "#" lines directly beneath it, in
+# log order, up to the 80 line cap. With no "not ok" line the last 80 lines
+# are printed instead. Empty input prints nothing.
+_ci_failure_excerpt() {
+	local log="$1" causes
+	[[ -n "$log" ]] || return 0
+	causes=$(printf '%s\n' "$log" | awk '
+		/^not ok/ { keep = 1; if (n < 80) { print; n++ }; next }
+		keep && /^[[:space:]]*#/ { if (n < 80) { print; n++ }; next }
+		{ keep = 0 }
+	')
+	if [[ -n "$causes" ]]; then
+		printf '%s\n' "$causes"
+	else
+		printf '%s\n' "$log" | tail -n 80
+	fi
+}
+
+# _wait_for_check_on_head PR HEAD_SHA CHECK_NAME
+#
+# Polls read-mr-checks.sh until it reports HEAD_SHA as the PR head AND a check
+# named CHECK_NAME (any status) on it, then returns 0. Returns 1 once
+# CI_FIX_RERUN_WAIT_MAX seconds (default 900) have passed without that. A
+# check seen only under another head sha does not count: straight after a push
+# the new head has no checks registered yet (#1141). Poll spacing is
+# CI_FIX_RERUN_POLL_INTERVAL seconds (default 15).
+_wait_for_check_on_head() {
+	local pr="$1" head_sha="$2" check_name="$3"
+	local max="${CI_FIX_RERUN_WAIT_MAX:-900}"
+	local interval="${CI_FIX_RERUN_POLL_INTERVAL:-15}"
+	local start now json
+	start=$(date +%s)
+	while true; do
+		json=$("$PLATFORM_DIR/read-mr-checks.sh" "$pr" 2>/dev/null || true)
+		if [[ -n "$json" ]] && jq -e --arg sha "$head_sha" --arg n "$check_name" \
+			'(.head_sha == $sha) and (((.checks // []) | map(select(.name == $n)) | length) > 0)' \
+			<<< "$json" > /dev/null 2>&1; then
+			return 0
+		fi
+		now=$(date +%s)
+		if (( now - start >= max )); then
+			return 1
+		fi
+		sleep "$interval"
+	done
+}
+
+# _ci_fix_attempt PR CHECK_NAME ITERATION
+#
+# One bounded fix attempt for a failed CI check (#1141). Fetches the check's
+# failed-step log through read-mr-checks.sh, saves it whole under LOG_BASE,
+# and runs a "fix-ci-iter-N" stage whose prompt carries the check name, the
+# failure excerpt, the saved log path and three rules. The commit is then
+# verified (a dirty tree with no commit fails) and passed through the path
+# allowlist guard.
+#
+# Returns 0 only when the stage COMMITTED a fix that passed the guard.
+# Returns 1 for an empty log, a clean no-op, a dirty tree or a guard
+# rejection. Nothing is pushed here. The log path goes in the prompt only.
+_ci_fix_attempt() {
+	local pr="$1" check_name="$2" iteration="$3"
+	local log_text log_path excerpt fix_prompt fix_result
+	local head_before head_after dirty_before dirty_after
+
+	log_text=$("$PLATFORM_DIR/read-mr-checks.sh" "$pr" \
+		--failed-log "$check_name" 2>/dev/null || true)
+	if [[ -z "$log_text" ]]; then
+		log_warn "No failed log for check \"$check_name\" —" \
+			"no CI fix attempt"
+		_ci_fix_result="no failed-step log available"
+		return 1
+	fi
+
+	mkdir -p "$LOG_BASE" 2>/dev/null || true
+	log_path="$LOG_BASE/ci-failed-log-iter-$iteration.log"
+	printf '%s\n' "$log_text" > "$log_path"
+
+	excerpt=$(_ci_failure_excerpt "$log_text")
+
+	fix_prompt="CI check \"$check_name\" failed on PR #$pr for issue #$ISSUE_NUMBER.
+
+Failure excerpt:
+$excerpt
+
+The full failed-step log is saved at: $log_path
+
+Rules:
+1. Make the smallest change that fixes this failure.
+2. Change an existing test only where this issue deliberately changed the behaviour it asserts, and say so in the commit message.
+3. Change nothing if the failure is not caused by this branch.
+
+Fix the failure and commit. Output a summary of the fix applied."
+
+	head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
+	dirty_before=$(git status --porcelain 2>/dev/null || printf '')
+
+	fix_result=$(run_stage "fix-ci-iter-$iteration" "$fix_prompt" \
+		"implement-issue-fix.json" "${AGENT:-default}")
+	_halt_if_budget_exceeded
+	_halt_if_api_error
+
+	if ! verify_fix_stage_commit "fix-ci-iter-$iteration" "$head_before"; then
+		_ci_fix_result="fix stage left uncommitted changes"
+		return 1
+	fi
+
+	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
+	if [[ -z "$head_after" || "$head_after" == "$head_before" ]]; then
+		log "fix-ci-iter-$iteration committed nothing —" \
+			"no CI fix to push"
+		_ci_fix_result="fix stage made no change"
+		return 1
+	fi
+
+	# verify_fix_stage_commit passes once the head has moved, so a stage that
+	# committed part of its fix and left the rest in the tree gets this far.
+	# Compared with the tree before the stage so earlier leftovers do not count.
+	dirty_after=$(git status --porcelain 2>/dev/null || printf '')
+	if [[ -n "$dirty_after" && "$dirty_after" != "$dirty_before" ]]; then
+		log_error "fix-ci-iter-$iteration committed but left changes" \
+			"in the working tree — CI fix rejected." \
+			"Uncommitted paths: $(_porcelain_dirty_paths "$dirty_after")"
+		_ci_fix_result="fix stage left uncommitted changes"
+		return 1
+	fi
+
+	if ! guard_commit_path_allowlist "."; then
+		log_error "fix-ci-iter-$iteration: committed paths outside" \
+			"the code/tests allowlist — CI fix rejected"
+		_ci_fix_result="fix rejected: changed paths outside allowlist"
+		return 1
+	fi
+	: "$fix_result"
+	return 0
+}
+
+# _ci_fix_push_and_wait PR CHECK_NAME ITERATION BRANCH HEAD_BEFORE
+#
+# Publishes a committed CI fix (#1141). Pushes BRANCH, then confirms the
+# REMOTE head equals the local HEAD (ls-remote) — a push that exits 0 but
+# leaves the remote elsewhere must not count. On success posts a "CI Fix"
+# comment on the PR listing the files changed since HEAD_BEFORE, then waits
+# for the rerun: a check named CHECK_NAME on the new head (see
+# _wait_for_check_on_head).
+#
+# Returns 0 once the rerun is seen. Returns 1 when the push fails, the remote
+# head does not match, or the rerun never appears. No comment is posted unless
+# the push was verified.
+_ci_fix_push_and_wait() {
+	local pr="$1" check_name="$2" iteration="$3"
+	local branch="$4" head_before="$5"
+	local local_head remote_head files file_list=""
+
+	local_head=$(git rev-parse HEAD 2>/dev/null || printf '')
+	if [[ -z "$local_head" ]]; then
+		log_error "CI fix push: cannot resolve local HEAD"
+		return 1
+	fi
+
+	if ! git push origin "$branch" 2>>"${LOG_FILE:-/dev/stderr}"; then
+		log_error "CI fix push to origin/$branch failed"
+		_ci_fix_result="fix push failed"
+		return 1
+	fi
+
+	remote_head=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null \
+		| awk '{print $1; exit}')
+	if [[ "$remote_head" != "$local_head" ]]; then
+		log_error "CI fix push not verified: remote head" \
+			"'${remote_head:-none}' != local $local_head"
+		_ci_fix_result="fix push not verified against remote head"
+		return 1
+	fi
+
+	files=$(git diff --name-only "$head_before" "$local_head" 2>/dev/null \
+		|| printf '')
+	while IFS= read -r file; do
+		[[ -n "$file" ]] || continue
+		file_list+="- \`$file\`"$'\n'
+	done <<< "$files"
+	[[ -n "$file_list" ]] || file_list=$'- (no files reported)\n'
+
+	comment_pr "$pr" "CI Fix (attempt $iteration)" \
+"Check \"$check_name\" failed; pushed fix \`${local_head:0:12}\` to \`$branch\`.
+
+Changed files:
+$file_list" "${AGENT:-}"
+
+	if ! _wait_for_check_on_head "$pr" "$local_head" "$check_name"; then
+		log_warn "Check \"$check_name\" did not appear on" \
+			"${local_head:0:12} within the wait budget"
+		_ci_fix_result="fix pushed but check did not rerun in time"
+		return 1
+	fi
+	return 0
+}
+
+# _merge_with_ci_fix PR BRANCH
+#
+# Runs merge-mr.sh and, when it declines because a CI check failed, makes up
+# to MAX_CI_FIX_ITERATIONS (default 1, 0 = off) fix attempts (#1141): fix,
+# push and wait for the rerun (_ci_fix_attempt, _ci_fix_push_and_wait), then
+# retries merge-mr.sh. The decline reason is read from MERGE_MR_DECLINE_FILE.
+# Before every merge-mr.sh run `_merged_tip` (the CALLER's local, by dynamic
+# scope) is re-read from origin/BRANCH, so after a CI-fix push it names the
+# fixed tip rather than the pre-fix one.
+#
+# Sets `_ci_fix_summary` (the CALLER's local, by dynamic scope) to a one-line
+# "check X failed; CI fix: <result>" whenever a check failure was seen, with no
+# local paths, for the failure comment and final reason.
+#
+# Returns the exit status of the last merge-mr.sh run (124 on timeout); a
+# fix that cannot be made, pushed or seen to rerun returns the status of the
+# merge-mr.sh run that triggered it.
+_merge_with_ci_fix() {
+	local pr="$1" branch="$2"
+	local max="${MAX_CI_FIX_ITERATIONS:-1}"
+	local iter=0 rc decline_file kind check_name head_before
+	local _ci_fix_result="" fixed_check=""
+	[[ "$max" =~ ^[0-9]+$ ]] || max=1
+	_ci_fix_summary=""
+
+	while true; do
+		rc=0
+		_merged_tip=$(git rev-parse --verify -q \
+			"refs/remotes/origin/$branch" 2>/dev/null) || true
+		decline_file=$(mktemp "${TMPDIR:-/tmp}/merge-decline.XXXXXX") \
+			|| decline_file=""
+		MERGE_MR_DECLINE_FILE="$decline_file" \
+			timeout "$MERGE_MR_STEP_TIMEOUT" \
+			"$PLATFORM_DIR/merge-mr.sh" "$pr" \
+			>>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
+		kind="" check_name=""
+		if [[ -n "$decline_file" ]]; then
+			IFS=$'\t' read -r kind check_name < "$decline_file" \
+				|| true
+			rm -f "$decline_file"
+		fi
+		if (( rc == 0 || rc == 124 )); then
+			return "$rc"
+		fi
+		if [[ "$kind" != "check_failed" || -z "$check_name" ]]; then
+			# A fix was pushed for an earlier check and the retry was
+			# declined for another reason: keep the fix on the record.
+			if [[ -n "$fixed_check" ]]; then
+				_ci_fix_result="fix pushed but the merge was still declined"
+				_ci_fix_summary="check \"$fixed_check\" failed; CI fix: $_ci_fix_result"
+			fi
+			return "$rc"
+		fi
+		if (( iter >= max )); then
+			if (( iter == 0 )); then
+				_ci_fix_result="not attempted (CI fix disabled)"
+			else
+				_ci_fix_result="fix pushed but check still failing"
+			fi
+			_ci_fix_summary="check \"$check_name\" failed; CI fix: $_ci_fix_result"
+			return "$rc"
+		fi
+
+		iter=$((iter + 1))
+		log "merge_pr: check \"$check_name\" failed —" \
+			"CI fix attempt $iter of $max"
+		head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
+		if ! _ci_fix_attempt "$pr" "$check_name" "$iter"; then
+			_ci_fix_summary="check \"$check_name\" failed; CI fix: $_ci_fix_result"
+			return "$rc"
+		fi
+		if ! _ci_fix_push_and_wait "$pr" "$check_name" "$iter" \
+			"$branch" "$head_before"; then
+			_ci_fix_summary="check \"$check_name\" failed; CI fix: $_ci_fix_result"
+			return "$rc"
+		fi
+		fixed_check="$check_name"
+	done
+}
+
 # _run_bounded_process_group BUDGET GRACE OUTFILE CMD [ARGS...]
 #
 # Runs CMD in its own process group with stdout+stderr sent to OUTFILE and
@@ -16441,16 +16723,13 @@ $_task_summary_line}" \
         log "merge_pr: merge-in-progress comment posted"
         log "merge_pr: invoking merge-mr.sh for PR #$pr_number"
 
-        # The PR head as last pushed; recorded before merge-mr.sh deletes
-        # the remote branch so the local copy can be judged against what
-        # actually merged (issue #950).
-        local _merged_tip
-        _merged_tip=$(git rev-parse --verify -q \
-            "refs/remotes/origin/$branch" 2>/dev/null)
+        # The PR head as last pushed; _merge_with_ci_fix records it before
+        # each merge-mr.sh run (which deletes the remote branch) so the
+        # local copy can be judged against what actually merged (issue #950).
+        local _merged_tip=""
 
-        local _merge_exit
-        timeout "$MERGE_MR_STEP_TIMEOUT" "$PLATFORM_DIR/merge-mr.sh" \
-            "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1
+        local _merge_exit _ci_fix_summary=""
+        _merge_with_ci_fix "$pr_number" "$branch"
         _merge_exit=$?
         if (( _merge_exit == 124 )); then
             _handle_merge_pr_timeout "merge-mr.sh" "$MERGE_MR_STEP_TIMEOUT"
@@ -16458,9 +16737,10 @@ $_task_summary_line}" \
             log "merge_pr: merge-mr.sh failed for PR #$pr_number"
             log_error "Failed to merge PR #$pr_number"
             comment_issue "Merge: Failed" \
-                "❌ Failed to merge PR #$pr_number. Manual intervention required." \
+                "❌ Failed to merge PR #$pr_number${_ci_fix_summary:+ ($_ci_fix_summary)}. Manual intervention required." \
                 "default"
-            set_final_state "error" "Failed to merge PR #$pr_number"
+            set_final_state "error" \
+                "Failed to merge PR #$pr_number${_ci_fix_summary:+ ($_ci_fix_summary)}"
             exit 1
         fi
 
