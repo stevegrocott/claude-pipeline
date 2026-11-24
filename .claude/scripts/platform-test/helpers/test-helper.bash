@@ -187,6 +187,13 @@ case "$1" in
         ;;
     esac
     ;;
+  run)
+    case "$2" in
+      view)
+        echo "${MOCK_GH_RUN_LOG:-}"
+        ;;
+    esac
+    ;;
 esac
 
 exit "${MOCK_GH_EXIT_CODE:-0}"
