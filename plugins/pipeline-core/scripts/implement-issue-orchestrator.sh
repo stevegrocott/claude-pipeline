@@ -606,7 +606,9 @@ _full_suite_cause_lines() {
 # A plain tail misses it: the "not ok" line and the "#" lines under it sit
 # well before the closing "Process completed with exit code 1" line. Each
 # "not ok" line is kept together with the "#" lines directly beneath it, in
-# log order, up to the 80 line cap. With no "not ok" line the last 80 lines
+# log order, up to the 80 line cap. Single lines holding "##[error]", FAIL,
+# FAILED, "Error:" or a cross mark (U+2717, U+2718, U+274C) are kept too, so
+# non-bats runners name their cause. With none of these the last 80 lines
 # are printed instead. Empty input prints nothing.
 _ci_failure_excerpt() {
 	local log="$1" causes
@@ -614,7 +616,15 @@ _ci_failure_excerpt() {
 	causes=$(printf '%s\n' "$log" | awk '
 		/^not ok/ { keep = 1; if (n < 80) { print; n++ }; next }
 		keep && /^[[:space:]]*#/ { if (n < 80) { print; n++ }; next }
-		{ keep = 0 }
+		{
+			keep = 0
+			if (index($0, "##[error]") || index($0, "Error:") ||
+				$0 ~ /(^|[^A-Za-z])FAIL(ED)?([^A-Za-z]|$)/ ||
+				index($0, "\342\234\227") || index($0, "\342\234\230") ||
+				index($0, "\342\235\214")) {
+				if (n < 80) { print; n++ }
+			}
+		}
 	')
 	if [[ -n "$causes" ]]; then
 		printf '%s\n' "$causes"

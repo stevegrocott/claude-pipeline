@@ -99,6 +99,28 @@ make_log() {
 	((count == 80))
 }
 
+@test "excerpt keeps ##[error], FAIL, FAILED, Error: and cross-mark lines" {
+	local log out
+	log=$(for i in {1..120}; do printf 'plain %d\n' "$i"; done
+		printf '##[error]step blew up\n'
+		printf 'FAIL src/a.test.js\n'
+		printf 'FAILED tests/b.py::t\n'
+		printf 'TypeError: x is undefined\n'
+		printf '\xe2\x9c\x97 cross one\n'
+		printf '\xe2\x9d\x8c cross two\n'
+		printf 'Failure-free plain line\n')
+	out=$(_ci_failure_excerpt "$log")
+
+	[[ "$out" == *'##[error]step blew up'* ]]
+	[[ "$out" == *'FAIL src/a.test.js'* ]]
+	[[ "$out" == *'FAILED tests/b.py::t'* ]]
+	[[ "$out" == *'Error: x is undefined'* ]]
+	[[ "$out" == *'cross one'* ]]
+	[[ "$out" == *'cross two'* ]]
+	[[ "$out" != *'plain 5'$'\n'* ]]
+	[[ "$out" != *'Failure-free'* ]]
+}
+
 @test "excerpt of empty input prints nothing" {
 	local out
 	out=$(_ci_failure_excerpt "")
