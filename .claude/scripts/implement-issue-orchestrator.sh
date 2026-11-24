@@ -600,6 +600,58 @@ _full_suite_cause_lines() {
 	fi
 }
 
+# _ci_failure_excerpt LOG
+#
+# Prints at most 80 lines of a CI failed-step log that name the CAUSE (#1141).
+# A plain tail misses it: the "not ok" line and the "#" lines under it sit
+# well before the closing "Process completed with exit code 1" line. Each
+# "not ok" line is kept together with the "#" lines directly beneath it, in
+# log order, up to the 80 line cap. With no "not ok" line the last 80 lines
+# are printed instead. Empty input prints nothing.
+_ci_failure_excerpt() {
+	local log="$1" causes
+	[[ -n "$log" ]] || return 0
+	causes=$(printf '%s\n' "$log" | awk '
+		/^not ok/ { keep = 1; if (n < 80) { print; n++ }; next }
+		keep && /^[[:space:]]*#/ { if (n < 80) { print; n++ }; next }
+		{ keep = 0 }
+	')
+	if [[ -n "$causes" ]]; then
+		printf '%s\n' "$causes"
+	else
+		printf '%s\n' "$log" | tail -n 80
+	fi
+}
+
+# _wait_for_check_on_head PR HEAD_SHA CHECK_NAME
+#
+# Polls read-mr-checks.sh until it reports HEAD_SHA as the PR head AND a check
+# named CHECK_NAME (any status) on it, then returns 0. Returns 1 once
+# CI_FIX_RERUN_WAIT_MAX seconds (default 900) have passed without that. A
+# check seen only under another head sha does not count: straight after a push
+# the new head has no checks registered yet (#1141). Poll spacing is
+# CI_FIX_RERUN_POLL_INTERVAL seconds (default 15).
+_wait_for_check_on_head() {
+	local pr="$1" head_sha="$2" check_name="$3"
+	local max="${CI_FIX_RERUN_WAIT_MAX:-900}"
+	local interval="${CI_FIX_RERUN_POLL_INTERVAL:-15}"
+	local start now json
+	start=$(date +%s)
+	while true; do
+		json=$("$PLATFORM_DIR/read-mr-checks.sh" "$pr" 2>/dev/null || true)
+		if [[ -n "$json" ]] && jq -e --arg sha "$head_sha" --arg n "$check_name" \
+			'(.head_sha == $sha) and (((.checks // []) | map(select(.name == $n)) | length) > 0)' \
+			<<< "$json" > /dev/null 2>&1; then
+			return 0
+		fi
+		now=$(date +%s)
+		if (( now - start >= max )); then
+			return 1
+		fi
+		sleep "$interval"
+	done
+}
+
 # _run_bounded_process_group BUDGET GRACE OUTFILE CMD [ARGS...]
 #
 # Runs CMD in its own process group with stdout+stderr sent to OUTFILE and
