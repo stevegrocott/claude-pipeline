@@ -3009,9 +3009,9 @@ run_tests() {
     if [[ $exit_code -eq 0 ]] && [[ -n "${TEST_E2E_CMD:-}" ]]; then
         local e2e_cmd="$TEST_E2E_CMD"
         if [[ -n "${BASE_BRANCH:-}" ]]; then
-            # Target the branch's changed specs. The helper emits one spec
-            # per line; a newline would end the command under eval, so
-            # fold the result onto a single line.
+            # Target the branch's changed specs. The helper emits one
+            # line; the fold below is defensive, since a bare newline
+            # would end the command under eval.
             e2e_cmd=$(_build_targeted_e2e_cmd "$BASE_BRANCH")
             e2e_cmd="${e2e_cmd//$'\n'/ }"
         fi
@@ -10569,36 +10569,54 @@ _is_playwright_spec() {
 # Outputs:
 #   The E2E command string (targeted or full)
 _build_targeted_e2e_cmd() {
-    local base="$1"
-    local pw_specs=""
-    local diff_err_file diff_rc=0
-    # Decision: if the diff itself fails we cannot tell which specs changed.
-    # Fall back to the full TEST_E2E_CMD (never fail the run, never skip
-    # E2E): running more specs is safe, running none would hide breakage.
-    diff_err_file=$(mktemp)
-    pw_specs=$(git diff "$base"...HEAD --name-only \
-        -- 'tests/e2e/*.spec.*' 'test/e2e/*.spec.*' \
-           'e2e/*.spec.*' '**/e2e/*.spec.*' \
-        2>"$diff_err_file") || diff_rc=$?
-    if ((diff_rc != 0)); then
-        log_warn "_build_targeted_e2e_cmd: git diff ${base}...HEAD failed" \
-            "(exit ${diff_rc}): $(tr '\n' ' ' < "$diff_err_file")" \
-            "— falling back to the full E2E command"
-        pw_specs=""
-    fi
-    rm -f "$diff_err_file"
-    if [[ -n "$pw_specs" ]]; then
-        log "Targeted E2E: running changed spec files only"
-        # Quote each path (printf %q) so spaces/metacharacters survive eval
-        local quoted_specs="" spec
-        while IFS= read -r spec; do
-            [[ -n "$spec" ]] || continue
-            quoted_specs+="${quoted_specs:+ }$(printf '%q' "$spec")"
-        done <<< "$pw_specs"
-        printf '%s -- %s' "$TEST_E2E_CMD" "$quoted_specs"
-    else
-        printf '%s' "$TEST_E2E_CMD"
-    fi
+	local base="$1"
+	local diff_err_file diff_rc=0 spec
+	local -a pw_specs=()
+	# Decision: if the diff itself fails we cannot tell which specs changed.
+	# Fall back to the full TEST_E2E_CMD (never fail the run, never skip
+	# E2E): running more specs is safe, running none would hide breakage.
+	#
+	# `-z` NUL-delimits the paths and `core.quotePath=off` keeps non-ASCII
+	# names verbatim, so a path with spaces, quotes or UTF-8 reaches the
+	# runner intact. NUL cannot survive a `$()` capture, so the diff is
+	# read off a process substitution, and its exit status is taken from
+	# a status file because a process substitution hides it.
+	diff_err_file=$(mktemp)
+	while IFS= read -r -d '' spec; do
+		pw_specs+=("$spec")
+	done < <(
+		git -c core.quotePath=off diff -z --no-renames \
+			--name-only "$base"...HEAD \
+			-- 'tests/e2e/*.spec.*' 'test/e2e/*.spec.*' \
+			'e2e/*.spec.*' '**/e2e/*.spec.*' \
+			2>"$diff_err_file"
+		printf 'rc=%d' "$?" > "${diff_err_file}.rc"
+	)
+	if [[ -f "${diff_err_file}.rc" ]]; then
+		diff_rc=$(< "${diff_err_file}.rc")
+		diff_rc="${diff_rc#rc=}"
+		rm -f "${diff_err_file}.rc"
+	fi
+	if [[ "$diff_rc" != 0 ]]; then
+		log_warn "_build_targeted_e2e_cmd: git diff ${base}...HEAD failed" \
+			"(exit ${diff_rc}): $(tr '\n' ' ' < "$diff_err_file")" \
+			"— falling back to the full E2E command"
+		pw_specs=()
+	fi
+	rm -f "$diff_err_file"
+	if ((${#pw_specs[@]} > 0)); then
+		log "Targeted E2E: running changed spec files only"
+		# Quote each path (printf %q) so spaces/metacharacters survive the
+		# caller's eval / bash -c. %q renders a newline as $'\n', so the
+		# result is always one physical line.
+		local quoted_specs=""
+		for spec in "${pw_specs[@]}"; do
+			quoted_specs+="${quoted_specs:+ }$(printf '%q' "$spec")"
+		done
+		printf '%s -- %s' "$TEST_E2E_CMD" "$quoted_specs"
+	else
+		printf '%s' "$TEST_E2E_CMD"
+	fi
 }
 
 # Pull "<n> <word>" out of a runner summary blob (issue #872).
@@ -10896,14 +10914,10 @@ _e2e_direct_verify() {
 	local cmd="$1"
 	local log_path="${2:-}"
 
-	# _build_targeted_e2e_cmd appends the changed specs straight from
-	# `git diff --name-only`, so the command string carries one spec per
-	# LINE. That reads fine in an agent prompt, but a newline is a command
-	# separator to `bash -c` — the second spec would be run as its own
-	# command. Fold the whitespace so every spec stays an argument of the
-	# one runner invocation. (A spec path containing a literal space is
-	# not supported here, the same limitation the targeted command has
-	# always had.)
+	# _build_targeted_e2e_cmd emits a single line (each spec %q-quoted, so
+	# a path with spaces or a newline stays one shell word). The fold below
+	# is defensive: callers may also pass a multi-line command, and a bare
+	# newline would be a command separator to `bash -c`.
 	local run_cmd
 	run_cmd=$(printf '%s' "$cmd" | tr '\n' ' ')
 

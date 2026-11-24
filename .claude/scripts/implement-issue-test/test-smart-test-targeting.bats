@@ -3711,6 +3711,70 @@ STUB
         "every changed spec must reach the runner in one invocation"
 }
 
+# Real-repo coverage for _build_targeted_e2e_cmd: no stubbed git, the
+# command it builds is executed through bash -c to prove each spec path
+# arrives as exactly one argument.
+_run_built_e2e_cmd() {
+	local cmd="$1"
+	bash -c "$cmd"
+}
+
+@test "_build_targeted_e2e_cmd passes spec paths with spaces and UTF-8 as single args" {
+	log() { :; }
+	log_warn() { :; }
+	cd "$TEST_TMP/repo"
+	local stub="$TEST_TMP/argv-stub.sh"
+	printf '#!/usr/bin/env bash\nfor a in "$@"; do printf "[%%s]\\n" "$a"; done\n' \
+		> "$stub"
+	chmod +x "$stub"
+	export TEST_E2E_CMD="$stub"
+
+	git checkout -q -b feature-1153-e2e-paths main
+	mkdir -p tests/e2e
+	printf 'x\n' > "tests/e2e/with space.spec.ts"
+	printf 'x\n' > "tests/e2e/"$'caf\xc3\xa9'".spec.ts"
+	printf 'x\n' > "tests/e2e/plain.spec.ts"
+	git add tests/e2e
+	git commit -q -m "add specs"
+
+	local cmd out
+	cmd=$(_build_targeted_e2e_cmd main)
+	[[ "$cmd" != *$'\n'* ]]
+	out=$(_run_built_e2e_cmd "$cmd")
+	[[ "$out" == *"[--]"* ]]
+	[[ "$out" == *"[tests/e2e/with space.spec.ts]"* ]]
+	[[ "$out" == *"[tests/e2e/café.spec.ts]"* ]]
+	[[ "$out" == *"[tests/e2e/plain.spec.ts]"* ]]
+}
+
+@test "_build_targeted_e2e_cmd returns the full command when no spec changed" {
+	log() { :; }
+	log_warn() { :; }
+	cd "$TEST_TMP/repo"
+	export TEST_E2E_CMD="npx playwright test"
+	git checkout -q -b feature-1153-e2e-nospec main
+	printf 'x\n' > other.txt
+	git add other.txt
+	git commit -q -m "non-spec"
+
+	local cmd
+	cmd=$(_build_targeted_e2e_cmd main)
+	[[ "$cmd" == "npx playwright test" ]]
+}
+
+@test "_build_targeted_e2e_cmd falls back to the full command when git diff fails" {
+	log() { :; }
+	local warned="$TEST_TMP/warned"
+	log_warn() { printf '%s\n' "$*" >> "$warned"; }
+	cd "$TEST_TMP/repo"
+	export TEST_E2E_CMD="npx playwright test"
+
+	local cmd
+	cmd=$(_build_targeted_e2e_cmd no-such-branch-1153)
+	[[ "$cmd" == "npx playwright test" ]]
+	grep -q "falling back" "$warned"
+}
+
 # =============================================================================
 # Issue #965 — the blocking test loop must run the repo's real test command,
 # and a runner that never started must not be laundered into "pre-existing"

@@ -6158,6 +6158,65 @@ MOCK_CLAUDE
 	rm_line=$(grep -n 'rm -f "\$orch_out_fifo"' <<< "$body" | tail -1 | cut -d: -f1)
 	((rm_line > wait_line)) \
 		|| fail "fifo removed (line $rm_line) before wait on tee (line $wait_line)"
+
+	# Exactly one removal (the stale cleanup) may precede the wait.
+	local removals_before_wait
+	removals_before_wait=$(grep -n 'rm -f "\$orch_out_fifo"' <<< "$body" \
+		| cut -d: -f1 | awk -v w="$wait_line" '$1 < w' | wc -l | tr -d ' ')
+	((removals_before_wait == 1)) \
+		|| fail "expected 1 fifo removal before the tee wait, got $removals_before_wait"
+}
+
+# Fake inner orchestrator that leaves a background child holding the fifo's
+# write end open, so tee never sees EOF after the orchestrator exits.
+_install_fake_inner_orchestrator_holds_fifo() {
+	cat > "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh" << 'FAKE_ORCH'
+#!/usr/bin/env bash
+set -uo pipefail
+status_file=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--status-file) status_file="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+sleep 12 < /dev/null &
+jq -n '{state: "completed", cost_summary: {total_cost_usd: 0}}' > "$status_file"
+FAKE_ORCH
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh"
+}
+
+@test "real batch-orchestrator.sh: TEE_FLUSH_TIMEOUT bounds the tee wait and kills a stuck tee" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_holds_fifo
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=2
+
+	local start=$SECONDS
+	run "$BATCH_E2E_ORCH_COPY" --issues "778" --branch main
+	local elapsed=$((SECONDS - start))
+
+	[[ "$output" == *"did not exit 2s after orchestrator exit"* ]] \
+		|| fail "stuck tee was not reported/killed (output: $output)"
+	((elapsed < 11)) \
+		|| fail "batch waited ${elapsed}s; tee wait was not bounded by TEE_FLUSH_TIMEOUT"
+}
+
+@test "real batch-orchestrator.sh: non-integer TEE_FLUSH_TIMEOUT is rejected with a warning and the default is used" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=abc
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "779" --branch main
+
+	[ "$status" -eq 0 ] || fail "batch exited $status: $output"
+	[[ "$output" == *"TEE_FLUSH_TIMEOUT='abc' is not a non-negative integer"* ]] \
+		|| fail "no rejection warning for non-integer value (output: $output)"
 }
 
 # =============================================================================
