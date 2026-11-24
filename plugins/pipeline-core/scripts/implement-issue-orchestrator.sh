@@ -6936,6 +6936,47 @@ _format_pr_review_comment() {
 	fi
 }
 
+# Builds the feedback text handed to the PR-review fix stage. Listed
+# issues come first; when there are none (a changes_requested verdict
+# carried only prose), the reviewer's comments and summary are used so
+# the fix stage never receives an empty prompt section.
+#
+# Arguments:
+#   $1  review_result   stage result JSON (reads .output.issues,
+#                       .output.comments and .output.summary)
+_build_pr_fix_feedback() {
+	local review_result="$1"
+	local issues
+	local comments
+	local summary
+
+	issues=$(printf '%s' "$review_result" | jq -r '
+		[.output.issues // [] | .[] |
+			"\(.file // ""):\(.line // "") → \(.description // "")"
+		] | join("\n- ")' 2>/dev/null || true)
+	if [[ -n "${issues//[[:space:]]/}" ]]; then
+		printf '%s' "$issues"
+		return 0
+	fi
+
+	comments=$(printf '%s' "$review_result" \
+		| jq -r '.output.comments // ""' 2>/dev/null || true)
+	summary=$(printf '%s' "$review_result" \
+		| jq -r '.output.summary // ""' 2>/dev/null || true)
+
+	if [[ -n "${comments//[[:space:]]/}" ]]; then
+		printf 'Reviewer comments:\n%s' "$comments"
+		if [[ -n "${summary//[[:space:]]/}" ]]; then
+			printf '\n\nReview summary:\n%s' "$summary"
+		fi
+	elif [[ -n "${summary//[[:space:]]/}" ]]; then
+		printf 'Review summary:\n%s' "$summary"
+	else
+		printf 'The reviewer requested changes but gave no details. %s' \
+			'Re-review the branch diff against the issue and fix any problems.'
+	fi
+}
+
 # Builds a well-formed issue body for an adjacent follow-up issue.
 # If the raw body already contains a valid ## Implementation Tasks section
 # with at least one canonical task line, it is returned unchanged.
@@ -13931,6 +13972,7 @@ verify_fix_stage_commit() {
 #   $3 - branch name
 #   $4 - branch head SHA captured before the fix stage ran
 #   $5 - fix stage result JSON
+#   $6 - review feedback given to the stage (optional, for the no-op comment)
 # Returns:
 #   0 - fix committed (head moved)
 #   1 - fix left uncommitted; no success comment posted
@@ -13943,6 +13985,7 @@ _handle_fix_stage_result() {
 	local branch="$3"
 	local head_before="$4"
 	local fix_result="$5"
+	local feedback="${6:-}"
 
 	local head_after
 	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
@@ -13967,9 +14010,18 @@ leaving changes in the working tree. The reported fixes have NOT landed on
 				"committed nothing — not a no-op"
 			return 2
 		fi
-		# Genuine no-op: nothing landed, so there is no fix to report.
-		log "No commit from fix-pr-review-iter-$pr_iteration" \
-			"and a clean tree — skipping the fix comment"
+		# Genuine no-op: nothing landed. Say so once, with the feedback the
+		# stage declined to act on, so the PR does not look silently stuck.
+		log_warn "fix-pr-review-iter-$pr_iteration committed nothing" \
+			"and left a clean tree — review feedback not applied"
+		comment_pr "$pr_number" \
+			"⚠️ PR Review Fix made no changes (Iteration $pr_iteration)" \
+			"The fix stage committed nothing for this iteration, so no
+changes were pushed to \`$branch\`.
+
+Feedback it was asked to address:
+${feedback:-"(not recorded)"}" \
+			"$AGENT"
 		return 3
 	fi
 
@@ -16292,7 +16344,7 @@ ${fa_numstat_note}"
 
             # Collect feedback
             local review_comments
-            review_comments=$(printf '%s' "$review_result" | jq -r '[.output.issues // [] | .[] | "\(.file // ""):\(.line // "") → \(.description // "")"] | join("\n- ")')
+            review_comments=$(_build_pr_fix_feedback "$review_result")
 
             # Append current iteration issues to history file
             local current_issues
@@ -16350,7 +16402,8 @@ Fix the issues and commit. Output a summary of fixes applied."
             # its work uncommitted.
             local fix_handle_rc=0
             _handle_fix_stage_result "$pr_number" "$pr_iteration" \
-                "$branch" "$fix_head_before" "$fix_result" || fix_handle_rc=$?
+                "$branch" "$fix_head_before" "$fix_result" \
+                "$review_comments" || fix_handle_rc=$?
             if (( fix_handle_rc == 2 )); then
                 # Errored fix, nothing committed: record the cause (persisted
                 # before any max-iterations reason), arm no push, and stop
