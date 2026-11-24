@@ -79,7 +79,8 @@
 #
 # redact_local_paths [text]
 #   Prints text (argument or stdin) with the repo root made relative and
-#   $HOME replaced by "~", path-boundary safe. See its docstring below.
+#   $HOME replaced by "~" (and its dash-encoded form by "-HOME"),
+#   path-boundary safe. See its docstring below.
 
 # Idempotent sourcing guard — skip re-definition on repeated source.
 if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
@@ -305,28 +306,63 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
     }
 
     # _redact_prefix <text> <prefix> <bare-replacement> <slash-replacement>
+    #                [any-before]
     #   Prints <text> with every path-boundary-safe occurrence of <prefix>
     #   replaced: "<prefix>/" becomes <slash-replacement>, a bare "<prefix>"
     #   becomes <bare-replacement>. A hit counts only when the char before it
     #   is not a path char and the char after it is "/" or not a name char,
     #   so /home/u/repo never matches inside /home/u/repo2 or /x/home/u/repo.
+    #   With a non-empty [any-before] (the $HOME rule) the preceding-char
+    #   check is skipped, so a home prefix is redacted after ANY character
+    #   (e.g. "path=/home/u/x" or "/other/home/u"), and a single trailing
+    #   "." that ends the text or precedes a non-name char is a sentence
+    #   boundary, not a name char ("/home/u." -> "~.").
     #   Pure bash 3.2 (no regex captures, no ${var^^}).
     _redact_prefix() {
-        local text="$1" prefix="$2" bare="$3" slashed="$4"
-        local out="" before after
+        local text="$1" prefix="$2" bare="$3" slashed="$4" anybefore="${5:-}"
+        local out="" before after rest
         while [[ "$text" == *"$prefix"* ]]; do
             before="${text%%"$prefix"*}"
             after="${text#*"$prefix"}"
             out+="$before"
-            if [[ -n "$before" && "${before: -1}" == [A-Za-z0-9._~/-] ]]; then
+            if [[ -z "$anybefore" && -n "$before" \
+                && "${before: -1}" == [A-Za-z0-9._~/-] ]]; then
                 out+="$prefix"
             elif [[ "$after" == /* ]]; then
                 out+="$slashed"
                 after="${after#/}"
             elif [[ -z "$after" || "${after:0:1}" != [A-Za-z0-9._-] ]]; then
                 out+="$bare"
+            elif [[ -n "$anybefore" && "${after:0:1}" == "." ]] \
+                && rest="${after:1}" \
+                && [[ -z "$rest" || "${rest:0:1}" != [A-Za-z0-9._-] ]]; then
+                out+="$bare"
             else
                 out+="$prefix"
+            fi
+            text="$after"
+        done
+        printf '%s' "${out}${text}"
+    }
+
+    # _redact_dash_home <text> <dash-home>
+    #   Prints <text> with each dash-encoded home (e.g. "-Users-me", how
+    #   Claude names ~/.claude/projects dirs) replaced by "-HOME". A hit
+    #   counts only when the char before it is not a name char or "-" (so
+    #   "--root-dir" is untouched) and the char after is not a name char.
+    _redact_dash_home() {
+        local text="$1" prefix="$2"
+        local out="" before after
+        while [[ "$text" == *"$prefix"* ]]; do
+            before="${text%%"$prefix"*}"
+            after="${text#*"$prefix"}"
+            out+="$before"
+            if [[ -n "$before" && "${before: -1}" == [A-Za-z0-9._~-] ]]; then
+                out+="$prefix"
+            elif [[ -n "$after" && "${after:0:1}" == [A-Za-z0-9_.] ]]; then
+                out+="$prefix"
+            else
+                out+="-HOME"
             fi
             text="$after"
         done
@@ -338,15 +374,21 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
     #   absolute paths made safe to publish: the repo root (override via
     #   $PIPELINE_REDACT_ROOT, else git toplevel) becomes a relative path
     #   ("." for the root itself) and $HOME becomes "~". The repo root is
-    #   handled first because it normally lives under $HOME. Matching is
-    #   path-boundary safe (see _redact_prefix). Always returns 0.
+    #   handled first because it normally lives under $HOME. In a linked
+    #   worktree the main checkout root is redacted too ("<main>"). Matching
+    #   is path-boundary safe (see _redact_prefix). PIPELINE_REDACT_PATHS=0
+    #   passes the text through untouched. Always returns 0.
     redact_local_paths() {
-        local text root home
+        local text root home main common
         if (($# > 0)); then
             text="$1"
         else
             text="$(cat; printf x)"
             text="${text%x}"
+        fi
+        if [[ "${PIPELINE_REDACT_PATHS:-}" == "0" ]]; then
+            printf '%s' "$text"
+            return 0
         fi
         root="${PIPELINE_REDACT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
         home="${HOME:-}"
@@ -355,10 +397,32 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
         if [[ -n "$root" ]]; then
             text="$(_redact_prefix "$text" "$root" "." ""; printf x)"
             text="${text%x}"
+            # Linked worktree: the main checkout is the parent of the
+            # shared git dir. Absent (or equal to root) in a plain clone.
+            common="$(cd "$root" 2>/dev/null \
+                && git rev-parse --git-common-dir 2>/dev/null)"
+            if [[ -n "$common" ]]; then
+                [[ "$common" == /* ]] || common="$root/$common"
+                common="$(cd "$common" 2>/dev/null && pwd -P)"
+                main="${common%/.git}"
+                while [[ "$main" == */ ]]; do main="${main%/}"; done
+                if [[ "$common" == */.git && -n "$main" \
+                    && "$main" != "$root" ]]; then
+                    text="$(_redact_prefix "$text" "$main" \
+                        "<main>" "<main>/"; printf x)"
+                    text="${text%x}"
+                fi
+            fi
         fi
         if [[ -n "$home" ]]; then
-            text="$(_redact_prefix "$text" "$home" "~" "~/"; printf x)"
+            text="$(_redact_prefix "$text" "$home" "~" "~/" any; printf x)"
             text="${text%x}"
+            # Dash-encoded home (two or more segments); /root stays alone.
+            local dash="${home//\//-}"
+            if [[ "${home#/}" == */* ]]; then
+                text="$(_redact_dash_home "$text" "$dash"; printf x)"
+                text="${text%x}"
+            fi
         fi
         printf '%s' "$text"
     }

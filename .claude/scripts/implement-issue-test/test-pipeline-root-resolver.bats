@@ -244,9 +244,19 @@ _redact() {
     [ "$output" = "~/repo2/a ~/repo-old/b /h/user/c" ]
 }
 
-@test "redact_local_paths ignores prefix embedded inside a longer path" {
-    run _redact /h/u/repo /h/u "/other/h/u/repo/a and /other/h/u"
-    [ "$output" = "/other/h/u/repo/a and /other/h/u" ]
+@test "redact_local_paths leaves repo root alone when embedded in a path" {
+    run _redact /h/u/repo /h/u "/other/h/u/repo/a"
+    [ "$output" = "/other~/repo/a" ]
+}
+
+@test "redact_local_paths redacts home after any preceding character" {
+    run _redact /h/u/repo /h/u "path=/h/u/x (/h/u) \"/h/u\" x/h/u"
+    [ "$output" = "path=~/x (~) \"~\" x~" ]
+}
+
+@test "redact_local_paths treats a final dot after home as a boundary" {
+    run _redact /h/u/repo /h/u "see /h/u. then /h/u.. and /h/u.cfg /h/u."
+    [ "$output" = "see ~. then /h/u.. and /h/u.cfg ~." ]
 }
 
 @test "redact_local_paths redacts every occurrence incl. repeats" {
@@ -273,4 +283,55 @@ _redact() {
 @test "redact_local_paths tolerates trailing slash on root and home" {
     run _redact /h/u/repo/ /h/u/ "/h/u/repo/a /h/u/b"
     [ "$output" = "a ~/b" ]
+}
+
+@test "redact_local_paths redacts dash-encoded home as -HOME" {
+    run _redact /h/u/repo /h/u "d=~/.claude/projects/-h-u-repo-x and -h-u"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"projects/-HOME-repo-x and -HOME" ]]
+}
+
+@test "redact_local_paths leaves single-segment home dash form alone" {
+    run _redact /r/x /root "run --root-dir /tmp -root"
+    [ "$status" -eq 0 ]
+    [ "$output" == "run --root-dir /tmp -root" ]
+}
+
+@test "redact_local_paths dash home respects boundaries" {
+    run _redact /h/u/repo /h/u "x-h-u -h-ux -h-u.bak a--h-u"
+    [ "$status" -eq 0 ]
+    [ "$output" == "x-h-u -h-ux -h-u.bak a--h-u" ]
+}
+
+@test "redact_local_paths also redacts the main checkout of a linked worktree" {
+    local base main wt
+    base="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+    main="$base/main"
+    wt="$base/wt"
+    git init -q "$main"
+    git -C "$main" -c user.name=t -c user.email=t@t commit -q \
+        --allow-empty -m init
+    git -C "$main" worktree add -q "$wt" -b feat
+    run _redact "$wt" /nonexistent-home \
+        "w=$wt/a.sh m=$main/b.sh $main"
+    [ "$status" -eq 0 ]
+    [ "$output" = "w=a.sh m=<main>/b.sh <main>" ]
+}
+
+@test "redact_local_paths has no main-root rule in a plain clone" {
+    local base
+    base="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+    git init -q "$base/plain"
+    run _redact "$base/plain" /nonexistent-home "$base/plain/a $base/other"
+    [ "$status" -eq 0 ]
+    [ "$output" = "a $base/other" ]
+}
+
+@test "redact_local_paths passes through when PIPELINE_REDACT_PATHS=0" {
+    run env PIPELINE_REDACT_PATHS=0 PIPELINE_REDACT_ROOT=/h/u/repo \
+        HOME=/h/u bash -c \
+        'source "$1"; redact_local_paths "$2"' _ "$RESOLVER_SRC" \
+        "/h/u/repo/a /h/u/b"
+    [ "$status" -eq 0 ]
+    [ "$output" = "/h/u/repo/a /h/u/b" ]
 }
