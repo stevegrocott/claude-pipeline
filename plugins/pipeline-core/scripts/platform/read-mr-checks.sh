@@ -1,8 +1,11 @@
 #!/bin/bash
-# Usage: read-mr-checks.sh <mr-number> [check-name]
+# Usage: read-mr-checks.sh <mr-number> [--failed-log <check-name>]
 # Returns: JSON {"head_sha": "...", "checks": [{name,status,conclusion,url}]}
-#   With check-name: the failed-step log of that named check instead.
-#   On gitlab: empty output, exit 0 (no checks API wired up).
+#   With --failed-log: the failed-step log of that named check instead; empty
+#   output, exit 0 for an unknown check, a non-Actions URL or a failing log
+#   command.
+#   On gitlab (no checks API wired up): {"head_sha":null,"checks":[]}, and
+#   empty output with --failed-log. Always exit 0.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=../resolve-pipeline-root.sh
@@ -16,12 +19,23 @@ PLATFORM_SH_FILE="$(resolve_consumer_file platform.sh)" || {
 # shellcheck disable=SC1090
 source "$PLATFORM_SH_FILE"
 
+USAGE="Usage: read-mr-checks.sh <mr-number> [--failed-log <check-name>]"
 if [[ $# -lt 1 || -z "$1" ]]; then
-    echo "Usage: read-mr-checks.sh <mr-number> [check-name]" >&2
+    echo "$USAGE" >&2
     exit 1
 fi
 MR="$1"
-CHECK_NAME="${2:-}"
+CHECK_NAME=""
+FAILED_LOG=false
+if [[ $# -ge 2 ]]; then
+    if [[ "$2" == "--failed-log" && $# -eq 3 && -n "$3" ]]; then
+        FAILED_LOG=true
+        CHECK_NAME="$3"
+    else
+        echo "$USAGE" >&2
+        exit 1
+    fi
+fi
 
 github_checks() {
     local pr_json
@@ -43,32 +57,35 @@ github_failed_log() {
     url="$(github_checks | jq -r --arg n "$CHECK_NAME" \
         '[.checks[] | select(.name == $n)][0].url // empty')"
     if [[ -z "$url" ]]; then
-        echo "ERROR: no check named '$CHECK_NAME' on MR $MR" >&2
-        exit 1
+        return 0
     fi
     if [[ "$url" =~ /runs/([0-9]+) ]]; then
         run_id="${BASH_REMATCH[1]}"
     else
-        echo "ERROR: cannot derive run id from '$url'" >&2
-        exit 1
+        return 0
     fi
     args=(run view "$run_id" --log-failed)
     if [[ "$url" =~ /job/([0-9]+) ]]; then
         job_id="${BASH_REMATCH[1]}"
         args+=(--job "$job_id")
     fi
-    gh "${args[@]}"
+    gh "${args[@]}" 2>/dev/null || true
 }
 
 case "$GIT_HOST" in
   github)
-    if [[ -n "$CHECK_NAME" ]]; then
+    if [[ "$FAILED_LOG" == true ]]; then
         github_failed_log
     else
         github_checks
     fi
     ;;
-  gitlab) exit 0 ;;
+  gitlab)
+    if [[ "$FAILED_LOG" != true ]]; then
+        echo '{"head_sha":null,"checks":[]}'
+    fi
+    exit 0
+    ;;
   *)
     echo "ERROR: unrecognised GIT_HOST '$GIT_HOST'" \
       "(accepted: github, gitlab)" >&2

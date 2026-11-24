@@ -42,37 +42,55 @@ teardown() {
 @test "read-mr-checks github: named check returns failed log via run id and job" {
     export GIT_HOST="github"
     export MOCK_GH_RUN_LOG="lint: error on line 4"
-    run run_platform_script read-mr-checks.sh 99 lint
+    run run_platform_script read-mr-checks.sh 99 --failed-log lint
     [ "$status" -eq 0 ]
     [ "$output" == "lint: error on line 4" ]
     assert_mock_called_with "gh run view 222 --log-failed --job 7"
     assert_mock_not_called_with "gh run view 111"
 }
 
-@test "read-mr-checks github: unknown check name fails without fetching log" {
+@test "read-mr-checks github: unknown check name gives empty output, exit 0, no log fetch" {
     export GIT_HOST="github"
-    run run_platform_script read-mr-checks.sh 99 nonesuch
-    [ "$status" -ne 0 ]
-    assert_output_contains "no check named 'nonesuch'"
+    run run_platform_script read-mr-checks.sh 99 --failed-log nonesuch
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
     assert_mock_not_called_with "gh run view"
+}
+
+@test "read-mr-checks github: failing log command gives empty output, exit 0" {
+    export GIT_HOST="github"
+    cat > "$TEST_TMP/bin/gh" <<'GH'
+#!/usr/bin/env bash
+[[ "$1" == run ]] && exit 1
+echo "$MOCK_GH_PR_VIEW_JSON"
+GH
+    run run_platform_script read-mr-checks.sh 99 --failed-log lint
+    [ "$status" -eq 0 ]
+}
+
+@test "read-mr-checks: rejects a bare positional check name" {
+    export GIT_HOST="github"
+    run run_platform_script read-mr-checks.sh 99 lint
+    [ "$status" -ne 0 ]
+    assert_output_contains "Usage"
 }
 
 # =============================================================================
 # GITLAB MODE
 # =============================================================================
 
-@test "read-mr-checks gitlab: empty output and no CLI calls" {
+@test "read-mr-checks gitlab: empty checks object and no CLI calls" {
     export GIT_HOST="gitlab"
     run run_platform_script read-mr-checks.sh 55
     [ "$status" -eq 0 ]
-    [ -z "$output" ]
+    [ "$(jq -c '.checks' <<< "$output")" == "[]" ]
     assert_mock_not_called_with "gh "
     assert_mock_not_called_with "glab "
 }
 
-@test "read-mr-checks gitlab: empty output with a check name too" {
+@test "read-mr-checks gitlab: empty output with --failed-log" {
     export GIT_HOST="gitlab"
-    run run_platform_script read-mr-checks.sh 55 lint
+    run run_platform_script read-mr-checks.sh 55 --failed-log lint
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }

@@ -472,3 +472,36 @@ STUB
 	_merge_with_ci_fix 5 feat || true
 	[[ "$_ci_fix_summary" == *'check "Bats" failed'*'still failing'* ]]
 }
+
+# =============================================================================
+# Integration: _ci_fix_attempt against the REAL read-mr-checks.sh (mock gh)
+# =============================================================================
+
+@test "fix attempt fetches the failed log through the real read-mr-checks.sh" {
+	fix_setup
+	local real_wrapper="$BATS_TEST_DIRNAME/../platform/read-mr-checks.sh"
+	# The real wrapper resolves its helpers relative to itself, so run it from
+	# a copy of the scripts tree rather than the stub platform directory.
+	mkdir -p "$TEST_TMP/real/platform" "$TEST_TMP/cfg" "$TEST_TMP/mockbin"
+	cp "$real_wrapper" "$TEST_TMP/real/platform/"
+	cp "$BATS_TEST_DIRNAME/../resolve-pipeline-root.sh" "$TEST_TMP/real/"
+	printf 'GIT_HOST=github\n' > "$TEST_TMP/cfg/platform.sh"
+	cat > "$TEST_TMP/mockbin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "gh $*" >> "$TEST_TMP/gh-calls.log"
+if [[ "$1" == pr ]]; then
+	echo '{"headRefOid":"abc","statusCheckRollup":[{"name":"Bats Suite","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/222/job/7"}]}'
+elif [[ "$1" == run ]]; then
+	printf 'not ok 1 real wrapper log\n'
+fi
+GH
+	chmod +x "$TEST_TMP/mockbin/gh"
+	export PIPELINE_CONFIG_DIR="$TEST_TMP/cfg"
+	PLATFORM_DIR="$TEST_TMP/real/platform"
+	PATH="$TEST_TMP/mockbin:$PATH"
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -eq 0 ]]
+	[[ "$(< "$LOG_BASE/ci-failed-log-iter-1.log")" == *'real wrapper log'* ]]
+	grep -q 'gh run view 222 --log-failed --job 7' "$TEST_TMP/gh-calls.log"
+}
