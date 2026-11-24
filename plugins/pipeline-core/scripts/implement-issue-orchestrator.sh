@@ -7403,6 +7403,37 @@ extract_changes_bullets() {
 	fi
 }
 
+# build_pr_body
+#
+# Composes the PR body from STATUS_FILE: the closing keyword plus one bullet
+# per task with its status. Output goes to stdout (no logging).
+build_pr_body() {
+	local task_lines=""
+
+	if [[ -f "${STATUS_FILE:-}" ]]; then
+		task_lines=$(jq -r '.tasks[]? |
+			"- Task \(.id) [\(.status // "unknown")]: \(.description // "")"' \
+			"$STATUS_FILE" 2>/dev/null) || task_lines=""
+	fi
+
+	printf 'Closes #%s\n' "$ISSUE_NUMBER"
+	if [[ -n "$task_lines" ]]; then
+		printf '\n## Tasks\n\n%s\n' "$task_lines"
+	fi
+}
+
+# write_pr_body_file
+#
+# Writes build_pr_body output to $LOG_BASE/pr-body.md so it can be passed to
+# create-mr.sh --body-file (no shell quoting of free text). Prints the path.
+write_pr_body_file() {
+	local body_file="${LOG_BASE:?}/pr-body.md"
+
+	mkdir -p "${body_file%/*}" || return 1
+	build_pr_body > "$body_file" || return 1
+	printf '%s' "$body_file"
+}
+
 # build_complete_prompt PR_NUMBER BRANCH [SKILL]
 #
 # Builds the complete-stage prompt (issue #1115). Lists every task from
@@ -15410,11 +15441,19 @@ Only the files listed above should be staged and committed."
         local pr_creation_skill
         pr_creation_skill=$(load_skill "pr-creation")
 
+        local pr_body_file
+        pr_body_file=$(write_pr_body_file) || pr_body_file=""
+        if [[ -z "$pr_body_file" ]]; then
+            log_error "Could not write PR body file"
+            set_final_state "error" "Could not write PR body file"
+            exit 1
+        fi
+
         local pr_prompt="Create a merge request for issue #$ISSUE_NUMBER.
 
 Run this exact command (substitute a short description for <description>):
 
-git push -u origin $branch 2>/dev/null; $PLATFORM_DIR/create-mr.sh --source '$branch' --target '$BASE_BRANCH' --title 'feat(issue-$ISSUE_NUMBER): <description>' --body 'Closes #$ISSUE_NUMBER'
+git push -u origin $branch 2>/dev/null; $PLATFORM_DIR/create-mr.sh --source '$branch' --target '$BASE_BRANCH' --title 'feat(issue-$ISSUE_NUMBER): <description>' --body-file '$pr_body_file'
 
 The command will output the MR number. Use that as pr_number in your response.
 

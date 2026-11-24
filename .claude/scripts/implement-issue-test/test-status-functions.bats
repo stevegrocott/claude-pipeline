@@ -935,3 +935,36 @@ _shadow_cp_failing_first() {
 	[[ "$output" == *"after-sync"* ]] \
 		|| fail "set -e subshell stopped at sync_status_to_log: $output"
 }
+
+# =============================================================================
+# PR BODY FROM STATUS
+# =============================================================================
+
+@test "build_pr_body lists closing keyword and each task with status" {
+    cat > "$STATUS_FILE" <<'JSON'
+{"tasks":[{"id":"1","status":"completed","description":"Add flag"},
+{"id":"2","status":"failed","description":"Wire it up; $(whoami) 'q'"}]}
+JSON
+    run build_pr_body
+    [ "$status" -eq 0 ]
+    [[ "$output" == "Closes #123"* ]]
+    [[ "$output" == *"- Task 1 [completed]: Add flag"* ]]
+    [[ "$output" == *"- Task 2 [failed]: Wire it up; \$(whoami) 'q'"* ]]
+}
+
+@test "build_pr_body falls back to closing keyword without tasks" {
+    echo '{"tasks":[]}' > "$STATUS_FILE"
+    run build_pr_body
+    [ "$status" -eq 0 ]
+    [ "$output" = "Closes #123" ]
+}
+
+@test "write_pr_body_file writes body to file and prints its path" {
+    echo '{"tasks":[{"id":"1","status":"completed","description":"Do x"}]}' \
+        > "$STATUS_FILE"
+    run write_pr_body_file
+    [ "$status" -eq 0 ]
+    [ "$output" = "$LOG_BASE/pr-body.md" ]
+    grep -qF 'Closes #123' "$output"
+    grep -qF -- '- Task 1 [completed]: Do x' "$output"
+}
