@@ -665,6 +665,38 @@ _wait_for_file() {
     [ ! -e "${STATUS_FILE}.lockdir.break" ] || fail "break file left behind"
 }
 
+@test "status lock: stale break file removal falls through to the deadline" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=0
+    export LOCK_STALE_AGE=5
+    init_status
+
+    mkdir -p "${STATUS_FILE}.lockdir"
+    printf '%s\n' 999999 > "${STATUS_FILE}.lockdir/pid"
+    : > "${STATUS_FILE}.lockdir.break"
+    touch -t 200001010000 "${STATUS_FILE}.lockdir.break"
+
+    run _status_lock_acquire
+    [ "$status" -eq 1 ] || fail "expected deadline (1), got $status: $output"
+    [ ! -e "${STATUS_FILE}.lockdir.break" ] || fail "stale break file kept"
+}
+
+@test "status lock: LOCK_STALE_AGE defaults to 5 seconds" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=10
+    unset LOCK_STALE_AGE
+    init_status
+
+    mkdir -p "${STATUS_FILE}.lockdir"
+    printf '%s\n' 999999 > "${STATUS_FILE}.lockdir/pid"
+    : > "${STATUS_FILE}.lockdir.break"
+    touch -t 200001010000 "${STATUS_FILE}.lockdir.break"
+
+    run status_json_write --arg v "default-age" '.branch = $v'
+    [ "$status" -eq 0 ] || fail "default stale age did not apply: $output"
+    [ ! -e "${STATUS_FILE}.lockdir.break" ] || fail "break file left behind"
+}
+
 @test "status lock: fresh break file makes the waiter time out, not spin" {
     export STATUS_LOCK_IMPL=mkdir
     export STATUS_LOCK_TIMEOUT=2
