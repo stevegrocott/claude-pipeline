@@ -244,9 +244,19 @@ _redact() {
     [ "$output" = "~/repo2/a ~/repo-old/b /h/user/c" ]
 }
 
-@test "redact_local_paths ignores prefix embedded inside a longer path" {
-    run _redact /h/u/repo /h/u "/other/h/u/repo/a and /other/h/u"
-    [ "$output" = "/other/h/u/repo/a and /other/h/u" ]
+@test "redact_local_paths leaves repo root alone when embedded in a path" {
+    run _redact /h/u/repo /h/u "/other/h/u/repo/a"
+    [ "$output" = "/other~/repo/a" ]
+}
+
+@test "redact_local_paths redacts home after any preceding character" {
+    run _redact /h/u/repo /h/u "path=/h/u/x (/h/u) \"/h/u\" x/h/u"
+    [ "$output" = "path=~/x (~) \"~\" x~" ]
+}
+
+@test "redact_local_paths treats a final dot after home as a boundary" {
+    run _redact /h/u/repo /h/u "see /h/u. then /h/u.. and /h/u.cfg /h/u."
+    [ "$output" = "see ~. then /h/u.. and /h/u.cfg ~." ]
 }
 
 @test "redact_local_paths redacts every occurrence incl. repeats" {

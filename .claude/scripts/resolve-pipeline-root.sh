@@ -305,25 +305,36 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
     }
 
     # _redact_prefix <text> <prefix> <bare-replacement> <slash-replacement>
+    #                [any-before]
     #   Prints <text> with every path-boundary-safe occurrence of <prefix>
     #   replaced: "<prefix>/" becomes <slash-replacement>, a bare "<prefix>"
     #   becomes <bare-replacement>. A hit counts only when the char before it
     #   is not a path char and the char after it is "/" or not a name char,
     #   so /home/u/repo never matches inside /home/u/repo2 or /x/home/u/repo.
+    #   With a non-empty [any-before] (the $HOME rule) the preceding-char
+    #   check is skipped, so a home prefix is redacted after ANY character
+    #   (e.g. "path=/home/u/x" or "/other/home/u"), and a single trailing
+    #   "." that ends the text or precedes a non-name char is a sentence
+    #   boundary, not a name char ("/home/u." -> "~.").
     #   Pure bash 3.2 (no regex captures, no ${var^^}).
     _redact_prefix() {
-        local text="$1" prefix="$2" bare="$3" slashed="$4"
-        local out="" before after
+        local text="$1" prefix="$2" bare="$3" slashed="$4" anybefore="${5:-}"
+        local out="" before after rest
         while [[ "$text" == *"$prefix"* ]]; do
             before="${text%%"$prefix"*}"
             after="${text#*"$prefix"}"
             out+="$before"
-            if [[ -n "$before" && "${before: -1}" == [A-Za-z0-9._~/-] ]]; then
+            if [[ -z "$anybefore" && -n "$before" \
+                && "${before: -1}" == [A-Za-z0-9._~/-] ]]; then
                 out+="$prefix"
             elif [[ "$after" == /* ]]; then
                 out+="$slashed"
                 after="${after#/}"
             elif [[ -z "$after" || "${after:0:1}" != [A-Za-z0-9._-] ]]; then
+                out+="$bare"
+            elif [[ -n "$anybefore" && "${after:0:1}" == "." ]] \
+                && rest="${after:1}" \
+                && [[ -z "$rest" || "${rest:0:1}" != [A-Za-z0-9._-] ]]; then
                 out+="$bare"
             else
                 out+="$prefix"
@@ -357,7 +368,7 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
             text="${text%x}"
         fi
         if [[ -n "$home" ]]; then
-            text="$(_redact_prefix "$text" "$home" "~" "~/"; printf x)"
+            text="$(_redact_prefix "$text" "$home" "~" "~/" any; printf x)"
             text="${text%x}"
         fi
         printf '%s' "$text"
