@@ -7704,6 +7704,90 @@ _load_followups_pass() {
 		|| fail "denials not reported: $(cat "$TEST_TMP/denials.log")"
 }
 
+@test "#1190: wait_for_pr_merged dispatches one followups pass when the pre-check sees MERGED" {
+	_load_wait_for_merge_functions
+	_load_followups_pass
+	_seed_status_merge_blocked
+	_stub_comment_issue
+	_stub_gh_pr_states MERGED
+	dispatch_composition() {
+		printf '%s\n' "$1" >> "$TEST_TMP/dispatch.log"
+		printf '%s\n' '{"structured_output":{"status":"merged","follow_up_issues":["77"]}}'
+	}
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "wait failed: $output"
+	[[ "$(grep -c -- '--followups-only' "$TEST_TMP/dispatch.log")" == "1" ]] \
+		|| fail "expected exactly one dispatch: $(cat "$TEST_TMP/dispatch.log")"
+	[[ "$(jq -c '.issues[] | select(.number == "5980") | .follow_ups' \
+		"$STATUS_FILE")" == '["77"]' ]] \
+		|| fail "follow_ups not recorded: $(cat "$STATUS_FILE")"
+}
+
+@test "#1190: wait_for_pr_merged dispatches one followups pass when the poll sees MERGED" {
+	_load_wait_for_merge_functions
+	_load_followups_pass
+	_seed_status_merge_blocked
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN MERGED
+	dispatch_composition() {
+		printf '%s\n' "$1" >> "$TEST_TMP/dispatch.log"
+		printf '%s\n' '{"structured_output":{"status":"merged","follow_up_issues":["78"]}}'
+	}
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "wait failed: $output"
+	[[ "$(grep -c -- '--followups-only' "$TEST_TMP/dispatch.log")" == "1" ]] \
+		|| fail "expected exactly one dispatch: $(cat "$TEST_TMP/dispatch.log")"
+	[[ "$(jq -c '.issues[] | select(.number == "5980") | .follow_ups' \
+		"$STATUS_FILE")" == '["78"]' ]] \
+		|| fail "follow_ups not recorded: $(cat "$STATUS_FILE")"
+}
+
+@test "#1190: a failing pass through wait_for_pr_merged warns and the issue stays completed (pre-check arm)" {
+	_load_wait_for_merge_functions
+	_load_followups_pass
+	_seed_status_merge_blocked
+	_stub_comment_issue
+	_stub_gh_pr_states MERGED
+	dispatch_composition() { return 7; }
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "failing pass was fatal: $output"
+	grep -q 'dispatch exited 7' "$TEST_TMP/warn.log" \
+		|| fail "no warning: $(cat "$TEST_TMP/warn.log")"
+	[[ "$(jq -r '.issues[] | select(.number == "5980") | .status' \
+		"$STATUS_FILE")" == "completed" ]]
+}
+
+@test "#1190: a failing pass through wait_for_pr_merged warns and the issue stays completed (poll arm)" {
+	_load_wait_for_merge_functions
+	_load_followups_pass
+	_seed_status_merge_blocked
+	_stub_comment_issue
+	_stub_gh_pr_states OPEN MERGED
+	dispatch_composition() { return 7; }
+
+	BATCH_WAIT_FOR_MERGE_MAX=100 BATCH_WAIT_FOR_MERGE_INTERVAL=1
+	export BATCH_WAIT_FOR_MERGE_MAX BATCH_WAIT_FOR_MERGE_INTERVAL
+
+	run wait_for_pr_merged 5980
+	[[ "$status" -eq 0 ]] || fail "failing pass was fatal: $output"
+	grep -q 'dispatch exited 7' "$TEST_TMP/warn.log" \
+		|| fail "no warning: $(cat "$TEST_TMP/warn.log")"
+	[[ "$(jq -r '.issues[] | select(.number == "5980") | .status' \
+		"$STATUS_FILE")" == "completed" ]]
+}
+
 @test "#1157: no second pass when follow_ups are already recorded" {
 	_load_followups_pass
 	jq -n '{state:"running", issues:[{number:"5980", status:"merge_blocked",
