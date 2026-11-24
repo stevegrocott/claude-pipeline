@@ -78,6 +78,11 @@ else
   fi
 fi
 
+# Never publish machine-local absolute paths. Runs AFTER validation, which
+# needs the real paths to resolve task files against the repo root.
+BODY="$(redact_local_paths "$BODY"; printf x)"
+BODY="${BODY%x}"
+
 case "$TRACKER" in
   github)
     ARGS=(gh issue create --title "$TITLE" --body "$BODY")
