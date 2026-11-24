@@ -15,6 +15,10 @@ source "$PLATFORM_SH_FILE"
 
 ISSUE="$1" COMMENT="$2" REPO_ARG="${3:-}"
 
+# Never publish machine-local absolute paths.
+COMMENT="$(redact_local_paths "$COMMENT"; printf x)"
+COMMENT="${COMMENT%x}"
+
 case "${TRACKER:-github}" in
   github)
     if [[ -n "$REPO_ARG" ]]; then

@@ -76,6 +76,10 @@
 #        consumers see no behavior change.
 #   On a hit: prints the absolute path and returns 0.
 #   On a miss (or empty argument): prints nothing and returns non-zero.
+#
+# redact_local_paths [text]
+#   Prints text (argument or stdin) with the repo root made relative and
+#   $HOME replaced by "~", path-boundary safe. See its docstring below.
 
 # Idempotent sourcing guard — skip re-definition on repeated source.
 if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
@@ -298,5 +302,64 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
         printf '%s\n' "${found[@]}" "$version" \
             | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n \
             | awk -v v="$version" 'seen { print } $0 == v { seen = 1 }'
+    }
+
+    # _redact_prefix <text> <prefix> <bare-replacement> <slash-replacement>
+    #   Prints <text> with every path-boundary-safe occurrence of <prefix>
+    #   replaced: "<prefix>/" becomes <slash-replacement>, a bare "<prefix>"
+    #   becomes <bare-replacement>. A hit counts only when the char before it
+    #   is not a path char and the char after it is "/" or not a name char,
+    #   so /home/u/repo never matches inside /home/u/repo2 or /x/home/u/repo.
+    #   Pure bash 3.2 (no regex captures, no ${var^^}).
+    _redact_prefix() {
+        local text="$1" prefix="$2" bare="$3" slashed="$4"
+        local out="" before after
+        while [[ "$text" == *"$prefix"* ]]; do
+            before="${text%%"$prefix"*}"
+            after="${text#*"$prefix"}"
+            out+="$before"
+            if [[ -n "$before" && "${before: -1}" == [A-Za-z0-9._~/-] ]]; then
+                out+="$prefix"
+            elif [[ "$after" == /* ]]; then
+                out+="$slashed"
+                after="${after#/}"
+            elif [[ -z "$after" || "${after:0:1}" != [A-Za-z0-9._-] ]]; then
+                out+="$bare"
+            else
+                out+="$prefix"
+            fi
+            text="$after"
+        done
+        printf '%s' "${out}${text}"
+    }
+
+    # redact_local_paths [text]
+    #   Prints <text> (or stdin when no argument is given) with machine-local
+    #   absolute paths made safe to publish: the repo root (override via
+    #   $PIPELINE_REDACT_ROOT, else git toplevel) becomes a relative path
+    #   ("." for the root itself) and $HOME becomes "~". The repo root is
+    #   handled first because it normally lives under $HOME. Matching is
+    #   path-boundary safe (see _redact_prefix). Always returns 0.
+    redact_local_paths() {
+        local text root home
+        if (($# > 0)); then
+            text="$1"
+        else
+            text="$(cat; printf x)"
+            text="${text%x}"
+        fi
+        root="${PIPELINE_REDACT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+        home="${HOME:-}"
+        while [[ "$root" == */ ]]; do root="${root%/}"; done
+        while [[ "$home" == */ ]]; do home="${home%/}"; done
+        if [[ -n "$root" ]]; then
+            text="$(_redact_prefix "$text" "$root" "." ""; printf x)"
+            text="${text%x}"
+        fi
+        if [[ -n "$home" ]]; then
+            text="$(_redact_prefix "$text" "$home" "~" "~/"; printf x)"
+            text="${text%x}"
+        fi
+        printf '%s' "$text"
     }
 fi

@@ -85,6 +85,39 @@ teardown() {
 }
 
 # =============================================================================
+# PATH REDACTION
+# =============================================================================
+
+@test "create-issue github: redacts repo root and HOME from body" {
+    export TRACKER="github"
+    export HOME="/home/someone"
+    export PIPELINE_REDACT_ROOT="/home/someone/work/repo"
+    run run_platform_script create-issue.sh --title "T" --skip-validation \
+        --body "see /home/someone/work/repo/src/a.sh and /home/someone/.cfg"
+    [ "$status" -eq 0 ]
+    assert_mock_called_with "--body see src/a.sh and ~/.cfg"
+    assert_mock_not_called_with "/home/someone"
+}
+
+@test "create-issue github: validation runs on the unredacted body" {
+    export TRACKER="github"
+    export HOME="/home/someone"
+    export PIPELINE_REDACT_ROOT="/home/someone/work/repo"
+    # Stub validator records what it was given and rejects.
+    cat > "$TEST_TMP/scripts/issue-body-lib.sh" << 'LIB_EOF'
+assert_issue_valid() {
+    printf '%s' "$1" > "$TEST_TMP/validated_body"
+    return 1
+}
+LIB_EOF
+    export ISSUE_BODY_REPO_ROOT="$TEST_TMP"
+    run run_platform_script create-issue.sh --title "T" \
+        --body "at /home/someone/work/repo/x"
+    [ "$status" -eq 1 ]
+    [[ "$(<"$TEST_TMP/validated_body")" == "at /home/someone/work/repo/x" ]]
+}
+
+# =============================================================================
 # JIRA MODE
 # =============================================================================
 

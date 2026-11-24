@@ -212,3 +212,65 @@ _install_versioned() {
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# --- redact_local_paths -----------------------------------------------------
+
+_redact() {
+    local root="$1" home="$2" text="$3"
+    PIPELINE_REDACT_ROOT="$root" HOME="$home" bash -c \
+        'source "$1"; redact_local_paths "$2"' _ "$RESOLVER_SRC" "$text"
+}
+
+@test "redact_local_paths makes repo-root paths relative" {
+    run _redact /h/u/repo /h/u "see /h/u/repo/.claude/a.sh:10 now"
+    [ "$status" -eq 0 ]
+    [ "$output" = "see .claude/a.sh:10 now" ]
+}
+
+@test "redact_local_paths maps the bare repo root to a dot" {
+    run _redact /h/u/repo /h/u "cwd=/h/u/repo,"
+    [ "$output" = "cwd=.," ]
+    run _redact /h/u/repo /h/u "in /h/u/repo"
+    [ "$output" = "in ." ]
+}
+
+@test "redact_local_paths maps home to tilde" {
+    run _redact /h/u/repo /h/u "cfg /h/u/.config/x and /h/u"
+    [ "$output" = "cfg ~/.config/x and ~" ]
+}
+
+@test "redact_local_paths does not match a sibling dir sharing the prefix" {
+    run _redact /h/u/repo /h/u "/h/u/repo2/a /h/u/repo-old/b /h/user/c"
+    [ "$output" = "~/repo2/a ~/repo-old/b /h/user/c" ]
+}
+
+@test "redact_local_paths ignores prefix embedded inside a longer path" {
+    run _redact /h/u/repo /h/u "/other/h/u/repo/a and /other/h/u"
+    [ "$output" = "/other/h/u/repo/a and /other/h/u" ]
+}
+
+@test "redact_local_paths redacts every occurrence incl. repeats" {
+    run _redact /h/u/repo /h/u "/h/u/repo/a /h/u/repo/b /h/u/x"
+    [ "$output" = "a b ~/x" ]
+}
+
+@test "redact_local_paths reads stdin and preserves newlines" {
+    run bash -c 'source "$1"; printf "/h/u/repo/a\n/h/u/b\n" \
+        | PIPELINE_REDACT_ROOT=/h/u/repo HOME=/h/u redact_local_paths' \
+        _ "$RESOLVER_SRC"
+    [ "$status" -eq 0 ]
+    [ "$output" = $'a\n~/b' ]
+}
+
+@test "redact_local_paths leaves unrelated text and empty input alone" {
+    run _redact /h/u/repo /h/u "nothing here"
+    [ "$output" = "nothing here" ]
+    run _redact /h/u/repo /h/u ""
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "redact_local_paths tolerates trailing slash on root and home" {
+    run _redact /h/u/repo/ /h/u/ "/h/u/repo/a /h/u/b"
+    [ "$output" = "a ~/b" ]
+}

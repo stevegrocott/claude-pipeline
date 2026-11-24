@@ -56,6 +56,32 @@ teardown() {
 }
 
 # =============================================================================
+# PATH REDACTION
+# =============================================================================
+
+@test "create-mr github: redacts repo root and HOME from body" {
+    export GIT_HOST="github"
+    export HOME="/home/someone"
+    export PIPELINE_REDACT_ROOT="/home/someone/work/repo"
+    run run_platform_script create-mr.sh --source "f" --target "main" --title "T" \
+        --body "see /home/someone/work/repo/src/a.sh and /home/someone/.cfg"
+    [ "$status" -eq 0 ]
+    assert_mock_called_with "--body see src/a.sh and ~/.cfg"
+    assert_mock_not_called_with "/home/someone"
+}
+
+@test "create-mr gitlab: redacts local paths from description" {
+    export GIT_HOST="gitlab"
+    export HOME="/home/someone"
+    export PIPELINE_REDACT_ROOT="/home/someone/work/repo"
+    run run_platform_script create-mr.sh --source "f" --target "main" --title "T" \
+        --body "at /home/someone/work/repo/x"
+    [ "$status" -eq 0 ]
+    assert_mock_called_with "--description at x"
+    assert_mock_not_called_with "/home/someone"
+}
+
+# =============================================================================
 # ERROR HANDLING
 # =============================================================================
 
