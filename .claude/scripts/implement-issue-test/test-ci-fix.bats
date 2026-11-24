@@ -108,6 +108,7 @@ make_log() {
 		printf 'TypeError: x is undefined\n'
 		printf '\xe2\x9c\x97 cross one\n'
 		printf '\xe2\x9d\x8c cross two\n'
+		printf '\xe2\x9c\x95 cross three\n'
 		printf 'Failure-free plain line\n')
 	out=$(_ci_failure_excerpt "$log")
 
@@ -117,6 +118,7 @@ make_log() {
 	[[ "$out" == *'Error: x is undefined'* ]]
 	[[ "$out" == *'cross one'* ]]
 	[[ "$out" == *'cross two'* ]]
+	[[ "$out" == *'cross three'* ]]
 	[[ "$out" != *'plain 5'$'\n'* ]]
 	[[ "$out" != *'Failure-free'* ]]
 }
@@ -367,6 +369,26 @@ push_setup() {
 	[[ "$remote_log" == *"chore: bundle"* ]]
 	[[ "$(git ls-remote origin refs/heads/feat | cut -f1)" == "$(git rev-parse HEAD)" ]]
 	[[ -z "$(git status --porcelain)" ]]
+}
+
+@test "formatter failure returns 1 and does not push" {
+	push_setup
+	run_format_cmd_if_needed() { return 1; }
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 1 ]]
+	[[ "$(command git --git-dir="$TEST_TMP/origin.git" rev-parse feat)" == "$PUSH_BEFORE" ]]
+	[[ ! -e "$COMMENT_FILE" ]]
+}
+
+@test "bundle regeneration failure returns 1 and does not push" {
+	push_setup
+	regenerate_bundle_if_needed() { return 1; }
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 1 ]]
+	[[ "$(command git --git-dir="$TEST_TMP/origin.git" rev-parse feat)" == "$PUSH_BEFORE" ]]
+	[[ ! -e "$COMMENT_FILE" ]]
 }
 
 @test "push failure returns 1 and posts no comment" {
