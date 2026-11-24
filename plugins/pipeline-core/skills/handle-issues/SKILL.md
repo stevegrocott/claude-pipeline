@@ -170,7 +170,7 @@ prompt.
 | `TRIAGE_MODEL` | `haiku` (tier) | Override the model. Pass a tier name (`haiku`/`sonnet`/`opus`), not a pinned model ID — the tier-to-model mapping lives in `.claude/scripts/model-config.sh`. |
 | `FAST_PATH_IMPLEMENT_MODEL` | `sonnet` | Model used by the fast-path implement step. |
 | `SKIP_ON_MERGED_PR` | unset | Any non-empty value restores the pre-#771 up-front skip gate: an **open** issue whose `feature/issue-N` branch already has a merged PR is skipped instead of processed. Off by default because an open issue with a merged branch PR usually means the merge did *not* resolve it (reopened, partial, reverted, or branch name reused), and skipping silently drops the work. Does not affect failure-site reconciliation (`check_issue_pr_merged`), which always treats a merged branch PR as resolution. |
-
+| `BATCH_FOLLOWUPS_ON_MERGE` | `1` | `0` skips the followups-only pass (`/process-pr ... --followups-only`) that runs when a parked PR is seen merged. A failing pass (non-zero exit, timeout, no parseable result) or permission denials log a warning naming the PR and cause; the issue stays completed. |
 ### Behaviour change (#771): already-closed issues report as skipped
 
 An issue that is already **closed** on GitHub when the batch reaches it is
