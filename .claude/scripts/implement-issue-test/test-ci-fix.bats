@@ -261,3 +261,78 @@ STUB
 	[[ "$status" -ne 0 ]]
 	[[ "$output" == *"hard-denied"* || "$output" == *"CI fix rejected"* ]]
 }
+
+# =============================================================================
+# _ci_fix_push_and_wait
+# =============================================================================
+
+# Repo with a bare origin, one fix commit on top, comment_pr recorded.
+push_setup() {
+	git init -q --bare "$TEST_TMP/origin.git"
+	git init -q -b feat "$TEST_TMP/prepo"
+	cd "$TEST_TMP/prepo" || return 1
+	git config user.email t@example.com
+	git config user.name t
+	git remote add origin "$TEST_TMP/origin.git"
+	printf 'a\n' > a.sh
+	git add a.sh
+	git commit -q -m init
+	git push -q origin feat
+	PUSH_BEFORE=$(git rev-parse HEAD)
+	printf 'b\n' >> a.sh
+	printf 'n\n' > new.sh
+	git add new.sh
+	git commit -q -am "fix ci"
+
+	COMMENT_FILE="$TEST_TMP/comment"
+	comment_pr() { printf '%s\n%s' "$2" "$3" > "$COMMENT_FILE"; }
+	printf '%s\n' "{\"head_sha\":\"$(git rev-parse HEAD)\",\"checks\":[{\"name\":\"Bats\",\"status\":\"queued\"}]}" \
+		> "$STUB_CHECKS_JSON"
+}
+
+@test "push verified, comment lists changed files, rerun awaited" {
+	push_setup
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 0 ]]
+
+	[[ "$(git ls-remote origin refs/heads/feat | cut -f1)" == "$(git rev-parse HEAD)" ]]
+	local c
+	c=$(< "$COMMENT_FILE")
+	[[ "$c" == *'CI Fix'* ]]
+	[[ "$c" == *'`a.sh`'* ]]
+	[[ "$c" == *'`new.sh`'* ]]
+}
+
+@test "push failure returns 1 and posts no comment" {
+	push_setup
+	git remote set-url origin "$TEST_TMP/missing.git"
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 1 ]]
+	[[ ! -e "$COMMENT_FILE" ]]
+}
+
+@test "remote head mismatch after push returns 1 and posts no comment" {
+	push_setup
+	git() {
+		if [[ "$1" == ls-remote ]]; then
+			printf 'deadbeef\trefs/heads/feat\n'
+			return 0
+		fi
+		command git "$@"
+	}
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 1 ]]
+	[[ ! -e "$COMMENT_FILE" ]]
+}
+
+@test "returns 1 when the rerun never appears on the new head" {
+	push_setup
+	printf '%s\n' '{"head_sha":"old","checks":[]}' > "$STUB_CHECKS_JSON"
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 1 ]]
+	[[ -e "$COMMENT_FILE" ]]
+}

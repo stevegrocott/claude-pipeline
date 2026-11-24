@@ -724,6 +724,64 @@ Fix the failure and commit. Output a summary of the fix applied."
 	return 0
 }
 
+# _ci_fix_push_and_wait PR CHECK_NAME ITERATION BRANCH HEAD_BEFORE
+#
+# Publishes a committed CI fix (#1141). Pushes BRANCH, then confirms the
+# REMOTE head equals the local HEAD (ls-remote) — a push that exits 0 but
+# leaves the remote elsewhere must not count. On success posts a "CI Fix"
+# comment on the PR listing the files changed since HEAD_BEFORE, then waits
+# for the rerun: a check named CHECK_NAME on the new head (see
+# _wait_for_check_on_head).
+#
+# Returns 0 once the rerun is seen. Returns 1 when the push fails, the remote
+# head does not match, or the rerun never appears. No comment is posted unless
+# the push was verified.
+_ci_fix_push_and_wait() {
+	local pr="$1" check_name="$2" iteration="$3"
+	local branch="$4" head_before="$5"
+	local local_head remote_head files file_list=""
+
+	local_head=$(git rev-parse HEAD 2>/dev/null || printf '')
+	if [[ -z "$local_head" ]]; then
+		log_error "CI fix push: cannot resolve local HEAD"
+		return 1
+	fi
+
+	if ! git push origin "$branch" 2>>"${LOG_FILE:-/dev/stderr}"; then
+		log_error "CI fix push to origin/$branch failed"
+		return 1
+	fi
+
+	remote_head=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null \
+		| awk '{print $1; exit}')
+	if [[ "$remote_head" != "$local_head" ]]; then
+		log_error "CI fix push not verified: remote head" \
+			"'${remote_head:-none}' != local $local_head"
+		return 1
+	fi
+
+	files=$(git diff --name-only "$head_before" "$local_head" 2>/dev/null \
+		|| printf '')
+	while IFS= read -r file; do
+		[[ -n "$file" ]] || continue
+		file_list+="- \`$file\`"$'\n'
+	done <<< "$files"
+	[[ -n "$file_list" ]] || file_list=$'- (no files reported)\n'
+
+	comment_pr "$pr" "CI Fix (attempt $iteration)" \
+"Check \"$check_name\" failed; pushed fix \`${local_head:0:12}\` to \`$branch\`.
+
+Changed files:
+$file_list" "${AGENT:-}"
+
+	if ! _wait_for_check_on_head "$pr" "$local_head" "$check_name"; then
+		log_warn "Check \"$check_name\" did not appear on" \
+			"${local_head:0:12} within the wait budget"
+		return 1
+	fi
+	return 0
+}
+
 # _run_bounded_process_group BUDGET GRACE OUTFILE CMD [ARGS...]
 #
 # Runs CMD in its own process group with stdout+stderr sent to OUTFILE and
