@@ -690,7 +690,87 @@ _install_failing_then_passing_run_stage_capture_prompt() {
 	grep -qF "NO SUITE COMMAND" "$PROMPT_CAPTURE_FILE"
 	grep -qF "Set bats_result to 'skipped'" "$PROMPT_CAPTURE_FILE"
 	grep -qF "STEP 2 — TEST VALIDATION" "$PROMPT_CAPTURE_FILE"
-	! grep -qF "run-tests.sh" "$PROMPT_CAPTURE_FILE"
+	expect_not_ok "deferred prompt must not name the root suite runner" \
+		grep -qF "run-tests.sh" "$PROMPT_CAPTURE_FILE"
+	expect_not_ok "deferred prompt must not carry a bats invocation" \
+		grep -qE '(^|[^[:alnum:]_-])bats[[:space:]]' "$PROMPT_CAPTURE_FILE"
+	expect_not_ok "deferred prompt must not carry a tests/*.bats glob" \
+		grep -qF ".bats" "$PROMPT_CAPTURE_FILE"
+}
+
+# The deferred flag is per run_test_loop call: a second loop whose branch
+# changes a .bats file must start with the flag false, not inherit the
+# true left behind by an earlier deferred loop.
+@test "bash scope: BATS_SUITE_DEFERRED is reset at the start of a second test loop" {
+	_setup_test_loop_repo
+	mkdir -p .claude/scripts/implement-issue-test tests
+	printf '#!/usr/bin/env bash\n' > .claude/scripts/implement-issue-test/run-tests.sh
+	git add .claude
+	git commit -q -m "runner on main"
+
+	git checkout -q -b feature-first-deferred
+	printf '#!/usr/bin/env bash\necho changed\n' > .claude/scripts/thing.sh
+	git add .claude
+	git commit -q -m "change a script only"
+
+	git checkout -q main
+	git checkout -q -b feature-second-bats
+	printf '@test "x" { true; }\n' > tests/second.bats
+	git add tests
+	git commit -q -m "add a bats suite"
+
+	FLAG_AT_STAGE="$TEST_TMP/flag_at_stage"
+	export FLAG_AT_STAGE
+	: > "$FLAG_AT_STAGE"
+	run_stage() {
+		printf '%s\n' "$BATS_SUITE_DEFERRED" >> "$FLAG_AT_STAGE"
+		printf '%s' '{"status":"success","output":{"result":"passed","summary":"x","validation_result":"passed","bats_result":"passed"}}'
+	}
+	export -f run_stage
+	comment_issue() { :; }
+	export -f comment_issue
+
+	git checkout -q feature-first-deferred
+	run_test_loop "$TEST_TMP/repo" "feature-first-deferred" "" "bash"
+	expect_ok "first loop must run deferred" \
+		test "$(< "$FLAG_AT_STAGE")" = "true"
+	test "$BATS_SUITE_DEFERRED" = "true"
+
+	: > "$FLAG_AT_STAGE"
+	git checkout -q feature-second-bats
+	run_test_loop "$TEST_TMP/repo" "feature-second-bats" "" "bash"
+	expect_ok "second loop must start with the deferred flag false" \
+		test "$(< "$FLAG_AT_STAGE")" = "false"
+	test "$BATS_SUITE_DEFERRED" = "false"
+}
+
+# The wording that tells the operator the unmeasured result now blocks the
+# merge is only logged when the suite was deferred.
+@test "deferred suite: unmeasured and timed-out warnings say 'blocking: suite deferred'" {
+	comment_issue() { :; }
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/warn"; }
+
+	BATS_SUITE_DEFERRED=true
+	_bats_full_suite_outcome 124 "" "$TEST_TMP/l.log"
+	expect_ok "timeout warning must carry the blocking wording" \
+		grep -qF "blocking: suite deferred" "$TEST_TMP/warn"
+
+	: > "$TEST_TMP/warn"
+	_bats_full_suite_outcome 137 $'1..3\nok 1 a' "$TEST_TMP/l.log"
+	expect_ok "unmeasured warning must carry the blocking wording" \
+		grep -qF "blocking: suite deferred" "$TEST_TMP/warn"
+}
+
+@test "non-deferred suite: unmeasured warning says non-blocking, never 'blocking: suite deferred'" {
+	comment_issue() { :; }
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/warn"; }
+
+	BATS_SUITE_DEFERRED=false
+	_bats_full_suite_outcome 137 $'1..3\nok 1 a' "$TEST_TMP/l.log"
+	expect_ok "warning must say non-blocking" \
+		grep -qF "(non-blocking)" "$TEST_TMP/warn"
+	expect_not_ok "warning must not claim the suite was deferred" \
+		grep -qF "blocking: suite deferred" "$TEST_TMP/warn"
 }
 
 # A deferred suite runs no BATS command, so an agent that omits bats_result
