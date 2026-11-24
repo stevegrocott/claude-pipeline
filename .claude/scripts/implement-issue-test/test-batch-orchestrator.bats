@@ -6204,6 +6204,48 @@ FAKE_ORCH
 		|| fail "batch waited ${elapsed}s; tee wait was not bounded by TEE_FLUSH_TIMEOUT"
 }
 
+# Fake inner orchestrator that exits at once but leaves a background child
+# holding the fifo's write end; the child writes a marker line 2s later and
+# then exits. The marker only reaches the issue log if the batch waits for tee.
+_install_fake_inner_orchestrator_late_output() {
+	cat > "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh" << 'FAKE_ORCH'
+#!/usr/bin/env bash
+set -uo pipefail
+status_file=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--status-file) status_file="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+(sleep 2; printf '%s\n' 'LATE-OUTPUT-MARKER') &
+jq -n '{state: "completed", stages: {pr: {pr_number: 101}},
+	cost_summary: {total_cost_usd: 0}}' > "$status_file"
+FAKE_ORCH
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh"
+}
+
+@test "real batch-orchestrator.sh: output written after the inner orchestrator exits reaches the issue log with no tee kill message" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_late_output
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=10
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "780" --branch main
+
+	[ "$status" -eq 0 ] || fail "batch exited $status: $output"
+	[[ "$output" != *"did not exit"* ]] \
+		|| fail "tee was killed although output arrived within the timeout (output: $output)"
+
+	local issue_log
+	issue_log=$(find "$PWD/logs" -name 'issue-780.log' | head -1)
+	[[ -n "$issue_log" ]] || fail "no issue-780.log was written"
+	grep -qF 'LATE-OUTPUT-MARKER' "$issue_log" \
+		|| fail "late output never reached the issue log (log: $(cat "$issue_log"))"
+}
+
 @test "real batch-orchestrator.sh: non-integer TEE_FLUSH_TIMEOUT is rejected with a warning and the default is used" {
 	_make_batch_e2e_scripts_copy
 	_install_fake_inner_orchestrator
@@ -6217,6 +6259,54 @@ FAKE_ORCH
 	[ "$status" -eq 0 ] || fail "batch exited $status: $output"
 	[[ "$output" == *"TEE_FLUSH_TIMEOUT='abc' is not a non-negative integer"* ]] \
 		|| fail "no rejection warning for non-integer value (output: $output)"
+}
+
+@test "real batch-orchestrator.sh: empty TEE_FLUSH_TIMEOUT uses the default with no warning" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=""
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "781" --branch main
+
+	[ "$status" -eq 0 ] || fail "batch exited $status: $output"
+	[[ "$output" != *"TEE_FLUSH_TIMEOUT"* ]] \
+		|| fail "empty value should not warn (output: $output)"
+}
+
+@test "real batch-orchestrator.sh: negative TEE_FLUSH_TIMEOUT is rejected with a warning" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=-5
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "782" --branch main
+
+	[ "$status" -eq 0 ] || fail "batch exited $status: $output"
+	[[ "$output" == *"TEE_FLUSH_TIMEOUT='-5' is not a non-negative integer"* ]] \
+		|| fail "no rejection warning for negative value (output: $output)"
+}
+
+@test "real batch-orchestrator.sh: TEE_FLUSH_TIMEOUT=08 is read as 8 seconds, not octal" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_holds_fifo
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=08
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "783" --branch main
+
+	[[ "$output" != *"value too great for base"* ]] \
+		|| fail "08 was parsed as octal (output: $output)"
+	[[ "$output" != *"TEE_FLUSH_TIMEOUT="* ]] \
+		|| fail "08 was rejected with a warning (output: $output)"
+	[[ "$output" == *"did not exit 8s after orchestrator exit"* ]] \
+		|| fail "08 was not read as 8 seconds (output: $output)"
 }
 
 # =============================================================================

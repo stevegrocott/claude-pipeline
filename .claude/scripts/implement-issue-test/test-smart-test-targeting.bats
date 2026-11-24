@@ -3747,6 +3747,64 @@ _run_built_e2e_cmd() {
 	[[ "$out" == *"[tests/e2e/plain.spec.ts]"* ]]
 }
 
+@test "_build_targeted_e2e_cmd keeps semicolon, substitution, quote and newline names as one argument each and runs nothing" {
+	log() { :; }
+	log_warn() { :; }
+	cd "$TEST_TMP/repo"
+	local argv_file="$TEST_TMP/argv.out"
+	local stub="$TEST_TMP/argv-nul-stub.sh"
+	printf '#!/usr/bin/env bash\nprintf "%%s\\0" "$@" > "%s"\n' \
+		"$argv_file" > "$stub"
+	chmod +x "$stub"
+	export TEST_E2E_CMD="$stub"
+
+	git checkout -q -b feature-1189-e2e-hostile main
+	mkdir -p tests/e2e
+	local -a names=(
+		'tests/e2e/a;touch SEMI_RAN;b.spec.ts'
+		'tests/e2e/$(touch SUBST_RAN).spec.ts'
+		'tests/e2e/`touch TICK_RAN`.spec.ts'
+		"tests/e2e/it's \"q\".spec.ts"
+		$'tests/e2e/line\nbreak.spec.ts'
+	)
+	local name
+	for name in "${names[@]}"; do
+		printf 'x\n' > "$name"
+	done
+	git add tests/e2e
+	git commit -q -m "add hostile specs"
+
+	local cmd
+	cmd=$(_build_targeted_e2e_cmd main)
+	[[ "$cmd" != *$'\n'* ]]
+	_run_built_e2e_cmd "$cmd"
+
+	local -a got=()
+	while IFS= read -r -d '' name; do
+		got+=("$name")
+	done < "$argv_file"
+
+	# "--" plus exactly one argument per spec
+	[[ "${#got[@]}" -eq $((${#names[@]} + 1)) ]]
+	[[ "${got[0]}" == "--" ]]
+	local expected found
+	for expected in "${names[@]}"; do
+		found=false
+		for name in "${got[@]:1}"; do
+			[[ "$name" == "$expected" ]] && found=true
+		done
+		[[ "$found" == true ]] || {
+			printf 'missing argument: %q\n' "$expected" >&2
+			return 1
+		}
+	done
+
+	# Nothing in a name was executed
+	[[ ! -e SEMI_RAN && ! -e SUBST_RAN && ! -e TICK_RAN ]]
+	[[ ! -e tests/e2e/SEMI_RAN && ! -e tests/e2e/SUBST_RAN ]]
+	[[ ! -e tests/e2e/TICK_RAN ]]
+}
+
 @test "_build_targeted_e2e_cmd returns the full command when no spec changed" {
 	log() { :; }
 	log_warn() { :; }
