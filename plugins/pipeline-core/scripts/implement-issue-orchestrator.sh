@@ -667,7 +667,7 @@ _wait_for_check_on_head() {
 _ci_fix_attempt() {
 	local pr="$1" check_name="$2" iteration="$3"
 	local log_text log_path excerpt fix_prompt fix_result
-	local head_before head_after
+	local head_before head_after dirty_before dirty_after
 
 	log_text=$("$PLATFORM_DIR/read-mr-checks.sh" "$pr" \
 		--failed-log "$check_name" 2>/dev/null || true)
@@ -699,6 +699,7 @@ Rules:
 Fix the failure and commit. Output a summary of the fix applied."
 
 	head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
+	dirty_before=$(git status --porcelain 2>/dev/null || printf '')
 
 	fix_result=$(run_stage "fix-ci-iter-$iteration" "$fix_prompt" \
 		"implement-issue-fix.json" "${AGENT:-default}")
@@ -715,6 +716,18 @@ Fix the failure and commit. Output a summary of the fix applied."
 		log "fix-ci-iter-$iteration committed nothing —" \
 			"no CI fix to push"
 		_ci_fix_result="fix stage made no change"
+		return 1
+	fi
+
+	# verify_fix_stage_commit passes once the head has moved, so a stage that
+	# committed part of its fix and left the rest in the tree gets this far.
+	# Compared with the tree before the stage so earlier leftovers do not count.
+	dirty_after=$(git status --porcelain 2>/dev/null || printf '')
+	if [[ -n "$dirty_after" && "$dirty_after" != "$dirty_before" ]]; then
+		log_error "fix-ci-iter-$iteration committed but left changes" \
+			"in the working tree — CI fix rejected." \
+			"Uncommitted paths: $(_porcelain_dirty_paths "$dirty_after")"
+		_ci_fix_result="fix stage left uncommitted changes"
 		return 1
 	fi
 
@@ -810,7 +823,7 @@ _merge_with_ci_fix() {
 	local pr="$1" branch="$2"
 	local max="${MAX_CI_FIX_ITERATIONS:-1}"
 	local iter=0 rc decline_file kind check_name head_before
-	local _ci_fix_result=""
+	local _ci_fix_result="" fixed_check=""
 	[[ "$max" =~ ^[0-9]+$ ]] || max=1
 	_ci_fix_summary=""
 
@@ -834,6 +847,12 @@ _merge_with_ci_fix() {
 			return "$rc"
 		fi
 		if [[ "$kind" != "check_failed" || -z "$check_name" ]]; then
+			# A fix was pushed for an earlier check and the retry was
+			# declined for another reason: keep the fix on the record.
+			if [[ -n "$fixed_check" ]]; then
+				_ci_fix_result="fix pushed but the merge was still declined"
+				_ci_fix_summary="check \"$fixed_check\" failed; CI fix: $_ci_fix_result"
+			fi
 			return "$rc"
 		fi
 		if (( iter >= max )); then
@@ -859,6 +878,7 @@ _merge_with_ci_fix() {
 			_ci_fix_summary="check \"$check_name\" failed; CI fix: $_ci_fix_result"
 			return "$rc"
 		fi
+		fixed_check="$check_name"
 	done
 }
 

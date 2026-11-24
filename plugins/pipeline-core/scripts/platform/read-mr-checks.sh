@@ -1,9 +1,10 @@
 #!/bin/bash
 # Usage: read-mr-checks.sh <mr-number> [--failed-log <check-name>]
 # Returns: JSON {"head_sha": "...", "checks": [{name,status,conclusion,url}]}
-#   With --failed-log: the failed-step log of that named check instead; empty
-#   output, exit 0 for an unknown check, a non-Actions URL or a failing log
-#   command.
+#   With --failed-log: the failed-step log of a FAILED run of that named
+#   check instead, with gh's job, step and timestamp columns removed; empty
+#   output, exit 0 when no failed run has that name, for a non-Actions URL or
+#   a failing log command.
 #   On gitlab (no checks API wired up): {"head_sha":null,"checks":[]}, and
 #   empty output with --failed-log. Always exit 0.
 set -euo pipefail
@@ -51,11 +52,29 @@ github_checks() {
     }' <<< "$pr_json"
 }
 
+# gh prints each log line as "<job>\t<step>\t<timestamp> <text>". Strip the
+# three columns so a caller can anchor on the text (e.g. "^not ok").
+_strip_log_columns() {
+    awk '{
+        if (sub(/^[^\t]*\t[^\t]*\t/, "")) {
+            sub(/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]+Z ?/, "")
+        }
+        print
+    }'
+}
+
 github_failed_log() {
     local url run_id job_id
     local -a args
-    url="$(github_checks | jq -r --arg n "$CHECK_NAME" \
-        '[.checks[] | select(.name == $n)][0].url // empty')"
+    # One name can cover several runs (push and pull_request triggers, or a
+    # rerun); only a failed one has a failed-step log.
+    url="$(github_checks | jq -r --arg n "$CHECK_NAME" '
+        ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED",
+         "STARTUP_FAILURE"] as $failed
+        | [.checks[]
+            | select(.name == $n)
+            | select((.conclusion // .status // "") as $c | $failed | index($c))
+          ][0].url // empty')"
     if [[ -z "$url" ]]; then
         return 0
     fi
@@ -69,7 +88,7 @@ github_failed_log() {
         job_id="${BASH_REMATCH[1]}"
         args+=(--job "$job_id")
     fi
-    gh "${args[@]}" 2>/dev/null || true
+    gh "${args[@]}" 2>/dev/null | _strip_log_columns || true
 }
 
 case "$GIT_HOST" in

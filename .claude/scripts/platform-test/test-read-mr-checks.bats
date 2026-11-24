@@ -66,6 +66,55 @@ echo "$MOCK_GH_PR_VIEW_JSON"
 GH
     run run_platform_script read-mr-checks.sh 99 --failed-log lint
     [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "read-mr-checks github: failed log has the job, step and timestamp columns removed" {
+    export GIT_HOST="github"
+    export MOCK_GH_RUN_LOG=$'lint\tRun bats\t2026-01-02T03:04:05.1234567Z not ok 3 a thing\nlint\tRun bats\t2026-01-02T03:04:06.0000000Z # (in test file x.bats, line 4)\nlint\tRun bats\t2026-01-02T03:04:07.0000000Z   indented\ttext'
+    run run_platform_script read-mr-checks.sh 99 --failed-log lint
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" == "not ok 3 a thing" ]
+    [ "${lines[1]}" == "# (in test file x.bats, line 4)" ]
+    [ "${lines[2]}" == $'  indented\ttext' ]
+}
+
+@test "read-mr-checks github: a line without gh's columns is printed unchanged" {
+    export GIT_HOST="github"
+    export MOCK_GH_RUN_LOG="2026-01-02T03:04:05Z plain line"
+    run run_platform_script read-mr-checks.sh 99 --failed-log lint
+    [ "$status" -eq 0 ]
+    [ "$output" == "2026-01-02T03:04:05Z plain line" ]
+}
+
+@test "read-mr-checks github: a name shared by a passed and a failed run reads the failed run" {
+    export GIT_HOST="github"
+    export MOCK_GH_PR_VIEW_JSON='{"headRefOid":"abc123","statusCheckRollup":[{"name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/o/r/actions/runs/111/job/1"},{"name":"lint","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/222/job/7"}]}'
+    export MOCK_GH_RUN_LOG="lint: error on line 4"
+    run run_platform_script read-mr-checks.sh 99 --failed-log lint
+    [ "$status" -eq 0 ]
+    [ "$output" == "lint: error on line 4" ]
+    assert_mock_called_with "gh run view 222 --log-failed --job 7"
+    assert_mock_not_called_with "gh run view 111"
+}
+
+@test "read-mr-checks github: a check with no failed run gives empty output, exit 0, no log fetch" {
+    export GIT_HOST="github"
+    export MOCK_GH_RUN_LOG="must not be printed"
+    run run_platform_script read-mr-checks.sh 99 --failed-log build
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    assert_mock_not_called_with "gh run view"
+}
+
+@test "read-mr-checks github: a non-Actions check URL gives empty output, exit 0, no log fetch" {
+    export GIT_HOST="github"
+    export MOCK_GH_PR_VIEW_JSON='{"headRefOid":"abc123","statusCheckRollup":[{"context":"ci/external","state":"FAILURE","targetUrl":"https://ci.example.com/build/5"}]}'
+    export MOCK_GH_RUN_LOG="must not be printed"
+    run run_platform_script read-mr-checks.sh 99 --failed-log ci/external
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    assert_mock_not_called_with "gh run view"
 }
 
 @test "read-mr-checks: rejects a bare positional check name" {

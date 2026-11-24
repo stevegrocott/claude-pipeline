@@ -194,6 +194,11 @@ STUB
 			dirty)
 				printf 'c\n' >> a.sh
 				;;
+			commit_dirty)
+				printf 'b\n' >> a.sh
+				git commit -q -am "fix ci"
+				printf 'c\n' >> a.sh
+				;;
 		esac
 		printf '{"status":"success"}'
 	}
@@ -248,6 +253,14 @@ STUB
 @test "fix attempt fails when the stage leaves uncommitted changes" {
 	fix_setup
 	STUB_STAGE_ACTION=dirty
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -ne 0 ]]
+}
+
+@test "fix attempt fails when the stage commits and leaves uncommitted changes" {
+	fix_setup
+	STUB_STAGE_ACTION=commit_dirty
 
 	run _ci_fix_attempt 7 "Bats Suite" 1
 	[[ "$status" -ne 0 ]]
@@ -416,6 +429,21 @@ STUB
 	[[ "$(wc -l < "$MERGE_RUNS")" -eq 1 ]]
 }
 
+@test "a merge timeout returns 124 with no fix attempt" {
+	merge_setup
+	cat > "$PLATFORM_DIR/merge-mr.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'run\n' >> "$MERGE_RUNS"
+printf 'check_failed\tBats\n' > "$MERGE_MR_DECLINE_FILE"
+exit 124
+STUB
+	local rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 124 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 1 ]]
+	[[ ! -s "$FIX_CALLS" ]]
+}
+
 @test "merged tip is re-read from origin after the CI fix push" {
 	merge_setup
 	push_setup
@@ -473,6 +501,101 @@ STUB
 	[[ "$_ci_fix_summary" == *'check "Bats" failed'*'still failing'* ]]
 }
 
+@test "summary keeps the pushed fix when the retry is declined for another reason" {
+	merge_setup
+	cat > "$PLATFORM_DIR/merge-mr.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'run\n' >> "$MERGE_RUNS"
+if (($(wc -l < "$MERGE_RUNS") == 1)); then
+	printf 'check_failed\tBats\n' > "$MERGE_MR_DECLINE_FILE"
+fi
+exit 1
+STUB
+	local _ci_fix_summary="" rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 1 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 2 ]]
+	[[ "$_ci_fix_summary" == 'check "Bats" failed; CI fix: fix pushed but the merge was still declined' ]]
+}
+
+# =============================================================================
+# merge_pr stage in main: the stage's own merge call and failure handling,
+# extracted from the orchestrator and run under stubs
+# =============================================================================
+
+stage_setup() {
+	local body
+	body=$(awk '
+		/set_stage_started "merge_pr"/ { stage = 1 }
+		stage && /local _merge_exit _ci_fix_summary=""/ { on = 1 }
+		on { print }
+		on && /^        fi$/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	if [[ "$body" != *'_merge_with_ci_fix "$pr_number" "$branch"'*'        fi' ]]; then
+		echo "merge_pr stage body not found: no _merge_with_ci_fix call" \
+			"and failure handling in the merge_pr stage of $ORCHESTRATOR_SCRIPT" >&2
+		return 1
+	fi
+	eval "merge_stage_body() {
+$body
+}"
+	export MERGE_MR_STEP_TIMEOUT=10
+	STAGE_OUT="$TEST_TMP/stage-out"
+	: > "$STAGE_OUT"
+	STUB_MERGE_RC=1 STUB_SUMMARY=""
+	_merge_with_ci_fix() {
+		printf 'merge|%s|%s\n' "$1" "$2" >> "$STAGE_OUT"
+		_ci_fix_summary="$STUB_SUMMARY"
+		return "$STUB_MERGE_RC"
+	}
+	comment_issue() { printf 'comment|%s|%s\n' "$1" "$2" >> "$STAGE_OUT"; }
+	set_final_state() { printf 'final|%s|%s\n' "$1" "$2" >> "$STAGE_OUT"; }
+	_handle_merge_pr_timeout() {
+		printf 'timeout|%s|%s\n' "$1" "$2" >> "$STAGE_OUT"
+		exit 1
+	}
+	pr_number=5 branch=feat
+}
+
+@test "merge_pr stage calls the merge function with the PR and branch" {
+	stage_setup
+	STUB_MERGE_RC=0
+
+	run merge_stage_body
+	[[ "$status" -eq 0 ]]
+	[[ "$(< "$STAGE_OUT")" == 'merge|5|feat' ]]
+}
+
+@test "merge_pr stage puts the CI fix summary in the comment and final reason" {
+	stage_setup
+	STUB_SUMMARY='check "Bats" failed; CI fix: fix stage made no change'
+
+	run merge_stage_body
+	[[ "$status" -eq 1 ]]
+	grep -qxF 'comment|Merge: Failed|❌ Failed to merge PR #5 (check "Bats" failed; CI fix: fix stage made no change). Manual intervention required.' "$STAGE_OUT"
+	grep -qxF 'final|error|Failed to merge PR #5 (check "Bats" failed; CI fix: fix stage made no change)' "$STAGE_OUT"
+}
+
+@test "merge_pr stage failure reads as before when no check failure was recorded" {
+	stage_setup
+
+	run merge_stage_body
+	[[ "$status" -eq 1 ]]
+	grep -qxF 'comment|Merge: Failed|❌ Failed to merge PR #5. Manual intervention required.' "$STAGE_OUT"
+	grep -qxF 'final|error|Failed to merge PR #5' "$STAGE_OUT"
+}
+
+@test "merge_pr stage sends exit 124 to the timeout handler" {
+	stage_setup
+	STUB_MERGE_RC=124
+
+	run merge_stage_body
+	[[ "$status" -eq 1 ]]
+	grep -qxF 'timeout|merge-mr.sh|10' "$STAGE_OUT"
+	run grep -c '^comment|' "$STAGE_OUT"
+	[[ "$output" == 0 ]]
+}
+
 # =============================================================================
 # Integration: _ci_fix_attempt against the REAL read-mr-checks.sh (mock gh)
 # =============================================================================
@@ -492,7 +615,13 @@ echo "gh $*" >> "$TEST_TMP/gh-calls.log"
 if [[ "$1" == pr ]]; then
 	echo '{"headRefOid":"abc","statusCheckRollup":[{"name":"Bats Suite","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/222/job/7"}]}'
 elif [[ "$1" == run ]]; then
-	printf 'not ok 1 real wrapper log\n'
+	# gh's real shape: job, step and timestamp columns before the text, and
+	# the cause well above the last 80 lines.
+	printf 'Bats Suite\tRun bats\t2026-01-02T03:04:05.1234567Z not ok 1 real wrapper log\n'
+	printf 'Bats Suite\tRun bats\t2026-01-02T03:04:05.2000000Z # (in test file x.bats, line 4)\n'
+	for i in $(seq 1 100); do
+		printf 'Bats Suite\tRun bats\t2026-01-02T03:04:06.0000000Z tail line %s\n' "$i"
+	done
 fi
 GH
 	chmod +x "$TEST_TMP/mockbin/gh"
@@ -504,4 +633,10 @@ GH
 	[[ "$status" -eq 0 ]]
 	[[ "$(< "$LOG_BASE/ci-failed-log-iter-1.log")" == *'real wrapper log'* ]]
 	grep -q 'gh run view 222 --log-failed --job 7' "$TEST_TMP/gh-calls.log"
+	# The prompt's excerpt is the cause, not the tail: the columns were
+	# stripped, so the excerpt helper could anchor on "not ok".
+	grep -qx 'not ok 1 real wrapper log' "$STAGE_PROMPT_FILE"
+	grep -qx '# (in test file x.bats, line 4)' "$STAGE_PROMPT_FILE"
+	run grep -c 'tail line' "$STAGE_PROMPT_FILE"
+	[[ "$output" == 0 ]]
 }
