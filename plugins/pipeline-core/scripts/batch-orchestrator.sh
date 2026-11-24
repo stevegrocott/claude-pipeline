@@ -500,7 +500,7 @@ log_warn() {
 #   - a newer version sitting in the plugin cache (this run uses the old one).
 # Advisory only: never fails the batch.
 log_startup_environment() {
-    local version root bin_dir entry newer
+    local version root bin_dir entry newer my_name other_name
     local -a newer_versions=()
     local -a stale_bins=()
     version=$(pipeline_version 2>/dev/null) || version=""
@@ -510,19 +510,40 @@ log_startup_environment() {
     [[ -n "$version" ]] || return 0
     root=$(pipeline_plugin_root 2>/dev/null) || return 0
     bin_dir="$root/bin"
+    my_name=$(jq -r '.name // empty' "$root/.claude-plugin/plugin.json" \
+        2>/dev/null) || my_name=""
 
-    local -a path_entries
-    # Sibling-version bins dropped by pipeline_pin_bin_first are still noted.
-    IFS=: read -r -a path_entries <<< "${PATH}:${PIPELINE_PIN_REMOVED:-}"
-    for entry in "${path_entries[@]}"; do
+    local -a path_entries=()
+    local -a removed_entries=()
+    local -a leftover_bins=()
+    # The "removed" warning names only what pipeline_pin_bin_first dropped.
+    IFS=: read -r -a removed_entries <<< "${PIPELINE_PIN_REMOVED:-}"
+    for entry in "${removed_entries[@]}"; do
         [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
-        [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
-            && "${entry%/bin}" != "$root" ]] || continue
         stale_bins+=("$entry")
     done
     if ((${#stale_bins[@]} > 0)); then
         log_warn "Pipeline $version running; removed other-version bin" \
             "from PATH: ${stale_bins[*]}"
+    fi
+
+    # Other plugin bin dirs still on PATH after pinning were not removed.
+    IFS=: read -r -a path_entries <<< "$PATH"
+    for entry in "${path_entries[@]}"; do
+        [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
+        [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
+            && "${entry%/bin}" != "$root" ]] || continue
+        # Warn only for another copy of this same plugin; a differently
+        # named plugin's bin is legitimate. Unreadable name => stay silent.
+        other_name=$(jq -r '.name // empty' \
+            "${entry%/bin}/.claude-plugin/plugin.json" 2>/dev/null) || continue
+        [[ -n "$my_name" && -n "$other_name" \
+            && "$other_name" == "$my_name" ]] || continue
+        leftover_bins+=("$entry")
+    done
+    if ((${#leftover_bins[@]} > 0)); then
+        log_warn "Pipeline $version running; other plugin bin still" \
+            "on PATH: ${leftover_bins[*]}"
     fi
 
     while IFS= read -r newer; do
