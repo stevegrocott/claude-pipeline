@@ -835,6 +835,37 @@ _classify_false_absence() {
 	[[ "$src" != *'first 500 of'* ]]
 }
 
+@test "PR review requirements block carries tasks and criteria, local-tree rule (issue #1185)" {
+	printf '%s\n' '# T' '## Implementation Tasks' '- (S) do thing `a.sh`' \
+		'## Acceptance Criteria' '- [ ] it works' '## Other' 'noise' \
+		> "$TEST_TMP/body.md"
+	run _pr_review_requirements_block "$TEST_TMP/body.md" "/x/full.diff"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"- (S) do thing"* ]]
+	[[ "$output" == *"- [ ] it works"* ]]
+	[[ "$output" != *"noise"* ]]
+	[[ "$output" == *"local working tree and the diff file"*"/x/full.diff"* ]]
+	[[ "$output" == *"do NOT read the remote branch"* ]]
+	[[ "$output" == *"could not verify"* ]]
+}
+
+@test "PR review requirements block reports a missing file or section (issue #1185)" {
+	run _pr_review_requirements_block "$TEST_TMP/absent.md"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"Implementation Tasks"*"not available"*"Acceptance Criteria"*"not available"* ]]
+	printf '%s\n' '## Acceptance Criteria' '- [ ] only this' > "$TEST_TMP/b.md"
+	run _pr_review_requirements_block "$TEST_TMP/b.md"
+	[[ "$output" == *"- [ ] only this"* ]]
+	[[ "$output" == *"Implementation Tasks"*"not available"* ]]
+}
+
+@test "PR review prompt injects the requirements block (issue #1185)" {
+	local src
+	src=$(declare -f main)
+	[[ "$src" == *'_pr_review_requirements_block'* ]]
+	[[ "$src" == *'${pr_requirements_prompt}Part 1'* ]]
+}
+
 # =============================================================================
 # LOGGING
 # =============================================================================

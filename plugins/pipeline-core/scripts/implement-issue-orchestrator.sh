@@ -6415,6 +6415,53 @@ _infer_agent_from_path() {
 	fi
 }
 
+# Builds the "issue requirements" block of the PR review prompt (issue #1185).
+#
+# The reviewer can only check what it is shown, so the prompt carries the
+# issue's "Implementation Tasks" and "Acceptance Criteria" sections (read from
+# the parse stage's context/issue-body.md) and states that the local working
+# tree, not the remote branch, is the change under review. A missing file or
+# section is reported in the block and never fatal.
+#
+# Arguments:
+#   $1 - path to the issue body markdown
+#   $2 - optional path of the saved full diff
+# Outputs:
+#   Prompt block on stdout
+#
+_pr_review_requirements_block() {
+	local body_file="$1"
+	local diff_file="${2:-}"
+	local tasks="" criteria="" name section
+	local missing="(not available: the section is missing from the issue body or the body file was not found)"
+	if [[ -f "$body_file" ]]; then
+		for name in "Implementation Tasks" "Acceptance Criteria"; do
+			section=$(awk -v h="$name" '
+				{ sub(/\r$/, "") }
+				!found && /^##+[[:space:]]/ {
+					t = tolower($0)
+					sub(/^##+[[:space:]]+/, "", t)
+					if (index(t, tolower(h)) == 1) { found = 1; next }
+				}
+				found && /^##+[[:space:]]/ { exit }
+				found { print }
+			' < "$body_file")
+			if [[ "$name" == "Implementation Tasks" ]]; then
+				tasks="$section"
+			else
+				criteria="$section"
+			fi
+		done
+	fi
+	[[ -n "${tasks//[[:space:]]/}" ]] || tasks="$missing"
+	[[ -n "${criteria//[[:space:]]/}" ]] || criteria="$missing"
+	printf '\n## Issue Requirements\n\n### Implementation Tasks\n\n%s\n\n' "$tasks"
+	printf '### Acceptance Criteria\n\n%s\n\n' "$criteria"
+	printf 'Check each acceptance criterion against the change, and list any criterion you could not verify.\n\n'
+	printf 'Source of truth: the change under review is the local working tree%s. The remote branch may be behind the local commits; do NOT read the remote branch or fetch file contents from it.\n\n' \
+		"${diff_file:+ and the diff file \`$diff_file\`}"
+}
+
 #
 # Parses task lines from a tasks section string into a JSON array.
 #
@@ -16064,6 +16111,10 @@ ${prior_prs_rows}
 "
         fi
 
+        local pr_requirements_prompt
+        pr_requirements_prompt=$(_pr_review_requirements_block \
+            "$LOG_BASE/context/issue-body.md" "${pr_diff_full_path:-}")
+
         local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
 ${pr_review_skill:+## Skill Instructions — READ AND FOLLOW THESE
@@ -16072,7 +16123,7 @@ $pr_review_skill
 
 ## End Skill Instructions
 
-}${prior_prs_prompt}Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
+}${prior_prs_prompt}${pr_requirements_prompt}Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
 
 Here is the diff to review (do NOT run git diff yourself — use this):
