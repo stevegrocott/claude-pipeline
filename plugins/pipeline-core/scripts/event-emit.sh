@@ -13,7 +13,10 @@
 # Environment:
 #   LOG_DIR   Directory where events.jsonl lives (required)
 #   LOCK_STALE_AGE  Seconds before an orphaned mkdir-lock break file or
-#                   empty pidfile is considered stale (default: 5)
+#                   empty pidfile is considered stale (default: 5). The
+#                   issue orchestrator's status lock reads the same
+#                   variable; keep it below STATUS_LOCK_TIMEOUT (default
+#                   10) or a leftover break file outlives every waiter.
 #
 # Exit codes:
 #   0   Event appended successfully

@@ -1631,6 +1631,13 @@ emit_event() {
 # and a second `readonly` assignment aborts with "readonly variable".
 STATUS_LOCK_TIMEOUT="${STATUS_LOCK_TIMEOUT:-10}"
 
+# LOCK_STALE_AGE (seconds, default 5) is how old an orphaned break file or an
+# empty pidfile must be before a waiter removes it.  Keep it below
+# STATUS_LOCK_TIMEOUT: a waiter gives up at the timeout, so a stale age at or
+# above it means a leftover break file is never cleared in time and every
+# status write fails until it ages out.  Read where it is used (not assigned
+# here) because test fixtures source only the function bodies.
+
 # Pid of the CURRENT shell or subshell.  `$$` is inherited unchanged by
 # subshells, so a status writer running inside a backgrounded `( ... ) &`
 # (run_parallel_post_task_stages) would record its PARENT's pid — a killed
@@ -16144,13 +16151,16 @@ $pr_creation_skill}"
         pr_diff_total_lines="${pr_diff_total_lines//[[:space:]]/}"
         local pr_diff
         local pr_diff_max_lines="${PR_REVIEW_DIFF_MAX_LINES:-2000}"
-        [[ "$pr_diff_max_lines" =~ ^[1-9][0-9]*$ ]] \
-            || pr_diff_max_lines=2000
+        if [[ ! "$pr_diff_max_lines" =~ ^[1-9][0-9]*$ ]]; then
+            log_warn "PR_REVIEW_DIFF_MAX_LINES='$pr_diff_max_lines' is not" \
+                "a positive integer; using 2000"
+            pr_diff_max_lines=2000
+        fi
         pr_diff=$(printf '%s\n' "$pr_diff_full" \
             | head -n "$pr_diff_max_lines")
 
         # A truncated diff silently hides changes from the reviewer — it
-        # sees only the first 500 lines and has no way to know more exists,
+        # sees only the first lines and has no way to know more exists,
         # so it can approve a PR without ever seeing the rest of the change
         # (issue #839). When truncated, surface it both to the operator log
         # and inline in the review prompt, and hand the reviewer the full
@@ -16158,12 +16168,15 @@ $pr_creation_skill}"
         # `git diff --numstat`) so it can at least judge the shape of what
         # it isn't seeing.
         local pr_diff_truncation_note=""
+        # Reset each iteration so the path an earlier, truncated iteration
+        # saved is not passed on when this one is not truncated.
+        local pr_diff_full_path=""
         if ((pr_diff_total_lines > pr_diff_max_lines)); then
             log_warn "PR review diff truncated: showing" \
                 "$pr_diff_max_lines of" \
                 "$pr_diff_total_lines lines (iteration $pr_iteration)"
             # Save the full diff so the reviewer can read the rest.
-            local pr_diff_full_path="${LOG_BASE:-${TMPDIR:-/tmp}}"
+            pr_diff_full_path="${LOG_BASE:-${TMPDIR:-/tmp}}"
             pr_diff_full_path+="/pr-review-full-diff-iter-${pr_iteration}.diff"
             mkdir -p "${pr_diff_full_path%/*}" 2>/dev/null || true
             printf '%s\n' "$pr_diff_full" > "$pr_diff_full_path" \
