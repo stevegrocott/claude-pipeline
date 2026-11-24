@@ -12,6 +12,8 @@
 #
 # Environment:
 #   LOG_DIR   Directory where events.jsonl lives (required)
+#   LOCK_STALE_AGE  Seconds before an orphaned mkdir-lock break file or
+#                   empty pidfile is considered stale (default: 5)
 #
 # Exit codes:
 #   0   Event appended successfully
@@ -113,7 +115,7 @@ validate_event() {
 }
 
 # Seconds after which an orphaned break-mutex file is considered stale.
-LOCK_STALE_AGE="${LOCK_STALE_AGE:-30}"
+LOCK_STALE_AGE="${LOCK_STALE_AGE:-5}"
 
 _drop_stale_break() {
 	local file="$1"
