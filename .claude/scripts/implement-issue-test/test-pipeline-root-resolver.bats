@@ -302,3 +302,36 @@ _redact() {
     [ "$status" -eq 0 ]
     [ "$output" == "x-h-u -h-ux -h-u.bak a--h-u" ]
 }
+
+@test "redact_local_paths also redacts the main checkout of a linked worktree" {
+    local base main wt
+    base="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+    main="$base/main"
+    wt="$base/wt"
+    git init -q "$main"
+    git -C "$main" -c user.name=t -c user.email=t@t commit -q \
+        --allow-empty -m init
+    git -C "$main" worktree add -q "$wt" -b feat
+    run _redact "$wt" /nonexistent-home \
+        "w=$wt/a.sh m=$main/b.sh $main"
+    [ "$status" -eq 0 ]
+    [ "$output" = "w=a.sh m=<main>/b.sh <main>" ]
+}
+
+@test "redact_local_paths has no main-root rule in a plain clone" {
+    local base
+    base="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+    git init -q "$base/plain"
+    run _redact "$base/plain" /nonexistent-home "$base/plain/a $base/other"
+    [ "$status" -eq 0 ]
+    [ "$output" = "a $base/other" ]
+}
+
+@test "redact_local_paths passes through when PIPELINE_REDACT_PATHS=0" {
+    run env PIPELINE_REDACT_PATHS=0 PIPELINE_REDACT_ROOT=/h/u/repo \
+        HOME=/h/u bash -c \
+        'source "$1"; redact_local_paths "$2"' _ "$RESOLVER_SRC" \
+        "/h/u/repo/a /h/u/b"
+    [ "$status" -eq 0 ]
+    [ "$output" = "/h/u/repo/a /h/u/b" ]
+}

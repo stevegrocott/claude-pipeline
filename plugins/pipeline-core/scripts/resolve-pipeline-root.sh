@@ -374,15 +374,21 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
     #   absolute paths made safe to publish: the repo root (override via
     #   $PIPELINE_REDACT_ROOT, else git toplevel) becomes a relative path
     #   ("." for the root itself) and $HOME becomes "~". The repo root is
-    #   handled first because it normally lives under $HOME. Matching is
-    #   path-boundary safe (see _redact_prefix). Always returns 0.
+    #   handled first because it normally lives under $HOME. In a linked
+    #   worktree the main checkout root is redacted too ("<main>"). Matching
+    #   is path-boundary safe (see _redact_prefix). PIPELINE_REDACT_PATHS=0
+    #   passes the text through untouched. Always returns 0.
     redact_local_paths() {
-        local text root home
+        local text root home main common
         if (($# > 0)); then
             text="$1"
         else
             text="$(cat; printf x)"
             text="${text%x}"
+        fi
+        if [[ "${PIPELINE_REDACT_PATHS:-}" == "0" ]]; then
+            printf '%s' "$text"
+            return 0
         fi
         root="${PIPELINE_REDACT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
         home="${HOME:-}"
@@ -391,6 +397,22 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
         if [[ -n "$root" ]]; then
             text="$(_redact_prefix "$text" "$root" "." ""; printf x)"
             text="${text%x}"
+            # Linked worktree: the main checkout is the parent of the
+            # shared git dir. Absent (or equal to root) in a plain clone.
+            common="$(cd "$root" 2>/dev/null \
+                && git rev-parse --git-common-dir 2>/dev/null)"
+            if [[ -n "$common" ]]; then
+                [[ "$common" == /* ]] || common="$root/$common"
+                common="$(cd "$common" 2>/dev/null && pwd -P)"
+                main="${common%/.git}"
+                while [[ "$main" == */ ]]; do main="${main%/}"; done
+                if [[ "$common" == */.git && -n "$main" \
+                    && "$main" != "$root" ]]; then
+                    text="$(_redact_prefix "$text" "$main" \
+                        "<main>" "<main>/"; printf x)"
+                    text="${text%x}"
+                fi
+            fi
         fi
         if [[ -n "$home" ]]; then
             text="$(_redact_prefix "$text" "$home" "~" "~/" any; printf x)"
