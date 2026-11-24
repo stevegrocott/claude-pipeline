@@ -493,3 +493,40 @@ JSON
 	[[ "$fence_block" != *"Posted by"* ]]
 	[[ "$fence_block" != *"["*"]"* ]]
 }
+
+# =============================================================================
+# completion_footer derives readiness from state
+# =============================================================================
+
+@test "completion_footer says ready when no degraded stage and no block" {
+	echo '{"merge_blocked_reason":null}' > "$STATUS_FILE"
+	DEGRADED_STAGES=()
+	run completion_footer
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"ready for human review and merge"* ]]
+	[[ "$output" != *"NOT"* ]]
+}
+
+@test "completion_footer names in-memory degraded stage" {
+	echo '{}' > "$STATUS_FILE"
+	DEGRADED_STAGES=("quality:max_iterations:x:iter=3")
+	run completion_footer
+	[[ "$output" == *"NOT ready"* ]]
+	[[ "$output" == *"quality:max_iterations:x:iter=3"* ]]
+}
+
+@test "completion_footer names merge_blocked_reason" {
+	echo '{"merge_blocked_reason":"Partial implementation: 1/2"}' > "$STATUS_FILE"
+	DEGRADED_STAGES=()
+	run completion_footer
+	[[ "$output" == *"NOT ready"* ]]
+	[[ "$output" == *"Partial implementation: 1/2"* ]]
+}
+
+@test "completion_footer uses persisted degraded_stages after resume" {
+	echo '{"degraded_stages":["e2e_verify:degraded"]}' > "$STATUS_FILE"
+	DEGRADED_STAGES=()
+	run completion_footer
+	[[ "$output" == *"NOT ready"* ]]
+	[[ "$output" == *"e2e_verify:degraded"* ]]
+}

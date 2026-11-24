@@ -7895,6 +7895,44 @@ append_reconciled_tally() {
 	printf '%s' "$complete_summary"
 }
 
+# completion_footer() — one-line verdict closing the COMPLETE-stage PR comment.
+# "ready" only when no degraded stage is recorded (in-memory DEGRADED_STAGES or
+# persisted .degraded_stages) and no merge_blocked_reason is set in
+# $STATUS_FILE; otherwise names what blocks, so the comment never claims
+# readiness the pipeline's own state contradicts.
+#
+# Globals:
+#   DEGRADED_STAGES, STATUS_FILE
+# Outputs:
+#   The footer line on stdout
+completion_footer() {
+	local reason="" persisted="" blockers="" ds
+	local -a stages=()
+
+	if [[ -f "${STATUS_FILE:-}" ]]; then
+		reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE" 2>/dev/null) || reason=""
+		persisted=$(jq -r '(.degraded_stages // [])[]?' "$STATUS_FILE" 2>/dev/null) || persisted=""
+	fi
+	for ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		stages+=("$ds")
+	done
+	while IFS= read -r ds; do
+		[[ -n "$ds" ]] || continue
+		[[ " ${stages[*]-} " == *" $ds "* ]] || stages+=("$ds")
+	done <<< "$persisted"
+
+	if [[ -z "$reason" ]] && ((${#stages[@]} == 0)); then
+		printf '%s' '*This PR is ready for human review and merge.*'
+		return 0
+	fi
+	[[ -z "$reason" ]] || blockers="merge blocked: ${reason}"
+	if ((${#stages[@]} > 0)); then
+		[[ -z "$blockers" ]] || blockers+="; "
+		blockers+="degraded stage(s): ${stages[*]}"
+	fi
+	printf '%s' "*This PR is NOT ready to merge — ${blockers}.*"
+}
+
 # _lacking_evidence_summary() — formats every task still marked "failed" in
 # $STATUS_FILE into a human-readable list for merge_blocked_reason (#620
 # task 3), so a block names the specific tasks lacking evidence rather
@@ -16523,7 +16561,7 @@ Manual review of these areas is recommended.
 $complete_summary
 
 ---
-*This PR is ready for human review and merge.*"
+$(completion_footer)"
 
         set_stage_completed "complete"
     fi
