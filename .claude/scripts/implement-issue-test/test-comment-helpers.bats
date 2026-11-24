@@ -473,3 +473,23 @@ JSON
 	[[ "$output" == *"(no tasks recorded)"* ]]
 	[[ "$output" != *"Skill Instructions"* ]]
 }
+
+# =============================================================================
+# complete-summary skill asks for the Changes section only (issue #1115)
+# =============================================================================
+
+@test "complete-summary skill requests Changes section only, no gates or placeholders" {
+	local skill="$BATS_TEST_DIRNAME/../../../plugins/pipeline-core/skills/complete-summary/SKILL.md"
+	[ -f "$skill" ]
+	grep -qF '### Changes' "$skill"
+	grep -qi 'Changes section only' "$skill"
+	grep -qi 'task list' "$skill"
+	# The output template must no longer carry header/footer/gate lines.
+	local fence_block
+	fence_block=$(awk '/^## Output Format/{f=1;next} /^## /{f=0} f' "$skill")
+	[[ "$fence_block" != *"Quality Gates"* ]]
+	[[ "$fence_block" != *"Implementation Complete"* ]]
+	[[ "$fence_block" != *"ready for human review"* ]]
+	[[ "$fence_block" != *"Posted by"* ]]
+	[[ "$fence_block" != *"["*"]"* ]]
+}
