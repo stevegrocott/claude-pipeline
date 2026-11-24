@@ -2717,3 +2717,23 @@ _make_plain_consumer_repo() {
     [ -n "$sync_paths" ]
     [ "$sync_paths" = "$orch_paths" ]
 }
+
+@test "sourcing sync.sh is silent and exposes a non-empty GITIGNORE_PATHS" {
+    local root out count
+    root="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
+    out=$(bash -c 'source "$1" && printf "COUNT=%s\n" "${#GITIGNORE_PATHS[@]}"' \
+        _ "$root/sync.sh" 2>&1)
+    # Only our own COUNT line: sourcing must print nothing else (no usage).
+    [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = "1" ]
+    count="${out#COUNT=}"
+    [[ "$count" =~ ^[0-9]+$ ]]
+    [ "$count" -gt 0 ]
+}
+
+@test "bare sync.sh run prints usage and exits non-zero" {
+    local root
+    root="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"
+    run bash "$root/sync.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Usage: ./sync.sh"* ]]
+}
