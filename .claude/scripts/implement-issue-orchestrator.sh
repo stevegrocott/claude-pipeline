@@ -7405,20 +7405,49 @@ extract_changes_bullets() {
 
 # build_pr_body
 #
-# Composes the PR body from STATUS_FILE: the closing keyword plus one bullet
-# per task with its status. Output goes to stdout (no logging).
+# Composes the PR body from STATUS_FILE: the closing keyword, a diff stat, a
+# task list (size and agent per row, capped at PR_BODY_MAX_TASKS with the true
+# total stated), a Tests section and, when DEGRADED_STAGES is non-empty, a
+# Degraded stages section. Output goes to stdout (no logging). Every optional
+# section degrades to nothing so the body is never worse than 'Closes #N'.
 build_pr_body() {
-	local task_lines=""
+	local max_tasks="${PR_BODY_MAX_TASKS:-30}"
+	local task_lines="" total=0 shown=0 test_line="" shortstat=""
 
 	if [[ -f "${STATUS_FILE:-}" ]]; then
-		task_lines=$(jq -r '.tasks[]? |
-			"- Task \(.id) [\(.status // "unknown")]: \(.description // "")"' \
+		total=$(jq -r '(.tasks // []) | length' "$STATUS_FILE" 2>/dev/null) || total=0
+		[[ "$total" =~ ^[0-9]+$ ]] || total=0
+		task_lines=$(jq -r --argjson max "$max_tasks" '(.tasks // [])[:$max][]? |
+			"- Task \(.id) [\(.status // "unknown")] (size: \(.size // "?"), agent: \(.agent // "?")): \(.description // "")"' \
 			"$STATUS_FILE" 2>/dev/null) || task_lines=""
+		test_line=$(jq -r '"Test iterations: \(.test_iterations // 0)" +
+			(([.stages // {} | to_entries[] | select(.key | test("test")) |
+				"\(.key)=\(.value.status // "unknown")"] | join(", ")) as $st |
+				if $st == "" then "" else "; stages: " + $st end)' \
+			"$STATUS_FILE" 2>/dev/null) || test_line=""
 	fi
+	shown=$total
+	((shown > max_tasks)) && shown=$max_tasks
+
+	shortstat=$(git diff --shortstat "origin/${BASE_BRANCH:-main}...HEAD" 2>/dev/null) \
+		|| shortstat=""
+	shortstat="${shortstat# }"
 
 	printf 'Closes #%s\n' "$ISSUE_NUMBER"
+	printf '\n_This describes the run up to PR creation; later stages (review, merge) are not reflected._\n'
+	[[ -z "$shortstat" ]] || printf '\nDiff: %s\n' "$shortstat"
 	if [[ -n "$task_lines" ]]; then
 		printf '\n## Tasks\n\n%s\n' "$task_lines"
+		if ((total > shown)); then
+			printf '\n_Showing %s of %s tasks._\n' "$shown" "$total"
+		else
+			printf '\n_Total: %s tasks._\n' "$total"
+		fi
+	fi
+	[[ -z "$test_line" ]] || printf '\n## Tests\n\n%s\n' "$test_line"
+	if [[ -n "${DEGRADED_STAGES[*]-}" ]]; then
+		printf '\n## Degraded stages\n\n'
+		printf -- '- %s\n' "${DEGRADED_STAGES[@]}"
 	fi
 }
 
@@ -15443,17 +15472,19 @@ Only the files listed above should be staged and committed."
 
         local pr_body_file
         pr_body_file=$(write_pr_body_file) || pr_body_file=""
-        if [[ -z "$pr_body_file" ]]; then
-            log_error "Could not write PR body file"
-            set_final_state "error" "Could not write PR body file"
-            exit 1
+        local pr_body_arg
+        if [[ -n "$pr_body_file" ]]; then
+            pr_body_arg="--body-file '$pr_body_file'"
+        else
+            log_warn "Could not write PR body file; falling back to one-line body"
+            pr_body_arg="--body 'Closes #$ISSUE_NUMBER'"
         fi
 
         local pr_prompt="Create a merge request for issue #$ISSUE_NUMBER.
 
 Run this exact command (substitute a short description for <description>):
 
-git push -u origin $branch 2>/dev/null; $PLATFORM_DIR/create-mr.sh --source '$branch' --target '$BASE_BRANCH' --title 'feat(issue-$ISSUE_NUMBER): <description>' --body-file '$pr_body_file'
+git push -u origin $branch 2>/dev/null; $PLATFORM_DIR/create-mr.sh --source '$branch' --target '$BASE_BRANCH' --title 'feat(issue-$ISSUE_NUMBER): <description>' $pr_body_arg
 
 The command will output the MR number. Use that as pr_number in your response.
 

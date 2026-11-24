@@ -948,15 +948,16 @@ JSON
     run build_pr_body
     [ "$status" -eq 0 ]
     [[ "$output" == "Closes #123"* ]]
-    [[ "$output" == *"- Task 1 [completed]: Add flag"* ]]
-    [[ "$output" == *"- Task 2 [failed]: Wire it up; \$(whoami) 'q'"* ]]
+    [[ "$output" == *"- Task 1 [completed] (size: ?, agent: ?): Add flag"* ]]
+    [[ "$output" == *"- Task 2 [failed] (size: ?, agent: ?): Wire it up; \$(whoami) 'q'"* ]]
 }
 
 @test "build_pr_body falls back to closing keyword without tasks" {
     echo '{"tasks":[]}' > "$STATUS_FILE"
     run build_pr_body
     [ "$status" -eq 0 ]
-    [ "$output" = "Closes #123" ]
+    [[ "$output" == "Closes #123"* ]]
+    [[ "$output" != *"## Tasks"* ]]
 }
 
 @test "write_pr_body_file writes body to file and prints its path" {
@@ -966,5 +967,54 @@ JSON
     [ "$status" -eq 0 ]
     [ "$output" = "$LOG_BASE/pr-body.md" ]
     grep -qF 'Closes #123' "$output"
-    grep -qF -- '- Task 1 [completed]: Do x' "$output"
+    grep -qF -- '- Task 1 [completed] (size: ?, agent: ?): Do x' "$output"
+}
+
+@test "build_pr_body shows task size and agent, tests, and run-scope note" {
+    cat > "$STATUS_FILE" <<'JSON'
+{"test_iterations":3,"stages":{"test_loop":{"status":"completed"}},
+"tasks":[{"id":"1","status":"completed","size":"M","agent":"bash-script-craftsman","description":"Do x"}]}
+JSON
+    DEGRADED_STAGES=()
+    run build_pr_body
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(size: M, agent: bash-script-craftsman): Do x"* ]]
+    [[ "$output" == *"## Tests"* ]]
+    [[ "$output" == *"Test iterations: 3"* ]]
+    [[ "$output" == *"test_loop=completed"* ]]
+    [[ "$output" == *"up to PR creation"* ]]
+    [[ "$output" != *"## Degraded stages"* ]]
+}
+
+@test "build_pr_body lists degraded stages when present" {
+    echo '{"tasks":[]}' > "$STATUS_FILE"
+    DEGRADED_STAGES=("quality:max_iterations:x:iter=2")
+    run build_pr_body
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"## Degraded stages"* ]]
+    [[ "$output" == *"- quality:max_iterations:x:iter=2"* ]]
+}
+
+@test "build_pr_body caps task rows and states the true total" {
+    jq -n '{tasks:[range(1;46)|{id:(.|tostring),status:"completed",description:"t\(.)"}]}' \
+        > "$STATUS_FILE"
+    run build_pr_body
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"- Task 30 ["* ]]
+    [[ "$output" != *"- Task 31 ["* ]]
+    [[ "$output" == *"Showing 30 of 45 tasks"* ]]
+}
+
+@test "write_pr_body_file fails when the body file cannot be written" {
+    mkdir -p "$LOG_BASE/pr-body.md"
+    run write_pr_body_file
+    [ "$status" -ne 0 ]
+}
+
+@test "orchestrator PR prompt pins --body-file command and one-line fallback" {
+    local src="${BATS_TEST_DIRNAME}/../implement-issue-orchestrator.sh"
+    grep -qF -- "--body-file '\$pr_body_file'" "$src"
+    grep -qF -- "--body 'Closes #\$ISSUE_NUMBER'" "$src"
+    run bash -c 'source /dev/stdin <<<"$(sed -n "/^build_pr_body()/,/^}/p" "$1")"; STATUS_FILE=/nonexistent ISSUE_NUMBER=7 build_pr_body | head -1' _ "$src"
+    [ "$output" = "Closes #7" ]
 }
