@@ -6936,6 +6936,47 @@ _format_pr_review_comment() {
 	fi
 }
 
+# Builds the feedback text handed to the PR-review fix stage. Listed
+# issues come first; when there are none (a changes_requested verdict
+# carried only prose), the reviewer's comments and summary are used so
+# the fix stage never receives an empty prompt section.
+#
+# Arguments:
+#   $1  review_result   stage result JSON (reads .output.issues,
+#                       .output.comments and .output.summary)
+_build_pr_fix_feedback() {
+	local review_result="$1"
+	local issues
+	local comments
+	local summary
+
+	issues=$(printf '%s' "$review_result" | jq -r '
+		[.output.issues // [] | .[] |
+			"\(.file // ""):\(.line // "") → \(.description // "")"
+		] | join("\n- ")' 2>/dev/null || true)
+	if [[ -n "${issues//[[:space:]]/}" ]]; then
+		printf '%s' "$issues"
+		return 0
+	fi
+
+	comments=$(printf '%s' "$review_result" \
+		| jq -r '.output.comments // ""' 2>/dev/null || true)
+	summary=$(printf '%s' "$review_result" \
+		| jq -r '.output.summary // ""' 2>/dev/null || true)
+
+	if [[ -n "${comments//[[:space:]]/}" ]]; then
+		printf 'Reviewer comments:\n%s' "$comments"
+		if [[ -n "${summary//[[:space:]]/}" ]]; then
+			printf '\n\nReview summary:\n%s' "$summary"
+		fi
+	elif [[ -n "${summary//[[:space:]]/}" ]]; then
+		printf 'Review summary:\n%s' "$summary"
+	else
+		printf 'The reviewer requested changes but gave no details. %s' \
+			'Re-review the branch diff against the issue and fix any problems.'
+	fi
+}
+
 # Builds a well-formed issue body for an adjacent follow-up issue.
 # If the raw body already contains a valid ## Implementation Tasks section
 # with at least one canonical task line, it is returned unchanged.
@@ -16292,7 +16333,7 @@ ${fa_numstat_note}"
 
             # Collect feedback
             local review_comments
-            review_comments=$(printf '%s' "$review_result" | jq -r '[.output.issues // [] | .[] | "\(.file // ""):\(.line // "") → \(.description // "")"] | join("\n- ")')
+            review_comments=$(_build_pr_fix_feedback "$review_result")
 
             # Append current iteration issues to history file
             local current_issues

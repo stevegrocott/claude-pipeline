@@ -2737,3 +2737,37 @@ _make_plain_consumer_repo() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"Usage: ./sync.sh"* ]]
 }
+
+# =============================================================================
+# _build_pr_fix_feedback
+# =============================================================================
+
+@test "pr fix feedback lists issues when present" {
+    run _build_pr_fix_feedback \
+        '{"output":{"issues":[{"file":"a.sh","line":3,"description":"bad"}],"comments":"c","summary":"s"}}'
+    [ "$status" -eq 0 ]
+    [ "$output" = "a.sh:3 → bad" ]
+}
+
+@test "pr fix feedback falls back to comments and summary without issues" {
+    run _build_pr_fix_feedback \
+        '{"output":{"issues":[],"comments":"fix the loop","summary":"needs work"}}'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"fix the loop"* ]]
+    [[ "$output" == *"needs work"* ]]
+}
+
+@test "pr fix feedback uses summary alone when no comments" {
+    run _build_pr_fix_feedback '{"output":{"summary":"needs work"}}'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"needs work"* ]]
+}
+
+@test "pr fix feedback is never empty" {
+    run _build_pr_fix_feedback '{"output":{}}'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no details"* ]]
+    run _build_pr_fix_feedback 'not json'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no details"* ]]
+}
