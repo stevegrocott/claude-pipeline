@@ -406,7 +406,7 @@ GHEOF
 	[[ "$_SKIP_REASON" == *"epic-scope"* ]]
 }
 
-@test "functional: oversized body (checkbox count) flags epic-scope" {
+@test "functional: oversized body (open task count) flags epic-scope" {
 	local mock_bin="$TEST_TMP/mock-bin"
 	mkdir -p "$mock_bin"
 	# Body with 4 checkboxes; threshold lowered to 3 to trigger.
@@ -431,6 +431,33 @@ GHEOF
 
 	[[ "$rc" -eq 1 ]]
 	[[ "$_EPIC_SCOPE" == *"oversized body"* ]]
+	[[ "$_EPIC_SCOPE" == *"4 tasks"* ]]
+}
+
+@test "functional: AC checkboxes and checked tasks are not counted" {
+	local mock_bin="$TEST_TMP/mock-bin"
+	mkdir -p "$mock_bin"
+	# 2 open tasks + 1 done task + 4 ACs; threshold 3 must NOT trigger.
+	cat > "$mock_bin/gh" << 'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"body":"## Implementation Tasks\n- [ ] `[default]` a — f.sh\n- [ ] `[default]` b — f.sh\n- [x] `[default]` c — f.sh\n\n## Acceptance Criteria\n- [ ] w\n- [ ] x\n- [ ] y\n- [ ] z","labels":[]}'
+GHEOF
+	chmod +x "$mock_bin/gh"
+	export PATH="$mock_bin:$PATH"
+
+	_source_validate || skip "validate_issue_for_processing not present"
+	log()                  { :; }
+	log_warn()             { :; }
+	dispatch_composition() { return 1; }
+	assert_issue_valid()   { return 0; }
+	export ENRICH_FOLLOWUPS=false
+	EPIC_SCOPE_MAX_TASKS=3
+
+	_SKIP_REASON=""
+	_EPIC_SCOPE=""
+	validate_issue_for_processing 45 || true
+
+	[[ -z "$_EPIC_SCOPE" ]]
 }
 
 @test "functional: normal issue is NOT flagged epic-scope" {

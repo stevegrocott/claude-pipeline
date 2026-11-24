@@ -207,7 +207,7 @@ _UPFRONT_SKIP_REASON=""
 _UPFRONT_SKIP_PR=""
 
 # Epic-scope task-count threshold: an issue whose body carries more than this
-# many task/AC checkboxes is treated as epic-scope regardless of labels. Set
+# many open tasks is treated as epic-scope regardless of labels. Set
 # generously so ordinary multi-task issues are not flagged. Env-configurable.
 EPIC_SCOPE_MAX_TASKS="${EPIC_SCOPE_MAX_TASKS:-20}"
 
@@ -1713,7 +1713,8 @@ validate_issue_for_processing() {
 	# Epic-scope issues concentrate spend (claude-spend: 48 epic-scope runs
 	# used 35% of tokens). Detect them at preflight — via an `epic`/
 	# `epic-scope` label or an oversized body (more than EPIC_SCOPE_MAX_TASKS
-	# task/AC checkboxes) — set _EPIC_SCOPE, and route to split-first by
+	# open tasks in the Implementation Tasks section; AC checkboxes are not
+	# counted) — set _EPIC_SCOPE, and route to split-first by
 	# skipping the wholesale run so the issue is broken into sub-issues first.
 	# -----------------------------------------------------------------
 	_EPIC_SCOPE=""
@@ -1724,15 +1725,21 @@ validate_issue_for_processing() {
 	epic_body=$(printf '%s' "$issue_json" \
 		| jq -r '.body // ""' 2>/dev/null) || epic_body=""
 	epic_task_count=$(printf '%s' "$epic_body" \
-		| grep -cE '^[[:space:]]*[-*] \[[ xX]\]' 2>/dev/null) \
-		|| epic_task_count=0
+		| awk '
+			/^#+[[:space:]]/ {
+				in_tasks = ($0 ~ /^#+[[:space:]]+Implementation Tasks/)
+				next
+			}
+			in_tasks && /^[[:space:]]*[-*] \[ \]/ { n++ }
+			END { print n + 0 }
+		' 2>/dev/null) || epic_task_count=0
 
 	if [[ "$has_epic_label" == "true" ]] \
 		|| (( epic_task_count > EPIC_SCOPE_MAX_TASKS )); then
 		if [[ "$has_epic_label" == "true" ]]; then
 			_EPIC_SCOPE="epic label"
 		else
-			_EPIC_SCOPE="oversized body ($epic_task_count checkboxes > $EPIC_SCOPE_MAX_TASKS)"
+			_EPIC_SCOPE="oversized body ($epic_task_count tasks > $EPIC_SCOPE_MAX_TASKS)"
 		fi
 		log_warn "Preflight #$issue_num: epic-scope ($_EPIC_SCOPE)" \
 			"— routing to split-first"
