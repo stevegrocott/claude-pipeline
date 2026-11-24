@@ -6261,6 +6261,54 @@ FAKE_ORCH
 		|| fail "no rejection warning for non-integer value (output: $output)"
 }
 
+@test "real batch-orchestrator.sh: empty TEE_FLUSH_TIMEOUT uses the default with no warning" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=""
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "781" --branch main
+
+	[ "$status" -eq 0 ] || fail "batch exited $status: $output"
+	[[ "$output" != *"TEE_FLUSH_TIMEOUT"* ]] \
+		|| fail "empty value should not warn (output: $output)"
+}
+
+@test "real batch-orchestrator.sh: negative TEE_FLUSH_TIMEOUT is rejected with a warning" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=-5
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "782" --branch main
+
+	[ "$status" -eq 0 ] || fail "batch exited $status: $output"
+	[[ "$output" == *"TEE_FLUSH_TIMEOUT='-5' is not a non-negative integer"* ]] \
+		|| fail "no rejection warning for negative value (output: $output)"
+}
+
+@test "real batch-orchestrator.sh: TEE_FLUSH_TIMEOUT=08 is read as 8 seconds, not octal" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_holds_fifo
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export TEE_FLUSH_TIMEOUT=08
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "783" --branch main
+
+	[[ "$output" != *"value too great for base"* ]] \
+		|| fail "08 was parsed as octal (output: $output)"
+	[[ "$output" != *"TEE_FLUSH_TIMEOUT="* ]] \
+		|| fail "08 was rejected with a warning (output: $output)"
+	[[ "$output" == *"did not exit 8s after orchestrator exit"* ]] \
+		|| fail "08 was not read as 8 seconds (output: $output)"
+}
+
 # =============================================================================
 # TASK 7 (#891): an end-to-end circuit-breaker case
 # =============================================================================
