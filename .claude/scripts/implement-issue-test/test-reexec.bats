@@ -470,6 +470,26 @@ _run_orch_startup_env() {
 	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
 }
 
+@test "orchestrator startup: no removed warning when nothing was removed from PATH" {
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_run_orch_startup_env "$cache" 0.8.19 "/usr/bin:/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"removed other-version bin"* ]]
+}
+
+@test "orchestrator startup: other plugin bin left on PATH is warned on its own line" {
+	local cache="$TEST_TMP/cache"
+	local other="$TEST_TMP/other"
+	_make_plugin_version "$cache" 0.8.19
+	_make_plugin_version "$other" 0.8.19
+	_run_orch_startup_env "$cache" 0.8.19 "$other/0.8.19/bin:/usr/bin:/bin"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"removed other-version bin"* ]]
+	[[ "$output" == *"WARN: Pipeline 0.8.19 running; other plugin bin still on PATH: $other/0.8.19/bin"* ]]
+	[ "$(grep -c 'still on PATH' <<< "$output")" -eq 1 ]
+}
+
 @test "orchestrator startup: silent when batch marked startup as logged" {
 	local cache="$TEST_TMP/cache"
 	_make_plugin_version "$cache" 0.8.19

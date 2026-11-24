@@ -1474,7 +1474,9 @@ log_startup_environment() {
     local version root bin_dir entry newer
     local -a newer_versions=()
     local -a stale_bins=()
-    local -a path_entries
+    local -a path_entries=()
+    local -a removed_entries=()
+    local -a leftover_bins=()
     [[ "$_PIPELINE_BIN_ALREADY_PINNED" == true ]] && return 0
     version=$(pipeline_version 2>/dev/null) || version=""
     log "Pipeline version: ${version:-repo-local}" \
@@ -1484,17 +1486,28 @@ log_startup_environment() {
     root=$(pipeline_plugin_root 2>/dev/null) || return 0
     bin_dir="$root/bin"
 
-    # Sibling-version bins dropped by pipeline_pin_bin_first are still noted.
-    IFS=: read -r -a path_entries <<< "${PATH}:${PIPELINE_PIN_REMOVED:-}"
-    for entry in "${path_entries[@]}"; do
+    # The "removed" warning names only what pipeline_pin_bin_first dropped.
+    IFS=: read -r -a removed_entries <<< "${PIPELINE_PIN_REMOVED:-}"
+    for entry in "${removed_entries[@]}"; do
         [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
-        [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
-            && "${entry%/bin}" != "$root" ]] || continue
         stale_bins+=("$entry")
     done
     if ((${#stale_bins[@]} > 0)); then
         log_warn "Pipeline $version running; removed other-version bin" \
             "from PATH: ${stale_bins[*]}"
+    fi
+
+    # Other plugin bin dirs still on PATH after pinning were not removed.
+    IFS=: read -r -a path_entries <<< "$PATH"
+    for entry in "${path_entries[@]}"; do
+        [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
+        [[ "$entry" == */bin && -f "${entry%/bin}/.claude-plugin/plugin.json" \
+            && "${entry%/bin}" != "$root" ]] || continue
+        leftover_bins+=("$entry")
+    done
+    if ((${#leftover_bins[@]} > 0)); then
+        log_warn "Pipeline $version running; other plugin bin still" \
+            "on PATH: ${leftover_bins[*]}"
     fi
 
     while IFS= read -r newer; do
