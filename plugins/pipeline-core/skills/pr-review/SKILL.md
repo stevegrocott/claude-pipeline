@@ -21,7 +21,7 @@ side_effects: []
 composes: []
 failure_modes:
   - id: review_timeout
-    mitigation: Stop exploring the codebase — review only the provided diff; complete in 3-5 turns maximum
+    mitigation: Stop exploring the codebase — review only the provided diff (and the saved full-diff file if named); complete in 3-5 turns maximum
   - id: issue_fetch_failed
     mitigation: Stop and report error — cannot review without fetching the requirements
 ---
@@ -35,20 +35,22 @@ Review a pull request diff against the issue requirements. Produce a verdict (ap
 1. **The diff is provided in the prompt. Do NOT run `git diff`.** Running git diff wastes 2-3 turns and 50K+ tokens re-reading what you already have.
 2. **Do NOT read source files** unless the diff references a function whose behavior you cannot determine from the diff context alone. If you must read a file, read only the specific function — never the whole file.
 3. **Do NOT explore the repository.** No `ls`, no `find`, no `glob`. The diff and issue description contain everything you need.
-4. **Fetch the issue description** to understand the requirements. Use the platform CLI or MCP tool (one call). This is the ONLY external data you should fetch.
-5. **Work from the diff, not the codebase.** Review what changed, not what exists.
+4. **The criteria are in the prompt.** When the prompt has an **Issue Requirements** section (Implementation Tasks and Acceptance Criteria), review against it and do NOT fetch the issue again. Only if that section is absent or reports the criteria as unavailable, fetch the issue description (one platform CLI or MCP call).
+5. **If the diff is truncated, the full diff is in the named file.** When the prompt's NOTE names a saved full-diff file, read that file for the remainder (use offsets for large files). Never judge a criterion "missing" from a truncated diff without reading the file.
+6. **Never read the remote branch.** The local working tree is the source of truth; the remote branch may be behind local commits. Do not use `gh api`, `git show origin/...`, or any fetch of file contents from the remote branch.
+7. **Work from the diff, not the codebase.** Review what changed, not what exists.
 
 ## Process
 
 ```
 1. Read the diff (provided inline in the prompt)
-2. Fetch the issue description (1 tool call)
+2. Read the criteria from the prompt's Issue Requirements section (fetch the issue only if absent)
 3. Spec review: Does the diff achieve the issue goals? Flag scope creep.
 4. Code review: Check the diff for quality issues (see checklist)
 5. Return structured verdict with evidence
 ```
 
-**Target: 3-5 turns maximum.** Turn 1: fetch issue. Turns 2-4: analyze and respond.
+**Target: 3-5 turns maximum.** Turn 1: read the saved full diff if the prompt names one. Turns 2-4: analyze and respond.
 
 ## Spec Review Criteria
 
@@ -116,6 +118,7 @@ Apply only the items relevant to the technology in the diff. Skip items that don
 |---|---|---|
 | `git diff` to see changes | Diff is already in the prompt | Read the prompt |
 | Read every file touched | You have the diff context | Only read if a function call is opaque |
+| Read the remote branch (`gh api`, `origin/...`) | It can be behind local commits and produce phantom findings | Use the prompt diff and the named diff file |
 | Explore repo structure | Irrelevant to reviewing a diff | Focus on the diff |
 | Run tests | Not your job — test stage handles this | Review the code |
 | Suggest refactors | Review scope, not improvement scope | Only flag bugs and missing requirements |
