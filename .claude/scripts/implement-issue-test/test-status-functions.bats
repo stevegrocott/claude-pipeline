@@ -1018,3 +1018,38 @@ JSON
     run bash -c 'source /dev/stdin <<<"$(sed -n "/^build_pr_body()/,/^}/p" "$1")"; STATUS_FILE=/nonexistent ISSUE_NUMBER=7 build_pr_body | head -1' _ "$src"
     [ "$output" = "Closes #7" ]
 }
+
+# Runs the orchestrator's real PR-stage prompt assembly (extracted from the
+# orchestrator source) and prints the resulting pr_prompt.
+_pr_stage_prompt() {
+    local src="${BATS_TEST_DIRNAME}/../implement-issue-orchestrator.sh"
+    local frag="$TEST_TMP/pr-stage-fragment.bash"
+    {
+        printf 'build_pr_stage_prompt() {\n'
+        printf '    local branch=feat/x pr_creation_skill=""\n'
+        printf '    local PLATFORM_DIR=/plat\n'
+        sed -n '/^        local pr_body_file$/,/^\$pr_creation_skill}"$/p' "$src"
+        printf '\n    printf "%%s" "$pr_prompt"\n}\n'
+    } > "$frag"
+    source "$frag"
+    build_pr_stage_prompt
+}
+
+@test "PR stage prompt carries the body file path when the write succeeds" {
+    echo '{"tasks":[{"id":"1","status":"completed","description":"Do x"}]}' \
+        > "$STATUS_FILE"
+    run _pr_stage_prompt
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--body-file '$LOG_BASE/pr-body.md'"* ]]
+    [[ "$output" != *"--body 'Closes"* ]]
+    grep -qF 'Closes #123' "$LOG_BASE/pr-body.md"
+}
+
+@test "PR stage prompt falls back to the one-line body when the write fails" {
+    echo '{"tasks":[]}' > "$STATUS_FILE"
+    mkdir -p "$LOG_BASE/pr-body.md"
+    run _pr_stage_prompt
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--body 'Closes #123'"* ]]
+    [[ "$output" != *"--body-file"* ]]
+}
