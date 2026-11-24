@@ -12,6 +12,13 @@
 #   --agent <name>  Specify agent for implement-issue (e.g., react-frontend-developer,
 #                   fastify-backend-developer). Process-pr always uses code-reviewer.
 #
+# Environment:
+#   BATCH_FOLLOWUPS_ON_MERGE=0  Skip the followups-only pass that runs
+#                   `/process-pr ... --followups-only` when a parked PR is
+#                   seen merged (default 1). A failing pass (non-zero exit,
+#                   timeout, no parseable result) or permission denials log a
+#                   warning naming the PR and cause; the issue stays completed.
+#
 # Outputs:
 #   - status.json: Real-time progress (read by handle-issues skill)
 #   - logs/batch-<timestamp>/: Per-issue logs and final summary
@@ -2931,19 +2938,25 @@ mark_issue_completed_on_merge() {
 		return 0
 	fi
 	# Non-fatal: a failed followups pass never un-completes the issue.
+	_FOLLOWUPS_PASS_CAUSE=""
 	dispatch_followups_only_pass "$issue_num" "$pr" \
 		|| log_warn "Issue #$issue_num: followups-only pass for PR #$pr" \
-			"failed (non-fatal)"
+			"failed (non-fatal): ${_FOLLOWUPS_PASS_CAUSE:-unknown cause}"
 	return 0
 }
 
 # After a parked PR is seen merged, its follow-ups were never filed (the
 # process-pr run that parked it did not merge). Dispatch the followups-only
 # pass and record the created issue numbers in the issue's follow_ups.
-# Skipped when follow_ups is already populated. Always returns 0.
+# Skipped when follow_ups is already populated.
+# Returns 0 on success (an empty follow-up list from a parseable result is
+# success); returns 1 and sets _FOLLOWUPS_PASS_CAUSE on a non-zero exit
+# (timeout for 124, rate limit when detected) or when no output line parses
+# as a JSON object. Permission denials are reported via
+# warn_permission_denials.
 dispatch_followups_only_pass() {
 	local issue_num="$1" pr="$2"
-	local existing="" out="" last_json="" created=""
+	local existing="" out="" last_json="" created="" rc=0
 	local issue_log="$LOG_BASE/issue-$issue_num.log"
 
 	existing=$(jq -r --arg num "$issue_num" \
@@ -2961,11 +2974,36 @@ dispatch_followups_only_pass() {
 		--agent code-reviewer \
 		--allowedTools "$(process_pr_allowed_tools)" \
 		--output-format json \
-		--json-schema "$PROCESS_SCHEMA" 2>>"$issue_log") || out=""
+		--json-schema "$PROCESS_SCHEMA" 2>>"$issue_log") || rc=$?
 	printf '%s\n' "=== followups-only output ===" >> "$issue_log"
 	printf '%s\n' "$out" >> "$issue_log"
 
-	last_json=$(tail -1 <<< "$out")
+	# Last line starting with an open brace; written as a bracket class
+	# built from a variable so the test loader's brace counting stays even.
+	local open_brace=$'\x7b'
+	last_json=$(grep -E "^[$open_brace]" <<< "$out" | tail -1)
+	if [[ -n "$last_json" ]]; then
+		warn_permission_denials "$last_json" "followups-only" \
+			"$issue_num"
+	fi
+	if ((rc == 124)); then
+		_FOLLOWUPS_PASS_CAUSE="timed out (exit 124)"
+		return 1
+	fi
+	if detect_rate_limit "$last_json" "$rc"; then
+		_FOLLOWUPS_PASS_CAUSE="rate limited (exit $rc)"
+		return 1
+	fi
+	if ((rc != 0)); then
+		_FOLLOWUPS_PASS_CAUSE="dispatch exited $rc"
+		return 1
+	fi
+	if [[ -z "$last_json" ]] \
+		|| ! jq -e 'type == "object"' <<< "$last_json" \
+			>/dev/null 2>&1; then
+		_FOLLOWUPS_PASS_CAUSE="no parseable result"
+		return 1
+	fi
 	created=$(jq -c '.structured_output.follow_up_issues // []' \
 		<<< "$last_json" 2>/dev/null) || created="[]"
 	[[ -n "$created" ]] || created="[]"

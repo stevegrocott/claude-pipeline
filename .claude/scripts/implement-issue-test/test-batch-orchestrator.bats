@@ -7586,9 +7586,15 @@ _load_followups_pass() {
 	BRANCH=main
 	PROCESS_SCHEMA='{}'
 	log() { :; }
-	log_warn() { :; }
+	log_warn() { printf '%s\n' "$*" >> "$TEST_TMP/warn.log"; }
 	process_pr_allowed_tools() { printf '%s\n' 'Bash(gh *)'; }
+	detect_rate_limit() { return 1; }
+	warn_permission_denials() {
+		printf 'denials:%s:%s\n' "$2" "$1" >> "$TEST_TMP/denials.log"
+	}
 	: > "$TEST_TMP/dispatch.log"
+	: > "$TEST_TMP/warn.log"
+	: > "$TEST_TMP/denials.log"
 }
 
 @test "#1157: a merge seen while parked dispatches --followups-only and records follow_ups" {
@@ -7622,6 +7628,80 @@ _load_followups_pass() {
 		"$STATUS_FILE")" == "completed" ]]
 	[[ "$(jq -c '.issues[] | select(.number == "5980") | .follow_ups // []' \
 		"$STATUS_FILE")" == '[]' ]]
+}
+
+@test "#1190: a non-zero dispatch exit warns with PR and cause" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	dispatch_composition() { return 7; }
+
+	run mark_issue_completed_on_merge 5980 1234
+	[[ "$status" -eq 0 ]]
+	grep -q 'PR #1234' "$TEST_TMP/warn.log" \
+		|| fail "no warning naming the PR: $(cat "$TEST_TMP/warn.log")"
+	grep -q 'dispatch exited 7' "$TEST_TMP/warn.log" \
+		|| fail "cause missing: $(cat "$TEST_TMP/warn.log")"
+}
+
+@test "#1190: a timed-out dispatch warns with the timeout cause" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	dispatch_composition() { return 124; }
+
+	mark_issue_completed_on_merge 5980 1234
+	grep -q 'timed out' "$TEST_TMP/warn.log" \
+		|| fail "timeout cause missing: $(cat "$TEST_TMP/warn.log")"
+}
+
+@test "#1190: unparseable output warns and records no follow-ups" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	dispatch_composition() { printf '%s\n' 'not json at all'; }
+
+	mark_issue_completed_on_merge 5980 1234
+	grep -q 'no parseable result' "$TEST_TMP/warn.log" \
+		|| fail "cause missing: $(cat "$TEST_TMP/warn.log")"
+	[[ "$(jq -r '.issues[] | select(.number == "5980") | .status' \
+		"$STATUS_FILE")" == "completed" ]]
+}
+
+@test "#1190: an empty follow-up list from a parseable result is success" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	dispatch_composition() {
+		printf '%s\n' 'chatter'
+		printf '%s\n' '{"structured_output":{"status":"merged","follow_up_issues":[]}}'
+		printf '%s\n' 'trailing non-json'
+	}
+
+	mark_issue_completed_on_merge 5980 1234
+	[[ ! -s "$TEST_TMP/warn.log" ]] \
+		|| fail "unexpected warning: $(cat "$TEST_TMP/warn.log")"
+}
+
+@test "#1190: a rate-limited pass logs the rate limit as the cause" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	detect_rate_limit() { return 0; }
+	dispatch_composition() {
+		printf '%s\n' '{"structured_output":{"status":"rate_limit"}}'
+	}
+
+	mark_issue_completed_on_merge 5980 1234
+	grep -q 'rate limited' "$TEST_TMP/warn.log" \
+		|| fail "cause missing: $(cat "$TEST_TMP/warn.log")"
+}
+
+@test "#1190: permission denials in the pass are reported" {
+	_load_followups_pass
+	_seed_status_merge_blocked
+	dispatch_composition() {
+		printf '%s\n' '{"permission_denials":[{"tool_name":"Bash"}],"structured_output":{"status":"merged","follow_up_issues":[]}}'
+	}
+
+	mark_issue_completed_on_merge 5980 1234
+	grep -q 'denials:followups-only:' "$TEST_TMP/denials.log" \
+		|| fail "denials not reported: $(cat "$TEST_TMP/denials.log")"
 }
 
 @test "#1157: no second pass when follow_ups are already recorded" {
