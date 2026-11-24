@@ -79,7 +79,8 @@
 #
 # redact_local_paths [text]
 #   Prints text (argument or stdin) with the repo root made relative and
-#   $HOME replaced by "~", path-boundary safe. See its docstring below.
+#   $HOME replaced by "~" (and its dash-encoded form by "-HOME"),
+#   path-boundary safe. See its docstring below.
 
 # Idempotent sourcing guard — skip re-definition on repeated source.
 if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
@@ -344,6 +345,30 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
         printf '%s' "${out}${text}"
     }
 
+    # _redact_dash_home <text> <dash-home>
+    #   Prints <text> with each dash-encoded home (e.g. "-Users-me", how
+    #   Claude names ~/.claude/projects dirs) replaced by "-HOME". A hit
+    #   counts only when the char before it is not a name char or "-" (so
+    #   "--root-dir" is untouched) and the char after is not a name char.
+    _redact_dash_home() {
+        local text="$1" prefix="$2"
+        local out="" before after
+        while [[ "$text" == *"$prefix"* ]]; do
+            before="${text%%"$prefix"*}"
+            after="${text#*"$prefix"}"
+            out+="$before"
+            if [[ -n "$before" && "${before: -1}" == [A-Za-z0-9._~-] ]]; then
+                out+="$prefix"
+            elif [[ -n "$after" && "${after:0:1}" == [A-Za-z0-9_.] ]]; then
+                out+="$prefix"
+            else
+                out+="-HOME"
+            fi
+            text="$after"
+        done
+        printf '%s' "${out}${text}"
+    }
+
     # redact_local_paths [text]
     #   Prints <text> (or stdin when no argument is given) with machine-local
     #   absolute paths made safe to publish: the repo root (override via
@@ -370,6 +395,12 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
         if [[ -n "$home" ]]; then
             text="$(_redact_prefix "$text" "$home" "~" "~/" any; printf x)"
             text="${text%x}"
+            # Dash-encoded home (two or more segments); /root stays alone.
+            local dash="${home//\//-}"
+            if [[ "${home#/}" == */* ]]; then
+                text="$(_redact_dash_home "$text" "$dash"; printf x)"
+                text="${text%x}"
+            fi
         fi
         printf '%s' "$text"
     }

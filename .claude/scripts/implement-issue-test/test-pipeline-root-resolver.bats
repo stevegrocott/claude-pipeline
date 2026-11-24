@@ -284,3 +284,21 @@ _redact() {
     run _redact /h/u/repo/ /h/u/ "/h/u/repo/a /h/u/b"
     [ "$output" = "a ~/b" ]
 }
+
+@test "redact_local_paths redacts dash-encoded home as -HOME" {
+    run _redact /h/u/repo /h/u "d=~/.claude/projects/-h-u-repo-x and -h-u"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"projects/-HOME-repo-x and -HOME" ]]
+}
+
+@test "redact_local_paths leaves single-segment home dash form alone" {
+    run _redact /r/x /root "run --root-dir /tmp -root"
+    [ "$status" -eq 0 ]
+    [ "$output" == "run --root-dir /tmp -root" ]
+}
+
+@test "redact_local_paths dash home respects boundaries" {
+    run _redact /h/u/repo /h/u "x-h-u -h-ux -h-u.bak a--h-u"
+    [ "$status" -eq 0 ]
+    [ "$output" == "x-h-u -h-ux -h-u.bak a--h-u" ]
+}
