@@ -6415,6 +6415,53 @@ _infer_agent_from_path() {
 	fi
 }
 
+# Builds the "issue requirements" block of the PR review prompt (issue #1185).
+#
+# The reviewer can only check what it is shown, so the prompt carries the
+# issue's "Implementation Tasks" and "Acceptance Criteria" sections (read from
+# the parse stage's context/issue-body.md) and states that the local working
+# tree, not the remote branch, is the change under review. A missing file or
+# section is reported in the block and never fatal.
+#
+# Arguments:
+#   $1 - path to the issue body markdown
+#   $2 - optional path of the saved full diff
+# Outputs:
+#   Prompt block on stdout
+#
+_pr_review_requirements_block() {
+	local body_file="$1"
+	local diff_file="${2:-}"
+	local tasks="" criteria="" name section
+	local missing="(not available: the section is missing from the issue body or the body file was not found)"
+	if [[ -f "$body_file" ]]; then
+		for name in "Implementation Tasks" "Acceptance Criteria"; do
+			section=$(awk -v h="$name" '
+				{ sub(/\r$/, "") }
+				!found && /^##+[[:space:]]/ {
+					t = tolower($0)
+					sub(/^##+[[:space:]]+/, "", t)
+					if (index(t, tolower(h)) == 1) { found = 1; next }
+				}
+				found && /^##+[[:space:]]/ { exit }
+				found { print }
+			' < "$body_file")
+			if [[ "$name" == "Implementation Tasks" ]]; then
+				tasks="$section"
+			else
+				criteria="$section"
+			fi
+		done
+	fi
+	[[ -n "${tasks//[[:space:]]/}" ]] || tasks="$missing"
+	[[ -n "${criteria//[[:space:]]/}" ]] || criteria="$missing"
+	printf '\n## Issue Requirements\n\n### Implementation Tasks\n\n%s\n\n' "$tasks"
+	printf '### Acceptance Criteria\n\n%s\n\n' "$criteria"
+	printf 'Check each acceptance criterion against the change, and list any criterion you could not verify.\n\n'
+	printf 'Source of truth: the change under review is the local working tree%s. The remote branch may be behind the local commits; do NOT read the remote branch or fetch file contents from it.\n\n' \
+		"${diff_file:+ and the diff file \`$diff_file\`}"
+}
+
 #
 # Parses task lines from a tasks section string into a JSON array.
 #
@@ -15958,7 +16005,11 @@ $pr_creation_skill}"
         pr_diff_total_lines=$(printf '%s\n' "$pr_diff_full" | wc -l)
         pr_diff_total_lines="${pr_diff_total_lines//[[:space:]]/}"
         local pr_diff
-        pr_diff=$(printf '%s\n' "$pr_diff_full" | head -500)
+        local pr_diff_max_lines="${PR_REVIEW_DIFF_MAX_LINES:-2000}"
+        [[ "$pr_diff_max_lines" =~ ^[1-9][0-9]*$ ]] \
+            || pr_diff_max_lines=2000
+        pr_diff=$(printf '%s\n' "$pr_diff_full" \
+            | head -n "$pr_diff_max_lines")
 
         # A truncated diff silently hides changes from the reviewer — it
         # sees only the first 500 lines and has no way to know more exists,
@@ -15969,9 +16020,16 @@ $pr_creation_skill}"
         # `git diff --numstat`) so it can at least judge the shape of what
         # it isn't seeing.
         local pr_diff_truncation_note=""
-        if ((pr_diff_total_lines > 500)); then
-            log_warn "PR review diff truncated: showing 500 of" \
+        if ((pr_diff_total_lines > pr_diff_max_lines)); then
+            log_warn "PR review diff truncated: showing" \
+                "$pr_diff_max_lines of" \
                 "$pr_diff_total_lines lines (iteration $pr_iteration)"
+            # Save the full diff so the reviewer can read the rest.
+            local pr_diff_full_path="${LOG_BASE:-${TMPDIR:-/tmp}}"
+            pr_diff_full_path+="/pr-review-full-diff-iter-${pr_iteration}.diff"
+            mkdir -p "${pr_diff_full_path%/*}" 2>/dev/null || true
+            printf '%s\n' "$pr_diff_full" > "$pr_diff_full_path" \
+                2>/dev/null || pr_diff_full_path=""
             local pr_diff_file_stats=""
             local ns_added ns_removed ns_path
             while IFS=$'\t' read -r ns_added ns_removed ns_path; do
@@ -15985,7 +16043,7 @@ $pr_creation_skill}"
                 fi
             done < <(git diff --numstat "$BASE_BRANCH"...HEAD -- 2>/dev/null)
             pr_diff_truncation_note="
-**NOTE: the diff above is truncated — showing the first 500 of ${pr_diff_total_lines} total lines.** Full list of changed files with line counts:
+**NOTE: the diff above is truncated — showing the first ${pr_diff_max_lines} of ${pr_diff_total_lines} total lines.**${pr_diff_full_path:+ The full diff is saved at \`${pr_diff_full_path}\` — read it for the remainder.} Full list of changed files with line counts:
 
 ${pr_diff_file_stats}
 "
@@ -16053,6 +16111,10 @@ ${prior_prs_rows}
 "
         fi
 
+        local pr_requirements_prompt
+        pr_requirements_prompt=$(_pr_review_requirements_block \
+            "$LOG_BASE/context/issue-body.md" "${pr_diff_full_path:-}")
+
         local review_prompt="Review PR #$pr_number for issue #$ISSUE_NUMBER against base $BASE_BRANCH.
 
 ${pr_review_skill:+## Skill Instructions — READ AND FOLLOW THESE
@@ -16061,7 +16123,7 @@ $pr_review_skill
 
 ## End Skill Instructions
 
-}${prior_prs_prompt}Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
+}${prior_prs_prompt}${pr_requirements_prompt}Part 1 — Spec Review: Verify the PR achieves the goals of the issue. Check goal achievement, not code quality. Flag scope creep.
 Part 2 — Code Review: Review code quality, patterns, standards, and security.
 
 Here is the diff to review (do NOT run git diff yourself — use this):
