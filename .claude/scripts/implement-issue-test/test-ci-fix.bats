@@ -99,6 +99,30 @@ make_log() {
 	((count == 80))
 }
 
+@test "excerpt keeps ##[error], FAIL, FAILED, Error: and cross-mark lines" {
+	local log out
+	log=$(for i in {1..120}; do printf 'plain %d\n' "$i"; done
+		printf '##[error]step blew up\n'
+		printf 'FAIL src/a.test.js\n'
+		printf 'FAILED tests/b.py::t\n'
+		printf 'TypeError: x is undefined\n'
+		printf '\xe2\x9c\x97 cross one\n'
+		printf '\xe2\x9d\x8c cross two\n'
+		printf '\xe2\x9c\x95 cross three\n'
+		printf 'Failure-free plain line\n')
+	out=$(_ci_failure_excerpt "$log")
+
+	[[ "$out" == *'##[error]step blew up'* ]]
+	[[ "$out" == *'FAIL src/a.test.js'* ]]
+	[[ "$out" == *'FAILED tests/b.py::t'* ]]
+	[[ "$out" == *'Error: x is undefined'* ]]
+	[[ "$out" == *'cross one'* ]]
+	[[ "$out" == *'cross two'* ]]
+	[[ "$out" == *'cross three'* ]]
+	[[ "$out" != *'plain 5'$'\n'* ]]
+	[[ "$out" != *'Failure-free'* ]]
+}
+
 @test "excerpt of empty input prints nothing" {
 	local out
 	out=$(_ci_failure_excerpt "")
@@ -317,6 +341,56 @@ push_setup() {
 	[[ "$c" == *'`new.sh`'* ]]
 }
 
+@test "format and bundle steps run before push and their commits are pushed" {
+	push_setup
+	export FORMAT_CMD="printf 'formatted\\n' >> a.sh"
+	regenerate_bundle_if_needed() {
+		printf 'bundle\n' > bundle.txt
+		git add bundle.txt
+		git commit -q -m "chore: bundle"
+	}
+	# The rerun appears on the NEW head (after format + bundle commits).
+	git() {
+		if [[ "$1" == push ]]; then
+			command git push "${@:2}" || return 1
+			printf '{"head_sha":"%s","checks":[{"name":"Bats","status":"queued"}]}\n' \
+				"$(command git rev-parse HEAD)" > "$STUB_CHECKS_JSON"
+			return 0
+		fi
+		command git "$@"
+	}
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 0 ]]
+
+	local remote_log
+	remote_log=$(git --git-dir="$TEST_TMP/origin.git" log --format=%s feat)
+	[[ "$remote_log" == *"style: format"* ]]
+	[[ "$remote_log" == *"chore: bundle"* ]]
+	[[ "$(git ls-remote origin refs/heads/feat | cut -f1)" == "$(git rev-parse HEAD)" ]]
+	[[ -z "$(git status --porcelain)" ]]
+}
+
+@test "formatter failure returns 1 and does not push" {
+	push_setup
+	run_format_cmd_if_needed() { return 1; }
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 1 ]]
+	[[ "$(command git --git-dir="$TEST_TMP/origin.git" rev-parse feat)" == "$PUSH_BEFORE" ]]
+	[[ ! -e "$COMMENT_FILE" ]]
+}
+
+@test "bundle regeneration failure returns 1 and does not push" {
+	push_setup
+	regenerate_bundle_if_needed() { return 1; }
+
+	run _ci_fix_push_and_wait 5 Bats 1 feat "$PUSH_BEFORE"
+	[[ "$status" -eq 1 ]]
+	[[ "$(command git --git-dir="$TEST_TMP/origin.git" rev-parse feat)" == "$PUSH_BEFORE" ]]
+	[[ ! -e "$COMMENT_FILE" ]]
+}
+
 @test "push failure returns 1 and posts no comment" {
 	push_setup
 	git remote set-url origin "$TEST_TMP/missing.git"
@@ -442,6 +516,21 @@ STUB
 	[[ "$rc" -eq 124 ]]
 	[[ "$(wc -l < "$MERGE_RUNS")" -eq 1 ]]
 	[[ ! -s "$FIX_CALLS" ]]
+}
+
+@test "a merge conflict decline writes no check_failed and no fix is attempted" {
+	merge_setup
+	cat > "$PLATFORM_DIR/merge-mr.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'run\n' >> "$MERGE_RUNS"
+exit 1
+STUB
+	local rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 1 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 1 ]]
+	[[ ! -s "$FIX_CALLS" ]]
+	[[ -z "$_ci_fix_summary" ]]
 }
 
 @test "merged tip is re-read from origin after the CI fix push" {

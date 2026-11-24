@@ -606,7 +606,9 @@ _full_suite_cause_lines() {
 # A plain tail misses it: the "not ok" line and the "#" lines under it sit
 # well before the closing "Process completed with exit code 1" line. Each
 # "not ok" line is kept together with the "#" lines directly beneath it, in
-# log order, up to the 80 line cap. With no "not ok" line the last 80 lines
+# log order, up to the 80 line cap. Single lines holding "##[error]", FAIL,
+# FAILED, "Error:" or a cross mark (U+2715, U+2717, U+2718, U+274C) are kept too, so
+# non-bats runners name their cause. With none of these the last 80 lines
 # are printed instead. Empty input prints nothing.
 _ci_failure_excerpt() {
 	local log="$1" causes
@@ -614,7 +616,15 @@ _ci_failure_excerpt() {
 	causes=$(printf '%s\n' "$log" | awk '
 		/^not ok/ { keep = 1; if (n < 80) { print; n++ }; next }
 		keep && /^[[:space:]]*#/ { if (n < 80) { print; n++ }; next }
-		{ keep = 0 }
+		{
+			keep = 0
+			if (index($0, "##[error]") || index($0, "Error:") ||
+				$0 ~ /(^|[^A-Za-z])FAIL(ED)?([^A-Za-z]|$)/ ||
+				index($0, "\342\234\227") || index($0, "\342\234\230") ||
+				index($0, "\342\235\214") || index($0, "\342\234\225")) {
+				if (n < 80) { print; n++ }
+			}
+		}
 	')
 	if [[ -n "$causes" ]]; then
 		printf '%s\n' "$causes"
@@ -757,6 +767,21 @@ _ci_fix_push_and_wait() {
 	local pr="$1" check_name="$2" iteration="$3"
 	local branch="$4" head_before="$5"
 	local local_head remote_head files file_list=""
+
+	# Same pre-push steps as the initial PR push: formatter first, then bundle
+	# regeneration, so neither can leave the fix red on the very check it
+	# fixes. Both run BEFORE the head is resolved so the pushed (and verified)
+	# head includes their commits.
+	if ! run_format_cmd_if_needed "."; then
+		log_error "CI fix push: formatter failed; not pushing"
+		_ci_fix_result="formatter failed"
+		return 1
+	fi
+	if ! regenerate_bundle_if_needed "." "${BASE_BRANCH:-main}"; then
+		log_error "CI fix push: bundle regeneration failed; not pushing"
+		_ci_fix_result="bundle regeneration failed"
+		return 1
+	fi
 
 	local_head=$(git rev-parse HEAD 2>/dev/null || printf '')
 	if [[ -z "$local_head" ]]; then
