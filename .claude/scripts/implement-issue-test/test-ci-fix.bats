@@ -336,3 +336,98 @@ push_setup() {
 	[[ "$status" -eq 1 ]]
 	[[ -e "$COMMENT_FILE" ]]
 }
+
+# =============================================================================
+# _merge_with_ci_fix
+# =============================================================================
+
+# Stubs merge-mr.sh: declines with check_failed on the first STUB_DECLINES
+# runs (writing MERGE_MR_DECLINE_FILE), then succeeds. Fix helpers are stubbed.
+merge_setup() {
+	export MERGE_MR_STEP_TIMEOUT=10
+	MERGE_RUNS="$TEST_TMP/merge-runs"
+	FIX_CALLS="$TEST_TMP/fix-calls"
+	: > "$MERGE_RUNS"
+	: > "$FIX_CALLS"
+	export MERGE_RUNS STUB_DECLINES=1 STUB_KIND=check_failed
+	cat > "$PLATFORM_DIR/merge-mr.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'run\n' >> "$MERGE_RUNS"
+n=$(wc -l < "$MERGE_RUNS")
+if ((n <= STUB_DECLINES)); then
+	printf '%s\tBats\n' "$STUB_KIND" > "$MERGE_MR_DECLINE_FILE"
+	exit 1
+fi
+exit 0
+STUB
+	chmod +x "$PLATFORM_DIR/merge-mr.sh"
+	STUB_FIX_RC=0
+	_ci_fix_attempt() { printf 'attempt %s %s %s\n' "$@" >> "$FIX_CALLS"; return "$STUB_FIX_RC"; }
+	_ci_fix_push_and_wait() { printf 'push %s\n' "$3" >> "$FIX_CALLS"; return 0; }
+}
+
+@test "merge retries once after a CI fix and succeeds" {
+	merge_setup
+	local rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 0 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 2 ]]
+	grep -q 'attempt 5 Bats 1' "$FIX_CALLS"
+	grep -q 'push 1' "$FIX_CALLS"
+}
+
+@test "MAX_CI_FIX_ITERATIONS=0 never attempts a fix" {
+	merge_setup
+	MAX_CI_FIX_ITERATIONS=0
+	local rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 1 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 1 ]]
+	[[ ! -s "$FIX_CALLS" ]]
+}
+
+@test "merge stops after the iteration cap" {
+	merge_setup
+	STUB_DECLINES=5
+	MAX_CI_FIX_ITERATIONS=2
+	local rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 1 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 3 ]]
+	[[ "$(grep -c '^attempt' "$FIX_CALLS")" -eq 2 ]]
+}
+
+@test "a non-CI decline is not retried" {
+	merge_setup
+	STUB_KIND=other
+	local rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 1 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 1 ]]
+	[[ ! -s "$FIX_CALLS" ]]
+}
+
+@test "a failed fix attempt returns the merge decline without retrying" {
+	merge_setup
+	STUB_FIX_RC=1
+	local rc=0
+	_merge_with_ci_fix 5 feat || rc=$?
+	[[ "$rc" -eq 1 ]]
+	[[ "$(wc -l < "$MERGE_RUNS")" -eq 1 ]]
+}
+
+@test "merged tip is re-read from origin after the CI fix push" {
+	merge_setup
+	push_setup
+	git push -q origin HEAD:refs/heads/feat 2>/dev/null || true
+	git update-ref refs/remotes/origin/feat "$PUSH_BEFORE"
+	local fixed
+	fixed=$(git rev-parse HEAD)
+	_ci_fix_push_and_wait() {
+		git update-ref refs/remotes/origin/feat "$fixed"
+		return 0
+	}
+	local _merged_tip=""
+	_merge_with_ci_fix 5 feat || true
+	[[ "$_merged_tip" == "$fixed" ]]
+}

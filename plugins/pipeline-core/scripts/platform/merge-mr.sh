@@ -176,6 +176,18 @@ _first_failed_check() {
   ' <<<"$rollup_json" 2>/dev/null || echo "unknown check"
 }
 
+# Records a check-failure refusal in MERGE_MR_DECLINE_FILE, when set, as one
+# tab-separated line: "check_failed", then the failing check's name. Lets the
+# caller learn WHY the merge was declined without scraping stderr. A write
+# failure never changes the refusal itself.
+_record_check_failed_decline() {
+  local check="$1"
+
+  [ -n "${MERGE_MR_DECLINE_FILE:-}" ] || return 0
+  printf 'check_failed\t%s\n' "$check" >"$MERGE_MR_DECLINE_FILE" 2>/dev/null \
+    || true
+}
+
 # The PR's current head SHA; empty when it cannot be read.
 _pr_head_sha() {
   gh pr view "$1" --json headRefOid --jq '.headRefOid' 2>/dev/null || printf ''
@@ -400,7 +412,10 @@ wait_for_mergeable() {
       rollup=$(jq -c '.statusCheckRollup // []' <<<"$legacy_json" 2>/dev/null || echo "[]")
 
       if _has_concluded_check_failure "$rollup"; then
-        echo "PR #$pr has check \"$(_first_failed_check "$rollup")\" that concluded in failure (mergeable: $state); refusing to wait" >&2
+        local failed_check
+        failed_check=$(_first_failed_check "$rollup")
+        _record_check_failed_decline "$failed_check"
+        echo "PR #$pr has check \"$failed_check\" that concluded in failure (mergeable: $state); refusing to wait" >&2
         return 1
       fi
 
@@ -445,7 +460,10 @@ wait_for_mergeable() {
         rollup=$(jq -c '.statusCheckRollup // []' <<<"$json" 2>/dev/null || echo "[]")
 
         if _has_concluded_check_failure "$rollup"; then
-          echo "PR #$pr has check \"$(_first_failed_check "$rollup")\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
+          local failed_check
+          failed_check=$(_first_failed_check "$rollup")
+          _record_check_failed_decline "$failed_check"
+          echo "PR #$pr has check \"$failed_check\" that concluded in failure (mergeStateStatus: $merge_state); refusing to wait" >&2
           return 1
         fi
 

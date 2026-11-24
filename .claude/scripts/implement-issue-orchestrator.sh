@@ -782,6 +782,63 @@ $file_list" "${AGENT:-}"
 	return 0
 }
 
+# _merge_with_ci_fix PR BRANCH
+#
+# Runs merge-mr.sh and, when it declines because a CI check failed, makes up
+# to MAX_CI_FIX_ITERATIONS (default 1, 0 = off) fix attempts (#1141): fix,
+# push and wait for the rerun (_ci_fix_attempt, _ci_fix_push_and_wait), then
+# retries merge-mr.sh. The decline reason is read from MERGE_MR_DECLINE_FILE.
+# Before every merge-mr.sh run `_merged_tip` (the CALLER's local, by dynamic
+# scope) is re-read from origin/BRANCH, so after a CI-fix push it names the
+# fixed tip rather than the pre-fix one.
+#
+# Returns the exit status of the last merge-mr.sh run (124 on timeout); a
+# fix that cannot be made, pushed or seen to rerun returns the status of the
+# merge-mr.sh run that triggered it.
+_merge_with_ci_fix() {
+	local pr="$1" branch="$2"
+	local max="${MAX_CI_FIX_ITERATIONS:-1}"
+	local iter=0 rc decline_file kind check_name head_before
+	[[ "$max" =~ ^[0-9]+$ ]] || max=1
+
+	while true; do
+		rc=0
+		_merged_tip=$(git rev-parse --verify -q \
+			"refs/remotes/origin/$branch" 2>/dev/null) || true
+		decline_file=$(mktemp "${TMPDIR:-/tmp}/merge-decline.XXXXXX") \
+			|| decline_file=""
+		MERGE_MR_DECLINE_FILE="$decline_file" \
+			timeout "$MERGE_MR_STEP_TIMEOUT" \
+			"$PLATFORM_DIR/merge-mr.sh" "$pr" \
+			>>"${LOG_FILE:-/dev/null}" 2>&1 || rc=$?
+		kind="" check_name=""
+		if [[ -n "$decline_file" ]]; then
+			IFS=$'\t' read -r kind check_name < "$decline_file" \
+				|| true
+			rm -f "$decline_file"
+		fi
+		if (( rc == 0 || rc == 124 )); then
+			return "$rc"
+		fi
+		if [[ "$kind" != "check_failed" || -z "$check_name" ]] \
+			|| (( iter >= max )); then
+			return "$rc"
+		fi
+
+		iter=$((iter + 1))
+		log "merge_pr: check \"$check_name\" failed —" \
+			"CI fix attempt $iter of $max"
+		head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
+		if ! _ci_fix_attempt "$pr" "$check_name" "$iter"; then
+			return "$rc"
+		fi
+		if ! _ci_fix_push_and_wait "$pr" "$check_name" "$iter" \
+			"$branch" "$head_before"; then
+			return "$rc"
+		fi
+	done
+}
+
 # _run_bounded_process_group BUDGET GRACE OUTFILE CMD [ARGS...]
 #
 # Runs CMD in its own process group with stdout+stderr sent to OUTFILE and
@@ -16623,16 +16680,13 @@ $_task_summary_line}" \
         log "merge_pr: merge-in-progress comment posted"
         log "merge_pr: invoking merge-mr.sh for PR #$pr_number"
 
-        # The PR head as last pushed; recorded before merge-mr.sh deletes
-        # the remote branch so the local copy can be judged against what
-        # actually merged (issue #950).
-        local _merged_tip
-        _merged_tip=$(git rev-parse --verify -q \
-            "refs/remotes/origin/$branch" 2>/dev/null)
+        # The PR head as last pushed; _merge_with_ci_fix records it before
+        # each merge-mr.sh run (which deletes the remote branch) so the
+        # local copy can be judged against what actually merged (issue #950).
+        local _merged_tip=""
 
         local _merge_exit
-        timeout "$MERGE_MR_STEP_TIMEOUT" "$PLATFORM_DIR/merge-mr.sh" \
-            "$pr_number" >>"${LOG_FILE:-/dev/null}" 2>&1
+        _merge_with_ci_fix "$pr_number" "$branch"
         _merge_exit=$?
         if (( _merge_exit == 124 )); then
             _handle_merge_pr_timeout "merge-mr.sh" "$MERGE_MR_STEP_TIMEOUT"
