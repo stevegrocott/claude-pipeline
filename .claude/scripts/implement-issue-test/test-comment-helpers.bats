@@ -449,3 +449,27 @@ EOF
 	run extract_changes_bullets ""
 	[ "$output" = "Implementation completed successfully" ]
 }
+
+# =============================================================================
+# build_complete_prompt (issue #1115)
+# =============================================================================
+
+@test "build_complete_prompt lists each task description and status" {
+	cat > "$STATUS_FILE" <<'JSON'
+{"tasks":[{"id":"1","description":"Add foo","status":"completed"},
+{"id":"2","description":"Fix bar","status":"failed"}]}
+JSON
+	run build_complete_prompt 45 feature/issue-9 "SKILLTEXT"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"PR #45 implementing issue #123 on branch feature/issue-9"* ]]
+	[[ "$output" == *"- Task 1 [completed]: Add foo"* ]]
+	[[ "$output" == *"- Task 2 [failed]: Fix bar"* ]]
+	[[ "$output" == *"SKILLTEXT"* ]]
+}
+
+@test "build_complete_prompt omits skill block when skill empty" {
+	echo '{"tasks":[]}' > "$STATUS_FILE"
+	run build_complete_prompt 1 b ""
+	[[ "$output" == *"(no tasks recorded)"* ]]
+	[[ "$output" != *"Skill Instructions"* ]]
+}

@@ -7403,6 +7403,34 @@ extract_changes_bullets() {
 	fi
 }
 
+# build_complete_prompt PR_NUMBER BRANCH [SKILL]
+#
+# Builds the complete-stage prompt (issue #1115). Lists every task from
+# STATUS_FILE with its description and status so the model summarises the
+# work actually done instead of describing a comment it could not write.
+build_complete_prompt() {
+	local pr_number="${1-}"
+	local branch="${2-}"
+	local skill="${3-}"
+	local task_lines=""
+
+	if [[ -f "${STATUS_FILE:-}" ]]; then
+		task_lines=$(jq -r '.tasks[]? |
+			"- Task \(.id) [\(.status // "unknown")]: \(.description // "")"' \
+			"$STATUS_FILE" 2>/dev/null) || task_lines=""
+	fi
+	[[ -n "$task_lines" ]] || task_lines="(no tasks recorded)"
+
+	printf '%s\n\n' "Generate a completion summary for PR #$pr_number implementing issue #$ISSUE_NUMBER on branch $branch."
+	printf '%s\n%s\n\n' "## Tasks and Status" "$task_lines"
+	if [[ -n "$skill" ]]; then
+		printf '%s\n\n%s\n\n%s\n\n' \
+			"## Skill Instructions — READ AND FOLLOW THESE" \
+			"$skill" "## End Skill Instructions"
+	fi
+	printf '%s' "Output a summary suitable for a PR/MR comment."
+}
+
 # append_reconciled_tally() — appends the reconciled-task tally to the
 # COMPLETE-stage PR comment when non-zero (issue #810 task 2).
 # reconcile_failed_tasks_with_branch_evidence() persists .reconciled_count in
@@ -15983,15 +16011,8 @@ Fix the issues and commit. Output a summary of fixes applied."
         local complete_skill
         complete_skill=$(load_skill "complete-summary")
 
-        local complete_prompt="Generate a completion summary for PR #$pr_number implementing issue #$ISSUE_NUMBER on branch $branch.
-
-${complete_skill:+## Skill Instructions — READ AND FOLLOW THESE
-
-$complete_skill
-
-## End Skill Instructions
-
-}Output a summary suitable for a PR/MR comment."
+        local complete_prompt
+        complete_prompt=$(build_complete_prompt "$pr_number" "$branch" "$complete_skill")
 
         local complete_result
         complete_result=$(run_stage "complete" "$complete_prompt" "implement-issue-complete.json")
