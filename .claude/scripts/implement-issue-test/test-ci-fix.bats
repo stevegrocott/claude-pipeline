@@ -431,3 +431,44 @@ STUB
 	_merge_with_ci_fix 5 feat || true
 	[[ "$_merged_tip" == "$fixed" ]]
 }
+
+# =============================================================================
+# _ci_fix_summary (Merge: Failed comment and final reason)
+# =============================================================================
+
+@test "summary names the check and the fix result without paths" {
+	merge_setup
+	_ci_fix_attempt() {
+		_ci_fix_result="fix stage made no change"
+		return 1
+	}
+	local _ci_fix_summary=""
+	_merge_with_ci_fix 5 feat || true
+	[[ "$_ci_fix_summary" == 'check "Bats" failed; CI fix: fix stage made no change' ]]
+	[[ "$_ci_fix_summary" != */* ]]
+}
+
+@test "summary says the fix was disabled when MAX_CI_FIX_ITERATIONS=0" {
+	merge_setup
+	MAX_CI_FIX_ITERATIONS=0
+	local _ci_fix_summary=""
+	_merge_with_ci_fix 5 feat || true
+	[[ "$_ci_fix_summary" == *'check "Bats" failed'*'disabled'* ]]
+}
+
+@test "summary is empty for a non-CI decline" {
+	merge_setup
+	STUB_KIND=other
+	local _ci_fix_summary="stale"
+	_merge_with_ci_fix 5 feat || true
+	[[ -z "$_ci_fix_summary" ]]
+}
+
+@test "summary is reported after the iteration cap is exhausted" {
+	merge_setup
+	STUB_DECLINES=5
+	MAX_CI_FIX_ITERATIONS=1
+	local _ci_fix_summary=""
+	_merge_with_ci_fix 5 feat || true
+	[[ "$_ci_fix_summary" == *'check "Bats" failed'*'still failing'* ]]
+}

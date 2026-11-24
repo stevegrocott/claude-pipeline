@@ -674,6 +674,7 @@ _ci_fix_attempt() {
 	if [[ -z "$log_text" ]]; then
 		log_warn "No failed log for check \"$check_name\" —" \
 			"no CI fix attempt"
+		_ci_fix_result="no failed-step log available"
 		return 1
 	fi
 
@@ -705,6 +706,7 @@ Fix the failure and commit. Output a summary of the fix applied."
 	_halt_if_api_error
 
 	if ! verify_fix_stage_commit "fix-ci-iter-$iteration" "$head_before"; then
+		_ci_fix_result="fix stage left uncommitted changes"
 		return 1
 	fi
 
@@ -712,12 +714,14 @@ Fix the failure and commit. Output a summary of the fix applied."
 	if [[ -z "$head_after" || "$head_after" == "$head_before" ]]; then
 		log "fix-ci-iter-$iteration committed nothing —" \
 			"no CI fix to push"
+		_ci_fix_result="fix stage made no change"
 		return 1
 	fi
 
 	if ! guard_commit_path_allowlist "."; then
 		log_error "fix-ci-iter-$iteration: committed paths outside" \
 			"the code/tests allowlist — CI fix rejected"
+		_ci_fix_result="fix rejected: changed paths outside allowlist"
 		return 1
 	fi
 	: "$fix_result"
@@ -749,6 +753,7 @@ _ci_fix_push_and_wait() {
 
 	if ! git push origin "$branch" 2>>"${LOG_FILE:-/dev/stderr}"; then
 		log_error "CI fix push to origin/$branch failed"
+		_ci_fix_result="fix push failed"
 		return 1
 	fi
 
@@ -757,6 +762,7 @@ _ci_fix_push_and_wait() {
 	if [[ "$remote_head" != "$local_head" ]]; then
 		log_error "CI fix push not verified: remote head" \
 			"'${remote_head:-none}' != local $local_head"
+		_ci_fix_result="fix push not verified against remote head"
 		return 1
 	fi
 
@@ -777,6 +783,7 @@ $file_list" "${AGENT:-}"
 	if ! _wait_for_check_on_head "$pr" "$local_head" "$check_name"; then
 		log_warn "Check \"$check_name\" did not appear on" \
 			"${local_head:0:12} within the wait budget"
+		_ci_fix_result="fix pushed but check did not rerun in time"
 		return 1
 	fi
 	return 0
@@ -792,6 +799,10 @@ $file_list" "${AGENT:-}"
 # scope) is re-read from origin/BRANCH, so after a CI-fix push it names the
 # fixed tip rather than the pre-fix one.
 #
+# Sets `_ci_fix_summary` (the CALLER's local, by dynamic scope) to a one-line
+# "check X failed; CI fix: <result>" whenever a check failure was seen, with no
+# local paths, for the failure comment and final reason.
+#
 # Returns the exit status of the last merge-mr.sh run (124 on timeout); a
 # fix that cannot be made, pushed or seen to rerun returns the status of the
 # merge-mr.sh run that triggered it.
@@ -799,7 +810,9 @@ _merge_with_ci_fix() {
 	local pr="$1" branch="$2"
 	local max="${MAX_CI_FIX_ITERATIONS:-1}"
 	local iter=0 rc decline_file kind check_name head_before
+	local _ci_fix_result=""
 	[[ "$max" =~ ^[0-9]+$ ]] || max=1
+	_ci_fix_summary=""
 
 	while true; do
 		rc=0
@@ -820,8 +833,16 @@ _merge_with_ci_fix() {
 		if (( rc == 0 || rc == 124 )); then
 			return "$rc"
 		fi
-		if [[ "$kind" != "check_failed" || -z "$check_name" ]] \
-			|| (( iter >= max )); then
+		if [[ "$kind" != "check_failed" || -z "$check_name" ]]; then
+			return "$rc"
+		fi
+		if (( iter >= max )); then
+			if (( iter == 0 )); then
+				_ci_fix_result="not attempted (CI fix disabled)"
+			else
+				_ci_fix_result="fix pushed but check still failing"
+			fi
+			_ci_fix_summary="check \"$check_name\" failed; CI fix: $_ci_fix_result"
 			return "$rc"
 		fi
 
@@ -830,10 +851,12 @@ _merge_with_ci_fix() {
 			"CI fix attempt $iter of $max"
 		head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
 		if ! _ci_fix_attempt "$pr" "$check_name" "$iter"; then
+			_ci_fix_summary="check \"$check_name\" failed; CI fix: $_ci_fix_result"
 			return "$rc"
 		fi
 		if ! _ci_fix_push_and_wait "$pr" "$check_name" "$iter" \
 			"$branch" "$head_before"; then
+			_ci_fix_summary="check \"$check_name\" failed; CI fix: $_ci_fix_result"
 			return "$rc"
 		fi
 	done
@@ -16685,7 +16708,7 @@ $_task_summary_line}" \
         # local copy can be judged against what actually merged (issue #950).
         local _merged_tip=""
 
-        local _merge_exit
+        local _merge_exit _ci_fix_summary=""
         _merge_with_ci_fix "$pr_number" "$branch"
         _merge_exit=$?
         if (( _merge_exit == 124 )); then
@@ -16694,9 +16717,10 @@ $_task_summary_line}" \
             log "merge_pr: merge-mr.sh failed for PR #$pr_number"
             log_error "Failed to merge PR #$pr_number"
             comment_issue "Merge: Failed" \
-                "❌ Failed to merge PR #$pr_number. Manual intervention required." \
+                "❌ Failed to merge PR #$pr_number${_ci_fix_summary:+ ($_ci_fix_summary)}. Manual intervention required." \
                 "default"
-            set_final_state "error" "Failed to merge PR #$pr_number"
+            set_final_state "error" \
+                "Failed to merge PR #$pr_number${_ci_fix_summary:+ ($_ci_fix_summary)}"
             exit 1
         fi
 
