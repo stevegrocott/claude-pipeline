@@ -697,6 +697,82 @@ _wait_for_file() {
     [ ! -e "${STATUS_FILE}.lockdir.break" ] || fail "break file left behind"
 }
 
+# Back-dates FILE by SECS seconds.  UTC on both sides so a daylight-saving
+# transition cannot shift the stamp.
+_backdate() {
+    local stamp
+    TZ=UTC printf -v stamp '%(%Y%m%d%H%M.%S)T' "$(( $(date +%s) - $2 ))"
+    TZ=UTC touch -t "$stamp" "$1"
+}
+
+@test "status lock: default stale age clears an 8-second-old break file (issue #1193)" {
+    export STATUS_LOCK_IMPL=mkdir
+    unset STATUS_LOCK_TIMEOUT LOCK_STALE_AGE
+    init_status
+
+    mkdir -p "${STATUS_FILE}.lockdir"
+    printf '%s\n' 999999 > "${STATUS_FILE}.lockdir/pid"
+    : > "${STATUS_FILE}.lockdir.break"
+    _backdate "${STATUS_FILE}.lockdir.break" 8
+
+    # A default at or above STATUS_LOCK_TIMEOUT (it was 30) leaves the break
+    # file in place until the waiter gives up.
+    run status_json_write --arg v "eight-seconds" '.branch = $v'
+    [ "$status" -eq 0 ] \
+        || fail "8 s old break file not stale under the default: $output"
+    [ "$(jq -r '.branch' "$STATUS_FILE")" = "eight-seconds" ] \
+        || fail "update lost"
+    [ ! -e "${STATUS_FILE}.lockdir.break" ] || fail "break file left behind"
+}
+
+@test "status lock: default stale age keeps a 2-second-old break file (issue #1193)" {
+    export STATUS_LOCK_IMPL=mkdir
+    unset LOCK_STALE_AGE
+    init_status
+    # Zero timeout: the staleness check runs exactly once before the deadline.
+    export STATUS_LOCK_TIMEOUT=0
+
+    mkdir -p "${STATUS_FILE}.lockdir"
+    printf '%s\n' 999999 > "${STATUS_FILE}.lockdir/pid"
+    : > "${STATUS_FILE}.lockdir.break"
+    _backdate "${STATUS_FILE}.lockdir.break" 2
+
+    run _status_lock_acquire
+    [ "$status" -eq 1 ] || fail "expected deadline (1), got $status: $output"
+    [ -e "${STATUS_FILE}.lockdir.break" ] \
+        || fail "a break file younger than the default stale age was removed"
+}
+
+@test "status lock: unremovable stale break file times out, does not spin (issue #1193)" {
+    export STATUS_LOCK_IMPL=mkdir
+    export STATUS_LOCK_TIMEOUT=2
+    export LOCK_STALE_AGE=5
+    init_status
+
+    mkdir -p "${STATUS_FILE}.lockdir"
+    printf '%s\n' 999999 > "${STATUS_FILE}.lockdir/pid"
+    # A non-empty directory: stale by age, but `rm -f` cannot remove it.
+    mkdir -p "${STATUS_FILE}.lockdir.break"
+    : > "${STATUS_FILE}.lockdir.break/keep"
+    touch -t 200001010000 "${STATUS_FILE}.lockdir.break"
+
+    # In the background under a watchdog: a waiter that loops without
+    # reaching the deadline check would otherwise hang the suite.
+    local start=$SECONDS
+    (
+        rc=0
+        _status_lock_acquire 2>/dev/null || rc=$?
+        printf '%s' "$rc" > "$TEST_TMP/acquire.rc"
+    ) &
+    _wait_pids_or_fail 15 "$!"
+
+    [ "$(<"$TEST_TMP/acquire.rc")" = "1" ] \
+        || fail "expected timeout (1), got $(<"$TEST_TMP/acquire.rc")"
+    (( SECONDS - start >= 2 )) || fail "returned before the deadline"
+    (( SECONDS - start < 10 )) || fail "overran the deadline"
+    [ -d "${STATUS_FILE}.lockdir.break" ] || fail "break directory removed"
+}
+
 @test "status lock: fresh break file makes the waiter time out, not spin" {
     export STATUS_LOCK_IMPL=mkdir
     export STATUS_LOCK_TIMEOUT=2
@@ -1084,4 +1160,5 @@ _pr_stage_prompt() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"--body 'Closes #123'"* ]]
     [[ "$output" != *"--body-file"* ]]
+    [[ "$output" == *"Could not write PR body file"* ]]
 }

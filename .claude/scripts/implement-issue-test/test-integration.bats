@@ -866,6 +866,77 @@ _classify_false_absence() {
 	[[ "$src" == *'${pr_requirements_prompt}Part 1'* ]]
 }
 
+# Runs main()'s real diff-cap validation (extracted from the function text, so
+# the test executes production code) and prints the cap it settles on.
+_pr_diff_cap() {
+	local block
+	block=$(declare -f main | awk '
+		/local pr_diff_max_lines=/ { on = 1 }
+		on { print }
+		on && /^ *fi;?$/ { exit }')
+	[[ "$block" == *'pr_diff_max_lines=2000'* ]] || return 99
+	eval "_cap() {
+		$block
+		printf 'cap=%s\n' \"\$pr_diff_max_lines\"
+	}"
+	_cap
+}
+
+@test "PR review diff cap warns and uses 2000 for an invalid PR_REVIEW_DIFF_MAX_LINES (issue #1185)" {
+	local bad
+	for bad in abc 0 -5 1.5; do
+		: > "$LOG_FILE"
+		PR_REVIEW_DIFF_MAX_LINES="$bad"
+		run _pr_diff_cap
+		[ "$status" -eq 0 ] || fail "cap block failed for '$bad': $output"
+		[[ "$output" == *"cap=2000"* ]] \
+			|| fail "'$bad' must fall back to 2000: $output"
+		grep -qF "PR_REVIEW_DIFF_MAX_LINES='$bad' is not a positive integer; using 2000" \
+			"$LOG_FILE" || fail "no warning logged for '$bad'"
+	done
+}
+
+@test "PR review diff cap takes a valid or unset PR_REVIEW_DIFF_MAX_LINES without a warning (issue #1185)" {
+	: > "$LOG_FILE"
+	PR_REVIEW_DIFF_MAX_LINES=750
+	run _pr_diff_cap
+	[[ "$output" == *"cap=750"* ]] || fail "valid cap not used: $output"
+	unset PR_REVIEW_DIFF_MAX_LINES
+	run _pr_diff_cap
+	[[ "$output" == *"cap=2000"* ]] || fail "default cap not used: $output"
+	run grep -c "PR_REVIEW_DIFF_MAX_LINES" "$LOG_FILE"
+	[ "$output" = "0" ] || fail "unexpected warning: $(<"$LOG_FILE")"
+}
+
+@test "PR review saved-diff path does not carry over to an untruncated iteration (issue #1185)" {
+	# The truncation branch up to the point the full diff is saved; the
+	# closing fi is added back below.
+	local block
+	block=$(declare -f main | awk '
+		/local pr_diff_truncation_note="";/ { on = 1 }
+		on { print }
+		on && /\|\| pr_diff_full_path="";/ { exit }')
+	[[ "$block" == *'pr-review-full-diff-iter-'* ]] \
+		|| fail "could not extract the truncation branch"
+	# Iteration 1 is truncated (3 lines over a cap of 2), iteration 2 is not.
+	eval "_two_iterations() {
+		local pr_iteration pr_diff_total_lines pr_diff_max_lines=2
+		local pr_diff_full=\$'a\nb\nc'
+		for pr_iteration in 1 2; do
+			pr_diff_total_lines=\$(( pr_iteration == 1 ? 3 : 1 ))
+			$block
+			fi
+			printf 'iter%s=%s\n' \"\$pr_iteration\" \"\$pr_diff_full_path\"
+		done
+	}"
+	_two_iterations > "$TEST_TMP/iterations.out" 2>/dev/null
+	grep -qxF "iter1=$LOG_BASE/pr-review-full-diff-iter-1.diff" \
+		"$TEST_TMP/iterations.out" \
+		|| fail "truncated iteration saved no diff: $(<"$TEST_TMP/iterations.out")"
+	grep -qxF "iter2=" "$TEST_TMP/iterations.out" \
+		|| fail "stale path carried over: $(<"$TEST_TMP/iterations.out")"
+}
+
 # =============================================================================
 # LOGGING
 # =============================================================================

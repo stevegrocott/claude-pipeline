@@ -2772,6 +2772,68 @@ _make_plain_consumer_repo() {
     [[ "$output" == *"no details"* ]]
 }
 
+# Extracts the review loop's fix dispatch (feedback collection, fix prompt,
+# fix stage and the hand-over call) from the real main() so the test executes
+# the production text rather than a copy.
+_extract_fix_dispatch() {
+    declare -f main | awk '
+        /local review_comments;/ { on = 1 }
+        on { print }
+        on && /_handle_fix_stage_result "\$pr_number"/ { exit }'
+}
+
+# Runs the extracted dispatch for REVIEW_RESULT.  The fix prompt handed to
+# run_stage lands in fix-prompt.txt and the feedback handed to
+# _handle_fix_stage_result (its sixth argument) in handover-feedback.txt.
+_run_fix_dispatch() {
+    local block
+    block=$(_extract_fix_dispatch)
+    [[ "$block" == *"run_stage"*"_handle_fix_stage_result"* ]] || return 99
+
+    load_skill() { :; }
+    verify_on_feature_branch() { :; }
+    _halt_if_budget_exceeded() { :; }
+    _halt_if_api_error() { :; }
+    run_stage() {
+        printf '%s' "$2" > "$TEST_TMP/fix-prompt.txt"
+        printf '%s' '{"status":"success","output":{"summary":"done"}}'
+    }
+    _handle_fix_stage_result() {
+        printf '%s' "$6" > "$TEST_TMP/handover-feedback.txt"
+    }
+
+    eval "_dispatch() {
+        local pr_number=77 pr_iteration=1 branch=fix-branch AGENT=''
+        local review_result=\"\$1\"
+        local review_history_file=\"\$TEST_TMP/review-history.json\"
+        $block
+    }"
+    _dispatch "$@"
+}
+
+@test "review loop hands summary-only feedback to the fix prompt and the hand-over (issue #1186)" {
+    _run_fix_dispatch '{"status":"success","output":{"result":"changes_requested","issues":[],"comments":"tighten the retry loop","summary":"needs another pass"}}' \
+        || fail "fix dispatch did not run (rc=$?)"
+
+    local sink
+    for sink in fix-prompt.txt handover-feedback.txt; do
+        grep -qF "tighten the retry loop" "$TEST_TMP/$sink" \
+            || fail "$sink lacks the review comments: $(<"$TEST_TMP/$sink")"
+        grep -qF "needs another pass" "$TEST_TMP/$sink" \
+            || fail "$sink lacks the review summary: $(<"$TEST_TMP/$sink")"
+    done
+}
+
+@test "review loop hands listed issues to the fix prompt and the hand-over (issue #1186)" {
+    _run_fix_dispatch '{"status":"success","output":{"result":"changes_requested","issues":[{"file":"a.sh","line":3,"description":"bad quoting"}],"summary":"s"}}' \
+        || fail "fix dispatch did not run (rc=$?)"
+
+    grep -qF "a.sh:3 → bad quoting" "$TEST_TMP/fix-prompt.txt" \
+        || fail "fix prompt lacks the issue: $(<"$TEST_TMP/fix-prompt.txt")"
+    grep -qF "a.sh:3 → bad quoting" "$TEST_TMP/handover-feedback.txt" \
+        || fail "hand-over lacks the issue: $(<"$TEST_TMP/handover-feedback.txt")"
+}
+
 # =============================================================================
 # _handle_fix_stage_result: genuine no-op
 # =============================================================================
