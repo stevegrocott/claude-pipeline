@@ -445,6 +445,17 @@ EOF
 	[ "$output" = "Implementation completed successfully" ]
 }
 
+@test "extract_changes_bullets drops bare TBD and angle placeholder bullets" {
+	local s=$'## Changes\n- Real change\n- TBD\n- tbd.\n* <describe change>\n- Uses <b> tag in output'
+	run extract_changes_bullets "$s"
+	[ "$output" = $'- Real change\n- Uses <b> tag in output' ]
+}
+
+@test "extract_changes_bullets falls back when only TBD or angle bullets" {
+	run extract_changes_bullets $'## Changes\n- TBD\n- <summary>'
+	[ "$output" = "Implementation completed successfully" ]
+}
+
 @test "extract_changes_bullets falls back on empty input" {
 	run extract_changes_bullets ""
 	[ "$output" = "Implementation completed successfully" ]

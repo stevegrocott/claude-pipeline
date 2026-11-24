@@ -7742,14 +7742,16 @@ reconcile_failed_tasks_with_branch_evidence() {
 # comment, or fills Quality Gates lines with placeholders; only the bullets
 # under a Changes heading are trustworthy, since the orchestrator supplies
 # the rest. Bullets containing a bracket placeholder ([...] not followed by
-# "(", so markdown links survive) are dropped. When no bullet remains the
-# fallback line is printed.
+# "(", so markdown links survive) are dropped, as are bullets whose whole
+# text is TBD or a single <angle-bracket> placeholder. When no bullet
+# remains the fallback line is printed.
 extract_changes_bullets() {
 	local summary="${1-}"
 	local line in_changes=0 out=""
 	local fallback="Implementation completed successfully"
 	local placeholder='\[[^]]*\]([^(]|$)'
 	local bullet='^[[:space:]]*[-*+][[:space:]]+'
+	local empty_re='^[[:space:]]*[-*+][[:space:]]+(TBD|tbd|Tbd|<[^<>]*>)[[:space:]]*[.:]?[[:space:]]*$'
 
 	while IFS= read -r line || [[ -n "$line" ]]; do
 		if [[ "$line" =~ ^[[:space:]]*(#+|\*\*)[[:space:]]*[^[:alnum:]]*Changes ]]; then
@@ -7763,6 +7765,7 @@ extract_changes_bullets() {
 		((in_changes)) || continue
 		[[ "$line" =~ $bullet ]] || continue
 		[[ "$line" =~ $placeholder ]] && continue
+		[[ "$line" =~ $empty_re ]] && continue
 		out+="$line"$'\n'
 	done <<< "$summary"
 
@@ -7893,6 +7896,44 @@ append_reconciled_tally() {
 	fi
 
 	printf '%s' "$complete_summary"
+}
+
+# completion_footer() — one-line verdict closing the COMPLETE-stage PR comment.
+# "ready" only when no degraded stage is recorded (in-memory DEGRADED_STAGES or
+# persisted .degraded_stages) and no merge_blocked_reason is set in
+# $STATUS_FILE; otherwise names what blocks, so the comment never claims
+# readiness the pipeline's own state contradicts.
+#
+# Globals:
+#   DEGRADED_STAGES, STATUS_FILE
+# Outputs:
+#   The footer line on stdout
+completion_footer() {
+	local reason="" persisted="" blockers="" ds
+	local -a stages=()
+
+	if [[ -f "${STATUS_FILE:-}" ]]; then
+		reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE" 2>/dev/null) || reason=""
+		persisted=$(jq -r '(.degraded_stages // [])[]?' "$STATUS_FILE" 2>/dev/null) || persisted=""
+	fi
+	for ds in "${DEGRADED_STAGES[@]+"${DEGRADED_STAGES[@]}"}"; do
+		stages+=("$ds")
+	done
+	while IFS= read -r ds; do
+		[[ -n "$ds" ]] || continue
+		[[ " ${stages[*]-} " == *" $ds "* ]] || stages+=("$ds")
+	done <<< "$persisted"
+
+	if [[ -z "$reason" ]] && ((${#stages[@]} == 0)); then
+		printf '%s' '*This PR is ready for human review and merge.*'
+		return 0
+	fi
+	[[ -z "$reason" ]] || blockers="merge blocked: ${reason}"
+	if ((${#stages[@]} > 0)); then
+		[[ -z "$blockers" ]] || blockers+="; "
+		blockers+="degraded stage(s): ${stages[*]}"
+	fi
+	printf '%s' "*This PR is NOT ready to merge — ${blockers}.*"
 }
 
 # _lacking_evidence_summary() — formats every task still marked "failed" in
@@ -16523,7 +16564,7 @@ Manual review of these areas is recommended.
 $complete_summary
 
 ---
-*This PR is ready for human review and merge.*"
+$(completion_footer)"
 
         set_stage_completed "complete"
     fi

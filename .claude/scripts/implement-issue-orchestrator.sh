@@ -7742,14 +7742,16 @@ reconcile_failed_tasks_with_branch_evidence() {
 # comment, or fills Quality Gates lines with placeholders; only the bullets
 # under a Changes heading are trustworthy, since the orchestrator supplies
 # the rest. Bullets containing a bracket placeholder ([...] not followed by
-# "(", so markdown links survive) are dropped. When no bullet remains the
-# fallback line is printed.
+# "(", so markdown links survive) are dropped, as are bullets whose whole
+# text is TBD or a single <angle-bracket> placeholder. When no bullet
+# remains the fallback line is printed.
 extract_changes_bullets() {
 	local summary="${1-}"
 	local line in_changes=0 out=""
 	local fallback="Implementation completed successfully"
 	local placeholder='\[[^]]*\]([^(]|$)'
 	local bullet='^[[:space:]]*[-*+][[:space:]]+'
+	local empty_re='^[[:space:]]*[-*+][[:space:]]+(TBD|tbd|Tbd|<[^<>]*>)[[:space:]]*[.:]?[[:space:]]*$'
 
 	while IFS= read -r line || [[ -n "$line" ]]; do
 		if [[ "$line" =~ ^[[:space:]]*(#+|\*\*)[[:space:]]*[^[:alnum:]]*Changes ]]; then
@@ -7763,6 +7765,7 @@ extract_changes_bullets() {
 		((in_changes)) || continue
 		[[ "$line" =~ $bullet ]] || continue
 		[[ "$line" =~ $placeholder ]] && continue
+		[[ "$line" =~ $empty_re ]] && continue
 		out+="$line"$'\n'
 	done <<< "$summary"
 
