@@ -156,6 +156,20 @@ teardown() {
     assert_mock_not_called_with "inline loses"
 }
 
+@test "create-mr github: shell metacharacters in body file reach host unchanged" {
+    export GIT_HOST="github"
+    local marker="$TEST_TMP/pwned"
+    printf '%s\n' \
+        'tick `touch '"$marker"'` and $(touch '"$marker"')' \
+        'quote "dq" '"'sq'"' pipe a | b; $HOME' > "$TEST_TMP/body.md"
+    run run_platform_script create-mr.sh --source "f" --target "main" --title "T" \
+        --body-file "$TEST_TMP/body.md"
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
+    assert_mock_called_with 'tick `touch '"$marker"'` and $(touch '"$marker"')'
+    assert_mock_called_with 'quote "dq" '"'sq'"' pipe a | b; $HOME'
+}
+
 @test "create-mr: fails on a missing --body-file without calling the host" {
     export GIT_HOST="github"
     run run_platform_script create-mr.sh --source "f" --target "main" --title "T" \
