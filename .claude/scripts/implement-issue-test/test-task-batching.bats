@@ -741,6 +741,193 @@ _restore_acceptance_env() {
 }
 
 # =============================================================================
+# cleanup_worktree: plugin-registry entry removal (issue #1025)
+# =============================================================================
+
+# Write a plugin registry under a throwaway HOME. Args: worktree paths to
+# register as project-scope pipeline-core entries (plus fixed siblings).
+_i1025_write_registry() {
+	export HOME="$TEST_TMP/home"
+	REGISTRY="$HOME/.claude/plugins/installed_plugins.json"
+	mkdir -p "$(dirname "$REGISTRY")"
+	local entries="" p
+	for p in "$@"; do
+		entries+="{\"scope\":\"project\",\"projectPath\":\"$p\",\"installPath\":\"/cache/pc\",\"version\":\"0.8.23\"},"
+	done
+	cat > "$REGISTRY" <<REGISTRY_JSON
+{
+  "version": 2,
+  "plugins": {
+    "pipeline-core@claude-pipeline": [
+      ${entries}
+      {"scope":"user","installPath":"/cache/pc","version":"0.8.23"},
+      {"scope":"project","projectPath":"/elsewhere/repo","installPath":"/cache/pc","version":"0.8.23"}
+    ],
+    "other@market": [
+      {"scope":"project","projectPath":"$1","installPath":"/cache/other","version":"1.0"}
+    ]
+  }
+}
+REGISTRY_JSON
+}
+
+# Make a task worktree and print its path.
+_i1025_make_wt() {
+	local n="$1"
+	create_task_worktree "$TEST_TMP/worktrees" "feature/i1025" "$n" "1025" >/dev/null
+	printf '%s' "$TEST_TMP/worktrees/task-$n"
+}
+
+_i1025_count_path() {
+	jq -r --arg p "$1" \
+		'[.plugins["pipeline-core@claude-pipeline"][] | select(.projectPath == $p)] | length' \
+		"$REGISTRY"
+}
+
+_i1025_setup_branch() {
+	cd "$TEST_TMP/repo" || exit 1
+	git checkout -q -b feature/i1025 main
+}
+
+@test "#1025 cleanup_worktree: removes the registry entry for the exact projectPath" {
+	_i1025_setup_branch
+	local wt
+	wt=$(_i1025_make_wt 31)
+	_i1025_write_registry "$wt"
+	[ "$(_i1025_count_path "$wt")" = "1" ]
+
+	cleanup_worktree "$wt" "wt-i1025-t31" "1025" "31" "feature/i1025"
+
+	[ "$(_i1025_count_path "$wt")" = "0" ]
+}
+
+@test "#1025 cleanup_worktree: every other registry entry is preserved" {
+	_i1025_setup_branch
+	local wt
+	wt=$(_i1025_make_wt 32)
+	_i1025_write_registry "$wt"
+	local expected
+	expected=$(jq -cS --arg p "$wt" \
+		'.plugins["pipeline-core@claude-pipeline"] |= map(select(.projectPath != $p))' \
+		"$REGISTRY")
+
+	cleanup_worktree "$wt" "wt-i1025-t32" "1025" "32" "feature/i1025"
+
+	[ "$(jq -cS . "$REGISTRY")" = "$expected" ]
+	# user-scope, sibling project and other-plugin entries all survive
+	[ "$(jq '.plugins["pipeline-core@claude-pipeline"] | length' "$REGISTRY")" = "2" ]
+	[ "$(jq '.plugins["other@market"] | length' "$REGISTRY")" = "1" ]
+}
+
+@test "#1025 cleanup_worktree: prefix-sharing projectPath is not removed" {
+	_i1025_setup_branch
+	local wt
+	wt=$(_i1025_make_wt 33)
+	_i1025_write_registry "$wt" "${wt}-extra" "${wt}/sub"
+
+	cleanup_worktree "$wt" "wt-i1025-t33" "1025" "33" "feature/i1025"
+
+	[ "$(_i1025_count_path "$wt")" = "0" ]
+	[ "$(_i1025_count_path "${wt}-extra")" = "1" ]
+	[ "$(_i1025_count_path "${wt}/sub")" = "1" ]
+}
+
+@test "#1025 cleanup_worktree: missing registry file stays missing and returns 0" {
+	_i1025_setup_branch
+	local wt
+	wt=$(_i1025_make_wt 34)
+	export HOME="$TEST_TMP/home-none"
+	mkdir -p "$HOME"
+
+	run cleanup_worktree "$wt" "wt-i1025-t34" "1025" "34" "feature/i1025"
+	[ "$status" -eq 0 ]
+	[ ! -e "$HOME/.claude/plugins/installed_plugins.json" ]
+}
+
+@test "#1025 cleanup_worktree: empty registry file is untouched and returns 0" {
+	_i1025_setup_branch
+	local wt
+	wt=$(_i1025_make_wt 35)
+	_i1025_write_registry "$wt"
+	: > "$REGISTRY"
+
+	run cleanup_worktree "$wt" "wt-i1025-t35" "1025" "35" "feature/i1025"
+	[ "$status" -eq 0 ]
+	[ ! -s "$REGISTRY" ]
+}
+
+@test "#1025 cleanup_worktree: unparseable registry file is untouched and returns 0" {
+	_i1025_setup_branch
+	local wt
+	wt=$(_i1025_make_wt 36)
+	_i1025_write_registry "$wt"
+	printf '{ not json "%s"' "$wt" > "$REGISTRY"
+	local before
+	before=$(cat "$REGISTRY")
+
+	run cleanup_worktree "$wt" "wt-i1025-t36" "1025" "36" "feature/i1025"
+	[ "$status" -eq 0 ]
+	[ "$(cat "$REGISTRY")" = "$before" ]
+}
+
+@test "#1025 cleanup_worktree: jq absent from PATH leaves registry unchanged and returns 0" {
+	_i1025_setup_branch
+	local wt
+	wt=$(_i1025_make_wt 37)
+	_i1025_write_registry "$wt"
+	local before
+	before=$(cat "$REGISTRY")
+
+	# PATH of symlinks to every executable except jq
+	local nojq="$TEST_TMP/nojq-bin" d f
+	mkdir -p "$nojq"
+	local dirs
+	IFS=: read -ra dirs <<< "$PATH"
+	for d in "${dirs[@]}"; do
+		[[ -d "$d" ]] || continue
+		for f in "$d"/*; do
+			[[ -x "$f" && ! -d "$f" ]] || continue
+			[[ "${f##*/}" == jq ]] && continue
+			[[ -e "$nojq/${f##*/}" ]] || ln -s "$f" "$nojq/${f##*/}"
+		done
+	done
+
+	local saved_path="$PATH"
+	PATH="$nojq"
+	run command -v jq
+	local jq_status="$status"
+	run cleanup_worktree "$wt" "wt-i1025-t37" "1025" "37" "feature/i1025"
+	local cleanup_status="$status"
+	PATH="$saved_path"
+
+	[ "$jq_status" -ne 0 ]
+	[ "$cleanup_status" -eq 0 ]
+	[ "$(cat "$REGISTRY")" = "$before" ]
+}
+
+@test "#1025 cleanup_worktree: concurrent calls (mkdir lock) each remove their own entry" {
+	_i1025_setup_branch
+	local wt_a wt_b
+	wt_a=$(_i1025_make_wt 38)
+	wt_b=$(_i1025_make_wt 39)
+	_i1025_write_registry "$wt_a" "$wt_b"
+	export STATUS_LOCK_IMPL=mkdir
+
+	cleanup_worktree "$wt_a" "wt-i1025-t38" "1025" "38" "feature/i1025" &
+	local pid_a=$!
+	cleanup_worktree "$wt_b" "wt-i1025-t39" "1025" "39" "feature/i1025" &
+	local pid_b=$!
+	wait "$pid_a"
+	wait "$pid_b"
+
+	[ "$(_i1025_count_path "$wt_a")" = "0" ]
+	[ "$(_i1025_count_path "$wt_b")" = "0" ]
+	# siblings and other plugins survive both writes
+	[ "$(jq '.plugins["pipeline-core@claude-pipeline"] | length' "$REGISTRY")" = "2" ]
+	[ "$(jq '.plugins["other@market"] | length' "$REGISTRY")" = "1" ]
+}
+
+# =============================================================================
 # delete_merged_local_branch (issue #950)
 # =============================================================================
 
