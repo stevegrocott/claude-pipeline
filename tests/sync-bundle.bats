@@ -928,9 +928,10 @@ _init_pipeline_git_repo() {
 # before the fix stage hands its commit to the push, not just somewhere in
 # the file.
 #
-# Since #878 the loop no longer pushes per iteration: it marks the branch with
-# mark_review_push_pending and flush_review_push does one push when the loop
-# exits. The hazard and the guarantee are unchanged — the regeneration must
+# Since #878 the loop pushes through a helper: it marks the branch with
+# mark_review_push_pending and flush_review_push does the push (since #967
+# straight after the mark, before the next review). The hazard and the
+# guarantee are unchanged — the regeneration must
 # still run before the fix-stage commit is handed over — so this binds to the
 # hand-over point rather than to a push that is now one call away.
 @test "(#675) the regeneration hook also runs before the post-PR fix-stage push is queued" {

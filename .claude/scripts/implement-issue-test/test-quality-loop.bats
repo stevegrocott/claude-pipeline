@@ -2222,27 +2222,59 @@ _run_fix_handover() {
 }
 
 # =============================================================================
-# ISSUE #878 — one push per review loop, not one per iteration
+# ISSUES #878 and #967 — the review loop pushes each fix before the next review
 #
-# Each push is a full CI run on the consumer. The review loop diffs LOCAL git
-# (`git diff "$BASE_BRANCH"...HEAD`), so nothing inside the loop needs origin
-# to be current, and only the final head is ever merged — N intermediate
-# pushes buy no signal. The push moves to the loop exit, with the EXIT trap as
-# the safety net for a run halted mid-loop (batch-orchestrator recovers that
-# as "PR exists" and hands the PR to a standalone /process-pr, which merges
-# whatever is on origin — an unpushed fix would be silently dropped).
+# The reviewer reads the PR from the remote, so a fix that is committed but
+# not pushed gets reviewed as if it were missing (#967). The loop pushes and
+# verifies each accepted fix through flush_review_push before it reviews
+# again. #878's one-push-per-loop saving is given up for that. The flush at
+# the loop exit and the EXIT trap remain as the safety net for a run halted
+# mid-loop (batch-orchestrator recovers that as "PR exists" and hands the PR
+# to a standalone /process-pr, which merges whatever is on origin — an
+# unpushed fix would be silently dropped).
 # =============================================================================
 
-@test "#878: the review loop no longer pushes inside its fix branch" {
+# Stubs git for the flush tests: records each push, and answers rev-parse with
+# one fixed head so the post-push check sees origin equal to local HEAD.
+_stub_git_push_verified() {
+    GIT_PUSH_LOG="$1"
+    git() {
+        if [[ "$1" == "push" ]]; then
+            printf '%s\n' "$*" >> "$GIT_PUSH_LOG"
+            return 0
+        fi
+        if [[ "$1" == "rev-parse" ]]; then
+            printf '%s\n' 0123456789abcdef0123456789abcdef01234567
+            return 0
+        fi
+        command git "$@"
+    }
+}
+
+@test "#967: the review loop pushes and verifies each fix before the next review" {
     local main_def
     main_def=$(declare -f main)
 
     local fix_block
     fix_block=$(printf '%s' "$main_def" \
-        | awk '/_handle_fix_stage_result "\$pr_number"/,/^ *fi$/')
+        | awk '/_handle_fix_stage_result "\$pr_number"/,/^ *done$/')
 
+    [[ "$fix_block" == *'mark_review_push_pending "$branch"'* ]] || \
+        fail "the fix branch never arms the push: $fix_block"
+
+    # The push must be checked, and a failure must leave the loop and block
+    # the merge instead of re-reviewing a stale remote head.
+    local on_failure
+    on_failure=$(printf '%s\n' "$fix_block" \
+        | awk '/if ! flush_review_push; then/,/^ *fi;?$/')
+    [[ -n "$on_failure" ]] || \
+        fail "the fix branch does not check the push result: $fix_block"
+    [[ "$on_failure" == *"record_failed_review_fix"* && "$on_failure" == *"break"* ]] || \
+        fail "a failed push neither blocks the merge nor leaves the loop: $on_failure"
+
+    # The push itself stays inside flush_review_push, where it is verified.
     if [[ "$fix_block" == *"git push origin"* ]]; then
-        fail "the fix branch still pushes per iteration: $fix_block"
+        fail "the fix branch pushes without the verified helper: $fix_block"
     fi
 }
 
@@ -2267,15 +2299,9 @@ _run_fix_handover() {
         fail "flush runs after the stage completes, so merge-mr.sh could merge a stale remote head"
 }
 
-@test "#878: three review iterations result in exactly one push" {
+@test "#878: repeated marks flush as exactly one push" {
     local push_log="$TEST_TMP/git-push.log"
-    git() {
-        if [[ "$1" == "push" ]]; then
-            printf '%s\n' "$*" >> "$push_log"
-            return 0
-        fi
-        command git "$@"
-    }
+    _stub_git_push_verified "$push_log"
 
     mark_review_push_pending "fix/issue-878"
     mark_review_push_pending "fix/issue-878"
@@ -2286,7 +2312,7 @@ _run_fix_handover() {
     local pushes
     pushes=$(grep -c . "$push_log")
     [[ "$pushes" -eq 1 ]] || \
-        fail "expected exactly 1 push for 3 iterations, got $pushes: $(< "$push_log")"
+        fail "expected exactly 1 push for 3 marks, got $pushes: $(< "$push_log")"
     assert_file_contains "$push_log" "push origin fix/issue-878"
 }
 
@@ -2309,13 +2335,7 @@ _run_fix_handover() {
 
 @test "#878: the flush is idempotent — the loop exit and the EXIT trap push once between them" {
     local push_log="$TEST_TMP/git-push.log"
-    git() {
-        if [[ "$1" == "push" ]]; then
-            printf '%s\n' "$*" >> "$push_log"
-            return 0
-        fi
-        command git "$@"
-    }
+    _stub_git_push_verified "$push_log"
 
     mark_review_push_pending "fix/issue-878"
     flush_review_push
@@ -2326,6 +2346,34 @@ _run_fix_handover() {
     pushes=$(grep -c . "$push_log")
     [[ "$pushes" -eq 1 ]] || \
         fail "flush is not idempotent — expected 1 push, got $pushes"
+}
+
+@test "#967: a push the remote head does not reflect is retried once, fails and stays armed" {
+    local push_log="$TEST_TMP/git-push.log"
+    git() {
+        if [[ "$1" == "push" ]]; then
+            printf '%s\n' "$*" >> "$push_log"
+            return 0
+        fi
+        if [[ "$1" == "rev-parse" ]]; then
+            # Local HEAD resolves; origin/<branch> does not exist.
+            [[ "$2" == "HEAD" ]] || return 128
+            printf '%s\n' 0123456789abcdef0123456789abcdef01234567
+            return 0
+        fi
+        command git "$@"
+    }
+
+    mark_review_push_pending "fix/issue-967"
+    local rc=0
+    flush_review_push || rc=$?
+
+    [[ "$rc" -eq 1 ]] || fail "expected the unverified push to fail with 1, got $rc"
+    local pushes
+    pushes=$(grep -c . "$push_log")
+    [[ "$pushes" -eq 2 ]] || fail "expected one retry (2 pushes), got $pushes"
+    [[ "$PR_REVIEW_PUSH_PENDING" == "1" ]] || \
+        fail "a failed push must stay armed for the EXIT trap"
 }
 
 @test "#878: the EXIT trap flushes a pending push so a halted run cannot leave the fix unpushed" {
