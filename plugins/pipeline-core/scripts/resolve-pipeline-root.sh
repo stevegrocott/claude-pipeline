@@ -248,7 +248,7 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
         local -a removed=()
         local -a entries=()
         IFS=: read -r -a entries <<< "$PATH"
-        for entry in "${entries[@]}"; do
+        for entry in ${entries[@]+"${entries[@]}"}; do
             [[ "$entry" == "$bin_dir" ]] && continue
             # Sibling version bin: <cache>/<numeric version>/bin
             if [[ "$entry" == "${cache_dir}"/*/bin ]]; then
@@ -263,7 +263,7 @@ if [[ -z "${_RESOLVE_PIPELINE_ROOT_SOURCED:-}" ]]; then
         done
         local IFS=:
         PATH="${bin_dir}${kept[*]:+:${kept[*]}}"
-        PIPELINE_PIN_REMOVED="${removed[*]}"
+        PIPELINE_PIN_REMOVED="${removed[*]:-}"
         export PATH PIPELINE_PIN_REMOVED
     }
 
