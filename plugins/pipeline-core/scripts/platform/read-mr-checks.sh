@@ -2,9 +2,12 @@
 # Usage: read-mr-checks.sh <mr-number> [--failed-log <check-name>]
 # Returns: JSON {"head_sha": "...", "checks": [{name,status,conclusion,url}]}
 #   With --failed-log: the failed-step log of a FAILED run of that named
-#   check instead, with gh's job, step and timestamp columns removed; empty
-#   output, exit 0 when no failed run has that name, for a non-Actions URL or
-#   a failing log command.
+#   check instead, with gh's job, step and timestamp columns removed. When
+#   that prints nothing (e.g. the run is still in progress) and the URL names
+#   a job, the whole job log from the jobs API, with its byte order mark and
+#   leading timestamps removed. Empty output, exit 0 when no failed run has
+#   that name, for a non-Actions URL, or when no log can be read; in the last
+#   case gh's error text goes to stderr.
 #   On gitlab (no checks API wired up): {"head_sha":null,"checks":[]}, and
 #   empty output with --failed-log. Always exit 0.
 set -euo pipefail
@@ -63,8 +66,30 @@ _strip_log_columns() {
     }'
 }
 
-github_failed_log() {
-    local url run_id job_id
+# The jobs API prints each line as "<timestamp> <text>" and starts the log
+# with a byte order mark. LC_ALL=C so awk matches the mark byte by byte.
+_strip_api_log_prefix() {
+    LC_ALL=C awk '{
+        if (NR == 1) {
+            sub(/^\357\273\277/, "")
+        }
+        sub(/^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9:.]+Z ?/, "")
+        print
+    }'
+}
+
+# True when the file opens like a job log: a timestamp, after any byte order
+# mark. A success status alone does not show the reply is a log.
+_is_api_log() {
+    local first=""
+    IFS= read -r first < "$1" || true
+    first="${first#$'\357\273\277'}"
+    [[ "$first" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ]]
+}
+
+# The body is a subshell so the EXIT trap removes the temp dir on any exit.
+github_failed_log() (
+    local url run_id job_id="" tmp_dir
     local -a args
     # One name can cover several runs (push and pull_request triggers, or a
     # rerun); only a failed one has a failed-step log.
@@ -88,8 +113,32 @@ github_failed_log() {
         job_id="${BASH_REMATCH[1]}"
         args+=(--job "$job_id")
     fi
-    gh "${args[@]}" 2>/dev/null | _strip_log_columns || true
-}
+    tmp_dir="$(mktemp -d)" || return 0
+    trap 'rm -rf "$tmp_dir"' EXIT
+    gh "${args[@]}" > "$tmp_dir/log" 2> "$tmp_dir/err" || true
+    if [[ -s "$tmp_dir/log" ]]; then
+        _strip_log_columns < "$tmp_dir/log" || true
+        return 0
+    fi
+    # gh refuses --log-failed until every job in the run has finished, but
+    # the jobs API serves a finished job's log at once.
+    if [[ -n "$job_id" ]]; then
+        # On an HTTP error gh api prints the error body on stdout, so the
+        # output counts as a log only when the call succeeds.
+        if gh api "repos/{owner}/{repo}/actions/jobs/$job_id/logs" \
+            > "$tmp_dir/log" 2> "$tmp_dir/api_err" \
+            && _is_api_log "$tmp_dir/log"; then
+            _strip_api_log_prefix < "$tmp_dir/log" || true
+            return 0
+        fi
+        # Report the last error gh gave; a successful reply that is not a
+        # log has none, so the run view error stands.
+        if [[ -s "$tmp_dir/api_err" ]]; then
+            cat "$tmp_dir/api_err" > "$tmp_dir/err"
+        fi
+    fi
+    cat "$tmp_dir/err" >&2
+)
 
 case "$GIT_HOST" in
   github)

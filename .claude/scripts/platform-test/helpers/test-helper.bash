@@ -84,6 +84,10 @@ PLATFORM_EOF
 
     # Reset mock output env vars
     export MOCK_GH_EXIT_CODE=0
+    # Per-subcommand output for 'run view' and 'api'; unset means silent,
+    # with MOCK_GH_EXIT_CODE as the exit status.
+    unset MOCK_GH_RUN_LOG MOCK_GH_RUN_ERR MOCK_GH_RUN_EXIT_CODE
+    unset MOCK_GH_API_LOG MOCK_GH_API_ERR MOCK_GH_API_EXIT_CODE
     export MOCK_GH_ISSUE_JSON='{"title":"Test Issue","body":"Test body","state":"OPEN"}'
     export MOCK_GH_ISSUES_JSON='[{"number":1,"title":"Issue 1","state":"OPEN"},{"number":2,"title":"Issue 2","state":"OPEN"}]'
     export MOCK_GH_PR_JSON='{"number":99,"title":"Test PR","body":"PR body","state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}'
@@ -190,9 +194,28 @@ case "$1" in
   run)
     case "$2" in
       view)
-        echo "${MOCK_GH_RUN_LOG:-}"
+        # An empty log prints nothing at all, as gh does when it refuses
+        # --log-failed for a run that is still in progress.
+        if [[ -n "${MOCK_GH_RUN_LOG:-}" ]]; then
+          printf '%s\n' "$MOCK_GH_RUN_LOG"
+        fi
+        if [[ -n "${MOCK_GH_RUN_ERR:-}" ]]; then
+          printf '%s\n' "$MOCK_GH_RUN_ERR" >&2
+        fi
+        exit "${MOCK_GH_RUN_EXIT_CODE:-${MOCK_GH_EXIT_CODE:-0}}"
         ;;
     esac
+    ;;
+  api)
+    # On an HTTP error gh api prints the error body on stdout as well as a
+    # message on stderr, so the two are set independently.
+    if [[ -n "${MOCK_GH_API_LOG:-}" ]]; then
+      printf '%s\n' "$MOCK_GH_API_LOG"
+    fi
+    if [[ -n "${MOCK_GH_API_ERR:-}" ]]; then
+      printf '%s\n' "$MOCK_GH_API_ERR" >&2
+    fi
+    exit "${MOCK_GH_API_EXIT_CODE:-${MOCK_GH_EXIT_CODE:-0}}"
     ;;
 esac
 
