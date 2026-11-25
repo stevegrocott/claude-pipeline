@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# cost-accounting.bats
+# test-cost-accounting.bats
 # Tests for per-stage/run-level token & cost accounting (issue #580).
 #
 # Covers:
