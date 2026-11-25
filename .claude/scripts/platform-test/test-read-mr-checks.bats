@@ -4,6 +4,8 @@
 # Tests for platform/read-mr-checks.sh
 #
 
+bats_require_minimum_version 1.5.0
+
 load 'helpers/test-helper'
 
 setup() {
@@ -122,6 +124,105 @@ GH
     run run_platform_script read-mr-checks.sh 99 lint
     [ "$status" -ne 0 ]
     assert_output_contains "Usage"
+}
+
+# =============================================================================
+# GITHUB MODE: JOBS API FALLBACK
+# =============================================================================
+
+# What gh does for a finished job of a run that is still in progress.
+refuse_run_view() {
+    export MOCK_GH_RUN_EXIT_CODE=1
+    export MOCK_GH_RUN_ERR="run 222 is still in progress; logs will be \
+available when it is complete"
+}
+
+# A commit status: its URL names a run but no job.
+use_check_url_without_job() {
+    export MOCK_GH_PR_VIEW_JSON='{"headRefOid":"abc123","statusCheckRollup":[{"name":"lint","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/222"}]}'
+}
+
+@test "read-mr-checks github: an empty log falls back to the jobs API log" {
+    export GIT_HOST="github"
+    refuse_run_view
+    export MOCK_GH_API_LOG="2026-01-02T03:04:05.1234567Z not ok 3 a thing"
+    run --separate-stderr run_platform_script read-mr-checks.sh 99 \
+        --failed-log lint
+    [ "$status" -eq 0 ]
+    [ "$output" == "not ok 3 a thing" ]
+    [ -z "$stderr" ]
+    assert_mock_called_with "gh run view 222 --log-failed --job 7"
+    assert_mock_called_with "gh api repos/{owner}/{repo}/actions/jobs/7/logs"
+}
+
+@test "read-mr-checks github: an empty log from a successful run view also falls back" {
+    export GIT_HOST="github"
+    export MOCK_GH_API_LOG="2026-01-02T03:04:05Z from the api"
+    run run_platform_script read-mr-checks.sh 99 --failed-log lint
+    [ "$status" -eq 0 ]
+    [ "$output" == "from the api" ]
+}
+
+@test "read-mr-checks github: jobs API log has the byte order mark and timestamps removed" {
+    export GIT_HOST="github"
+    refuse_run_view
+    export MOCK_GH_API_LOG=$'\xef\xbb\xbf2026-01-02T03:04:05.1234567Z not ok 3 a thing\n2026-01-02T03:04:06.0000000Z # (in test file x.bats, line 4)\n2026-01-02T03:04:07.0000000Z   indented\ttext\nuntimed line'
+    run run_platform_script read-mr-checks.sh 99 --failed-log lint
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 4 ]
+    [ "${lines[0]}" == "not ok 3 a thing" ]
+    [ "${lines[1]}" == "# (in test file x.bats, line 4)" ]
+    [ "${lines[2]}" == $'  indented\ttext' ]
+    [ "${lines[3]}" == "untimed line" ]
+}
+
+@test "read-mr-checks github: a log from run view means no jobs API call" {
+    export GIT_HOST="github"
+    export MOCK_GH_RUN_LOG="lint: error on line 4"
+    export MOCK_GH_API_LOG="2026-01-02T03:04:05Z must not be printed"
+    run run_platform_script read-mr-checks.sh 99 --failed-log lint
+    [ "$status" -eq 0 ]
+    [ "$output" == "lint: error on line 4" ]
+    assert_mock_not_called_with "gh api"
+}
+
+@test "read-mr-checks github: a URL with no job id skips the jobs API and reports why" {
+    export GIT_HOST="github"
+    use_check_url_without_job
+    refuse_run_view
+    export MOCK_GH_API_LOG="2026-01-02T03:04:05Z must not be printed"
+    run --separate-stderr run_platform_script read-mr-checks.sh 99 \
+        --failed-log lint
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$stderr" == "$MOCK_GH_RUN_ERR" ]
+    assert_mock_called_with "gh run view 222 --log-failed"
+    assert_mock_not_called_with "--job"
+    assert_mock_not_called_with "gh api"
+}
+
+@test "read-mr-checks github: a failed jobs API call reports its error, not its body" {
+    export GIT_HOST="github"
+    refuse_run_view
+    export MOCK_GH_API_EXIT_CODE=1
+    export MOCK_GH_API_LOG='{"message":"Not Found","status":"404"}'
+    export MOCK_GH_API_ERR="gh: Not Found (HTTP 404)"
+    run --separate-stderr run_platform_script read-mr-checks.sh 99 \
+        --failed-log lint
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$stderr" == "gh: Not Found (HTTP 404)" ]
+}
+
+@test "read-mr-checks github: an empty jobs API reply reports the run view error" {
+    export GIT_HOST="github"
+    refuse_run_view
+    run --separate-stderr run_platform_script read-mr-checks.sh 99 \
+        --failed-log lint
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$stderr" == "$MOCK_GH_RUN_ERR" ]
+    assert_mock_called_with "gh api repos/{owner}/{repo}/actions/jobs/7/logs"
 }
 
 # =============================================================================
