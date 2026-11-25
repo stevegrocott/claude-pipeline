@@ -9570,6 +9570,65 @@ merge_worktree_branch() {
 	return 1
 }
 
+# Remove a worktree's plugin-registry entries (issue #1025).
+#
+# A nested Claude CLI run inside a task worktree registers a project-scope
+# plugin install keyed on the worktree path in the user-level registry
+# (~/.claude/plugins/installed_plugins.json). Nothing removes it when the
+# worktree is deleted, so one entry leaks per task worktree forever.
+#
+# The registry is shared by every repo and interactive session on the
+# machine, so the rewrite is deliberately narrow:
+#   - only pipeline-core@claude-pipeline entries whose projectPath EQUALS
+#     the given path are dropped (exact string equality, never a prefix
+#     or glob); other plugins' entries are never touched;
+#   - the plugin key is deleted only when this removal emptied its list;
+#   - the rewrite is jq -> temp file -> mv, under the same flock/mkdir lock
+#     status_json_write uses (it is reused with STATUS_FILE pointed at the
+#     registry, so the lock files sit beside it);
+#   - an absent or corrupt registry, a missing jq, or a lock timeout leaves
+#     the file untouched. This is bookkeeping: it never fails the caller.
+#
+# Arguments:
+#   $1 - worktree_path (the exact projectPath string to remove)
+#
+# Environment:
+#   PLUGIN_REGISTRY_FILE - registry location; defaults to
+#                          $HOME/.claude/plugins/installed_plugins.json
+#
+remove_worktree_plugin_registry_entry() {
+	local wt_path="$1"
+	local registry="${PLUGIN_REGISTRY_FILE:-}"
+	[[ -n "$registry" ]] \
+		|| registry="${HOME}/.claude/plugins/installed_plugins.json"
+
+	# An empty path must never reach the filter.
+	[[ -n "$wt_path" ]] || return 0
+	[[ -f "$registry" ]] || return 0
+	command -v jq > /dev/null 2>&1 || return 0
+
+	# status_json_write would create a missing file; the guard above rules
+	# that out. The subshell scopes the STATUS_FILE override so the
+	# orchestrator's real status file is never touched.
+	(
+		STATUS_FILE="$registry"
+		status_json_write --arg p "$wt_path" \
+			--arg k "pipeline-core@claude-pipeline" '
+			if (.plugins | type) == "object"
+				and (.plugins[$k] | type) == "array" then
+				(.plugins[$k] | map(select(
+					(type == "object"
+					 and .projectPath == $p) | not
+				))) as $kept
+				| if ($kept | length) == 0
+				  then del(.plugins[$k])
+				  else .plugins[$k] = $kept end
+			else . end
+		' 2>/dev/null
+	) || true
+	return 0
+}
+
 # Clean up a git worktree and its branch.
 #
 # If the branch carries commits that never landed in feature_branch
@@ -9602,6 +9661,7 @@ cleanup_worktree() {
 			2>/dev/null >&2 || true
 	fi
 	git worktree prune 2>/dev/null >&2 || true
+	remove_worktree_plugin_registry_entry "$wt_path"
 	git branch -D "$wt_branch" 2>/dev/null >&2 || true
 }
 
