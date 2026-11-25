@@ -360,3 +360,65 @@ teardown() {
 
 	assert_event_field "$LOG_BASE/events.jsonl" '.outcome' "completed"
 }
+
+# =============================================================================
+# review-loop push (#967): a failed push is a stage error; a successful push
+# leaves the remote head equal to the local head the review will run against.
+# Uses a real repo + bare remote — no stubbed git — so the actual push path runs.
+# =============================================================================
+
+source_review_push_functions() {
+	local func_file="$TEST_TMP/review_push_functions.bash"
+	local orchestrator="$SCRIPT_DIR/implement-issue-orchestrator.sh"
+
+	awk '
+		/^(log|mark_review_push_pending|flush_review_push)\(\) \{$/ { infn=1 }
+		infn { print }
+		infn && /^\}$/ { infn=0 }
+	' "$orchestrator" > "$func_file"
+
+	grep -q "flush_review_push()" "$func_file" || return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+make_review_push_repo() {
+	local remote_url="$1"
+	REVIEW_REPO="$TEST_TMP/review-repo"
+	git init -q "$REVIEW_REPO"
+	git -C "$REVIEW_REPO" config user.email t@example.com
+	git -C "$REVIEW_REPO" config user.name t
+	git -C "$REVIEW_REPO" checkout -q -b feature/issue-967
+	git -C "$REVIEW_REPO" commit -q --allow-empty -m "fix: review fix"
+	git -C "$REVIEW_REPO" remote add origin "$remote_url"
+}
+
+@test "#967: a failed review push is reported as a stage error, not swallowed" {
+	source_review_push_functions
+	make_review_push_repo "$TEST_TMP/does-not-exist.git"
+
+	cd "$REVIEW_REPO"
+	mark_review_push_pending "feature/issue-967"
+	run flush_review_push
+
+	# The failure must surface as a non-zero result ...
+	[ "$status" -ne 0 ]
+	# ... and the log must carry git's own error, not just a bare warning.
+	grep -qiE "does-not-exist|fatal|does not appear to be a git repository" "$LOG_FILE"
+}
+
+@test "#967: a successful review push leaves the remote head equal to local HEAD" {
+	source_review_push_functions
+	git init -q --bare "$TEST_TMP/remote.git"
+	make_review_push_repo "$TEST_TMP/remote.git"
+
+	cd "$REVIEW_REPO"
+	mark_review_push_pending "feature/issue-967"
+	run flush_review_push
+	[ "$status" -eq 0 ]
+
+	local local_head remote_head
+	local_head=$(git rev-parse HEAD)
+	remote_head=$(git --git-dir="$TEST_TMP/remote.git" rev-parse refs/heads/feature/issue-967)
+	[ "$local_head" = "$remote_head" ]
+}
