@@ -9071,6 +9071,9 @@ cleanup_stale_worktrees() {
 				log "  $line"
 			done
 		git worktree prune 2>/dev/null >&2 || true
+		if [[ ! -d "$dead_wt_path" ]]; then
+			remove_worktree_plugin_registry_entry "$dead_wt_path"
+		fi
 
 		salvage_unmerged_commits "$dead_wt_branch" "$dead_tag"
 		git branch -D "$dead_wt_branch" 2>&1 \
@@ -9930,6 +9933,9 @@ reclaim_merged_branch() {
 		else
 			git worktree remove --force "$active_wt" \
 				2>/dev/null >&2 || true
+			if [[ ! -d "$active_wt" ]]; then
+				remove_worktree_plugin_registry_entry "$active_wt"
+			fi
 		fi
 	fi
 
