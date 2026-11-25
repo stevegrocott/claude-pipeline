@@ -3131,40 +3131,47 @@ log_startup_environment
 # exit 143 is called, preventing orphaned child processes.
 _bg_pids=()
 
-# Deferred push for the PR review loop (issue #878).
+# Verified push for the PR review loop (issues #878, #967).
 #
-# The loop used to push after every fix iteration, so an N-iteration review
-# cost N full CI runs on a consumer whose expensive suite runs per push. Only
-# the FINAL state of the branch is ever merged, and the reviewer builds its
-# diff from local git (`git diff "$BASE_BRANCH"...HEAD`), never from origin —
-# so the intermediate pushes buy no review signal, only minutes. Mark the
-# branch here instead and flush once when the loop exits.
+# The reviewer reads the PR from the remote, so a fix that is committed but
+# not pushed is reviewed as if it did not exist: the same findings come back
+# and the loop burns its iterations (#967). Every accepted fix is therefore
+# pushed, and the remote head checked against local HEAD, before the next
+# review runs. A push that fails stops the loop and blocks the merge.
+#
+# #878 deferred the push to the loop exit to save one CI run per iteration on
+# consumers with an expensive per-push suite. That saving is given up on
+# purpose: a review of a stale remote head is worth nothing.
 #
 # The flush is deliberately also wired into the EXIT trap. A run halted inside
 # the loop (budget ceiling -> exit 2, SIGTERM from the batch per-issue
 # timeout) is recovered by batch-orchestrator as "PR exists" and handed to a
 # standalone /process-pr, which merges whatever is on origin. Without the
-# trap, the last fix commit would sit unpushed and that merge would silently
-# drop it — the #638 lost-fix failure mode, one layer up. Per-iteration
-# pushing used to mask this; the flush replaces that protection rather than
-# removing it.
+# trap, a fix commit whose push failed or never started would sit unpushed
+# and that merge would silently drop it — the #638 lost-fix failure mode, one
+# layer up.
 PR_REVIEW_PUSH_PENDING="${PR_REVIEW_PUSH_PENDING:-0}"
 PR_REVIEW_PUSH_BRANCH="${PR_REVIEW_PUSH_BRANCH:-}"
 
 # Records that the review loop has commits the remote does not have yet.
-# Cheap and idempotent: N iterations still flush as one push.
+# Cheap and idempotent: repeated marks still flush as one push.
 #
 # Arguments:
-#   $1 - branch to push when the loop ends
+#   $1 - branch the next flush_review_push call pushes
 mark_review_push_pending() {
     PR_REVIEW_PUSH_BRANCH="$1"
     PR_REVIEW_PUSH_PENDING=1
-    log "Review fix committed on $1 — push deferred to the loop exit"
+    log "Review fix committed on $1 — push pending"
 }
 
-# Pushes the review loop's commits once, if any are pending. A no-op when the
-# loop committed nothing, and self-clearing so the post-loop call and the EXIT
-# trap between them push at most once.
+# Pushes the review loop's pending commits and verifies origin/<branch> equals
+# local HEAD, retrying once. A no-op when nothing is pending, and self-clearing
+# on success so the in-loop call, the post-loop call and the EXIT trap push a
+# given commit at most once between them.
+#
+# Returns:
+#   0 - nothing pending, or pushed and verified
+#   1 - both attempts failed; the error is logged and the push stays armed
 flush_review_push() {
     [[ "${PR_REVIEW_PUSH_PENDING:-0}" == "1" ]] || return 0
     PR_REVIEW_PUSH_PENDING=0
@@ -3179,8 +3186,8 @@ flush_review_push() {
     local attempt push_err="" local_head remote_head
     for attempt in 1 2; do
         if push_err=$(git push origin "$branch" 2>&1); then
-            local_head=$(git rev-parse HEAD 2>/dev/null)
-            remote_head=$(git rev-parse "origin/$branch" 2>/dev/null)
+            local_head=$(git rev-parse HEAD 2>/dev/null) || local_head=""
+            remote_head=$(git rev-parse "origin/$branch" 2>/dev/null) || remote_head=""
             if [[ -n "$local_head" && "$local_head" == "$remote_head" ]]; then
                 return 0
             fi
@@ -3200,8 +3207,8 @@ flush_review_push() {
 # bash traps evaluate at exit time, so the definitions need not precede this
 # line.  Call order:
 #   0. flush_review_push              — push any review-loop commit the loop
-#      had not flushed yet, so a halted run cannot hand /process-pr a remote
-#      head that is missing the last fix (issue #878)
+#      had not pushed yet, so a halted run cannot hand /process-pr a remote
+#      head that is missing the last fix (issues #878, #967)
 #   1. _rewrite_running_to_interrupted — rewrite state="running" to
 #      "interrupted_during_<stage>" before anything else reads it
 #   2. write_task_summary_to_status   — persist task summary
@@ -16546,16 +16553,10 @@ Fix the issues and commit. Output a summary of fixes applied."
                 # a review-fix commit re-diverged the bundle).
                 regenerate_bundle_if_needed "." "$BASE_BRANCH"
 
-                # Defer the push (issue #878). The next review iteration
-                # diffs local git, not origin, so nothing in this loop needs
-                # the remote to be current — and only the final head is ever
-                # merged. flush_review_push() below (and the EXIT trap) turns
-                # N iterations into one push, and so one CI run.
-                mark_review_push_pending "$branch"
-
                 # Push now and verify origin == HEAD so the next review sees
-                # the fix on the remote; fail loudly rather than re-reviewing
-                # a stale remote head.
+                # the fix on the remote (issue #967); fail loudly rather than
+                # re-reviewing a stale remote head.
+                mark_review_push_pending "$branch"
                 if ! flush_review_push; then
                     record_failed_review_fix "fix-pr-review-iter-$pr_iteration" \
                         "push_failed" "none"
@@ -16568,8 +16569,9 @@ Fix the issues and commit. Output a summary of fixes applied."
         fi
         done
 
-        # One push for the whole loop, before the complete/merge stages —
-        # merge-mr.sh merges the REMOTE head, so this must land first.
+        # Safety net: a no-op when every fix was pushed in the loop. Must run
+        # before the complete/merge stages — merge-mr.sh merges the REMOTE
+        # head, so nothing may still be pending here.
         flush_review_push
 
         set_stage_completed "pr_review"
