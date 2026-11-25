@@ -266,6 +266,46 @@ STUB
 	[[ ! -e "$STAGE_NAME_FILE" ]]
 }
 
+# Empty log, STUB_ERR on stderr. Records the warning in WARN_FILE.
+no_log_setup() {
+	fix_setup
+	cat > "$PLATFORM_DIR/read-mr-checks.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$STUB_ERR" >&2
+STUB
+	export STUB_ERR=""
+	WARN_FILE="$TEST_TMP/warn"
+	log_warn() { printf '%s\n' "$*" >> "$WARN_FILE"; }
+}
+
+@test "no-log warning and result carry the first stderr line, capped" {
+	no_log_setup
+	local long
+	long=$(printf '%0250d' 0)
+	STUB_ERR="$long"$'\nsecond line\n'
+
+	local rc=0 _ci_fix_result=""
+	_ci_fix_attempt 7 "Bats Suite" 1 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ "$_ci_fix_result" == \
+		"no failed-step log available: ${long:0:200}" ]]
+	[[ "$(< "$WARN_FILE")" == \
+		*"no CI fix attempt: ${long:0:200}" ]]
+}
+
+@test "no-log warning and result are unchanged when stderr is empty" {
+	no_log_setup
+
+	local rc=0 _ci_fix_result=""
+	_ci_fix_attempt 7 "Bats Suite" 1 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ "$_ci_fix_result" == "no failed-step log available" ]]
+	[[ "$(< "$WARN_FILE")" == \
+		'No failed log for check "Bats Suite" — no CI fix attempt' ]]
+}
+
 @test "fix attempt fails when the stage commits nothing" {
 	fix_setup
 	STUB_STAGE_ACTION=nothing

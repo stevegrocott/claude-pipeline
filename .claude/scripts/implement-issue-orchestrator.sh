@@ -674,17 +674,27 @@ _wait_for_check_on_head() {
 # Returns 0 only when the stage COMMITTED a fix that passed the guard.
 # Returns 1 for an empty log, a clean no-op, a dirty tree or a guard
 # rejection. Nothing is pushed here. The log path goes in the prompt only.
+# For an empty log, the first line of the wrapper's stderr (at most 200
+# characters), if any, is added to the warning and to _ci_fix_result.
 _ci_fix_attempt() {
 	local pr="$1" check_name="$2" iteration="$3"
 	local log_text log_path excerpt fix_prompt fix_result
 	local head_before head_after dirty_before dirty_after
+	local err_file err_line=""
 
+	err_file=$(mktemp "${TMPDIR:-/tmp}/ci-failed-log-err.XXXXXX") \
+		|| err_file=""
 	log_text=$("$PLATFORM_DIR/read-mr-checks.sh" "$pr" \
-		--failed-log "$check_name" 2>/dev/null || true)
+		--failed-log "$check_name" 2>"${err_file:-/dev/null}" || true)
+	if [[ -n "$err_file" ]]; then
+		IFS= read -r err_line < "$err_file" || true
+		rm -f "$err_file"
+		err_line="${err_line:0:200}"
+	fi
 	if [[ -z "$log_text" ]]; then
 		log_warn "No failed log for check \"$check_name\" —" \
-			"no CI fix attempt"
-		_ci_fix_result="no failed-step log available"
+			"no CI fix attempt${err_line:+: $err_line}"
+		_ci_fix_result="no failed-step log available${err_line:+: $err_line}"
 		return 1
 	fi
 
