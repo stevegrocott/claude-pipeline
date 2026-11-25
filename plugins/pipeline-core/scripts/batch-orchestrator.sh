@@ -2969,17 +2969,27 @@ comment_paused_on_pr() {
 
 # Record an issue as completed once its parked PR is observed MERGED (#966).
 # merge_blocked stays only for PRs still open or closed unmerged.
+# Any error left by the failed run is cleared and logged once (#1223).
 mark_issue_completed_on_merge() {
 	local issue_num="$1" pr="$2"
-	local prior=""
+	local prior="" cleared=""
 	# Read BEFORE the write below: a run that already ended completed went
 	# through the process-pr dispatch, so it has nothing left to file.
 	prior=$(jq -r --arg num "$issue_num" \
 		'.issues[] | select(.number == $num) | .status // empty' \
 		"$STATUS_FILE" 2>/dev/null) || prior=""
+	cleared=$(jq -r --arg num "$issue_num" \
+		'.issues[] | select(.number == $num) | .error // empty' \
+		"$STATUS_FILE" 2>/dev/null) || cleared=""
 	update_issue_field "$issue_num" "status" "completed"
 	update_issue_field "$issue_num" "completed_at" "$(date -Iseconds)"
 	update_issue_field "$issue_num" "pr" "$pr" "true"
+	update_issue_field "$issue_num" "error" "null" "true"
+	if [[ -n "$cleared" ]]; then
+		# Newlines are flattened so the history stays on one log line.
+		log "Issue #$issue_num: cleared error after merge:" \
+			"${cleared//$'\n'/ }"
+	fi
 	update_progress
 	if [[ "$prior" == "completed" ]]; then
 		return 0

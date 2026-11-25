@@ -8042,3 +8042,80 @@ _envelope_no_denials() {
 	[[ "$(jq -c '[.issues[].follow_ups_unverified]' <<< "$output")" == '[true,false]' ]]
 	[[ "$(jq -r '.state' <<< "$output")" == completed ]]
 }
+
+# =============================================================================
+# #1223: a parked issue that recovers by merge must not keep the failed run's
+# error in the status file or in summary.json
+# =============================================================================
+
+# Real status writers with a recording log(). The followups-only pass is
+# stubbed out so the only possible log lines are the function's own.
+_load_merge_recovery() {
+	_load_status_writers
+	log() { printf '%s\n' "$*" >> "$TEST_TMP/batch.log"; }
+	log_warn() { log "$@"; }
+	dispatch_followups_only_pass() { :; }
+	: > "$TEST_TMP/batch.log"
+}
+
+# The #966 parked issue, with issue 5980's error set to the given JSON value.
+# Usage: _seed_parked_with_error <json-value>
+_seed_parked_with_error() {
+	_seed_status_merge_blocked
+	jq --argjson err "$1" \
+		'(.issues[] | select(.number == "5980")).error = $err' \
+		"$STATUS_FILE" > "$STATUS_FILE.seed"
+	mv "$STATUS_FILE.seed" "$STATUS_FILE"
+}
+
+@test "#1223: merging a parked issue nulls its error and logs the old text once" {
+	_load_merge_recovery
+	_seed_parked_with_error '"CI failed on shard 3"'
+
+	mark_issue_completed_on_merge 5980 1234
+
+	local row
+	row=$(jq -c '.issues[] | select(.number == "5980")' "$STATUS_FILE")
+	[[ "$(jq -r '.status' <<< "$row")" == "completed" ]] \
+		|| fail "issue not completed: $row"
+	[[ "$(jq -c '[has("error"), .error]' <<< "$row")" == '[true,null]' ]] \
+		|| fail "error not cleared to JSON null: $row"
+	[[ "$(grep -c 'CI failed on shard 3' "$TEST_TMP/batch.log")" -eq 1 ]] \
+		|| fail "old error not logged once: $(cat "$TEST_TMP/batch.log")"
+	grep -q 'Issue #5980: cleared error after merge: CI failed on shard 3' \
+		"$TEST_TMP/batch.log" \
+		|| fail "unexpected log line: $(cat "$TEST_TMP/batch.log")"
+}
+
+@test "#1223: merging a parked issue with no error adds no log line" {
+	_load_merge_recovery
+	_seed_parked_with_error 'null'
+
+	mark_issue_completed_on_merge 5980 1234
+
+	[[ "$(jq -r '.issues[] | select(.number == "5980") | .status' \
+		"$STATUS_FILE")" == "completed" ]]
+	[[ ! -s "$TEST_TMP/batch.log" ]] \
+		|| fail "unexpected log: $(cat "$TEST_TMP/batch.log")"
+}
+
+@test "#1223: the summary.json projection of a recovered issue shows error null" {
+	_load_merge_recovery
+	_seed_parked_with_error '"CI failed on shard 3"'
+	mark_issue_completed_on_merge 5980 1234
+
+	# The real summary filter, lifted from the script.
+	local filter
+	filter=$(awk '/^jq --argjson trend/{f=1; next}
+		/summary.json"$/{f=0}
+		f{print}' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ -n "$filter" ]] || fail "summary filter not found"
+
+	run jq --argjson trend '{"warning":false}' "{${filter}}" "$STATUS_FILE"
+	[[ "$status" -eq 0 ]] || fail "filter failed: $output"
+	local row
+	row=$(jq -c '.issues[] | select(.number == "5980")' <<< "$output")
+	[[ "$(jq -c '[.status, has("error"), .error]' <<< "$row")" \
+		== '["completed",true,null]' ]] \
+		|| fail "summary still carries the error: $row"
+}
