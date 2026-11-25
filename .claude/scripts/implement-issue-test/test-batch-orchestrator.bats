@@ -7878,3 +7878,167 @@ _load_followups_pass() {
 	[[ "$(jq -r '.issues[] | select(.number == "5980") | .status' \
 		"$STATUS_FILE")" == "completed" ]]
 }
+
+# =============================================================================
+# #1135: reconciled process-pr result with permission denials sets
+# follow_ups_unverified — never a failure
+# =============================================================================
+#
+# Both reconciling arms (changes_requested and the error fallthrough) are
+# driven with full result envelopes. Denials are the normal case for a stage
+# that did its work, so they must record completed plus the mark; only an
+# unmerged PR records failed, and it carries no mark.
+
+source_mark_follow_ups_unverified() {
+	local func_file="$TEST_TMP/mark_follow_ups_unverified.bash"
+	_extract_function_body mark_follow_ups_unverified \
+		"$BATCH_ORCHESTRATOR_SCRIPT" > "$func_file"
+	grep -q 'mark_follow_ups_unverified' "$func_file" 2>/dev/null \
+		|| return 1
+	# shellcheck disable=SC1090
+	source "$func_file"
+}
+
+# Runs one arm with $proc_last_json set to the given envelope.
+# Usage: _run_marked_arm <changes_requested|error> <envelope-json>
+_run_marked_arm() {
+	local arm="$1"
+	local block_file
+	if [[ "$arm" == "error" ]]; then
+		block_file=$(_extract_process_pr_failure_block) \
+			|| skip "error arm not found (script changed)"
+	else
+		block_file=$(_extract_process_pr_changes_requested_block) \
+			|| skip "changes_requested arm not found (script changed)"
+	fi
+	source_mark_follow_ups_unverified \
+		|| skip "mark_follow_ups_unverified() not yet present"
+	proc_last_json="$2"
+	PROC_STATUS_IN="$arm" PR_NUMBER_IN=735 \
+		_run_failure_site_block "$block_file"
+}
+
+_envelope_one_incidental_denial() {
+	jq -nc '{type:"result",subtype:"success",is_error:false,
+		result:"done",
+		structured_output:{status:"merged",follow_up_issues:[]},
+		permission_denials:[{tool_name:"Bash",tool_input:{command:
+		"VAR=\"$(date)\" echo hi"}}]}'
+}
+
+_envelope_denied_follow_up_creations() {
+	jq -nc '{type:"result",subtype:"success",is_error:false,
+		result:"done",
+		structured_output:{status:"error",follow_up_issues:[]},
+		permission_denials:[
+		{tool_name:"Bash",tool_input:{command:"create-issue.sh --title a"}},
+		{tool_name:"Bash",tool_input:{command:"create-issue.sh --title b"}}]}'
+}
+
+_envelope_no_denials() {
+	jq -nc '{type:"result",subtype:"success",is_error:false,
+		result:"done",
+		structured_output:{status:"merged",follow_up_issues:[]},
+		permission_denials:[]}'
+}
+
+@test "functional: changes_requested with one incidental denial records completed plus the mark (#1135)" {
+	_stub_gh_pr_merged
+	_run_marked_arm changes_requested "$(_envelope_one_incidental_denial)"
+
+	grep -qx '695 status completed' "$TEST_TMP/update.out"
+	grep -qx '695 follow_ups_unverified true true' "$TEST_TMP/update.out"
+	if grep -qx '695 status failed' "$TEST_TMP/update.out"; then
+		fail "a denial must never record a failure"
+	fi
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: error arm with denied follow-up creations records completed plus the mark (#1135)" {
+	_stub_gh_pr_merged
+	_run_marked_arm error "$(_envelope_denied_follow_up_creations)"
+
+	grep -qx '695 status completed' "$TEST_TMP/update.out"
+	grep -qx '695 follow_ups_unverified true true' "$TEST_TMP/update.out"
+	if grep -qx '695 status failed' "$TEST_TMP/update.out"; then
+		fail "denied follow-up creations must never record a failure"
+	fi
+	grep -q 'WARN:.*2 permission denial' "$TEST_TMP/log.out"
+	[[ "$_failure_block_rc" -eq 0 ]]
+}
+
+@test "functional: both arms with zero denials record completed and no mark (#1135)" {
+	local arm
+	for arm in changes_requested error; do
+		: > "$TEST_TMP/update.out"
+		_stub_gh_pr_merged
+		_run_marked_arm "$arm" "$(_envelope_no_denials)"
+
+		grep -qx '695 status completed' "$TEST_TMP/update.out"
+		if grep -q 'follow_ups_unverified' "$TEST_TMP/update.out"; then
+			fail "$arm arm marked an envelope with no denials"
+		fi
+	done
+}
+
+@test "functional: both arms with a non-JSON result record completed and no mark (#1135)" {
+	local arm
+	for arm in changes_requested error; do
+		: > "$TEST_TMP/update.out"
+		_stub_gh_pr_merged
+		_run_marked_arm "$arm" 'Error: connection reset'
+
+		grep -qx '695 status completed' "$TEST_TMP/update.out"
+		if grep -q 'follow_ups_unverified' "$TEST_TMP/update.out"; then
+			fail "$arm arm marked a non-JSON result"
+		fi
+	done
+}
+
+@test "functional: both arms with an unmerged PR record failed and no mark despite denials (#1135)" {
+	local arm
+	for arm in changes_requested error; do
+		: > "$TEST_TMP/update.out"
+		_stub_gh_pr_not_merged
+		_run_marked_arm "$arm" "$(_envelope_denied_follow_up_creations)"
+
+		grep -qx '695 status failed' "$TEST_TMP/update.out"
+		if grep -q 'follow_ups_unverified' "$TEST_TMP/update.out"; then
+			fail "$arm arm marked an unmerged PR"
+		fi
+		[[ "$_failure_block_rc" -eq 1 ]]
+	done
+}
+
+# --- #1135: end-of-batch follow_ups_unverified reporting ---
+
+@test "end-of-batch warning block lists follow_ups_unverified issues with PR (#1135)" {
+	local body
+	body=$(awk '/FOLLOW-UPS UNVERIFIED/,/^fi$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'select(.follow_ups_unverified == true)'* ]]
+	[[ "$body" == *'PR \(.pr // "N/A")'* ]]
+	# Warning only: the block must not touch state or the exit code.
+	[[ "$body" != *set_state* ]]
+	[[ "$body" != *exit_code=* ]]
+}
+
+@test "functional: summary.json carries per-issue mark and progress count (#1135)" {
+	local filter status_file
+	filter=$(awk '/^jq --argjson trend/{f=1; next}
+		/summary.json"$/{f=0}
+		f{print}' "$BATCH_ORCHESTRATOR_SCRIPT")
+	filter="{${filter}}"
+	[[ -n "$filter" ]]
+	status_file="$TEST_TMP/status.json"
+	jq -n '{state:"completed",base_branch:"main",log_dir:"x",
+		progress:{total:2,completed:2,failed:0},
+		issues:[
+			{number:1,status:"completed",pr:11,follow_ups_unverified:true},
+			{number:2,status:"completed",pr:12}]}' > "$status_file"
+	local trend='{"warning":false}'
+	run jq --argjson trend "$trend" "$filter" "$status_file"
+	[ "$status" -eq 0 ] || fail "filter failed: $output"
+	[[ "$(jq -r '.progress.follow_ups_unverified' <<< "$output")" == 1 ]]
+	[[ "$(jq -c '[.issues[].follow_ups_unverified]' <<< "$output")" == '[true,false]' ]]
+	[[ "$(jq -r '.state' <<< "$output")" == completed ]]
+}

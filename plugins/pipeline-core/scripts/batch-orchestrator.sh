@@ -555,6 +555,26 @@ log_startup_environment() {
     fi
 }
 
+# Mark an issue whose process-pr result carried permission denials but was
+# reconciled as merged. Denials are the normal case for a stage that did its
+# work, so this never changes status: it only sets follow_ups_unverified so
+# the follow-up issues the stage may not have filed can be checked.
+# Usage: mark_follow_ups_unverified <result_json> <issue_num> <pr_number>
+mark_follow_ups_unverified() {
+    local result_json="$1"
+    local issue_num="$2"
+    local pr_number="$3"
+    local count
+
+    count=$(printf '%s' "$result_json" |
+        jq -r '(.permission_denials // []) | length' 2>/dev/null) || count=0
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    if ((count > 0)); then
+        update_issue_field "$issue_num" "follow_ups_unverified" "true" "true"
+        log_warn "Issue #$issue_num: PR #${pr_number:-?} merged but process-pr had $count permission denial(s); follow-up issues unverified"
+    fi
+}
+
 # Log a WARN naming each tool denied in a claude result's permission_denials,
 # followed by one line per denial naming its tool. A Bash denial shows the
 # first line of the command cut to 160 characters; a denial without a command
@@ -2561,6 +2581,8 @@ process_issue() {
                 if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
                     update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
                 fi
+                mark_follow_ups_unverified "$proc_last_json" "$issue_num" \
+                    "${_RECONCILE_PR:-$pr_number}"
                 update_progress
                 git checkout "$BRANCH" 2>/dev/null || true
                 return 0
@@ -2586,6 +2608,8 @@ process_issue() {
                 if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
                     update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
                 fi
+                mark_follow_ups_unverified "$proc_last_json" "$issue_num" \
+                    "${_RECONCILE_PR:-$pr_number}"
                 update_progress
                 git checkout "$BRANCH" 2>/dev/null || true
                 return 0
@@ -3393,6 +3417,26 @@ if ((_skipped_count > 0)); then
         "$STATUS_FILE" 2>/dev/null)
 fi
 
+# Surface reconciled process-pr results that carried permission denials
+# (follow_ups_unverified, #1135). Warning only: never changes batch state or
+# the exit code.
+_fu_unverified_count=$(jq \
+    '[.issues[] | select(.follow_ups_unverified == true)] | length' \
+    "$STATUS_FILE" 2>/dev/null) || _fu_unverified_count=0
+if ((_fu_unverified_count > 0)); then
+    log_warn "=========================================="
+    log_warn "FOLLOW-UPS UNVERIFIED: $_fu_unverified_count issue(s)"
+    log_warn "(process-pr had permission denials; check PR for follow-ups)"
+    log_warn "=========================================="
+    while IFS= read -r _fu_entry; do
+        log_warn "  $_fu_entry"
+    done < <(jq -r \
+        '.issues[]
+         | select(.follow_ups_unverified == true)
+         | "Issue #\(.number) PR \(.pr // "N/A")"' \
+        "$STATUS_FILE" 2>/dev/null)
+fi
+
 _batch_outcome=$(jq -r '.state' "$STATUS_FILE" 2>/dev/null)
 [[ -z "$_batch_outcome" || "$_batch_outcome" == "null" ]] && _batch_outcome="failed"
 emit_event "batch_end" "outcome=$_batch_outcome"
@@ -3441,10 +3485,13 @@ jq --argjson trend "$_trend_verdict" '{
         deploy_verify_failed:
             ([.issues[] | select(.deploy_verify_failed == true)] | length),
         skipped:
-            ([.issues[] | select(.status == "skipped")] | length)
+            ([.issues[] | select(.status == "skipped")] | length),
+        follow_ups_unverified:
+            ([.issues[] | select(.follow_ups_unverified == true)] | length)
     }),
     issues: [.issues[] | {
-        number, status, pr, follow_ups, error, deploy_verify_failed
+        number, status, pr, follow_ups, error, deploy_verify_failed,
+        follow_ups_unverified: (.follow_ups_unverified // false)
     }],
     cost_summary: (.cost_summary // null),
     cost_rollup: {

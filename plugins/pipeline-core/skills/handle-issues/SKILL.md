@@ -728,6 +728,21 @@ if [[ -n "$FOLLOWUPS" ]]; then
     echo "Follow-up issues found: ${FOLLOWUPS}. Run: /handle-issues ${FOLLOWUPS} on branch main"
 fi
 
+# Issues whose reconciled process-pr result carried permission denials
+# (follow_ups_unverified, #1135): follow-ups may have been dropped unfiled.
+UNVERIFIED=$(jq -r '.issues[] | select(.follow_ups_unverified == true)
+    | "- #\(.number)" + (if .pr then " (PR #\(.pr))" else "" end)' status.json)
+if [[ -n "$UNVERIFIED" ]]; then
+    echo ""
+    echo "### Follow-ups Unverified"
+    echo ""
+    echo "process-pr had permission denials for these issues, so any follow-ups"
+    echo "from the PR review may not have been filed. Check each PR's review for"
+    echo "unfiled follow-ups:"
+    echo ""
+    echo "$UNVERIFIED"
+fi
+
 # macOS batch-end notification (silently skipped if osascript is unavailable)
 if command -v osascript >/dev/null 2>&1; then
     osascript -e "display notification \"$COMPLETED/$TOTAL completed, $FAILED failed\" \
