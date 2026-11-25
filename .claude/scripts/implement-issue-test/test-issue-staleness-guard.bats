@@ -648,3 +648,143 @@ _source_background_helpers() {
 	grep -q 'discussion-comments.json' "$BUNDLED_ORCHESTRATOR" || \
 		fail "parse step no longer writes discussion-comments.json"
 }
+
+# =============================================================================
+# ACCEPTANCE CRITERIA BLOCK (#1217)
+# =============================================================================
+
+_source_ac_helpers() {
+	local fn_file="$TEST_TMP/ac.bash"
+	{
+		_extract_function_body _extract_issue_section "$BUNDLED_ORCHESTRATOR"
+		_extract_function_body build_acceptance_criteria_block \
+			"$BUNDLED_ORCHESTRATOR"
+	} > "$fn_file"
+	# shellcheck disable=SC1090
+	source "$fn_file"
+
+	WARN_LOG="$TEST_TMP/warn.log"
+	: > "$WARN_LOG"
+	log_warn() { printf '%s\n' "$*" >> "$WARN_LOG"; }
+
+	unset IMPLEMENT_AC_MAX_CHARS
+	LOG_BASE="$TEST_TMP/logbase"
+	mkdir -p "$LOG_BASE/context"
+}
+
+_save_body() {
+	printf '%s\n' "$@" > "$LOG_BASE/context/issue-body.md"
+}
+
+# A body whose criteria are exactly $1 characters long.
+_save_long_criteria() {
+	local long
+	printf -v long '%*s' "$1" ''
+	_save_body '## Acceptance Criteria' "${long// /z}"
+}
+
+@test "criteria block: labelled, scoped and limited to the section (#1217)" {
+	_source_ac_helpers
+	_save_body '## Implementation Tasks' '- [ ] a task' \
+		'## Acceptance Criteria' '- [ ] AC1: it works' \
+		'## References' 'noise'
+
+	run build_acceptance_criteria_block
+	[ "$status" -eq 0 ]
+	expect_glob "$output" \
+		'ISSUE ACCEPTANCE CRITERIA (context for this task):*' "label"
+	expect_glob "$output" '*This task is one part of it.*' "scope"
+	expect_glob "$output" \
+		"*within this task's description and files.*" "scope files"
+	expect_glob "$output" '*Do not do the work of other tasks.*' "limit"
+	expect_glob "$output" '*- \[ \] AC1: it works*' "criteria text"
+	[[ "$output" != *noise* ]] || fail "next section leaked"
+	[[ "$output" != *'a task'* ]] || fail "tasks section leaked"
+	[[ "$output" != *truncated* ]] || fail "short criteria were cut"
+}
+
+@test "criteria block: heading case and CRLF do not change it (#1217)" {
+	_source_ac_helpers
+	local lf other
+	_save_body '## Acceptance Criteria' '- [ ] one' '- [ ] two'
+	lf=$(build_acceptance_criteria_block)
+	printf '## ACCEPTANCE criteria\r\n- [ ] one\r\n- [ ] two\r\n' \
+		> "$LOG_BASE/context/issue-body.md"
+	other=$(build_acceptance_criteria_block)
+
+	[ -n "$lf" ]
+	[ "$lf" = "$other" ]
+}
+
+@test "criteria block: nothing without a body or a section (#1217)" {
+	_source_ac_helpers
+	run build_acceptance_criteria_block
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+
+	_save_body '## Implementation Tasks' '- [ ] a task'
+	run build_acceptance_criteria_block
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+
+	_save_body '## Acceptance Criteria' '' '## Other' 'noise'
+	run build_acceptance_criteria_block
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+
+	unset LOG_BASE
+	run build_acceptance_criteria_block
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "criteria block: cut at IMPLEMENT_AC_MAX_CHARS with a note (#1217)" {
+	_source_ac_helpers
+	_save_long_criteria 60
+
+	IMPLEMENT_AC_MAX_CHARS=50 run build_acceptance_criteria_block
+	[ "$status" -eq 0 ]
+	expect_glob "$output" '*showing 50 of 60 characters*' "note"
+	local kept="${output//[!z]/}"
+	[ "${#kept}" -eq 50 ]
+
+	IMPLEMENT_AC_MAX_CHARS=60 run build_acceptance_criteria_block
+	[[ "$output" != *truncated* ]] || fail "at the cap nothing is cut"
+}
+
+@test "criteria block: default cap is 4000 (#1217)" {
+	_source_ac_helpers
+	_save_long_criteria 4001
+
+	run build_acceptance_criteria_block
+	expect_glob "$output" '*showing 4000 of 4001 characters*' "default"
+	[ ! -s "$WARN_LOG" ]
+}
+
+@test "criteria block: an invalid cap warns and uses 4000 (#1217)" {
+	_source_ac_helpers
+	_save_long_criteria 4001
+
+	local bad out
+	for bad in 0 -5 abc 1.5 010; do
+		: > "$WARN_LOG"
+		out=$(IMPLEMENT_AC_MAX_CHARS="$bad" build_acceptance_criteria_block)
+		expect_glob "$out" '*showing 4000 of 4001 characters*' "$bad"
+		grep -q "IMPLEMENT_AC_MAX_CHARS='$bad'" "$WARN_LOG" \
+			|| fail "no warning for $bad"
+	done
+}
+
+@test "criteria block: shares its extraction with the PR review block (#1217)" {
+	local fn
+	for fn in build_acceptance_criteria_block _pr_review_requirements_block; do
+		_extract_function_body "$fn" "$BUNDLED_ORCHESTRATOR" \
+			| grep -q '_extract_issue_section ' \
+			|| fail "$fn does not use _extract_issue_section"
+	done
+}
+
+@test "criteria block: the cap is documented in the script header (#1217)" {
+	awk '/^set -uo pipefail/ { exit } { print }' "$BUNDLED_ORCHESTRATOR" \
+		| grep -q 'IMPLEMENT_AC_MAX_CHARS'
+}

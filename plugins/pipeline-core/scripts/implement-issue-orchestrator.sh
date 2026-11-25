@@ -11,6 +11,11 @@
 #   - status.json: Real-time progress
 #   - logs/implement-issue/<timestamp>/: Per-stage logs
 #
+# Environment:
+#   IMPLEMENT_AC_MAX_CHARS : most characters of the issue's acceptance
+#     criteria shown to the implementing agent (default 4000). A value that
+#     is not a positive integer logs a warning and the default is used.
+#
 # Stage Execution Contract:
 #   run_stage <name> <prompt_file> [options]
 #     Runs a single pipeline stage and emits a stage_result JSON envelope on
@@ -6499,6 +6504,74 @@ _infer_agent_from_path() {
 	fi
 }
 
+# Prints one section of a saved issue body. The single heading rule shared by
+# the PR review block and the implement prompts: any heading of depth two or
+# more, matched by name prefix without regard to case, CRLF-tolerant, ending
+# at the next such heading.
+#
+# Arguments:
+#   $1 - path to the issue body markdown
+#   $2 - heading name, e.g. "Acceptance Criteria"
+# Outputs:
+#   Section text on stdout; nothing when the file or section is missing
+#
+_extract_issue_section() {
+	local body_file="$1"
+	local name="$2"
+	[[ -f "$body_file" ]] || return 0
+	awk -v h="$name" '
+		{ sub(/\r$/, "") }
+		!found && /^##+[[:space:]]/ {
+			t = tolower($0)
+			sub(/^##+[[:space:]]+/, "", t)
+			if (index(t, tolower(h)) == 1) { found = 1; next }
+		}
+		found && /^##+[[:space:]]/ { exit }
+		found { print }
+	' < "$body_file"
+}
+
+# Builds the acceptance criteria block of the implement prompts (issue #1217).
+#
+# The block tells the agent that the criteria cover the whole issue, so it
+# meets those within its own task and leaves the rest to other tasks.
+#
+# Globals:
+#   LOG_BASE
+#   IMPLEMENT_AC_MAX_CHARS (default 4000)
+# Arguments:
+#   $1 - optional issue body path (default: the parse stage's saved copy)
+# Outputs:
+#   The block on stdout; nothing when the body or section is missing
+#
+build_acceptance_criteria_block() {
+	local body_file="${1:-${LOG_BASE:-}/context/issue-body.md}"
+	local criteria
+	criteria=$(_extract_issue_section "$body_file" "Acceptance Criteria")
+	[[ -n "${criteria//[[:space:]]/}" ]] || return 0
+
+	local max_chars="${IMPLEMENT_AC_MAX_CHARS:-4000}"
+	if [[ ! "$max_chars" =~ ^[1-9][0-9]*$ ]]; then
+		log_warn "IMPLEMENT_AC_MAX_CHARS='$max_chars' is not" \
+			"a positive integer; using 4000"
+		max_chars=4000
+	fi
+
+	local total=${#criteria}
+	if ((total > max_chars)); then
+		criteria="${criteria:0:max_chars}
+[acceptance criteria truncated: showing $max_chars of $total characters]"
+	fi
+
+	printf '%s\n' \
+		'ISSUE ACCEPTANCE CRITERIA (context for this task):' \
+		'The whole issue must meet the criteria below. This task is one part of it.' \
+		"Meet every criterion that falls within this task's description and files." \
+		'Do not do the work of other tasks.' \
+		'' \
+		"$criteria"
+}
+
 # Builds the "issue requirements" block of the PR review prompt (issue #1185).
 #
 # The reviewer can only check what it is shown, so the prompt carries the
@@ -6516,27 +6589,10 @@ _infer_agent_from_path() {
 _pr_review_requirements_block() {
 	local body_file="$1"
 	local diff_file="${2:-}"
-	local tasks="" criteria="" name section
+	local tasks criteria
 	local missing="(not available: the section is missing from the issue body or the body file was not found)"
-	if [[ -f "$body_file" ]]; then
-		for name in "Implementation Tasks" "Acceptance Criteria"; do
-			section=$(awk -v h="$name" '
-				{ sub(/\r$/, "") }
-				!found && /^##+[[:space:]]/ {
-					t = tolower($0)
-					sub(/^##+[[:space:]]+/, "", t)
-					if (index(t, tolower(h)) == 1) { found = 1; next }
-				}
-				found && /^##+[[:space:]]/ { exit }
-				found { print }
-			' < "$body_file")
-			if [[ "$name" == "Implementation Tasks" ]]; then
-				tasks="$section"
-			else
-				criteria="$section"
-			fi
-		done
-	fi
+	tasks=$(_extract_issue_section "$body_file" "Implementation Tasks")
+	criteria=$(_extract_issue_section "$body_file" "Acceptance Criteria")
 	[[ -n "${tasks//[[:space:]]/}" ]] || tasks="$missing"
 	[[ -n "${criteria//[[:space:]]/}" ]] || criteria="$missing"
 	printf '\n## Issue Requirements\n\n### Implementation Tasks\n\n%s\n\n' "$tasks"
