@@ -161,6 +161,19 @@ _install_versioned() {
     [ "${lines[1]}" = "removed=" ]
 }
 
+# /bin/bash is 3.2 on macOS, where "${empty[*]}" is unbound under set -u
+# (issue #1246). A bare `bash` may resolve to a newer one that hides this.
+@test "pipeline_pin_bin_first succeeds under set -u with no sibling bin on PATH" {
+    local cache="$TEST_TMP/cache"
+    local resolver
+    resolver="$(_install_versioned "$cache" 0.8.22)"
+
+    run /bin/bash -c "set -u; source '$resolver'; PATH='$cache/0.8.22/bin'; pipeline_pin_bin_first || exit 1; printf '%s\n' \"\$PATH\"; printf 'removed=%s\n' \"\$PIPELINE_PIN_REMOVED\""
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "$cache/0.8.22/bin" ]
+    [ "${lines[1]}" = "removed=" ]
+}
+
 @test "pipeline_pin_bin_first fails and leaves PATH alone with no bin dir" {
     local resolver
     resolver="$(_install_resolver "$TEST_TMP/.claude/scripts")"
