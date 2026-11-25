@@ -3175,9 +3175,24 @@ flush_review_push() {
         return 0
     fi
 
-    log "Pushing review-loop commits to PR (one push per loop)..."
-    git push origin "$branch" 2>/dev/null \
-        || log "Warning: Could not push to origin"
+    log "Pushing review-loop commits to PR..."
+    local attempt push_err="" local_head remote_head
+    for attempt in 1 2; do
+        if push_err=$(git push origin "$branch" 2>&1); then
+            local_head=$(git rev-parse HEAD 2>/dev/null)
+            remote_head=$(git rev-parse "origin/$branch" 2>/dev/null)
+            if [[ -n "$local_head" && "$local_head" == "$remote_head" ]]; then
+                return 0
+            fi
+            push_err="push succeeded but origin/$branch (${remote_head:-unknown}) != local HEAD (${local_head:-unknown})"
+        fi
+        (( attempt == 1 )) && log "Warning: review push attempt 1 failed (${push_err}) — retrying once"
+    done
+
+    # Keep the push armed so the EXIT trap gets one more attempt.
+    PR_REVIEW_PUSH_PENDING=1
+    log_error "Review push to origin/$branch failed: ${push_err}"
+    return 1
 }
 
 # Register EXIT trap so interrupted runs surface as a distinct state and
@@ -16537,6 +16552,16 @@ Fix the issues and commit. Output a summary of fixes applied."
                 # merged. flush_review_push() below (and the EXIT trap) turns
                 # N iterations into one push, and so one CI run.
                 mark_review_push_pending "$branch"
+
+                # Push now and verify origin == HEAD so the next review sees
+                # the fix on the remote; fail loudly rather than re-reviewing
+                # a stale remote head.
+                if ! flush_review_push; then
+                    record_failed_review_fix "fix-pr-review-iter-$pr_iteration" \
+                        "push_failed" "none"
+                    pr_approved=true
+                    break
+                fi
             else
                 log_error "fix-pr-review-iter-$pr_iteration did not land its changes — re-reviewing unchanged branch"
             fi
