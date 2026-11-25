@@ -15812,12 +15812,15 @@ $full_scope_failures
             local bats_full_output bats_full_rc
             # --ci restricts the run to the same suites CI gates. Without it
             # run-tests.sh runs EVERY test-*.bats, including the four in
-            # CI_EXCLUDED_SUITES — test-stage-runner.bats and
-            # cost-accounting.bats are red on main (#897), so this check
-            # reported red on every run and silently disabled failed-task
-            # reconciliation via the tests_green gate (issue #905). The other
-            # two excluded suites are owned by bundle-parity.yml and
-            # orchestrator-guards.yml, so skipping them here loses no coverage.
+            # CI_EXCLUDED_SUITES. That list now holds only the two suites
+            # owned by other workflows (test-bundle-parity.bats by
+            # bundle-parity.yml, test-timeout-escalation.bats by
+            # orchestrator-guards.yml), so skipping them loses no coverage.
+            # It once held four: test-stage-runner.bats and cost-accounting
+            # .bats were red on main (#897), which made this check report red
+            # on every run and silently disabled failed-task reconciliation
+            # via the tests_green gate (issue #905). Both have since been
+            # removed from the list; see run-tests.sh for its current state.
             # Bounded by FULL_SUITE_BATS_TIMEOUT (overridable) so a wedged
             # suite cannot stall the orchestrator indefinitely — the check
             # is informational and must always return control (#926). The
