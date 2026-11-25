@@ -8009,3 +8009,36 @@ _envelope_no_denials() {
 		[[ "$_failure_block_rc" -eq 1 ]]
 	done
 }
+
+# --- #1135: end-of-batch follow_ups_unverified reporting ---
+
+@test "end-of-batch warning block lists follow_ups_unverified issues with PR (#1135)" {
+	local body
+	body=$(awk '/FOLLOW-UPS UNVERIFIED/,/^fi$/' "$BATCH_ORCHESTRATOR_SCRIPT")
+	[[ "$body" == *'select(.follow_ups_unverified == true)'* ]]
+	[[ "$body" == *'PR \(.pr // "N/A")'* ]]
+	# Warning only: the block must not touch state or the exit code.
+	[[ "$body" != *set_state* ]]
+	[[ "$body" != *exit_code=* ]]
+}
+
+@test "functional: summary.json carries per-issue mark and progress count (#1135)" {
+	local filter status_file
+	filter=$(awk '/^jq --argjson trend/{f=1; next}
+		/summary.json"$/{f=0}
+		f{print}' "$BATCH_ORCHESTRATOR_SCRIPT")
+	filter="{${filter}}"
+	[[ -n "$filter" ]]
+	status_file="$TEST_TMP/status.json"
+	jq -n '{state:"completed",base_branch:"main",log_dir:"x",
+		progress:{total:2,completed:2,failed:0},
+		issues:[
+			{number:1,status:"completed",pr:11,follow_ups_unverified:true},
+			{number:2,status:"completed",pr:12}]}' > "$status_file"
+	local trend='{"warning":false}'
+	run jq --argjson trend "$trend" "$filter" "$status_file"
+	[ "$status" -eq 0 ] || fail "filter failed: $output"
+	[[ "$(jq -r '.progress.follow_ups_unverified' <<< "$output")" == 1 ]]
+	[[ "$(jq -c '[.issues[].follow_ups_unverified]' <<< "$output")" == '[true,false]' ]]
+	[[ "$(jq -r '.state' <<< "$output")" == completed ]]
+}
