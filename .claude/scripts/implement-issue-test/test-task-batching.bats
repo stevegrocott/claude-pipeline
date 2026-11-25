@@ -4669,3 +4669,143 @@ _setup_status_634() {
 	git checkout -q main
 	git branch -D feature/serial-halt3 2>/dev/null || true
 }
+
+# =============================================================================
+# Implement prompts: acceptance criteria block (#1217)
+# =============================================================================
+
+readonly AC_LABEL_1217='ISSUE ACCEPTANCE CRITERIA (context for this task):'
+readonly AC_REVIEW_1217="acceptance criteria does this task cover"
+
+_save_issue_body_1217() {
+	mkdir -p "$LOG_BASE/context"
+	printf '## Acceptance Criteria\n\n- [ ] AC1: criterion-marker-1217\n' \
+		> "$LOG_BASE/context/issue-body.md"
+}
+
+# run_stage stub: saves each prompt under the stage name it was passed.
+_stub_prompt_capture_1217() {
+	run_stage() {
+		printf '%s' "$2" > "$TEST_TMP/prompt-1217-$1.txt"
+		printf '%s' '{"status":"success","output":{"status":"success","commit":"none","summary":"x"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	load_skill() { printf '%s' ""; }
+}
+
+# Prints the prompt run_stage received for the given stage name.
+_prompt_1217() {
+	cat "$TEST_TMP/prompt-1217-$1.txt"
+}
+
+_render_serial_1217() {
+	cd "$TEST_TMP/repo" || return 1
+	git checkout -q -b feature/serial-ac main
+	mkdir -p "$LOG_BASE/stages"
+	_stub_prompt_capture_1217
+	execute_batch_serial \
+		'[{"id":1,"description":"Do thing","agent":"default"}]' \
+		"feature/serial-ac" "main" >/dev/null 2>&1 || true
+}
+
+# Task 2 is a tdd-classified playwright task, so it runs before task 1.
+_render_tdd_prerun_1217() {
+	cd "$TEST_TMP/repo" || return 1
+	git checkout -q -b feature/prerun-ac main
+	mkdir -p "$LOG_BASE/stages"
+	_stub_prompt_capture_1217
+	classify_e2e_strategy() {
+		if [[ "$2" == "playwright-test-developer" ]]; then
+			printf 'tdd'
+		else
+			printf 'none'
+		fi
+	}
+	execute_batch_serial \
+		'[{"id":1,"description":"Do thing","agent":"default"},
+		{"id":2,"description":"Test it","agent":"playwright-test-developer"}]' \
+		"feature/prerun-ac" "main" >/dev/null 2>&1 || true
+}
+
+_render_worktree_1217() {
+	cd "$TEST_TMP/repo" || return 1
+	git checkout -q -b feature/wt-ac main
+	mkdir -p "$LOG_BASE/stages"
+	local wt_path="$TEST_TMP/wt-1217"
+	git worktree add -q -b wt-task-1217 "$wt_path" feature/wt-ac
+	_stub_prompt_capture_1217
+	sanitize_worktree_commits() { return 0; }
+	guard_commit_path_allowlist() { return 0; }
+	(
+		run_task_in_worktree 1 "Do thing" "default" "S" \
+			"$wt_path" "wt-task-1217" "feature/wt-ac" \
+			"$LOG_BASE/stages/task-1-worktree.log" "main"
+	) >/dev/null 2>&1 || true
+	cd "$TEST_TMP/repo" || return 1
+	git worktree remove --force "$wt_path" 2>/dev/null || true
+}
+
+_assert_has_criteria_1217() {
+	local prompt="$1"
+	expect_glob "$prompt" "*${AC_LABEL_1217}*" "scope label"
+	expect_glob "$prompt" '*criterion-marker-1217*' "criteria text"
+	expect_glob "$prompt" "*SELF-REVIEW*${AC_REVIEW_1217}*meet*" \
+		"self-review asks about the criteria"
+}
+
+_assert_no_criteria_1217() {
+	local prompt="$1"
+	expect_glob "$prompt" '*Implement task *SELF-REVIEW BEFORE COMMITTING*' \
+		"prompt was captured"
+	[[ "$prompt" != *"ACCEPTANCE CRITERIA"* ]] || fail "criteria block present"
+	[[ "$prompt" != *"acceptance criteria"* ]] || fail "criteria line present"
+}
+
+@test "#1217 serial prompt: carries the saved criteria after the background" {
+	_save_issue_body_1217
+	printf '[{"author":"bob","createdAt":"1","body":"hello"}]' \
+		> "$LOG_BASE/context/discussion-comments.json"
+	_render_serial_1217
+	local prompt
+	prompt=$(_prompt_1217 implement-task-1)
+
+	_assert_has_criteria_1217 "$prompt"
+	expect_glob "$prompt" "*@bob*hello*${AC_LABEL_1217}*SELF-REVIEW*" \
+		"block order: background, criteria, self-review"
+}
+
+@test "#1217 serial prompt: no criteria text without a saved body" {
+	_render_serial_1217
+	_assert_no_criteria_1217 "$(_prompt_1217 implement-task-1)"
+}
+
+@test "#1217 test-first pre-run prompt: carries the saved criteria" {
+	_save_issue_body_1217
+	_render_tdd_prerun_1217
+	_assert_has_criteria_1217 "$(_prompt_1217 implement-task-2-tdd-red)"
+}
+
+@test "#1217 test-first pre-run prompt: no criteria text without a body" {
+	_render_tdd_prerun_1217
+	_assert_no_criteria_1217 "$(_prompt_1217 implement-task-2-tdd-red)"
+}
+
+@test "#1217 worktree prompt: carries the saved criteria before the boundary" {
+	_save_issue_body_1217
+	_render_worktree_1217
+	local prompt
+	prompt=$(_prompt_1217 implement-task-1)
+
+	_assert_has_criteria_1217 "$prompt"
+	expect_glob "$prompt" "*${AC_LABEL_1217}*WORKTREE BOUNDARY*SELF-REVIEW*" \
+		"block order: criteria, boundary, self-review"
+}
+
+@test "#1217 worktree prompt: no criteria text without a saved body" {
+	_render_worktree_1217
+	_assert_no_criteria_1217 "$(_prompt_1217 implement-task-1)"
+}

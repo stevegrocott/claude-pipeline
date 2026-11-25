@@ -11,6 +11,11 @@
 #   - status.json: Real-time progress
 #   - logs/implement-issue/<timestamp>/: Per-stage logs
 #
+# Environment:
+#   IMPLEMENT_AC_MAX_CHARS : most characters of the issue's acceptance
+#     criteria shown to the implementing agent (default 4000). A value that
+#     is not a positive integer logs a warning and the default is used.
+#
 # Stage Execution Contract:
 #   run_stage <name> <prompt_file> [options]
 #     Runs a single pipeline stage and emits a stage_result JSON envelope on
@@ -6499,6 +6504,74 @@ _infer_agent_from_path() {
 	fi
 }
 
+# Prints one section of a saved issue body. The single heading rule shared by
+# the PR review block and the implement prompts: any heading of depth two or
+# more, matched by name prefix without regard to case, CRLF-tolerant, ending
+# at the next such heading.
+#
+# Arguments:
+#   $1 - path to the issue body markdown
+#   $2 - heading name, e.g. "Acceptance Criteria"
+# Outputs:
+#   Section text on stdout; nothing when the file or section is missing
+#
+_extract_issue_section() {
+	local body_file="$1"
+	local name="$2"
+	[[ -f "$body_file" ]] || return 0
+	awk -v h="$name" '
+		{ sub(/\r$/, "") }
+		!found && /^##+[[:space:]]/ {
+			t = tolower($0)
+			sub(/^##+[[:space:]]+/, "", t)
+			if (index(t, tolower(h)) == 1) { found = 1; next }
+		}
+		found && /^##+[[:space:]]/ { exit }
+		found { print }
+	' < "$body_file"
+}
+
+# Builds the acceptance criteria block of the implement prompts (issue #1217).
+#
+# The block tells the agent that the criteria cover the whole issue, so it
+# meets those within its own task and leaves the rest to other tasks.
+#
+# Globals:
+#   LOG_BASE
+#   IMPLEMENT_AC_MAX_CHARS (default 4000)
+# Arguments:
+#   $1 - optional issue body path (default: the parse stage's saved copy)
+# Outputs:
+#   The block on stdout; nothing when the body or section is missing
+#
+build_acceptance_criteria_block() {
+	local body_file="${1:-${LOG_BASE:-}/context/issue-body.md}"
+	local criteria
+	criteria=$(_extract_issue_section "$body_file" "Acceptance Criteria")
+	[[ -n "${criteria//[[:space:]]/}" ]] || return 0
+
+	local max_chars="${IMPLEMENT_AC_MAX_CHARS:-4000}"
+	if [[ ! "$max_chars" =~ ^[1-9][0-9]*$ ]]; then
+		log_warn "IMPLEMENT_AC_MAX_CHARS='$max_chars' is not" \
+			"a positive integer; using 4000"
+		max_chars=4000
+	fi
+
+	local total=${#criteria}
+	if ((total > max_chars)); then
+		criteria="${criteria:0:max_chars}
+[acceptance criteria truncated: showing $max_chars of $total characters]"
+	fi
+
+	printf '%s\n' \
+		'ISSUE ACCEPTANCE CRITERIA (context for this task):' \
+		'The whole issue must meet the criteria below. This task is one part of it.' \
+		"Meet every criterion that falls within this task's description and files." \
+		'Do not do the work of other tasks.' \
+		'' \
+		"$criteria"
+}
+
 # Builds the "issue requirements" block of the PR review prompt (issue #1185).
 #
 # The reviewer can only check what it is shown, so the prompt carries the
@@ -6516,27 +6589,10 @@ _infer_agent_from_path() {
 _pr_review_requirements_block() {
 	local body_file="$1"
 	local diff_file="${2:-}"
-	local tasks="" criteria="" name section
+	local tasks criteria
 	local missing="(not available: the section is missing from the issue body or the body file was not found)"
-	if [[ -f "$body_file" ]]; then
-		for name in "Implementation Tasks" "Acceptance Criteria"; do
-			section=$(awk -v h="$name" '
-				{ sub(/\r$/, "") }
-				!found && /^##+[[:space:]]/ {
-					t = tolower($0)
-					sub(/^##+[[:space:]]+/, "", t)
-					if (index(t, tolower(h)) == 1) { found = 1; next }
-				}
-				found && /^##+[[:space:]]/ { exit }
-				found { print }
-			' < "$body_file")
-			if [[ "$name" == "Implementation Tasks" ]]; then
-				tasks="$section"
-			else
-				criteria="$section"
-			fi
-		done
-	fi
+	tasks=$(_extract_issue_section "$body_file" "Implementation Tasks")
+	criteria=$(_extract_issue_section "$body_file" "Acceptance Criteria")
 	[[ -n "${tasks//[[:space:]]/}" ]] || tasks="$missing"
 	[[ -n "${criteria//[[:space:]]/}" ]] || criteria="$missing"
 	printf '\n## Issue Requirements\n\n### Implementation Tasks\n\n%s\n\n' "$tasks"
@@ -9207,6 +9263,8 @@ run_task_in_worktree() {
 		test_discovery_skill=$(load_skill "test-discovery")
 		local background_block
 		background_block=$(build_background_block)
+		local ac_block
+		ac_block=$(build_acceptance_criteria_block)
 		local boundary_block
 		boundary_block="
 WORKTREE BOUNDARY:
@@ -9224,12 +9282,16 @@ $test_discovery_skill
 
 ## End Skill Instructions
 
-}$task_desc${line_range_hint}${files_block}${background_block}${boundary_block}
+}$task_desc${line_range_hint}${files_block}${background_block}${ac_block:+
+
+$ac_block}${boundary_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
-3. If you find problems, fix them before committing.
+3. If you find problems, fix them before committing.${ac_block:+
+4. Which of the acceptance criteria does this task cover, and does your
+   change meet them?}
 
 Only commit when you are confident the task goal is achieved.
 When committing: run 'git diff --name-only' to list the files
@@ -10610,15 +10672,21 @@ execute_batch_serial() {
 					_pw_files_block=$(build_files_block)
 					local _pw_background_block
 					_pw_background_block=$(build_background_block)
+					local _pw_ac_block
+					_pw_ac_block=$(build_acceptance_criteria_block)
 					local _pw_prompt
 					_pw_prompt="Implement task $_next_tid on branch $feature_branch in the current working directory:
 
-$_next_tdesc${_pw_files_block}${_pw_background_block}
+$_next_tdesc${_pw_files_block}${_pw_background_block}${_pw_ac_block:+
+
+$_pw_ac_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
-3. If you find problems, fix them before committing.
+3. If you find problems, fix them before committing.${_pw_ac_block:+
+4. Which of the acceptance criteria does this task cover, and does your
+   change meet them?}
 
 MANDATORY UI INTERACTION CONSTRAINTS:
 - Use data-testid selectors on actual buttons, forms, and navigation elements.
@@ -10767,15 +10835,21 @@ Commit your changes with a descriptive message."
 			line_range_hint=$(build_line_range_hint "$tdesc")
 			local background_block
 			background_block=$(build_background_block)
+			local ac_block
+			ac_block=$(build_acceptance_criteria_block)
 			local impl_prompt
 			impl_prompt="Implement task $tid on branch $feature_branch in the current working directory:
 
-$tdesc${line_range_hint}${files_block}${background_block}
+$tdesc${line_range_hint}${files_block}${background_block}${ac_block:+
+
+$ac_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
-3. If you find problems, fix them before committing.
+3. If you find problems, fix them before committing.${ac_block:+
+4. Which of the acceptance criteria does this task cover, and does your
+   change meet them?}
 
 MANDATORY UI INTERACTION CONSTRAINTS:
 - Use data-testid selectors on actual buttons, forms, and navigation elements.
