@@ -610,24 +610,40 @@ _full_suite_cause_lines() {
 # Prints at most 80 lines of a CI failed-step log that name the CAUSE (#1141).
 # A plain tail misses it: the "not ok" line and the "#" lines under it sit
 # well before the closing "Process completed with exit code 1" line. Each
-# "not ok" line is kept together with the "#" lines directly beneath it, in
-# log order, up to the 80 line cap. Single lines holding "##[error]", FAIL,
-# FAILED, "Error:" or a cross mark (U+2715, U+2717, U+2718, U+274C) are kept too, so
-# non-bats runners name their cause. With none of these the last 80 lines
-# are printed instead. Empty input prints nothing.
+# "not ok" line is kept together with the "#" lines directly beneath it, and
+# these blocks have first call on the 80 lines (#1216). What they leave is
+# filled with single lines, earliest first, holding "##[error]", FAIL,
+# FAILED, "Error:" or a cross mark (U+2715, U+2717, U+2718, U+274C), so
+# non-bats runners name their cause. Kept lines are printed in log order.
+# With none of these the last 80 lines are printed instead. Empty input
+# prints nothing.
 _ci_failure_excerpt() {
 	local log="$1" causes
 	[[ -n "$log" ]] || return 0
 	causes=$(printf '%s\n' "$log" | awk '
-		/^not ok/ { keep = 1; if (n < 80) { print; n++ }; next }
-		keep && /^[[:space:]]*#/ { if (n < 80) { print; n++ }; next }
+		/^not ok/ { keep = 1; if (nb < 80) { block[NR] = $0; nb++ }; next }
+		keep && /^[[:space:]]*#/ {
+			if (nb < 80) { block[NR] = $0; nb++ }
+			next
+		}
 		{
 			keep = 0
 			if (index($0, "##[error]") || index($0, "Error:") ||
 				$0 ~ /(^|[^A-Za-z])FAIL(ED)?([^A-Za-z]|$)/ ||
 				index($0, "\342\234\227") || index($0, "\342\234\230") ||
 				index($0, "\342\235\214") || index($0, "\342\234\225")) {
-				if (n < 80) { print; n++ }
+				if (nm < 80) { marker[NR] = $0; nm++ }
+			}
+		}
+		END {
+			room = 80 - nb
+			for (i = 1; i <= NR; i++) {
+				if (i in block) {
+					print block[i]
+				} else if (i in marker && room > 0) {
+					print marker[i]
+					room--
+				}
 			}
 		}
 	')
