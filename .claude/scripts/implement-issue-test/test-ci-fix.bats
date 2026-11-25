@@ -130,6 +130,62 @@ make_log() {
 	[[ -z "$out" ]]
 }
 
+@test "excerpt keeps the whole not ok block after 100 Error: lines" {
+	local log out block expected
+	block=$(printf '%s\n' 'not ok 1 real cause' '# one' '# two' '# three')
+	log=$(for i in {1..100}; do printf 'Error: noise %d\n' "$i"; done
+		printf '%s\n' "$block")
+	out=$(_ci_failure_excerpt "$log")
+
+	# The earliest 76 marker lines, then all four block lines.
+	expected=$(for i in {1..76}; do printf 'Error: noise %d\n' "$i"; done
+		printf '%s\n' "$block")
+	[[ "$out" == "$expected" ]]
+}
+
+@test "excerpt of 100 not ok lines leaves no marker lines" {
+	local log out expected
+	log=$(for i in {1..100}; do
+		printf 'Error: noise %d\nnot ok %d t\n' "$i" "$i"
+	done)
+	out=$(_ci_failure_excerpt "$log")
+
+	expected=$(for i in {1..80}; do printf 'not ok %d t\n' "$i"; done)
+	[[ "$out" == "$expected" ]]
+}
+
+@test "excerpt prints a mixed log in log order" {
+	local log out expected
+	log=$(printf '%s\n' \
+		'Error: first' 'plain a' 'not ok 1 t' '# detail 1' 'plain b' \
+		'FAIL second' 'not ok 2 t' '# detail 2' 'Error: third')
+	out=$(_ci_failure_excerpt "$log")
+
+	expected=$(printf '%s\n' \
+		'Error: first' 'not ok 1 t' '# detail 1' \
+		'FAIL second' 'not ok 2 t' '# detail 2' 'Error: third')
+	[[ "$out" == "$expected" ]]
+}
+
+@test "excerpt never exceeds 80 lines when blocks and markers mix" {
+	local blocks log out count kept
+	# Under, at and over the cap in block lines, with 100 markers each.
+	for blocks in 1 39 40 41 100; do
+		log=$(for ((i = 1; i <= 100; i++)); do
+			printf 'Error: noise %d\n' "$i"
+			if ((i <= blocks)); then
+				printf 'not ok %d t\n# detail %d\n' "$i" "$i"
+			fi
+		done)
+		out=$(_ci_failure_excerpt "$log")
+		count=$(wc -l <<< "$out")
+		kept=$(grep -c -E '^(not ok|#)' <<< "$out")
+
+		((count == 80))
+		((kept == (blocks < 40 ? blocks * 2 : 80)))
+	done
+}
+
 # =============================================================================
 # _wait_for_check_on_head
 # =============================================================================
