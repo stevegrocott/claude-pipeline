@@ -729,7 +729,10 @@ $body
 # Integration: _ci_fix_attempt against the REAL read-mr-checks.sh (mock gh)
 # =============================================================================
 
-@test "fix attempt fetches the failed log through the real read-mr-checks.sh" {
+# Points PLATFORM_DIR at a copy of the real read-mr-checks.sh and puts
+# mockbin first on PATH. The caller writes $TEST_TMP/mockbin/gh and makes it
+# executable.
+real_wrapper_setup() {
 	fix_setup
 	local real_wrapper="$BATS_TEST_DIRNAME/../platform/read-mr-checks.sh"
 	# The real wrapper resolves its helpers relative to itself, so run it from
@@ -738,6 +741,13 @@ $body
 	cp "$real_wrapper" "$TEST_TMP/real/platform/"
 	cp "$BATS_TEST_DIRNAME/../resolve-pipeline-root.sh" "$TEST_TMP/real/"
 	printf 'GIT_HOST=github\n' > "$TEST_TMP/cfg/platform.sh"
+	export PIPELINE_CONFIG_DIR="$TEST_TMP/cfg"
+	PLATFORM_DIR="$TEST_TMP/real/platform"
+	PATH="$TEST_TMP/mockbin:$PATH"
+}
+
+@test "fix attempt fetches the failed log through the real read-mr-checks.sh" {
+	real_wrapper_setup
 	cat > "$TEST_TMP/mockbin/gh" <<'GH'
 #!/usr/bin/env bash
 echo "gh $*" >> "$TEST_TMP/gh-calls.log"
@@ -754,9 +764,6 @@ elif [[ "$1" == run ]]; then
 fi
 GH
 	chmod +x "$TEST_TMP/mockbin/gh"
-	export PIPELINE_CONFIG_DIR="$TEST_TMP/cfg"
-	PLATFORM_DIR="$TEST_TMP/real/platform"
-	PATH="$TEST_TMP/mockbin:$PATH"
 
 	run _ci_fix_attempt 7 "Bats Suite" 1
 	[[ "$status" -eq 0 ]]
@@ -765,6 +772,52 @@ GH
 	# The prompt's excerpt is the cause, not the tail: the columns were
 	# stripped, so the excerpt helper could anchor on "not ok".
 	grep -qx 'not ok 1 real wrapper log' "$STAGE_PROMPT_FILE"
+	grep -qx '# (in test file x.bats, line 4)' "$STAGE_PROMPT_FILE"
+	run grep -c 'tail line' "$STAGE_PROMPT_FILE"
+	[[ "$output" == 0 ]]
+}
+
+@test "fix attempt uses the jobs API log when run view is refused" {
+	real_wrapper_setup
+	# gh while the run is in progress: run view prints only a refusal, and
+	# the jobs API serves the finished job's log with a byte order mark and a
+	# bare timestamp on each line.
+	cat > "$TEST_TMP/mockbin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "gh $*" >> "$TEST_TMP/gh-calls.log"
+case "$1 $2" in
+	'pr view')
+		echo '{"headRefOid":"abc","statusCheckRollup":[{"name":"Bats Suite","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/o/r/actions/runs/222/job/7"}]}'
+		;;
+	'run view')
+		echo 'run 222 is still in progress; logs will be available when it is complete' >&2
+		exit 1
+		;;
+	'api repos/{owner}/{repo}/actions/jobs/7/logs')
+		printf '\357\273\2772026-01-02T03:04:05.1234567Z not ok 1 jobs api log\n'
+		printf '2026-01-02T03:04:05.2000000Z # (in test file x.bats, line 4)\n'
+		for i in {1..100}; do
+			printf '2026-01-02T03:04:06.0000000Z tail line %s\n' "$i"
+		done
+		;;
+	*)
+		exit 1
+		;;
+esac
+GH
+	chmod +x "$TEST_TMP/mockbin/gh"
+
+	run _ci_fix_attempt 7 "Bats Suite" 1
+	[[ "$status" -eq 0 ]]
+	[[ "$(< "$STAGE_NAME_FILE")" == fix-ci-iter-1 ]]
+	grep -qF 'gh run view 222 --log-failed --job 7' "$TEST_TMP/gh-calls.log"
+	grep -qF 'gh api repos/{owner}/{repo}/actions/jobs/7/logs' \
+		"$TEST_TMP/gh-calls.log"
+	local saved="$LOG_BASE/ci-failed-log-iter-1.log"
+	grep -qx 'not ok 1 jobs api log' "$saved"
+	grep -qx 'tail line 100' "$saved"
+	# The stage got the cause from that log, not its tail.
+	grep -qx 'not ok 1 jobs api log' "$STAGE_PROMPT_FILE"
 	grep -qx '# (in test file x.bats, line 4)' "$STAGE_PROMPT_FILE"
 	run grep -c 'tail line' "$STAGE_PROMPT_FILE"
 	[[ "$output" == 0 ]]
