@@ -555,6 +555,26 @@ log_startup_environment() {
     fi
 }
 
+# Mark an issue whose process-pr result carried permission denials but was
+# reconciled as merged. Denials are the normal case for a stage that did its
+# work, so this never changes status: it only sets follow_ups_unverified so
+# the follow-up issues the stage may not have filed can be checked.
+# Usage: mark_follow_ups_unverified <result_json> <issue_num> <pr_number>
+mark_follow_ups_unverified() {
+    local result_json="$1"
+    local issue_num="$2"
+    local pr_number="$3"
+    local count
+
+    count=$(printf '%s' "$result_json" |
+        jq -r '(.permission_denials // []) | length' 2>/dev/null) || count=0
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    if ((count > 0)); then
+        update_issue_field "$issue_num" "follow_ups_unverified" "true" "true"
+        log_warn "Issue #$issue_num: PR #${pr_number:-?} merged but process-pr had $count permission denial(s); follow-up issues unverified"
+    fi
+}
+
 # Log a WARN naming each tool denied in a claude result's permission_denials,
 # followed by one line per denial naming its tool. A Bash denial shows the
 # first line of the command cut to 160 characters; a denial without a command
@@ -2561,6 +2581,8 @@ process_issue() {
                 if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
                     update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
                 fi
+                mark_follow_ups_unverified "$proc_last_json" "$issue_num" \
+                    "${_RECONCILE_PR:-$pr_number}"
                 update_progress
                 git checkout "$BRANCH" 2>/dev/null || true
                 return 0
@@ -2586,6 +2608,8 @@ process_issue() {
                 if [[ -n "${_RECONCILE_PR:-$pr_number}" ]]; then
                     update_issue_field "$issue_num" "pr" "${_RECONCILE_PR:-$pr_number}" "true"
                 fi
+                mark_follow_ups_unverified "$proc_last_json" "$issue_num" \
+                    "${_RECONCILE_PR:-$pr_number}"
                 update_progress
                 git checkout "$BRANCH" 2>/dev/null || true
                 return 0
