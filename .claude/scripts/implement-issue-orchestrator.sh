@@ -9579,9 +9579,10 @@ merge_worktree_branch() {
 #
 # The registry is shared by every repo and interactive session on the
 # machine, so the rewrite is deliberately narrow:
-#   - only entries whose projectPath EQUALS the given path are dropped
-#     (exact string equality, never a prefix or glob);
-#   - a plugin key is deleted only when this removal emptied its list;
+#   - only pipeline-core@claude-pipeline entries whose projectPath EQUALS
+#     the given path are dropped (exact string equality, never a prefix
+#     or glob); other plugins' entries are never touched;
+#   - the plugin key is deleted only when this removal emptied its list;
 #   - the rewrite is jq -> temp file -> mv, under the same flock/mkdir lock
 #     status_json_write uses (it is reused with STATUS_FILE pointed at the
 #     registry, so the lock files sit beside it);
@@ -9611,20 +9612,17 @@ remove_worktree_plugin_registry_entry() {
 	# orchestrator's real status file is never touched.
 	(
 		STATUS_FILE="$registry"
-		status_json_write --arg p "$wt_path" '
-			if (.plugins | type) == "object" then
-				.plugins |= with_entries(
-					if (.value | type) == "array" then
-						(.value | map(select(
-							(type == "object"
-							 and .projectPath == $p) | not
-						))) as $kept
-						| if ($kept | length) == 0
-							and (.value | length) > 0
-						  then empty
-						  else .value = $kept end
-					else . end
-				)
+		status_json_write --arg p "$wt_path" \
+			--arg k "pipeline-core@claude-pipeline" '
+			if (.plugins | type) == "object"
+				and (.plugins[$k] | type) == "array" then
+				(.plugins[$k] | map(select(
+					(type == "object"
+					 and .projectPath == $p) | not
+				))) as $kept
+				| if ($kept | length) == 0
+				  then del(.plugins[$k])
+				  else .plugins[$k] = $kept end
 			else . end
 		' 2>/dev/null
 	) || true
@@ -9663,6 +9661,7 @@ cleanup_worktree() {
 			2>/dev/null >&2 || true
 	fi
 	git worktree prune 2>/dev/null >&2 || true
+	remove_worktree_plugin_registry_entry "$wt_path"
 	git branch -D "$wt_branch" 2>/dev/null >&2 || true
 }
 
