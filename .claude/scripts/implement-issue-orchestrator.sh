@@ -9263,6 +9263,8 @@ run_task_in_worktree() {
 		test_discovery_skill=$(load_skill "test-discovery")
 		local background_block
 		background_block=$(build_background_block)
+		local ac_block
+		ac_block=$(build_acceptance_criteria_block)
 		local boundary_block
 		boundary_block="
 WORKTREE BOUNDARY:
@@ -9280,12 +9282,16 @@ $test_discovery_skill
 
 ## End Skill Instructions
 
-}$task_desc${line_range_hint}${files_block}${background_block}${boundary_block}
+}$task_desc${line_range_hint}${files_block}${background_block}${ac_block:+
+
+$ac_block}${boundary_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
-3. If you find problems, fix them before committing.
+3. If you find problems, fix them before committing.${ac_block:+
+4. Which of the acceptance criteria does this task cover, and does your
+   change meet them?}
 
 Only commit when you are confident the task goal is achieved.
 When committing: run 'git diff --name-only' to list the files
@@ -10666,15 +10672,21 @@ execute_batch_serial() {
 					_pw_files_block=$(build_files_block)
 					local _pw_background_block
 					_pw_background_block=$(build_background_block)
+					local _pw_ac_block
+					_pw_ac_block=$(build_acceptance_criteria_block)
 					local _pw_prompt
 					_pw_prompt="Implement task $_next_tid on branch $feature_branch in the current working directory:
 
-$_next_tdesc${_pw_files_block}${_pw_background_block}
+$_next_tdesc${_pw_files_block}${_pw_background_block}${_pw_ac_block:+
+
+$_pw_ac_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
-3. If you find problems, fix them before committing.
+3. If you find problems, fix them before committing.${_pw_ac_block:+
+4. Which of the acceptance criteria does this task cover, and does your
+   change meet them?}
 
 MANDATORY UI INTERACTION CONSTRAINTS:
 - Use data-testid selectors on actual buttons, forms, and navigation elements.
@@ -10823,15 +10835,21 @@ Commit your changes with a descriptive message."
 			line_range_hint=$(build_line_range_hint "$tdesc")
 			local background_block
 			background_block=$(build_background_block)
+			local ac_block
+			ac_block=$(build_acceptance_criteria_block)
 			local impl_prompt
 			impl_prompt="Implement task $tid on branch $feature_branch in the current working directory:
 
-$tdesc${line_range_hint}${files_block}${background_block}
+$tdesc${line_range_hint}${files_block}${background_block}${ac_block:+
+
+$ac_block}
 SELF-REVIEW BEFORE COMMITTING:
 After implementing, verify your changes against the task description above:
 1. Does your implementation fully achieve the task's goal?
 2. Are there any obvious issues, missing edge cases, or incomplete parts?
-3. If you find problems, fix them before committing.
+3. If you find problems, fix them before committing.${ac_block:+
+4. Which of the acceptance criteria does this task cover, and does your
+   change meet them?}
 
 MANDATORY UI INTERACTION CONSTRAINTS:
 - Use data-testid selectors on actual buttons, forms, and navigation elements.
