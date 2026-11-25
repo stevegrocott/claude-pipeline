@@ -5983,6 +5983,149 @@ STUB
 }
 
 # =============================================================================
+# ISSUE #1237: the #950 reclaim paths drop the worktree's plugin-registry entry
+# =============================================================================
+
+# Point HOME at a throwaway directory holding a plugin registry that has a
+# pipeline-core entry for the given worktree, plus entries that must survive:
+# user scope, another project, a prefix-sharing path, and another plugin
+# registered on the very same path. A byte copy is kept in
+# $REGISTRY.before. Args: worktree path, exactly as git reports it.
+_write_1237_registry() {
+	local wt_path="$1"
+	export HOME="$TEST_TMP/home"
+	unset PLUGIN_REGISTRY_FILE
+	REGISTRY="$HOME/.claude/plugins/installed_plugins.json"
+	mkdir -p "${REGISTRY%/*}"
+	cat > "$REGISTRY" <<EOF
+{
+  "version": 2,
+  "plugins": {
+    "pipeline-core@claude-pipeline": [
+      {"scope":"project","projectPath":"$wt_path","version":"0.8.24"},
+      {"scope":"user","version":"0.8.24"},
+      {"scope":"project","projectPath":"/elsewhere/repo","version":"0.8.24"},
+      {"scope":"project","projectPath":"${wt_path}-extra","version":"0.8.24"}
+    ],
+    "other@market": [
+      {"scope":"project","projectPath":"$wt_path","version":"1.0"}
+    ]
+  }
+}
+EOF
+	cp "$REGISTRY" "$REGISTRY.before"
+}
+
+# Assert the registry equals its snapshot minus exactly the pipeline-core
+# entry for the given path.
+_assert_1237_only_entry_removed() {
+	local wt_path="$1"
+	local expected
+	expected=$(jq -S --arg p "$wt_path" \
+		'.plugins["pipeline-core@claude-pipeline"]
+			|= map(select(.projectPath != $p))' \
+		"$REGISTRY.before")
+	[[ "$(jq -S . "$REGISTRY")" == "$expected" ]] \
+		|| fail "unexpected registry: $(cat "$REGISTRY")"
+}
+
+_assert_1237_registry_untouched() {
+	cmp -s "$REGISTRY.before" "$REGISTRY" \
+		|| fail "registry was rewritten: $(cat "$REGISTRY")"
+}
+
+# Task worktree owned by the given pid. Sets WT_PATH to the symlink-resolved
+# path, which is what `git worktree list` reports (macOS /var).
+_make_1237_task_wt() {
+	local owner_pid="$1"
+	git checkout -q -b feature/issue-950 main
+	create_task_worktree "$TEST_TMP/worktrees" "feature/issue-950" "1" "950" \
+		> /dev/null
+	WT_PATH=$(cd "$TEST_TMP/worktrees/task-1" && pwd -P)
+	printf '%s' "$owner_pid" > "$WT_PATH/.claude-task.pid"
+}
+
+# Merged feature branch checked out in a second worktree. Sets WT_PATH.
+_make_1237_branch_wt() {
+	git branch feature/issue-950 main
+	git worktree add -q "$TEST_TMP/other-worktree" feature/issue-950
+	WT_PATH=$(cd "$TEST_TMP/other-worktree" && pwd -P)
+}
+
+@test "#1237 cleanup_stale_worktrees: drops only the reclaimed worktree's registry entry" {
+	_setup_950_repo
+	_make_1237_task_wt "$(_dead_pid)"
+	_write_1237_registry "$WT_PATH"
+
+	cleanup_stale_worktrees
+
+	[[ ! -d "$WT_PATH" ]] || fail "worktree was not reclaimed"
+	_assert_1237_only_entry_removed "$WT_PATH"
+}
+
+@test "#1237 cleanup_stale_worktrees: dry-run leaves the registry byte-identical" {
+	_setup_950_repo
+	_make_1237_task_wt "$(_dead_pid)"
+	_write_1237_registry "$WT_PATH"
+
+	export RECLAIM_DRY_RUN=true
+	cleanup_stale_worktrees
+
+	[[ -d "$WT_PATH" ]] || fail "dry-run removed the worktree"
+	_assert_1237_registry_untouched
+}
+
+@test "#1237 cleanup_stale_worktrees: a live owner leaves the registry byte-identical" {
+	_setup_950_repo
+	# $$ is this test's own shell: alive for as long as the assertion runs.
+	_make_1237_task_wt "$$"
+	_write_1237_registry "$WT_PATH"
+
+	cleanup_stale_worktrees
+
+	[[ -d "$WT_PATH" ]] || fail "a live run's worktree was removed"
+	_assert_1237_registry_untouched
+}
+
+@test "#1237 reclaim_merged_branch: drops only the reclaimed worktree's registry entry" {
+	_setup_950_repo
+	_make_1237_branch_wt
+	_write_1237_registry "$WT_PATH"
+
+	run reclaim_merged_branch feature/issue-950 main
+
+	[ "$status" -eq 0 ]
+	[[ ! -d "$WT_PATH" ]] || fail "worktree was not reclaimed"
+	_assert_1237_only_entry_removed "$WT_PATH"
+}
+
+@test "#1237 reclaim_merged_branch: dry-run leaves the registry byte-identical" {
+	_setup_950_repo
+	_make_1237_branch_wt
+	_write_1237_registry "$WT_PATH"
+
+	export RECLAIM_DRY_RUN=true
+	run reclaim_merged_branch feature/issue-950 main
+
+	[ "$status" -eq 0 ]
+	[[ -d "$WT_PATH" ]] || fail "dry-run removed the worktree"
+	_assert_1237_registry_untouched
+}
+
+@test "#1237 reclaim_merged_branch: a worktree kept for uncommitted changes leaves the registry byte-identical" {
+	_setup_950_repo
+	_make_1237_branch_wt
+	printf 'wip\n' > "$WT_PATH/untracked.txt"
+	_write_1237_registry "$WT_PATH"
+
+	run reclaim_merged_branch feature/issue-950 main
+
+	[ "$status" -ne 0 ]
+	[[ -f "$WT_PATH/untracked.txt" ]] || fail "uncommitted work was lost"
+	_assert_1237_registry_untouched
+}
+
+# =============================================================================
 # TASK 6 (#891): a first end-to-end run of the batch driver loop
 # =============================================================================
 #
