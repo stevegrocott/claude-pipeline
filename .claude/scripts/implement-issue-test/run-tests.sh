@@ -120,6 +120,37 @@ CI_EXCLUDED_SUITES=(
     # verify against a real Linux run.
 )
 
+# =============================================================================
+# GATING GUARD  (issue #1018)
+# =============================================================================
+#
+# Both the default run and --ci discover suites with the glob `test-*.bats`.
+# A .bats file that does not match it is run by NOTHING — that is how
+# cost-accounting.bats (35 tests) went unrun. `--check-gating` fails when any
+# *.bats in this directory is neither matched by that glob nor listed below.
+#
+# Add to this list only with a reason; the preferred fix is to rename the file
+# to test-*.bats.
+UNGATED_SUITES=(
+    # 35 tests, currently run by no workflow. Debt marker: rename to
+    # test-cost-accounting.bats once its tests are verified green on Linux.
+    cost-accounting.bats
+)
+
+# Prints every *.bats here that nothing runs, one per line.
+ungated_suite_list() {
+    local f skip excluded
+    for f in *.bats; do
+        [[ -e "$f" ]] || continue
+        [[ "$f" == test-*.bats ]] && continue
+        excluded=0
+        for skip in "${UNGATED_SUITES[@]}"; do
+            [[ "$f" == "$skip" ]] && { excluded=1; break; }
+        done
+        (( excluded )) || printf '%s\n' "$f"
+    done
+}
+
 # Prints the CI-safe suite list, one per line.
 #
 # With SHARD_INDEX/SHARD_TOTAL set, prints only this shard's slice. The whole
@@ -158,6 +189,7 @@ show_help() {
     echo "  --verbose    Verbose output"
     echo "  --ci         Run the CI-safe subset (all but CI_EXCLUDED_SUITES)"
     echo "  --list-ci    Print the CI-safe suite list and exit"
+    echo "  --check-gating  Fail if any .bats file is neither gated nor excluded"
     echo "  --help       Show this help"
     echo ""
     echo "Test Files:"
@@ -206,6 +238,19 @@ main() {
                 # Print the CI-safe list and exit — lets a contributor see
                 # exactly what CI will run without running it.
                 ci_suite_list
+                exit 0
+                ;;
+            --check-gating)
+                # Guard: every *.bats must be run by the test-*.bats glob or
+                # be an explicit UNGATED_SUITES exclusion (issue #1018).
+                local ungated
+                ungated="$(ungated_suite_list)"
+                if [[ -n "$ungated" ]]; then
+                    echo -e "${RED}Ungated .bats files (not test-*.bats, not in UNGATED_SUITES):${NC}" >&2
+                    echo "$ungated" >&2
+                    exit 1
+                fi
+                echo "All .bats files are gated or explicitly excluded."
                 exit 0
                 ;;
             --help|-h)
