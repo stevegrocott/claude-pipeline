@@ -20,3 +20,12 @@ RUNNER="$(cd "$BATS_TEST_DIRNAME" && pwd)/run-tests.sh"
     [ "$status" -eq 1 ]
     [[ "$output" == *"zz-stray-ungated.bats"* ]]
 }
+
+@test "guard fails when unprefixed cost-accounting.bats is re-added" {
+    local stray="$BATS_TEST_DIRNAME/cost-accounting.bats"
+    : > "$stray"
+    run "$RUNNER" --check-gating
+    rm -f "$stray"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cost-accounting.bats"* ]]
+}
