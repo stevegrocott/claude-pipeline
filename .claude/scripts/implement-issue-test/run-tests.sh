@@ -129,13 +129,9 @@ CI_EXCLUDED_SUITES=(
 # cost-accounting.bats (35 tests) went unrun. `--check-gating` fails when any
 # *.bats in this directory is neither matched by that glob nor listed below.
 #
-# Add to this list only with a reason; the preferred fix is to rename the file
-# to test-*.bats.
-UNGATED_SUITES=(
-    # 35 tests, currently run by no workflow. Debt marker: rename to
-    # test-cost-accounting.bats once its tests are verified green on Linux.
-    cost-accounting.bats
-)
+# The list is empty: every suite here is run by the glob. Add to it only with a
+# reason; the preferred fix is to rename the file to test-*.bats.
+UNGATED_SUITES=()
 
 # Prints every *.bats here that nothing runs, one per line.
 ungated_suite_list() {
@@ -144,7 +140,8 @@ ungated_suite_list() {
         [[ -e "$f" ]] || continue
         [[ "$f" == test-*.bats ]] && continue
         excluded=0
-        for skip in "${UNGATED_SUITES[@]}"; do
+        # Empty-safe: bash < 4.4 treats an empty array as unbound under set -u.
+        for skip in ${UNGATED_SUITES[@]+"${UNGATED_SUITES[@]}"}; do
             [[ "$f" == "$skip" ]] && { excluded=1; break; }
         done
         (( excluded )) || printf '%s\n' "$f"
