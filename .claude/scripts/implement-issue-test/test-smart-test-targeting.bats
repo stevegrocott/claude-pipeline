@@ -3885,6 +3885,7 @@ _commit_on_main() {
     local path="$1" content="$2"
     cd "$TEST_TMP/repo" || return 1
 
+    mkdir -p "$(dirname "$path")"
     printf '%s\n' "$content" > "$path"
     git add "$path"
     git commit -q -m "add $path"
@@ -4007,6 +4008,82 @@ _assert_prompt_runs_unit_cmd() {
     _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
 
     _assert_prompt_runs_unit_cmd
+}
+
+@test "#1010: TEST_TS_RUNNER=unit-cmd with TEST_UNIT_CMD unset keeps Jest and warns" {
+    unset TEST_UNIT_CMD
+    export TEST_TS_RUNNER=unit-cmd
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+    grep -qF 'TEST_TS_RUNNER=unit-cmd but TEST_UNIT_CMD is unset — keeping Jest' \
+        "$LOG_FILE" || fail "expected the 'keeping Jest' warning in the log"
+}
+
+@test "#1010: an unknown TEST_TS_RUNNER value warns and detects as auto (no Jest)" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=vitest
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_unit_cmd
+    grep -qF "Unknown TEST_TS_RUNNER value 'vitest'" "$LOG_FILE" \
+        || fail "expected the unknown-value warning in the log"
+}
+
+@test "#1010: an unknown TEST_TS_RUNNER value detects as auto (Jest repo)" {
+    # Together with the no-Jest case this rules out an unknown value being
+    # treated as either of the explicit settings.
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=vitest
+    _commit_on_main jest.config.js 'module.exports = {};'
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+}
+
+@test "#1010: a nested jest.config.* counts as Jest" {
+    _commit_on_main packages/app/jest.config.ts 'export default {};'
+
+    _repo_uses_jest "$TEST_TMP/repo" \
+        || fail "a jest.config.* below the root must be detected"
+}
+
+@test "#1010: a \"jest\" key in a nested package.json counts as Jest" {
+    _commit_on_main package.json '{"name":"root"}'
+    _commit_on_main packages/app/package.json '{"name":"app","jest":{}}'
+
+    _repo_uses_jest "$TEST_TMP/repo" \
+        || fail "a nested package.json \"jest\" key must be detected"
+}
+
+@test "#1010: a subdirectory loop_dir sees a root-level Jest config" {
+    _commit_on_main jest.config.js 'module.exports = {};'
+    _commit_on_main packages/app/index.ts 'export const x = 1;'
+
+    _repo_uses_jest "$TEST_TMP/repo/packages/app" \
+        || fail "the whole repository must be searched, not just loop_dir"
+}
+
+@test "#1010: a subdirectory loop_dir sees a sibling package.json \"jest\" key" {
+    # The manifest path comes back relative to loop_dir (../other/...), and
+    # must still resolve when it is read.
+    _commit_on_main packages/app/index.ts 'export const x = 1;'
+    _commit_on_main packages/other/package.json '{"name":"other","jest":{}}'
+
+    _repo_uses_jest "$TEST_TMP/repo/packages/app" \
+        || fail "a sibling package's \"jest\" key must be detected"
+}
+
+@test "#1010: untracked Jest config and \"jest\" key are ignored" {
+    cd "$TEST_TMP/repo"
+    mkdir -p node_modules/dep
+    echo 'module.exports = {};' > jest.config.js
+    echo '{"name":"fixture","jest":{}}' > package.json
+    echo 'module.exports = {};' > node_modules/dep/jest.config.js
+
+    run _repo_uses_jest "$TEST_TMP/repo"
+    [ "$status" -eq 1 ] || fail \
+        "only tracked files may signal Jest; got status $status"
 }
 
 @test "#1010: a TEST_UNIT_CMD failure with no changed test file is not pre-existing" {
