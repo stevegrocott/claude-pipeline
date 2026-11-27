@@ -677,6 +677,119 @@ _expect_no_shared_task_promoted() {
 	_expect_no_shared_task_promoted "red suite"
 }
 
+# Runs the orchestrator's own implement_end_sha recording block, lifted from
+# main(), so the tests below cannot pass without it.
+_run_shipped_implement_end_recording() {
+	local block
+	block=$(awk '
+		/^ *local _implement_end_sha$/ { grab = 1 }
+		grab { print }
+		grab && /^ *fi$/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	[[ "$block" == *'.implement_end_sha'*fi ]] ||
+		fail "implement_end_sha recording block not found in main()"
+	eval "_shipped_recording() {
+$block
+}"
+	_shipped_recording
+}
+
+@test "implement_end_sha: the shipped recording writes HEAD and enables sibling promotion" {
+	_seed_shared_file_failed_tasks
+	local expected
+	expected=$(git rev-parse HEAD)
+
+	_run_shipped_implement_end_recording
+
+	expect_glob "$(jq -r '.implement_end_sha' "$STATUS_FILE")" "$expected" \
+		"HEAD at implement end is recorded"
+	_commit_after_implement
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "the recorded SHA drives promotion"
+}
+
+@test "implement_end_sha: a resumed run does not overwrite the recorded SHA" {
+	_seed_shared_file_failed_tasks
+	local original
+	original=$(git rev-parse HEAD)
+	_run_shipped_implement_end_recording
+	_commit_after_implement
+
+	_run_shipped_implement_end_recording
+
+	expect_glob "$(jq -r '.implement_end_sha' "$STATUS_FILE")" "$original" \
+		"the first recorded SHA survives"
+}
+
+@test "drift guard: implement_end_sha is recorded after the implement stage and before reconciliation" {
+	local implement_line record_line reconcile_line
+	implement_line=$(grep -n '^ *_noncommit_delta=\$(reconcile_noncommit_tasks_with_deliverables)' \
+		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	record_line=$(grep -n "'\.implement_end_sha //= \\\$sha'" \
+		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	reconcile_line=$(grep -n '^ *_reconciled_count=\$(reconcile_failed_tasks_with_branch_evidence ' \
+		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+
+	expect_ok "post-task-loop anchor present" test -n "$implement_line"
+	expect_ok "recording present" test -n "$record_line"
+	expect_ok "reconcile call present" test -n "$reconcile_line"
+	expect_ok "recorded after the implement stage" \
+		test "$implement_line" -lt "$record_line"
+	expect_ok "recorded before reconciliation" \
+		test "$record_line" -lt "$reconcile_line"
+}
+
+@test "reconcile: every declared file must change after implement_end_sha, not just one" {
+	set_tasks "$(jq -n '[range(1; 4) | {id: ., description: "task \(.)",
+		status: "failed", affected_files: ["shared.sh", "second.sh"]}]')"
+	echo "implement" > shared.sh
+	echo "implement" > second.sh
+	git add shared.sh second.sh
+	git commit -q -m "implement stage lands both files"
+	_record_implement_end
+	_commit_after_implement
+
+	_expect_no_shared_task_promoted "only one of two files changed"
+
+	# Control: changing the other file too is what unblocks them.
+	echo "review fix" >> second.sh
+	git commit -q -am "later stage changes second.sh"
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "all declared files changed"
+}
+
+@test "reconcile: an implement_end_sha outside HEAD's history promotes no sibling" {
+	_seed_shared_file_failed_tasks
+	# A real commit that HEAD does not descend from, as after a rewrite.
+	git checkout -q -b rewritten
+	git commit -q --allow-empty -m "commit later dropped from the branch"
+	_record_implement_end
+	git checkout -q feature
+	_commit_after_implement
+
+	_expect_no_shared_task_promoted "implement_end_sha not an ancestor"
+}
+
+@test "reconcile: a declared directory counts only changes under it after implement_end_sha" {
+	set_tasks "$(jq -n '[range(1; 4) | {id: ., description: "task \(.)",
+		status: "failed", affected_files: ["lib/"]}]')"
+	mkdir lib
+	echo "implement" > lib/a.sh
+	git add lib/a.sh
+	git commit -q -m "implement stage lands lib/"
+	_record_implement_end
+	echo "other" > libother.sh
+	git add libother.sh
+	git commit -q -m "later stage changes a file outside lib/"
+
+	_expect_no_shared_task_promoted "nothing under lib/ changed"
+
+	echo "review fix" >> lib/a.sh
+	git commit -q -am "later stage changes a file under lib/"
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "a change under the declared directory is evidence"
+}
+
 @test "reconcile: does not promote an evidenced task while the test suite is red this run" {
 	# Issue #620's proposed direction requires file evidence AND a green
 	# test suite before treating a failed task as satisfied.
