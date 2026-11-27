@@ -5327,6 +5327,10 @@ _setup_950_repo() {
 	export STAGE_COUNTER=0
 	mkdir -p "$LOG_BASE"
 
+	# Removing a worktree rewrites the plugin registry (#1237); keep that
+	# away from the developer's real one under $HOME (#1250).
+	export PLUGIN_REGISTRY_FILE="$TEST_TMP/installed_plugins.json"
+
 	source_orchestrator_functions
 }
 
