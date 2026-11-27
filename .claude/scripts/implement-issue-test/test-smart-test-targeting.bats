@@ -4009,6 +4009,64 @@ _assert_prompt_runs_unit_cmd() {
     _assert_prompt_runs_unit_cmd
 }
 
+@test "#1010: a TEST_UNIT_CMD failure with no changed test file is not pre-existing" {
+    # Detection runs for this scope and finds no changed *.test.ts files,
+    # which is what arms the pre-existing skip. TEST_UNIT_CMD runs the whole
+    # suite, so the PR can still own the failure: it must reach the fix agent.
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-1010-unit-cmd-fail main
+    mkdir -p src
+    echo "export const x = 1;" > src/x.ts
+    git add src/x.ts
+    git commit -q -m "impl without tests"
+
+    prompt_file="$TEST_TMP/loop_prompt_1010"
+    count_file="$TEST_TMP/test_iter_count_1010"
+    fix_file="$TEST_TMP/fix_called_1010"
+    msgs_file="$TEST_TMP/comments_1010"
+    echo 0 > "$count_file"
+    : > "$msgs_file"
+    export prompt_file count_file fix_file msgs_file
+
+    # Fails once, then passes, so a loop that dispatches a fix terminates.
+    run_stage() {
+        case "$1" in
+            test-iter-*)
+                local count
+                count=$(< "$count_file")
+                echo $((count + 1)) > "$count_file"
+                if (( count == 0 )); then
+                    printf '%s' "$2" > "$prompt_file"
+                    echo '{"status":"success","output":{"result":"failed","summary":"1 failure","failures":[{"test":"adds numbers","message":"expected 4 but received 5"}],"validation_result":"skipped"}}'
+                else
+                    echo '{"status":"success","output":{"result":"passed","summary":"ok","validation_result":"passed","validation_summary":"ok"}}'
+                fi
+                ;;
+            fix-tests-*)
+                : > "$fix_file"
+                echo '{"status":"success","output":{"status":"success","summary":"fixed"}}'
+                ;;
+            *) echo '{"status":"success","output":{"result":"passed","summary":"ok"}}' ;;
+        esac
+    }
+    export -f run_stage
+    comment_issue() { printf '%s\n' "$*" >> "$msgs_file"; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-1010-unit-cmd-fail" "" "typescript"
+
+    _assert_prompt_runs_unit_cmd
+    grep -q 'Pre-existing Failures' "$msgs_file" && fail \
+        "a whole-suite failure must not be dismissed as pre-existing;" \
+        "comments: $(< "$msgs_file")"
+    [[ -f "$fix_file" ]] || fail \
+        "the failure must be dispatched to the fix agent"
+    (( $(< "$count_file") >= 2 )) || fail \
+        "the loop must re-test after the fix instead of exiting on a failure"
+}
+
 @test "#965: unknown-code with TEST_UNIT_CMD unset falls back to Jest and warns" {
     unset TEST_UNIT_CMD
     _capture_loop_prompt_for "src/app/other.py" "unknown-code"
