@@ -3879,6 +3879,37 @@ _capture_loop_prompt_for() {
     run_test_loop "$TEST_TMP/repo" "$(git branch --show-current)" "" "$scope"
 }
 
+# Helper: commit file $1 with content $2 on main, so it is part of the repo
+# under test rather than of the branch diff _capture_loop_prompt_for creates.
+_commit_on_main() {
+    local path="$1" content="$2"
+    cd "$TEST_TMP/repo" || return 1
+
+    mkdir -p "$(dirname "$path")"
+    printf '%s\n' "$content" > "$path"
+    git add "$path"
+    git commit -q -m "add $path"
+}
+
+# Helpers: assert which blocking command reached the test-stage prompt.
+_assert_prompt_runs_jest() {
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"npx jest --passWithNoTests"* ]] || fail \
+        "expected the incremental Jest command in the test prompt"
+    [[ -z "${TEST_UNIT_CMD:-}" || "$captured" != *"$TEST_UNIT_CMD"* ]] \
+        || fail "TEST_UNIT_CMD must not appear when Jest is the runner"
+}
+
+_assert_prompt_runs_unit_cmd() {
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"&& $TEST_UNIT_CMD"* ]] || fail \
+        "expected TEST_UNIT_CMD ('$TEST_UNIT_CMD') as the blocking command"
+    [[ "$captured" != *"npx jest"* ]] || fail \
+        "Jest must not run when TEST_UNIT_CMD is the runner"
+}
+
 @test "#965 AC1: unknown-code scope with TEST_UNIT_CMD runs that command as the blocking gate" {
     export TEST_UNIT_CMD="uv run pytest"
     _capture_loop_prompt_for "src/app/main.py" "unknown-code"
@@ -3926,6 +3957,8 @@ _capture_loop_prompt_for() {
     # pre-existing filter depends on that explicit mode to decide which
     # failures the PR owns; a full-suite substitution would lose it.
     export TEST_UNIT_CMD="npm test"
+    export TEST_TS_RUNNER=auto
+    _commit_on_main jest.config.js 'module.exports = {};'
     _capture_loop_prompt_for "src/lib/other.ts" "typescript"
 
     local captured
@@ -3933,6 +3966,182 @@ _capture_loop_prompt_for() {
     [[ "$captured" == *"npx jest --passWithNoTests"* ]] || fail \
         "setting TEST_UNIT_CMD must not take a TS consumer off the" \
         "incremental Jest path (#965 AC4)"
+}
+
+@test "#1010: TypeScript scope with no Jest runs TEST_UNIT_CMD" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_unit_cmd
+}
+
+@test "#1010: TypeScript scope with no Jest and no TEST_UNIT_CMD runs Jest" {
+    unset TEST_UNIT_CMD
+    export TEST_TS_RUNNER=auto
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+}
+
+@test "#1010: a \"jest\" key in package.json keeps Jest" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    _commit_on_main package.json '{"name":"fixture","jest":{}}'
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+}
+
+@test "#1010: TEST_TS_RUNNER=jest forces Jest in a repo with no Jest" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=jest
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+}
+
+@test "#1010: TEST_TS_RUNNER=unit-cmd overrides a tracked Jest config" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=unit-cmd
+    _commit_on_main jest.config.js 'module.exports = {};'
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_unit_cmd
+}
+
+@test "#1010: TEST_TS_RUNNER=unit-cmd with TEST_UNIT_CMD unset keeps Jest and warns" {
+    unset TEST_UNIT_CMD
+    export TEST_TS_RUNNER=unit-cmd
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+    grep -qF 'TEST_TS_RUNNER=unit-cmd but TEST_UNIT_CMD is unset — keeping Jest' \
+        "$LOG_FILE" || fail "expected the 'keeping Jest' warning in the log"
+}
+
+@test "#1010: an unknown TEST_TS_RUNNER value warns and detects as auto (no Jest)" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=vitest
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_unit_cmd
+    grep -qF "Unknown TEST_TS_RUNNER value 'vitest'" "$LOG_FILE" \
+        || fail "expected the unknown-value warning in the log"
+}
+
+@test "#1010: an unknown TEST_TS_RUNNER value detects as auto (Jest repo)" {
+    # Together with the no-Jest case this rules out an unknown value being
+    # treated as either of the explicit settings.
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=vitest
+    _commit_on_main jest.config.js 'module.exports = {};'
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+}
+
+@test "#1010: a nested jest.config.* counts as Jest" {
+    _commit_on_main packages/app/jest.config.ts 'export default {};'
+
+    _repo_uses_jest "$TEST_TMP/repo" \
+        || fail "a jest.config.* below the root must be detected"
+}
+
+@test "#1010: a \"jest\" key in a nested package.json counts as Jest" {
+    _commit_on_main package.json '{"name":"root"}'
+    _commit_on_main packages/app/package.json '{"name":"app","jest":{}}'
+
+    _repo_uses_jest "$TEST_TMP/repo" \
+        || fail "a nested package.json \"jest\" key must be detected"
+}
+
+@test "#1010: a subdirectory loop_dir sees a root-level Jest config" {
+    _commit_on_main jest.config.js 'module.exports = {};'
+    _commit_on_main packages/app/index.ts 'export const x = 1;'
+
+    _repo_uses_jest "$TEST_TMP/repo/packages/app" \
+        || fail "the whole repository must be searched, not just loop_dir"
+}
+
+@test "#1010: a subdirectory loop_dir sees a sibling package.json \"jest\" key" {
+    # The manifest path comes back relative to loop_dir (../other/...), and
+    # must still resolve when it is read.
+    _commit_on_main packages/app/index.ts 'export const x = 1;'
+    _commit_on_main packages/other/package.json '{"name":"other","jest":{}}'
+
+    _repo_uses_jest "$TEST_TMP/repo/packages/app" \
+        || fail "a sibling package's \"jest\" key must be detected"
+}
+
+@test "#1010: untracked Jest config and \"jest\" key are ignored" {
+    cd "$TEST_TMP/repo"
+    mkdir -p node_modules/dep
+    echo 'module.exports = {};' > jest.config.js
+    echo '{"name":"fixture","jest":{}}' > package.json
+    echo 'module.exports = {};' > node_modules/dep/jest.config.js
+
+    run _repo_uses_jest "$TEST_TMP/repo"
+    [ "$status" -eq 1 ] || fail \
+        "only tracked files may signal Jest; got status $status"
+}
+
+@test "#1010: a TEST_UNIT_CMD failure with no changed test file is not pre-existing" {
+    # Detection runs for this scope and finds no changed *.test.ts files,
+    # which is what arms the pre-existing skip. TEST_UNIT_CMD runs the whole
+    # suite, so the PR can still own the failure: it must reach the fix agent.
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    cd "$TEST_TMP/repo"
+    git checkout -q -b feature-1010-unit-cmd-fail main
+    mkdir -p src
+    echo "export const x = 1;" > src/x.ts
+    git add src/x.ts
+    git commit -q -m "impl without tests"
+
+    prompt_file="$TEST_TMP/loop_prompt_1010"
+    count_file="$TEST_TMP/test_iter_count_1010"
+    fix_file="$TEST_TMP/fix_called_1010"
+    msgs_file="$TEST_TMP/comments_1010"
+    echo 0 > "$count_file"
+    : > "$msgs_file"
+    export prompt_file count_file fix_file msgs_file
+
+    # Fails once, then passes, so a loop that dispatches a fix terminates.
+    run_stage() {
+        case "$1" in
+            test-iter-*)
+                local count
+                count=$(< "$count_file")
+                echo $((count + 1)) > "$count_file"
+                if (( count == 0 )); then
+                    printf '%s' "$2" > "$prompt_file"
+                    echo '{"status":"success","output":{"result":"failed","summary":"1 failure","failures":[{"test":"adds numbers","message":"expected 4 but received 5"}],"validation_result":"skipped"}}'
+                else
+                    echo '{"status":"success","output":{"result":"passed","summary":"ok","validation_result":"passed","validation_summary":"ok"}}'
+                fi
+                ;;
+            fix-tests-*)
+                : > "$fix_file"
+                echo '{"status":"success","output":{"status":"success","summary":"fixed"}}'
+                ;;
+            *) echo '{"status":"success","output":{"result":"passed","summary":"ok"}}' ;;
+        esac
+    }
+    export -f run_stage
+    comment_issue() { printf '%s\n' "$*" >> "$msgs_file"; }
+    export -f comment_issue
+
+    run_test_loop "$TEST_TMP/repo" "feature-1010-unit-cmd-fail" "" "typescript"
+
+    _assert_prompt_runs_unit_cmd
+    grep -q 'Pre-existing Failures' "$msgs_file" && fail \
+        "a whole-suite failure must not be dismissed as pre-existing;" \
+        "comments: $(< "$msgs_file")"
+    [[ -f "$fix_file" ]] || fail \
+        "the failure must be dispatched to the fix agent"
+    (( $(< "$count_file") >= 2 )) || fail \
+        "the loop must re-test after the fix instead of exiting on a failure"
 }
 
 @test "#965: unknown-code with TEST_UNIT_CMD unset falls back to Jest and warns" {

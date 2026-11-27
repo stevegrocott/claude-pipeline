@@ -364,6 +364,12 @@ TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
 # explicit opt-out.  Unset gets the default; empty stays empty.
 TEST_PATH_PATTERNS="${TEST_PATH_PATTERNS-tests/*|test/*|*/tests/*|*/test/*|*/__tests__/*|*.test.*|*.spec.*|*_test.*|test_*|*.bats}"
 
+# TEST_TS_RUNNER selects the blocking test command for the TypeScript and
+# frontend change scopes (issue #1010): auto | jest | unit-cmd.  Defaulted
+# here as well as in platform.sh so a consumer config that predates the key
+# still gets `auto`.
+TEST_TS_RUNNER="${TEST_TS_RUNNER:-auto}"
+
 # Direct-execution path for e2e_verify (issue #872).  When set (the default),
 # the stage runs TEST_E2E_CMD itself and parses the runner's own summary
 # counts instead of asking an agent to run it and self-report — deterministic,
@@ -12117,6 +12123,94 @@ _failures_indicate_runner_not_started() {
 	(( startup_count > 0 ))
 }
 
+# Reports whether the repository containing $1 uses Jest (issue #1010).
+#
+# Either signal is enough: a tracked jest.config.* file at any depth, or a
+# tracked package.json with a top-level "jest" key. Only files git tracks
+# are consulted, so an installed node_modules cannot answer for the repo,
+# and nothing is executed: `npx` may download and run a package.
+#
+# The whole repository is searched, even when $1 is a subdirectory of it.
+# An unreadable repository or unparseable package.json is not a signal.
+#
+# Arguments:
+#   $1 - loop_dir: a directory inside the repository to inspect
+# Returns:
+#   0 if the repository uses Jest
+#   1 otherwise
+_repo_uses_jest() {
+	local loop_dir="$1"
+	local manifest
+
+	# :(top) anchors at the repository root; **/ also matches the root
+	# itself. Paths come back relative to loop_dir, NUL-delimited.
+	if IFS= read -r -d '' _ < <(git -C "$loop_dir" ls-files -z -- \
+		':(top,glob)**/jest.config.*' 2>/dev/null); then
+		return 0
+	fi
+
+	while IFS= read -r -d '' manifest; do
+		# A tracked file may be deleted from the working tree.
+		[[ -f "$loop_dir/$manifest" ]] || continue
+		if jq -e 'type == "object" and has("jest")' \
+			"$loop_dir/$manifest" >/dev/null 2>&1; then
+			return 0
+		fi
+	done < <(git -C "$loop_dir" ls-files -z -- \
+		':(top,glob)**/package.json' 2>/dev/null)
+
+	return 1
+}
+
+# Chooses the blocking test runner for the typescript, ts-frontend, frontend
+# and mixed change scopes (issue #1010), and logs the choice and the reason.
+#
+# TEST_TS_RUNNER=jest and =unit-cmd are explicit and skip detection.  auto
+# picks TEST_UNIT_CMD only when it is set and the repository does not use
+# Jest; an unknown value warns and behaves as auto.  With TEST_UNIT_CMD unset
+# there is nothing else to run, so the answer is always jest.
+#
+# Arguments:
+#   $1 - loop_dir: a directory inside the repository under test
+# Outputs:
+#   "jest" or "unit-cmd" on stdout; all logging goes to stderr
+_select_ts_runner() {
+	local loop_dir="$1"
+	local setting="${TEST_TS_RUNNER:-auto}"
+	local runner='jest'
+	local reason
+
+	case "$setting" in
+		auto|jest|unit-cmd) ;;
+		*)
+			log_warn "Unknown TEST_TS_RUNNER value '$setting'" \
+				"(expected auto, jest or unit-cmd) — treating it as auto"
+			setting='auto'
+			;;
+	esac
+
+	if [[ "$setting" == 'jest' ]]; then
+		reason='TEST_TS_RUNNER=jest'
+	elif [[ -z "${TEST_UNIT_CMD:-}" ]]; then
+		reason='TEST_UNIT_CMD is unset'
+		if [[ "$setting" == 'unit-cmd' ]]; then
+			log_warn "TEST_TS_RUNNER=unit-cmd but TEST_UNIT_CMD is unset" \
+				"— keeping Jest"
+		fi
+	elif [[ "$setting" == 'unit-cmd' ]]; then
+		runner='unit-cmd'
+		reason='TEST_TS_RUNNER=unit-cmd'
+	elif _repo_uses_jest "$loop_dir"; then
+		reason='auto: the repo has a tracked Jest config or "jest" key'
+	else
+		runner='unit-cmd'
+		reason='auto: TEST_UNIT_CMD is set and the repo shows no sign of Jest'
+	fi
+
+	log "TypeScript-scope test runner: $runner ($reason)"
+	printf '%s\n' "$runner"
+}
+
 # Build the bash test command for a given loop directory.
 # Prefers run-tests.sh when it exists; falls back to direct bats glob otherwise.
 # Appends "&& bats [--jobs N] tests/*.bats" when at least one *.bats file
@@ -12450,6 +12544,10 @@ run_test_loop() {
         fi
     fi
 
+    # True when a TypeScript or frontend scope is gated by the whole-suite
+    # TEST_UNIT_CMD; the pre-existing failure skip below keys off it (#1010).
+    local ts_suite_is_blocking=false
+
     case "$change_scope" in
         bash)
             if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
@@ -12466,13 +12564,8 @@ run_test_loop() {
             # deciding the stage and `npx jest` failing to start.
             #
             # Note this arm is reached ONLY for the unclassified-code scope.
-            # A genuine typescript/ts-frontend/mixed scope keeps the
-            # incremental Jest path below even when TEST_UNIT_CMD is set
-            # (#965 AC3, AC4): that path passes explicit changed test files
-            # and the pre-existing filter depends on that explicit mode to
-            # decide which failures the PR owns. Swapping in a full-suite
-            # command there would both lose that attribution and run the
-            # whole suite on every iteration.
+            # The TypeScript and frontend scopes choose their runner in the
+            # arm below.
             if [[ -n "${TEST_UNIT_CMD:-}" ]]; then
                 test_command="cd $safe_dir && ${TEST_UNIT_CMD}"
                 log "Unclassified-code scope — blocking test loop runs" \
@@ -12489,9 +12582,18 @@ run_test_loop() {
             fi
             ;;
         *)
-            # typescript, ts-frontend, frontend, mixed: run Jest.
+            # typescript, ts-frontend, frontend, mixed: incremental Jest for
+            # Jest repos (#965 AC3, AC4), TEST_UNIT_CMD for repos that test
+            # TypeScript with something else (#1010).
             # Mixed BATS pipeline tests run separately as non-blocking (see bats_section below).
-            test_command="cd $safe_dir && $jest_command"
+            local ts_runner
+            ts_runner=$(_select_ts_runner "$loop_dir")
+            if [[ "$ts_runner" == "unit-cmd" ]]; then
+                test_command="cd $safe_dir && ${TEST_UNIT_CMD}"
+                ts_suite_is_blocking=true
+            else
+                test_command="cd $safe_dir && $jest_command"
+            fi
             ;;
     esac
 
@@ -12909,6 +13011,10 @@ $test_summary" "default"
             # An unpopulated changed_test_files on a scope we never scanned means
             # "unknown", NOT "no PR-owned failures" — inferring the latter is what
             # made every bash-scope failure vanish (#636).
+            #
+            # Nor is it sound when TEST_UNIT_CMD gates a TypeScript scope:
+            # that runs the whole suite, so a PR with no changed test file
+            # can still have broken it (#1010).
             # A runner that never started must be judged BEFORE the skip
             # below, because the skip would otherwise call it pre-existing
             # and exit the loop reporting success (#965 AC2). Recorded as a
@@ -12922,7 +13028,7 @@ $test_summary" "default"
                 set_final_state "test_runner_not_started"
                 DEGRADED_STAGES+=("test:runner_not_started:iter=$test_iteration")
                 comment_issue "Test Loop: Runner Did Not Start" \
-                    "🚫 The blocking test command ran no tests — the runner failed to start (scope: \`$change_scope\`). This is **not** a pre-existing failure: nothing was executed, so this branch is **unverified**. If this repo's tests are not run by the default command, set \`TEST_UNIT_CMD\` in \`.claude/config/platform.sh\` to the command that runs them." \
+                    "🚫 The blocking test command ran no tests — the runner failed to start (scope: \`$change_scope\`). This is **not** a pre-existing failure: nothing was executed, so this branch is **unverified**. If this repo's tests are not run by the default command, set \`TEST_UNIT_CMD\` in \`.claude/config/platform.sh\` to the command that runs them. For TypeScript and frontend scopes, \`TEST_TS_RUNNER\` in the same file selects the runner (\`auto\`, \`jest\` or \`unit-cmd\`)." \
                     "default"
                 loop_complete=true
                 break
@@ -12932,7 +13038,8 @@ $test_summary" "default"
             pr_failures="$failures"
             skipped_count=0
             if [[ "$changed_test_detection_attempted" == true \
-                    && -z "$changed_test_files" ]]; then
+                    && -z "$changed_test_files" \
+                    && "$ts_suite_is_blocking" != true ]]; then
                 skipped_count=$(printf '%s' "$failures" | jq 'length // 0' 2>/dev/null || echo 0)
                 if (( skipped_count > 0 )); then
                     log "INFO: Skipping $skipped_count pre-existing failure(s) — no PR-changed test files detected for $change_scope scope"

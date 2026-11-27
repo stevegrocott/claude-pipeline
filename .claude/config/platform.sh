@@ -48,6 +48,14 @@ MERGE_MR_NON_BLOCKING_CHECKS="${MERGE_MR_NON_BLOCKING_CHECKS:-}"  # e.g. "fronte
 
 # Test commands (set during /adapt based on project stack)
 TEST_UNIT_CMD="${TEST_UNIT_CMD:-}"        # e.g., "npm test", "vendor/bin/phpunit", "pytest"
+# TEST_TS_RUNNER: which command the blocking test loop runs for the
+# typescript, ts-frontend, frontend and mixed change scopes.
+#   auto     (default) TEST_UNIT_CMD when it is set and the repo has no
+#            tracked jest.config.* and no "jest" key in any tracked
+#            package.json; otherwise Jest
+#   jest     always Jest (incremental, changed test files only)
+#   unit-cmd always TEST_UNIT_CMD (whole suite on every iteration)
+TEST_TS_RUNNER="${TEST_TS_RUNNER:-auto}"  # auto | jest | unit-cmd
 TEST_E2E_CMD="${TEST_E2E_CMD:-}"          # e.g., "npx playwright test" — empty if no E2E
 TEST_E2E_BASE_URL="${TEST_E2E_BASE_URL:-}"
 # E2E_CONTAINER_REBUILD: gates the docker-compose rebuild/health-check that
