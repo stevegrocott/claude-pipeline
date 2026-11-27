@@ -1047,6 +1047,65 @@ _expect_no_shared_task_promoted() {
 		"the file task keeps its own kind"
 }
 
+@test "_lacking_evidence_summary: appends each task's own cause" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "one", status: "failed",
+		 affected_files: ["a.sh"], evidence_gap: "shared_with_task:3"},
+		{id: 2, description: "two", status: "failed",
+		 affected_files: ["b.sh"], evidence_gap: "not_modified"},
+		{id: 3, description: "three", status: "failed",
+		 affected_files: [], evidence_gap: "no_declared_files"},
+		{id: 4, description: "four", status: "failed",
+		 affected_files: ["d.sh"], commit_rejected: true,
+		 evidence_gap: "not_modified"},
+		{id: 5, description: "five", status: "failed",
+		 affected_files: ["e.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary expected
+	summary=$(_lacking_evidence_summary)
+	expected="task 1 (one) [file evidence: a.sh]"
+	expected+=" - files shared with still-failed task 3"
+	expected+="; task 2 (two) [file evidence: b.sh]"
+	expected+=" - not modified on branch"
+	expected+="; task 3 (three) [file evidence] - no declared files"
+	expected+="; task 4 (four) [file evidence: d.sh] - commit rejected"
+	expected+="; task 5 (five) [file evidence: e.sh]"
+	[[ "$summary" == "$expected" ]] ||
+		fail "expected '$expected', got '$summary'"
+}
+
+@test "_lacking_evidence_summary: a long entry is capped without losing its cause" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: ("x" * 400), status: "failed",
+		 affected_files: ["a.sh"], evidence_gap: "not_modified"}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	((${#summary} == 200)) ||
+		fail "expected a 200 char entry, got ${#summary}"
+	expect_glob "$summary" 'task 1 (xxx*... - not modified on branch' \
+		"the description is truncated, the cause survives"
+}
+
+@test "_lacking_evidence_summary: the joined summary stays capped at 1500" {
+	local tasks_json
+	tasks_json=$(jq -n '[range(1; 13)
+		| {id: ., description: ("x" * 400), status: "failed",
+		   affected_files: ["a.sh"], evidence_gap: "not_modified"}]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	((${#summary} == 1500)) ||
+		fail "expected a 1500 char summary, got ${#summary}"
+}
+
 # =============================================================================
 # UNIT TESTS: revalidate_partial_block_against_branch() (#620 task 2)
 # The implement-stage reconciliation cannot see work a *later* stage lands —

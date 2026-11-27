@@ -8221,14 +8221,21 @@ completion_footer() {
 # list needs to know that "lacking evidence" means "no recorded run" rather
 # than "no file changed" — the file path is never coming for that task.
 #
+# Each entry ends with why the task was left failed (issue #1009): "commit
+# rejected" for a commit_rejected task (never reconciled), else the cause in
+# .tasks[].evidence_gap (_set_task_evidence_gap()). A task with neither
+# carries no cause.
+#
 # Example output:
 #   "task 1 (apply gate config) [operational evidence: ha-lovelace-save.sh --verify]"
-#   "task 2 (README install section) [file evidence: README.md]"
+#   "task 2 (README install section) [file evidence: README.md]
+#       - not modified on branch"   (one line in the real output)
 # Multiple tasks are joined with "; ". Empty output when no task is failed.
 # Each entry is capped at 200 chars and the joined string at 1500 chars
 # (issue #620 review) so several failed tasks — each with a full
 # description and file list — cannot blow up merge_blocked_reason and the
-# issue comment it feeds.
+# issue comment it feeds. The per-entry cap truncates the text ahead of the
+# cause, never the cause itself.
 #
 # Globals:
 #   STATUS_FILE - read tasks from
@@ -8263,10 +8270,34 @@ _lacking_evidence_summary() {
 		' "$STATUS_FILE" 2>/dev/null)
 
 		[[ -n "$lacking_entry" ]] || continue
-		if ((${#lacking_entry} > entry_max)); then
-			lacking_entry="${lacking_entry:0:$((entry_max - 3))}..."
+
+		local lacking_gap lacking_cause=""
+		lacking_gap=$(jq -r --argjson id "$lacking_id" '
+			(.tasks // [])[] | select(.id == $id)
+			| if .commit_rejected == true then "commit_rejected"
+				else .evidence_gap // "" end
+		' "$STATUS_FILE" 2>/dev/null)
+		case "$lacking_gap" in
+			commit_rejected)
+				lacking_cause=" - commit rejected"
+				;;
+			shared_with_task:*)
+				lacking_cause=" - files shared with still-failed task"
+				lacking_cause+=" ${lacking_gap#*:}"
+				;;
+			no_declared_files)
+				lacking_cause=" - no declared files"
+				;;
+			not_modified)
+				lacking_cause=" - not modified on branch"
+				;;
+		esac
+
+		local lacking_room=$((entry_max - ${#lacking_cause}))
+		if ((${#lacking_entry} > lacking_room)); then
+			lacking_entry="${lacking_entry:0:$((lacking_room - 3))}..."
 		fi
-		lacking_parts+=("$lacking_entry")
+		lacking_parts+=("${lacking_entry}${lacking_cause}")
 	done < <(jq -r '(.tasks // [])[] | select(.status == "failed") | .id' \
 		"$STATUS_FILE" 2>/dev/null)
 
