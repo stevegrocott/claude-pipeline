@@ -3268,6 +3268,56 @@ source_sweep_implement_followups() {
 	! grep -qx '200' "$TEST_TMP/process_issue.calls"
 }
 
+@test "sweep_implement_followups: an API-error halt stops the sweep and counts no failure (#949)" {
+	source_sweep_implement_followups \
+		|| fail "sweep_implement_followups() not found"
+	local fn
+	for fn in halt_on_api_error set_state; do
+		eval "$(_extract_function_body "$fn" "$BATCH_ORCHESTRATOR_SCRIPT")"
+		declare -F "$fn" > /dev/null || fail "$fn() not found"
+	done
+
+	local MAX_FOLLOWUP_DEPTH=1 ENRICH_FOLLOWUPS=true
+	local MAX_CONSECUTIVE_FAILURES=3 consecutive_failures=0 exit_code=0
+	local _PREFLIGHT_SKIPPED=false _TERMINAL_STATUS=""
+	ISSUE_ARRAY=(1)
+
+	cat > "$STATUS_FILE" <<-'JSON'
+	{
+	  "state": "running",
+	  "progress": {"total": 1, "pending": 0, "completed": 1, "failed": 0},
+	  "issues": [
+	    {"number": "1", "status": "completed", "follow_ups": ["100", "101"]}
+	  ]
+	}
+	JSON
+
+	log()       { :; }
+	log_warn()  { :; }
+	log_error() { :; }
+	emit_event() { printf '%s\n' "$*" >> "$TEST_TMP/events.out"; }
+	# Like the real one, process_issue returns 0 on an API-error halt.
+	process_issue() {
+		printf '%s\n' "$1" >> "$TEST_TMP/process_issue.calls"
+		[[ "$1" != "100" ]] || _TERMINAL_STATUS="api_error"
+		return 0
+	}
+
+	sweep_implement_followups
+
+	[[ "$(< "$TEST_TMP/process_issue.calls")" == "100" ]] \
+		|| fail "processed: $(< "$TEST_TMP/process_issue.calls")"
+	jq -e '.state == "api_error" and .progress.failed == 0' \
+		"$STATUS_FILE" > /dev/null \
+		|| fail "batch status: $(< "$STATUS_FILE")"
+	[[ "$exit_code" -eq 2 ]] || fail "exit_code=$exit_code, expected 2"
+	[[ "$consecutive_failures" -eq 0 ]] \
+		|| fail "consecutive_failures=$consecutive_failures"
+	grep -q 'batch_paused reason=api_error issue_num=100' \
+		"$TEST_TMP/events.out" \
+		|| fail "no api_error batch_paused event"
+}
+
 # =============================================================================
 # TASK 1 (i554): post-enrich re-validation
 # After an inline /enrich-issue dispatch_composition call returns rc=0,
@@ -6535,6 +6585,106 @@ FAKE_ORCH
 }
 
 # =============================================================================
+# #949: an API-error halt stops the whole batch, end to end
+# =============================================================================
+
+# Fake inner orchestrator whose issue FAKE_HALT_ISSUE (default 901) stops on an
+# API-error halt (#1072). Any other issue would complete, so only the batch's
+# own halt can keep a later one from running.
+_install_fake_inner_orchestrator_api_halt() {
+	cat > "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh" << 'FAKE_ORCH'
+#!/usr/bin/env bash
+set -uo pipefail
+issue_num=""
+status_file=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--issue) issue_num="$2"; shift 2 ;;
+		--status-file) status_file="$2"; shift 2 ;;
+		*) shift ;;
+	esac
+done
+
+printf '%s\n' "$issue_num" >> "$FAKE_INNER_ORCH_CALL_LOG"
+
+if [[ "$issue_num" != "${FAKE_HALT_ISSUE:-901}" ]]; then
+	jq -n '{state: "completed", stages: {pr: {pr_number: 101}},
+		cost_summary: {total_cost_usd: 0}}' > "$status_file"
+	exit 0
+fi
+
+jq -n '{
+	state: "error",
+	final_state_reason:
+		"api_error: Claude API error (status 403) at stage implement-task-1",
+	api_error_halt: {stage: "implement-task-1", status: "403",
+		detail: "Cloudflare"},
+	cost_summary: {total_cost_usd: 0}
+}' > "$status_file"
+exit 1
+FAKE_ORCH
+	chmod +x "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh"
+}
+
+@test "real batch-orchestrator.sh: an API-error halt exits 2 in state api_error, starts no further issue and counts no failure (#949)" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_api_halt
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901,902,903" --branch main
+
+	[[ "$status" -eq 2 ]] \
+		|| fail "batch exited $status, expected 2: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == "901" ]] \
+		|| fail "inner orchestrator calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+	jq -e '.state == "api_error"
+		and ([.issues[].status] == ["pending", "pending", "pending"])
+		and (.issues[0].error | startswith("api_error:"))
+		and .progress.failed == 0' status.json > /dev/null \
+		|| fail "batch status: $(< status.json)"
+	# The startup banner says "Max consecutive failures", so match the
+	# capitalised per-failure line only.
+	[[ "$output" != *"Consecutive failures:"* ]] \
+		|| fail "a failure was counted: $output"
+	[[ "$output" == *"status 403 at stage implement-task-1"* ]] \
+		|| fail "halt line does not name status and stage: $output"
+}
+
+@test "real batch-orchestrator.sh: after an API-error halt --implement-followups starts no follow-up (#949)" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_api_halt
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	# 901 merges and records follow-up 950, so the sweep has work to do by
+	# the time 902 halts the batch.
+	cat > "$TEST_TMP/batch_e2e_bin/claude" << 'MOCK_CLAUDE'
+#!/usr/bin/env bash
+echo '{"result":"mocked process-pr","structured_output":{"status":"merged","follow_up_issues":["950"]}}'
+MOCK_CLAUDE
+	export FAKE_HALT_ISSUE=902
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901,902" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 2 ]] \
+		|| fail "batch exited $status, expected 2: $output"
+	jq -e '.state == "api_error"
+		and .issues[0].follow_ups == ["950"]
+		and ([.issues[].number] == ["901", "902"])
+		and .progress.failed == 0' status.json > /dev/null \
+		|| fail "batch status: $(< status.json)"
+	[[ "$output" == *"follow-ups not started"* ]] \
+		|| fail "no 'follow-ups not started' warning: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == $'901\n902' ]] \
+		|| fail "inner orchestrator calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+}
+
+# =============================================================================
 # #1020: process-pr result with permission_denials produces a WARN
 # =============================================================================
 
@@ -6748,12 +6898,13 @@ _I1017_STATES=(
 	wall_timeout_test
 )
 
-# _run_state_dispatch <state> <pr_number|""> [current_stage]
+# _run_state_dispatch <state> <pr_number|""> [current_stage] [reason] [halt_json]
 # Runs the real case/recovery block against a synthetic status file and sets
 # d_status, d_error, d_pr in the caller. log/log_warn/log_error output is
 # captured to $d_log_file (truncated per call) for message assertions.
 _run_state_dispatch() {
 	local state="$1" pr="$2" stage="${3:-pr_review}" reason="${4:-}"
+	local halt="${5:-}"
 	d_log_file="$TEST_TMP/dispatch-log.txt"
 	: > "$d_log_file"
 	local issue_status_file="$TEST_TMP/dispatch-status.json"
@@ -6769,6 +6920,12 @@ _run_state_dispatch() {
 			'{state: $s, current_stage: $cs, stages: {}}
 			 | if $r != "" then .final_state_reason = $r else . end' \
 			> "$issue_status_file"
+	fi
+	# A non-empty halt_json is written as .api_error_halt (#1072).
+	if [[ -n "$halt" ]]; then
+		jq --argjson h "$halt" '.api_error_halt = $h' \
+			"$issue_status_file" > "$issue_status_file.tmp" || return 1
+		mv "$issue_status_file.tmp" "$issue_status_file"
 	fi
 
 	local block="$TEST_TMP/dispatch-block.sh"
@@ -6889,6 +7046,97 @@ _run_state_dispatch() {
 	_run_state_dispatch "error" 42 "pr_review"
 	[[ "$d_status" == "success" ]]
 	[[ "$d_pr" == "42" ]]
+}
+
+# =============================================================================
+# Issue #949: an API-error halt leaves the issue pending, not failed
+# =============================================================================
+
+_I949_HALT='{"stage":"implement-task-1","status":"403","detail":"Cloudflare"}'
+_I949_REASON='api_error: Claude API error (status 403) at stage implement-task-1'
+
+# _run_outcome_arm
+# Feeds the d_status/d_error/d_pr left by _run_state_dispatch into the real
+# non-success arm of process_issue, writing a real batch status file. Sets
+# o_rc, o_terminal and o_status_file in the caller.
+_run_outcome_arm() {
+	o_status_file="$TEST_TMP/batch-status.json"
+	jq -n '{issues: [{number: "1017", status: "in_progress"}],
+		progress: {}, cost_summary: {}}' > "$o_status_file"
+
+	local block="$TEST_TMP/outcome-block.sh"
+	awk '
+		/^    if \[\[ "\$impl_status" != "success" \]\]; then$/ { cap = 1 }
+		cap { print }
+		cap && /^    fi$/ { exit }
+	' "$BATCH_ORCHESTRATOR_SCRIPT" > "$block"
+	[[ -s "$block" ]] || { echo "outcome block not found" >&2; return 1; }
+
+	local out
+	out=$(
+		log() { :; }
+		log_error() { :; }
+		git() { :; }
+		check_issue_pr_merged() { return 1; }
+		eval "$(_extract_function_body update_issue_field \
+			"$BATCH_ORCHESTRATOR_SCRIPT")"
+		eval "$(_extract_function_body update_progress \
+			"$BATCH_ORCHESTRATOR_SCRIPT")"
+		STATUS_FILE="$o_status_file"
+		BRANCH=main
+		issue_num=1017
+		impl_status="$d_status" impl_error="$d_error" pr_number="$d_pr"
+		_TERMINAL_STATUS=""
+		runner() {
+			# shellcheck disable=SC1090
+			source "$block"
+		}
+		rc=0
+		runner || rc=$?
+		printf '%s|%s\n' "$rc" "$_TERMINAL_STATUS"
+	) || return 1
+	IFS='|' read -r o_rc o_terminal <<<"$out"
+}
+
+@test "i949: state error with api_error_halt yields terminal status api_error" {
+	_run_state_dispatch "error" "" "implement" "$_I949_REASON" "$_I949_HALT"
+	[[ "$d_status" == "api_error" ]] || fail "dispatch status: $d_status"
+
+	_run_outcome_arm
+	[[ "$o_terminal" == "api_error" ]] || fail "terminal: $o_terminal"
+	[[ "$o_rc" == "0" ]] || fail "rc $o_rc would count as a failure"
+}
+
+@test "i949: an API-error halt leaves the issue pending with the reason" {
+	_run_state_dispatch "error" "" "implement" "$_I949_REASON" "$_I949_HALT"
+	_run_outcome_arm
+
+	jq -e --arg r "$_I949_REASON" \
+		'.issues[0].status == "pending"
+		 and (.issues[0].error | startswith($r))
+		 and .progress.pending == 1
+		 and .progress.failed == 0' "$o_status_file" >/dev/null \
+		|| fail "batch status: $(cat "$o_status_file")"
+}
+
+@test "i949: an API-error halt with a PR is not recovered as success" {
+	_run_state_dispatch "error" 99 "pr_review" "$_I949_REASON" "$_I949_HALT"
+	[[ "$d_status" == "api_error" ]] || fail "dispatch status: $d_status"
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]] \
+		|| fail "halted run was recovered: $(< "$d_log_file")"
+}
+
+@test "i949: state error without api_error_halt is still a plain failure" {
+	# The reason text alone must not trigger the halt path.
+	_run_state_dispatch "error" "" "implement" "$_I949_REASON"
+	[[ "$d_status" == "error" ]] || fail "dispatch status: $d_status"
+
+	_run_outcome_arm
+	[[ "$o_rc" == "1" ]] || fail "rc $o_rc would not count as a failure"
+	[[ -z "$o_terminal" ]] || fail "terminal: $o_terminal"
+	jq -e '.issues[0].status == "failed" and .progress.failed == 1
+		and .progress.pending == 0' "$o_status_file" >/dev/null \
+		|| fail "batch status: $(cat "$o_status_file")"
 }
 
 # =============================================================================
@@ -7240,7 +7488,7 @@ STUB
 	local sentence state
 	sentence="$(grep -A3 'If `STATE` is \*\*not\*\*' "$skill" | tr '\n' ' ')"
 	for state in completed completed_with_errors completed_with_skips circuit_breaker \
-		budget_exceeded halted_on_manual_merge interrupted; do
+		budget_exceeded halted_on_manual_merge interrupted api_error; do
 		[[ "$sentence" == *"\`$state\`"* ]]
 		grep -q "^| \`$state\` | yes" "$skill"
 	done
