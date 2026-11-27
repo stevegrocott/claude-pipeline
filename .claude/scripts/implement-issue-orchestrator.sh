@@ -12123,6 +12123,45 @@ _failures_indicate_runner_not_started() {
 	(( startup_count > 0 ))
 }
 
+# Reports whether the repository containing $1 uses Jest (issue #1010).
+#
+# Either signal is enough: a tracked jest.config.* file at any depth, or a
+# tracked package.json with a top-level "jest" key. Only files git tracks
+# are consulted, so an installed node_modules cannot answer for the repo,
+# and nothing is executed: `npx` may download and run a package.
+#
+# The whole repository is searched, even when $1 is a subdirectory of it.
+# An unreadable repository or unparseable package.json is not a signal.
+#
+# Arguments:
+#   $1 - loop_dir: a directory inside the repository to inspect
+# Returns:
+#   0 if the repository uses Jest
+#   1 otherwise
+_repo_uses_jest() {
+	local loop_dir="$1"
+	local manifest
+
+	# :(top) anchors at the repository root; **/ also matches the root
+	# itself. Paths come back relative to loop_dir, NUL-delimited.
+	if IFS= read -r -d '' _ < <(git -C "$loop_dir" ls-files -z -- \
+		':(top,glob)**/jest.config.*' 2>/dev/null); then
+		return 0
+	fi
+
+	while IFS= read -r -d '' manifest; do
+		# A tracked file may be deleted from the working tree.
+		[[ -f "$loop_dir/$manifest" ]] || continue
+		if jq -e 'type == "object" and has("jest")' \
+			"$loop_dir/$manifest" >/dev/null 2>&1; then
+			return 0
+		fi
+	done < <(git -C "$loop_dir" ls-files -z -- \
+		':(top,glob)**/package.json' 2>/dev/null)
+
+	return 1
+}
+
 # Build the bash test command for a given loop directory.
 # Prefers run-tests.sh when it exists; falls back to direct bats glob otherwise.
 # Appends "&& bats [--jobs N] tests/*.bats" when at least one *.bats file
