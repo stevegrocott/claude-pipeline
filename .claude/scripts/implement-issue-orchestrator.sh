@@ -364,6 +364,12 @@ TEST_E2E_PATH_PATTERNS="${TEST_E2E_PATH_PATTERNS:-tests/e2e/*}"
 # explicit opt-out.  Unset gets the default; empty stays empty.
 TEST_PATH_PATTERNS="${TEST_PATH_PATTERNS-tests/*|test/*|*/tests/*|*/test/*|*/__tests__/*|*.test.*|*.spec.*|*_test.*|test_*|*.bats}"
 
+# TEST_TS_RUNNER selects the blocking test command for the TypeScript and
+# frontend change scopes (issue #1010): auto | jest | unit-cmd.  Defaulted
+# here as well as in platform.sh so a consumer config that predates the key
+# still gets `auto`.
+TEST_TS_RUNNER="${TEST_TS_RUNNER:-auto}"
+
 # Direct-execution path for e2e_verify (issue #872).  When set (the default),
 # the stage runs TEST_E2E_CMD itself and parses the runner's own summary
 # counts instead of asking an agent to run it and self-report — deterministic,
