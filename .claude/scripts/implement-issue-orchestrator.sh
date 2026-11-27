@@ -12544,6 +12544,10 @@ run_test_loop() {
         fi
     fi
 
+    # True when a TypeScript or frontend scope is gated by the whole-suite
+    # TEST_UNIT_CMD; the pre-existing failure skip below keys off it (#1010).
+    local ts_suite_is_blocking=false
+
     case "$change_scope" in
         bash)
             if [[ "$BATS_SUITE_DEFERRED" == true ]]; then
@@ -12586,6 +12590,7 @@ run_test_loop() {
             ts_runner=$(_select_ts_runner "$loop_dir")
             if [[ "$ts_runner" == "unit-cmd" ]]; then
                 test_command="cd $safe_dir && ${TEST_UNIT_CMD}"
+                ts_suite_is_blocking=true
             else
                 test_command="cd $safe_dir && $jest_command"
             fi
@@ -13006,6 +13011,10 @@ $test_summary" "default"
             # An unpopulated changed_test_files on a scope we never scanned means
             # "unknown", NOT "no PR-owned failures" — inferring the latter is what
             # made every bash-scope failure vanish (#636).
+            #
+            # Nor is it sound when TEST_UNIT_CMD gates a TypeScript scope:
+            # that runs the whole suite, so a PR with no changed test file
+            # can still have broken it (#1010).
             # A runner that never started must be judged BEFORE the skip
             # below, because the skip would otherwise call it pre-existing
             # and exit the loop reporting success (#965 AC2). Recorded as a
@@ -13019,7 +13028,7 @@ $test_summary" "default"
                 set_final_state "test_runner_not_started"
                 DEGRADED_STAGES+=("test:runner_not_started:iter=$test_iteration")
                 comment_issue "Test Loop: Runner Did Not Start" \
-                    "🚫 The blocking test command ran no tests — the runner failed to start (scope: \`$change_scope\`). This is **not** a pre-existing failure: nothing was executed, so this branch is **unverified**. If this repo's tests are not run by the default command, set \`TEST_UNIT_CMD\` in \`.claude/config/platform.sh\` to the command that runs them." \
+                    "🚫 The blocking test command ran no tests — the runner failed to start (scope: \`$change_scope\`). This is **not** a pre-existing failure: nothing was executed, so this branch is **unverified**. If this repo's tests are not run by the default command, set \`TEST_UNIT_CMD\` in \`.claude/config/platform.sh\` to the command that runs them. For TypeScript and frontend scopes, \`TEST_TS_RUNNER\` in the same file selects the runner (\`auto\`, \`jest\` or \`unit-cmd\`)." \
                     "default"
                 loop_complete=true
                 break
@@ -13029,7 +13038,8 @@ $test_summary" "default"
             pr_failures="$failures"
             skipped_count=0
             if [[ "$changed_test_detection_attempted" == true \
-                    && -z "$changed_test_files" ]]; then
+                    && -z "$changed_test_files" \
+                    && "$ts_suite_is_blocking" != true ]]; then
                 skipped_count=$(printf '%s' "$failures" | jq 'length // 0' 2>/dev/null || echo 0)
                 if (( skipped_count > 0 )); then
                     log "INFO: Skipping $skipped_count pre-existing failure(s) — no PR-changed test files detected for $change_scope scope"
