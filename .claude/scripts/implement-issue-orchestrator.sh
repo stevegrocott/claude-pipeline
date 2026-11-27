@@ -10107,7 +10107,7 @@ _porcelain_new_lines() {
 	done <<< "$current"
 }
 
-# True when a task that produced no commit and left a clean tree may be
+# True when a task that produced no commit and left no new changes may be
 # credited as a genuine no-op (issue #796).
 #
 # verify_fix_stage_commit accepts every clean tree, because a fix stage is
@@ -10855,6 +10855,11 @@ Commit your changes with a descriptive message."
 		# compares against the branch state from before it started.
 		local task_head_before
 		task_head_before=$(git rev-parse HEAD 2>/dev/null)
+		# Tree state before the task ran, so the guard does not blame it
+		# for paths that were already dirty (issue #1008).
+		local task_dirty_before
+		task_dirty_before=$(git status --porcelain \
+			--untracked-files=all 2>/dev/null || printf '')
 
 		local base_timeout
 		base_timeout=$(get_stage_timeout \
@@ -11015,15 +11020,20 @@ Commit your changes with a descriptive message."
 					# No deliverable declared and HEAD never moved.
 					# Mirror verify_fix_stage_commit's dirty-vs-clean
 					# distinction (issue #796): only a DIRTY tree with
-					# no commit is a lost fix. A clean tree is either a
+					# no commit is a lost fix, where dirty means status
+					# lines absent from the pre-task snapshot (issue
+					# #1008). A clean tree is either a
 					# genuine idempotent no-op — the change already
 					# landed via an earlier task on this branch — or the
 					# silent no-op of issue #790, and the tree alone
 					# cannot tell them apart, so the accept requires the
 					# stage's own already_done claim.
-					local serial_dirty
-					serial_dirty=$(git status --porcelain \
-						2>/dev/null || printf '')
+					local serial_status serial_dirty
+					serial_status=$(git status --porcelain \
+						--untracked-files=all 2>/dev/null \
+						|| printf '')
+					serial_dirty=$(_porcelain_new_lines \
+						"$serial_status" "$task_dirty_before")
 					if [[ -n "$serial_dirty" ]]; then
 						log_error "Task $tid reported success but" \
 							"produced no commit while leaving" \
@@ -11035,8 +11045,8 @@ Commit your changes with a descriptive message."
 						continue
 					fi
 					if _task_noop_is_genuine "$impl_result"; then
-						log "Task $tid produced no commit, left a" \
-							"clean tree and reported already_done" \
+						log "Task $tid produced no commit, left no" \
+							"new changes and reported already_done" \
 							"— accepting as a genuine no-op"
 					else
 						log_error "Task $tid reported success" \

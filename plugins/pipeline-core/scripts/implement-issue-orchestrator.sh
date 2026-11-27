@@ -700,7 +700,7 @@ _wait_for_check_on_head() {
 _ci_fix_attempt() {
 	local pr="$1" check_name="$2" iteration="$3"
 	local log_text log_path excerpt fix_prompt fix_result
-	local head_before head_after dirty_before dirty_after
+	local head_before head_after dirty_before dirty_after dirty_new
 	local err_file err_line=""
 
 	err_file=$(mktemp "${TMPDIR:-/tmp}/ci-failed-log-err.XXXXXX") \
@@ -740,14 +740,16 @@ Rules:
 Fix the failure and commit. Output a summary of the fix applied."
 
 	head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
-	dirty_before=$(git status --porcelain 2>/dev/null || printf '')
+	dirty_before=$(git status --porcelain --untracked-files=all \
+		2>/dev/null || printf '')
 
 	fix_result=$(run_stage "fix-ci-iter-$iteration" "$fix_prompt" \
 		"implement-issue-fix.json" "${AGENT:-default}")
 	_halt_if_budget_exceeded
 	_halt_if_api_error
 
-	if ! verify_fix_stage_commit "fix-ci-iter-$iteration" "$head_before"; then
+	if ! verify_fix_stage_commit "fix-ci-iter-$iteration" "$head_before" \
+		"$dirty_before"; then
 		_ci_fix_result="fix stage left uncommitted changes"
 		return 1
 	fi
@@ -763,11 +765,13 @@ Fix the failure and commit. Output a summary of the fix applied."
 	# verify_fix_stage_commit passes once the head has moved, so a stage that
 	# committed part of its fix and left the rest in the tree gets this far.
 	# Compared with the tree before the stage so earlier leftovers do not count.
-	dirty_after=$(git status --porcelain 2>/dev/null || printf '')
-	if [[ -n "$dirty_after" && "$dirty_after" != "$dirty_before" ]]; then
+	dirty_after=$(git status --porcelain --untracked-files=all \
+		2>/dev/null || printf '')
+	dirty_new=$(_porcelain_new_lines "$dirty_after" "$dirty_before")
+	if [[ -n "$dirty_new" ]]; then
 		log_error "fix-ci-iter-$iteration committed but left changes" \
 			"in the working tree — CI fix rejected." \
-			"Uncommitted paths: $(_porcelain_dirty_paths "$dirty_after")"
+			"Uncommitted paths: $(_porcelain_dirty_paths "$dirty_new")"
 		_ci_fix_result="fix stage left uncommitted changes"
 		return 1
 	fi
@@ -10080,7 +10084,30 @@ _porcelain_dirty_paths() {
 	printf '%s' "${dirty_paths[*]+"${dirty_paths[*]}"}"
 }
 
-# True when a task that produced no commit and left a clean tree may be
+# Prints the porcelain status lines that are absent from an earlier snapshot,
+# so paths already dirty before a stage are not counted as its work (issue
+# #1008).  A line counts as present only when it matches verbatim.
+#
+# Arguments:
+#   $1 - current `git status --porcelain` output
+#   $2 - earlier output to compare against (may be empty)
+# Outputs:
+#   The new lines, one per line, on stdout.  Nothing when none are new.
+#
+_porcelain_new_lines() {
+	local current="${1:-}"
+	local snapshot="${2:-}"
+
+	local line
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		if [[ $'\n'"$snapshot"$'\n' != *$'\n'"$line"$'\n'* ]]; then
+			printf '%s\n' "$line"
+		fi
+	done <<< "$current"
+}
+
+# True when a task that produced no commit and left no new changes may be
 # credited as a genuine no-op (issue #796).
 #
 # verify_fix_stage_commit accepts every clean tree, because a fix stage is
@@ -10828,6 +10855,11 @@ Commit your changes with a descriptive message."
 		# compares against the branch state from before it started.
 		local task_head_before
 		task_head_before=$(git rev-parse HEAD 2>/dev/null)
+		# Tree state before the task ran, so the guard does not blame it
+		# for paths that were already dirty (issue #1008).
+		local task_dirty_before
+		task_dirty_before=$(git status --porcelain \
+			--untracked-files=all 2>/dev/null || printf '')
 
 		local base_timeout
 		base_timeout=$(get_stage_timeout \
@@ -10988,15 +11020,20 @@ Commit your changes with a descriptive message."
 					# No deliverable declared and HEAD never moved.
 					# Mirror verify_fix_stage_commit's dirty-vs-clean
 					# distinction (issue #796): only a DIRTY tree with
-					# no commit is a lost fix. A clean tree is either a
+					# no commit is a lost fix, where dirty means status
+					# lines absent from the pre-task snapshot (issue
+					# #1008). A clean tree is either a
 					# genuine idempotent no-op — the change already
 					# landed via an earlier task on this branch — or the
 					# silent no-op of issue #790, and the tree alone
 					# cannot tell them apart, so the accept requires the
 					# stage's own already_done claim.
-					local serial_dirty
-					serial_dirty=$(git status --porcelain \
-						2>/dev/null || printf '')
+					local serial_status serial_dirty
+					serial_status=$(git status --porcelain \
+						--untracked-files=all 2>/dev/null \
+						|| printf '')
+					serial_dirty=$(_porcelain_new_lines \
+						"$serial_status" "$task_dirty_before")
 					if [[ -n "$serial_dirty" ]]; then
 						log_error "Task $tid reported success but" \
 							"produced no commit while leaving" \
@@ -11008,8 +11045,8 @@ Commit your changes with a descriptive message."
 						continue
 					fi
 					if _task_noop_is_genuine "$impl_result"; then
-						log "Task $tid produced no commit, left a" \
-							"clean tree and reported already_done" \
+						log "Task $tid produced no commit, left no" \
+							"new changes and reported already_done" \
 							"— accepting as a genuine no-op"
 					else
 						log_error "Task $tid reported success" \
@@ -14217,15 +14254,22 @@ _prior_merged_prs_for_issue() {
 # because the review findings were already addressed is a genuine no-op and
 # must still pass.  Only a DIRTY tree with no commit is a lost fix.
 #
+# Paths that were already dirty before the stage are not its work (issue
+# #1008).  Given a pre-stage snapshot, a status line present verbatim in it
+# is ignored, so only new paths and changed statuses count.
+#
 # Arguments:
 #   $1 - stage label, for the log line
 #   $2 - branch head SHA captured before the stage ran
+#   $3 - `git status --porcelain --untracked-files=all` output captured
+#        before the stage ran (optional; without it every dirty path counts)
 # Returns:
-#   0 - head advanced, or clean tree with nothing to commit (genuine no-op)
+#   0 - head advanced, or nothing left to commit (genuine no-op)
 #   1 - work left uncommitted; the error names the uncommitted paths
 verify_fix_stage_commit() {
 	local stage_label="$1"
 	local head_before="$2"
+	local snapshot="${3:-}"
 
 	local head_after
 	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
@@ -14234,11 +14278,19 @@ verify_fix_stage_commit() {
 		return 0
 	fi
 
+	local status_now
+	status_now=$(git status --porcelain --untracked-files=all \
+		2>/dev/null || printf '')
+
 	local dirty
-	dirty=$(git status --porcelain 2>/dev/null || printf '')
+	dirty=$(_porcelain_new_lines "$status_now" "$snapshot")
 
 	if [[ -z "$dirty" ]]; then
-		log "$stage_label produced no commit and left a clean tree" \
+		local tree_state="a clean tree"
+		if [[ -n "$status_now" ]]; then
+			tree_state="only pre-existing changes"
+		fi
+		log "$stage_label produced no commit and left $tree_state" \
 			"— accepting as a genuine no-op"
 		return 0
 	fi
@@ -14263,6 +14315,8 @@ verify_fix_stage_commit() {
 #   $4 - branch head SHA captured before the fix stage ran
 #   $5 - fix stage result JSON
 #   $6 - review feedback given to the stage (optional, for the no-op comment)
+#   $7 - `git status --porcelain --untracked-files=all` output captured
+#        before the fix stage ran (optional)
 # Returns:
 #   0 - fix committed (head moved)
 #   1 - fix left uncommitted; no success comment posted
@@ -14276,12 +14330,14 @@ _handle_fix_stage_result() {
 	local head_before="$4"
 	local fix_result="$5"
 	local feedback="${6:-}"
+	local snapshot="${7:-}"
 
 	local head_after
 	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
 
 	if ! verify_fix_stage_commit \
-		"fix-pr-review-iter-$pr_iteration" "$head_before"; then
+		"fix-pr-review-iter-$pr_iteration" "$head_before" \
+		"$snapshot"; then
 		comment_pr "$pr_number" \
 			"⚠️ PR Review Fix FAILED (Iteration $pr_iteration)" \
 			"The fix stage reported success but committed nothing while
@@ -16687,8 +16743,12 @@ Fix the issues and commit. Output a summary of fixes applied."
 
             # Silent no-op guard (#638): remember where the branch was so a fix
             # stage that never commits cannot be reported as applied.
-            local fix_head_before
+            # The tree snapshot keeps files that were already dirty from
+            # being blamed on the stage (#1008).
+            local fix_head_before fix_dirty_before
             fix_head_before=$(git rev-parse HEAD 2>/dev/null || printf '')
+            fix_dirty_before=$(git status --porcelain --untracked-files=all \
+                2>/dev/null || printf '')
 
             verify_on_feature_branch "$branch" || true
 
@@ -16702,7 +16762,7 @@ Fix the issues and commit. Output a summary of fixes applied."
             local fix_handle_rc=0
             _handle_fix_stage_result "$pr_number" "$pr_iteration" \
                 "$branch" "$fix_head_before" "$fix_result" \
-                "$review_comments" || fix_handle_rc=$?
+                "$review_comments" "$fix_dirty_before" || fix_handle_rc=$?
             if (( fix_handle_rc == 2 )); then
                 # Errored fix, nothing committed: record the cause (persisted
                 # before any max-iterations reason), arm no push, and stop
