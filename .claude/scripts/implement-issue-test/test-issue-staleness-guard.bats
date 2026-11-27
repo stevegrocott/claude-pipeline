@@ -788,3 +788,19 @@ _save_long_criteria() {
 	awk '/^set -uo pipefail/ { exit } { print }' "$BUNDLED_ORCHESTRATOR" \
 		| grep -q 'IMPLEMENT_AC_MAX_CHARS'
 }
+
+@test "criteria block: deeper subheadings stay in the section (#1253)" {
+	_source_ac_helpers
+	_save_body '## Acceptance Criteria' '' \
+		'### Behaviour' '- AC1: first' '' \
+		'### Tests' '- AC2: second' '' \
+		'## References' '- reference noise'
+
+	run build_acceptance_criteria_block
+	[ "$status" -eq 0 ]
+	expect_glob "$output" \
+		'*### Behaviour?- AC1: first??### Tests?- AC2: second' \
+		"subheadings and criteria, ending the block"
+	[[ "$output" != *References* ]] || fail "next heading leaked"
+	[[ "$output" != *'reference noise'* ]] || fail "next section leaked"
+}
