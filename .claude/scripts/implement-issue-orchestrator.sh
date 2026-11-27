@@ -15683,6 +15683,18 @@ $impl_summary" "$tagent"
         # states both, not just the reconciled count).
         local _raw_completed_tasks=$completed_tasks
 
+        # Issue #1009: record where the implement stage left the branch, so
+        # later evidence checks can tell commits made after it from those
+        # made during it. //= keeps the original value on a resumed run.
+        local _implement_end_sha
+        if _implement_end_sha=$(git rev-parse --verify -q 'HEAD^{commit}'); then
+            status_json_write --arg sha "$_implement_end_sha" \
+                '.implement_end_sha //= $sha'
+            sync_status_to_log
+        else
+            log_warn "Could not resolve HEAD — implement_end_sha not recorded"
+        fi
+
         local _reconciled_count
         _reconciled_count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
         # Guard the arithmetic: a non-numeric capture (helper unavailable, jq
