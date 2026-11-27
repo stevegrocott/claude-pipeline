@@ -3268,6 +3268,56 @@ source_sweep_implement_followups() {
 	! grep -qx '200' "$TEST_TMP/process_issue.calls"
 }
 
+@test "sweep_implement_followups: an API-error halt stops the sweep and counts no failure (#949)" {
+	source_sweep_implement_followups \
+		|| fail "sweep_implement_followups() not found"
+	local fn
+	for fn in halt_on_api_error set_state; do
+		eval "$(_extract_function_body "$fn" "$BATCH_ORCHESTRATOR_SCRIPT")"
+		declare -F "$fn" > /dev/null || fail "$fn() not found"
+	done
+
+	local MAX_FOLLOWUP_DEPTH=1 ENRICH_FOLLOWUPS=true
+	local MAX_CONSECUTIVE_FAILURES=3 consecutive_failures=0 exit_code=0
+	local _PREFLIGHT_SKIPPED=false _TERMINAL_STATUS=""
+	ISSUE_ARRAY=(1)
+
+	cat > "$STATUS_FILE" <<-'JSON'
+	{
+	  "state": "running",
+	  "progress": {"total": 1, "pending": 0, "completed": 1, "failed": 0},
+	  "issues": [
+	    {"number": "1", "status": "completed", "follow_ups": ["100", "101"]}
+	  ]
+	}
+	JSON
+
+	log()       { :; }
+	log_warn()  { :; }
+	log_error() { :; }
+	emit_event() { printf '%s\n' "$*" >> "$TEST_TMP/events.out"; }
+	# Like the real one, process_issue returns 0 on an API-error halt.
+	process_issue() {
+		printf '%s\n' "$1" >> "$TEST_TMP/process_issue.calls"
+		[[ "$1" != "100" ]] || _TERMINAL_STATUS="api_error"
+		return 0
+	}
+
+	sweep_implement_followups
+
+	[[ "$(< "$TEST_TMP/process_issue.calls")" == "100" ]] \
+		|| fail "processed: $(< "$TEST_TMP/process_issue.calls")"
+	jq -e '.state == "api_error" and .progress.failed == 0' \
+		"$STATUS_FILE" > /dev/null \
+		|| fail "batch status: $(< "$STATUS_FILE")"
+	[[ "$exit_code" -eq 2 ]] || fail "exit_code=$exit_code, expected 2"
+	[[ "$consecutive_failures" -eq 0 ]] \
+		|| fail "consecutive_failures=$consecutive_failures"
+	grep -q 'batch_paused reason=api_error issue_num=100' \
+		"$TEST_TMP/events.out" \
+		|| fail "no api_error batch_paused event"
+}
+
 # =============================================================================
 # TASK 1 (i554): post-enrich re-validation
 # After an inline /enrich-issue dispatch_composition call returns rc=0,
@@ -6538,9 +6588,9 @@ FAKE_ORCH
 # #949: an API-error halt stops the whole batch, end to end
 # =============================================================================
 
-# Fake inner orchestrator whose first issue (901) stops on an API-error halt
-# (#1072). Any later issue would complete, so only the batch's own halt can
-# keep it from running.
+# Fake inner orchestrator whose issue FAKE_HALT_ISSUE (default 901) stops on an
+# API-error halt (#1072). Any other issue would complete, so only the batch's
+# own halt can keep a later one from running.
 _install_fake_inner_orchestrator_api_halt() {
 	cat > "$BATCH_E2E_SCRIPTS_COPY/implement-issue-orchestrator.sh" << 'FAKE_ORCH'
 #!/usr/bin/env bash
@@ -6557,7 +6607,7 @@ done
 
 printf '%s\n' "$issue_num" >> "$FAKE_INNER_ORCH_CALL_LOG"
 
-if [[ "$issue_num" != "901" ]]; then
+if [[ "$issue_num" != "${FAKE_HALT_ISSUE:-901}" ]]; then
 	jq -n '{state: "completed", stages: {pr: {pr_number: 101}},
 		cost_summary: {total_cost_usd: 0}}' > "$status_file"
 	exit 0
@@ -6601,6 +6651,37 @@ FAKE_ORCH
 		|| fail "a failure was counted: $output"
 	[[ "$output" == *"status 403 at stage implement-task-1"* ]] \
 		|| fail "halt line does not name status and stage: $output"
+}
+
+@test "real batch-orchestrator.sh: after an API-error halt --implement-followups starts no follow-up (#949)" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_api_halt
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	# 901 merges and records follow-up 950, so the sweep has work to do by
+	# the time 902 halts the batch.
+	cat > "$TEST_TMP/batch_e2e_bin/claude" << 'MOCK_CLAUDE'
+#!/usr/bin/env bash
+echo '{"result":"mocked process-pr","structured_output":{"status":"merged","follow_up_issues":["950"]}}'
+MOCK_CLAUDE
+	export FAKE_HALT_ISSUE=902
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901,902" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 2 ]] \
+		|| fail "batch exited $status, expected 2: $output"
+	jq -e '.state == "api_error"
+		and .issues[0].follow_ups == ["950"]
+		and ([.issues[].number] == ["901", "902"])
+		and .progress.failed == 0' status.json > /dev/null \
+		|| fail "batch status: $(< status.json)"
+	[[ "$output" == *"follow-ups not started"* ]] \
+		|| fail "no 'follow-ups not started' warning: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == $'901\n902' ]] \
+		|| fail "inner orchestrator calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
 }
 
 # =============================================================================
