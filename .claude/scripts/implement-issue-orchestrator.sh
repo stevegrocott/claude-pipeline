@@ -6523,7 +6523,8 @@ _infer_agent_from_path() {
 # Prints one section of a saved issue body. The single heading rule shared by
 # the PR review block and the implement prompts: any heading of depth two or
 # more, matched by name prefix without regard to case, CRLF-tolerant, ending
-# at the next such heading.
+# at the next such heading that is no deeper than the matched one. Deeper
+# headings belong to the section and are printed (issue #1253).
 #
 # Arguments:
 #   $1 - path to the issue body markdown
@@ -6540,9 +6541,17 @@ _extract_issue_section() {
 		!found && /^##+[[:space:]]/ {
 			t = tolower($0)
 			sub(/^##+[[:space:]]+/, "", t)
-			if (index(t, tolower(h)) == 1) { found = 1; next }
+			if (index(t, tolower(h)) == 1) {
+				match($0, /^#+/)
+				depth = RLENGTH
+				found = 1
+				next
+			}
 		}
-		found && /^##+[[:space:]]/ { exit }
+		found && /^##+[[:space:]]/ {
+			match($0, /^#+/)
+			if (RLENGTH <= depth) exit
+		}
 		found { print }
 	' < "$body_file"
 }
