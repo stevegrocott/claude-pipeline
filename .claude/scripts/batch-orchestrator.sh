@@ -191,9 +191,10 @@ _EPIC_SCOPE=""
 # Out-of-band terminal-status signal set by process_issue() (issue #809),
 # mirroring the _PREFLIGHT_SKIPPED pattern above. process_issue() returns 0
 # for several non-success terminal states (already_implemented,
-# merge_blocked, budget_exceeded) so they stay out of consecutive_failures
-# / the circuit breaker, but callers still need to tell those apart from a
-# genuine success when emitting telemetry. Reset to "" at the top of every
+# merge_blocked, budget_exceeded, api_error) so they stay out of
+# consecutive_failures / the circuit breaker, but callers still need to tell
+# those apart from a genuine success when emitting telemetry. Reset to "" at
+# the top of every
 # process_issue() call, set at each non-success return, and read by the
 # caller immediately after process_issue() returns — before any other
 # process_issue() invocation overwrites it.
@@ -2178,6 +2179,14 @@ process_issue() {
             error|max_iterations_quality|max_iterations_pr_review)
                 impl_status="error"
                 impl_error="Script exited with state: $state"
+                # Issue #949: an API-error halt (#1072) says nothing about
+                # the work.  Its own status keeps it out of the PR-recovery
+                # arm below, which would flip an unfinished run to success.
+                if [[ "$state" == "error" ]] \
+                    && jq -e '.api_error_halt' "$issue_status_file" \
+                        >/dev/null 2>&1; then
+                    impl_status="api_error"
+                fi
                 ;;
             interrupted_during_*)
                 local interrupted_stage="${state#interrupted_during_}"
@@ -2391,6 +2400,17 @@ process_issue() {
             fi
             update_progress
             git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+        fi
+        if [[ "$impl_status" == "api_error" ]]; then
+            # Issue #949: leave the issue pending so a resume re-runs it, and
+            # return 0 to keep it out of consecutive_failures.
+            log "Issue #$issue_num: API-error halt — left pending for resume"
+            update_issue_field "$issue_num" "status" "pending"
+            update_issue_field "$issue_num" "error" "$impl_error"
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            _TERMINAL_STATUS="api_error"
             return 0
         fi
         update_issue_field "$issue_num" "status" "failed"
