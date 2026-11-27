@@ -545,3 +545,29 @@ $hits"
 			|| fail "$dir/implement-issue-orchestrator.sh: tz_env not guarded"
 	done
 }
+
+@test "#1246: removed and removed_entries expansions are guarded against empty arrays (set -u, bash 3.2)" {
+	local root="$BATS_TEST_DIRNAME/../../.."
+	local dir f path bare
+	for dir in .claude/scripts plugins/pipeline-core/scripts; do
+		for f in resolve-pipeline-root.sh batch-orchestrator.sh \
+			implement-issue-orchestrator.sh; do
+			path="$root/$dir/$f"
+			[[ -f "$path" ]] || fail "missing $path"
+			# Remove the empty-safe forms ${a[@]+"${a[@]}"}, ${a[*]:-} and
+			# ${a[*]-}, then look for any bare expansion left.
+			bare=$(sed -E \
+				-e 's/\$\{(removed|removed_entries)\[@\]\+"\$\{(removed|removed_entries)\[@\]\}"\}//g' \
+				-e 's/\$\{(removed|removed_entries)\[[*@]\]:?-[^}]*\}//g' \
+				"$path" \
+				| grep -nE '\$\{(removed|removed_entries)\[[*@]\]\}' || true)
+			[[ -z "$bare" ]] || fail "$dir/$f has an unguarded removed/removed_entries expansion: $bare"
+		done
+		grep -qF '${removed[*]:-}' "$root/$dir/resolve-pipeline-root.sh" \
+			|| fail "$dir/resolve-pipeline-root.sh: removed not guarded"
+		grep -qE '\$\{removed_entries\[@\]\+' "$root/$dir/batch-orchestrator.sh" \
+			|| fail "$dir/batch-orchestrator.sh: removed_entries not guarded"
+		grep -qE '\$\{removed_entries\[@\]\+' "$root/$dir/implement-issue-orchestrator.sh" \
+			|| fail "$dir/implement-issue-orchestrator.sh: removed_entries not guarded"
+	done
+}

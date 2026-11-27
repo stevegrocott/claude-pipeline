@@ -164,6 +164,7 @@ _install_versioned() {
 # /bin/bash is 3.2 on macOS, where "${empty[*]}" is unbound under set -u
 # (issue #1246). A bare `bash` may resolve to a newer one that hides this.
 @test "pipeline_pin_bin_first succeeds under set -u with no sibling bin on PATH" {
+    [[ -x /bin/bash ]] || skip "no /bin/bash"
     local cache="$TEST_TMP/cache"
     local resolver
     resolver="$(_install_versioned "$cache" 0.8.22)"
