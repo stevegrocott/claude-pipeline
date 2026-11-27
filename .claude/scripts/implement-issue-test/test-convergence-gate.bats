@@ -526,6 +526,270 @@ teardown() {
 	expect_glob "$status3" 'failed' "task 3 remains failed — ambiguous attribution"
 }
 
+# Issue #1009: failed tasks declaring the same file are each refused because of
+# the other. A commit made after the implement stage ended belongs to no task,
+# so it breaks the deadlock.
+#
+# Seeds three failed tasks all declaring shared.sh and commits that file as the
+# implement stage would.
+_seed_shared_file_failed_tasks() {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["shared.sh"]},
+		{id: 2, description: "task two", status: "failed", affected_files: ["shared.sh"]},
+		{id: 3, description: "task three", status: "failed", affected_files: ["shared.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	echo "implement" > shared.sh
+	git add shared.sh
+	git commit -q -m "implement stage lands shared.sh"
+}
+
+# Records HEAD as implement_end_sha, as the orchestrator does when the
+# implement stage ends.
+_record_implement_end() {
+	local sha
+	sha=$(git rev-parse HEAD)
+	jq --arg sha "$sha" '.implement_end_sha = $sha' "$STATUS_FILE" \
+		> "$STATUS_FILE.tmp"
+	mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+_commit_after_implement() {
+	echo "review fix" >> shared.sh
+	git commit -q -am "later stage changes shared.sh"
+}
+
+# $1 - label for failure messages
+_expect_no_shared_task_promoted() {
+	local label="$1" count verdicts
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '0' "$label: nothing reconciles"
+
+	verdicts=$(jq -r '[.tasks[].status] | join(",")' "$STATUS_FILE")
+	expect_glob "$verdicts" 'failed,failed,failed' \
+		"$label: every task stays failed"
+}
+
+@test "reconcile: a commit after implement_end_sha promotes every sibling sharing the file" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_after_implement
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '3' "all three tasks reconcile"
+
+	local verdicts kinds
+	verdicts=$(jq -r '[.tasks[].status] | join(",")' "$STATUS_FILE")
+	expect_glob "$verdicts" 'completed,completed,completed' \
+		"every sibling is promoted"
+	kinds=$(jq -r '[.tasks[].evidence_kind] | join(",")' "$STATUS_FILE")
+	expect_glob "$kinds" 'post_implement,post_implement,post_implement' \
+		"each promotion is distinguishable from ordinary file evidence"
+}
+
+@test "reconcile: promoting siblings on a post-implement commit clears the partial merge block" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_after_implement
+	jq '.merge_blocked_reason = "Partial implementation: 0/3 tasks completed (implement:partial:0/3)."' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp"
+	mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+	DEGRADED_STAGES=("implement:partial:0/3")
+
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	local reason
+	reason=$(jq -r '.merge_blocked_reason // "cleared"' "$STATUS_FILE")
+	expect_glob "$reason" 'cleared' "the partial merge block is cleared"
+	expect_glob "${#DEGRADED_STAGES[@]}" '0' \
+		"the stale partial marker is dropped"
+}
+
+@test "revalidate: #1009 end-to-end — a post-implement commit clears the block on equal-set tasks" {
+	# The block is written by the shipped code, not hand-seeded: the first
+	# gate pass runs before any later commit, the second after it.
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	DEGRADED_STAGES=("implement:partial:0/3")
+
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	local gate_result reason
+	gate_result=$(_run_merge_gate)
+	expect_glob "${gate_result#*$'\x1e'}" 'partial' \
+		"the gate blocks while the file changed only during implement"
+	reason="${gate_result%%$'\x1e'*}"
+	expect_glob "$reason" '*files shared with still-failed task*' \
+		"the block names the shared-file cause"
+
+	_commit_after_implement
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	gate_result=$(_run_merge_gate)
+	[[ "$gate_result" == $'\x1e' ]] ||
+		fail "expected no block and no block kind, got '$gate_result'"
+
+	local tasks
+	tasks=$(jq -r '[.tasks[]
+		| "\(.status):\(.evidence_kind):\(has("evidence_gap"))"]
+		| unique | join(",")' "$STATUS_FILE")
+	expect_glob "$tasks" 'completed:post_implement:false' \
+		"every task is promoted, stamped, and its stale cause removed"
+}
+
+@test "reconcile: shared files changed only during implement promote no sibling" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	# A later commit that leaves the declared file alone is not evidence.
+	echo "other" > other.sh
+	git add other.sh
+	git commit -q -m "later stage changes an unrelated file"
+
+	_expect_no_shared_task_promoted "changed only during implement"
+}
+
+@test "reconcile: without implement_end_sha no sibling is promoted" {
+	_seed_shared_file_failed_tasks
+	_commit_after_implement
+
+	_expect_no_shared_task_promoted "implement_end_sha absent"
+}
+
+@test "reconcile: an unresolvable implement_end_sha promotes no sibling" {
+	_seed_shared_file_failed_tasks
+	_commit_after_implement
+	jq '.implement_end_sha = "0123456789012345678901234567890123456789"' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp"
+	mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	_expect_no_shared_task_promoted "implement_end_sha unresolvable"
+}
+
+@test "reconcile: a red suite promotes no sibling despite a post-implement commit" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_after_implement
+	DEGRADED_STAGES=("test:full_suite_red")
+
+	_expect_no_shared_task_promoted "red suite"
+}
+
+# Runs the orchestrator's own implement_end_sha recording block, lifted from
+# main(), so the tests below cannot pass without it.
+_run_shipped_implement_end_recording() {
+	local block
+	block=$(awk '
+		/^ *local _implement_end_sha$/ { grab = 1 }
+		grab { print }
+		grab && /^ *fi$/ { exit }
+	' "$ORCHESTRATOR_SCRIPT")
+	[[ "$block" == *'.implement_end_sha'*fi ]] ||
+		fail "implement_end_sha recording block not found in main()"
+	eval "_shipped_recording() {
+$block
+}"
+	_shipped_recording
+}
+
+@test "implement_end_sha: the shipped recording writes HEAD and enables sibling promotion" {
+	_seed_shared_file_failed_tasks
+	local expected
+	expected=$(git rev-parse HEAD)
+
+	_run_shipped_implement_end_recording
+
+	expect_glob "$(jq -r '.implement_end_sha' "$STATUS_FILE")" "$expected" \
+		"HEAD at implement end is recorded"
+	_commit_after_implement
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "the recorded SHA drives promotion"
+}
+
+@test "implement_end_sha: a resumed run does not overwrite the recorded SHA" {
+	_seed_shared_file_failed_tasks
+	local original
+	original=$(git rev-parse HEAD)
+	_run_shipped_implement_end_recording
+	_commit_after_implement
+
+	_run_shipped_implement_end_recording
+
+	expect_glob "$(jq -r '.implement_end_sha' "$STATUS_FILE")" "$original" \
+		"the first recorded SHA survives"
+}
+
+@test "drift guard: implement_end_sha is recorded after the implement stage and before reconciliation" {
+	local implement_line record_line reconcile_line
+	implement_line=$(grep -n '^ *_noncommit_delta=\$(reconcile_noncommit_tasks_with_deliverables)' \
+		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	record_line=$(grep -n "'\.implement_end_sha //= \\\$sha'" \
+		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+	reconcile_line=$(grep -n '^ *_reconciled_count=\$(reconcile_failed_tasks_with_branch_evidence ' \
+		"$ORCHESTRATOR_SCRIPT" | head -1 | cut -d: -f1)
+
+	expect_ok "post-task-loop anchor present" test -n "$implement_line"
+	expect_ok "recording present" test -n "$record_line"
+	expect_ok "reconcile call present" test -n "$reconcile_line"
+	expect_ok "recorded after the implement stage" \
+		test "$implement_line" -lt "$record_line"
+	expect_ok "recorded before reconciliation" \
+		test "$record_line" -lt "$reconcile_line"
+}
+
+@test "reconcile: every declared file must change after implement_end_sha, not just one" {
+	set_tasks "$(jq -n '[range(1; 4) | {id: ., description: "task \(.)",
+		status: "failed", affected_files: ["shared.sh", "second.sh"]}]')"
+	echo "implement" > shared.sh
+	echo "implement" > second.sh
+	git add shared.sh second.sh
+	git commit -q -m "implement stage lands both files"
+	_record_implement_end
+	_commit_after_implement
+
+	_expect_no_shared_task_promoted "only one of two files changed"
+
+	# Control: changing the other file too is what unblocks them.
+	echo "review fix" >> second.sh
+	git commit -q -am "later stage changes second.sh"
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "all declared files changed"
+}
+
+@test "reconcile: an implement_end_sha outside HEAD's history promotes no sibling" {
+	_seed_shared_file_failed_tasks
+	# A real commit that HEAD does not descend from, as after a rewrite.
+	git checkout -q -b rewritten
+	git commit -q --allow-empty -m "commit later dropped from the branch"
+	_record_implement_end
+	git checkout -q feature
+	_commit_after_implement
+
+	_expect_no_shared_task_promoted "implement_end_sha not an ancestor"
+}
+
+@test "reconcile: a declared directory counts only changes under it after implement_end_sha" {
+	set_tasks "$(jq -n '[range(1; 4) | {id: ., description: "task \(.)",
+		status: "failed", affected_files: ["lib/"]}]')"
+	mkdir lib
+	echo "implement" > lib/a.sh
+	git add lib/a.sh
+	git commit -q -m "implement stage lands lib/"
+	_record_implement_end
+	echo "other" > libother.sh
+	git add libother.sh
+	git commit -q -m "later stage changes a file outside lib/"
+
+	_expect_no_shared_task_promoted "nothing under lib/ changed"
+
+	echo "review fix" >> lib/a.sh
+	git commit -q -am "later stage changes a file under lib/"
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "a change under the declared directory is evidence"
+}
+
 @test "reconcile: does not promote an evidenced task while the test suite is red this run" {
 	# Issue #620's proposed direction requires file evidence AND a green
 	# test suite before treating a failed task as satisfied.
@@ -926,6 +1190,65 @@ teardown() {
 		"the operational task keeps its own kind"
 	expect_glob "$summary" '*\[file evidence: README.md\]*' \
 		"the file task keeps its own kind"
+}
+
+@test "_lacking_evidence_summary: appends each task's own cause" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "one", status: "failed",
+		 affected_files: ["a.sh"], evidence_gap: "shared_with_task:3"},
+		{id: 2, description: "two", status: "failed",
+		 affected_files: ["b.sh"], evidence_gap: "not_modified"},
+		{id: 3, description: "three", status: "failed",
+		 affected_files: [], evidence_gap: "no_declared_files"},
+		{id: 4, description: "four", status: "failed",
+		 affected_files: ["d.sh"], commit_rejected: true,
+		 evidence_gap: "not_modified"},
+		{id: 5, description: "five", status: "failed",
+		 affected_files: ["e.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary expected
+	summary=$(_lacking_evidence_summary)
+	expected="task 1 (one) [file evidence: a.sh]"
+	expected+=" - files shared with still-failed task 3"
+	expected+="; task 2 (two) [file evidence: b.sh]"
+	expected+=" - not modified on branch"
+	expected+="; task 3 (three) [file evidence] - no declared files"
+	expected+="; task 4 (four) [file evidence: d.sh] - commit rejected"
+	expected+="; task 5 (five) [file evidence: e.sh]"
+	[[ "$summary" == "$expected" ]] ||
+		fail "expected '$expected', got '$summary'"
+}
+
+@test "_lacking_evidence_summary: a long entry is capped without losing its cause" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: ("x" * 400), status: "failed",
+		 affected_files: ["a.sh"], evidence_gap: "not_modified"}
+	]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	((${#summary} == 200)) ||
+		fail "expected a 200 char entry, got ${#summary}"
+	expect_glob "$summary" 'task 1 (xxx*... - not modified on branch' \
+		"the description is truncated, the cause survives"
+}
+
+@test "_lacking_evidence_summary: the joined summary stays capped at 1500" {
+	local tasks_json
+	tasks_json=$(jq -n '[range(1; 13)
+		| {id: ., description: ("x" * 400), status: "failed",
+		   affected_files: ["a.sh"], evidence_gap: "not_modified"}]')
+	set_tasks "$tasks_json"
+
+	local summary
+	summary=$(_lacking_evidence_summary)
+	((${#summary} == 1500)) ||
+		fail "expected a 1500 char summary, got ${#summary}"
 }
 
 # =============================================================================

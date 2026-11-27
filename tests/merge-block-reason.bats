@@ -268,6 +268,56 @@ teardown() {
 }
 
 # =============================================================================
+# Issue #1009: the blocked reason says why each task was left failed. The
+# causes are produced by the real gate-time reconciliation, not hand-seeded,
+# so these fail if reconciliation stops recording them.
+# =============================================================================
+
+@test "#1009 AC6: the blocked reason names each task's own cause" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "one", status: "failed",
+		 affected_files: ["shared.sh"]},
+		{id: 2, description: "two", status: "failed",
+		 affected_files: ["shared.sh"]},
+		{id: 3, description: "three", status: "failed",
+		 affected_files: ["untouched.sh"]},
+		{id: 4, description: "four", status: "failed", affected_files: []},
+		{id: 5, description: "five", status: "failed",
+		 affected_files: ["rejected.sh"], commit_rejected: true}
+	]')
+	set_tasks "$tasks_json"
+
+	# The shared and the rejected files ARE on the branch, so neither cause
+	# can be explained by a missing change.
+	echo "landed" > shared.sh
+	echo "landed" > rejected.sh
+	git add shared.sh rejected.sh
+	git commit -q -m "implement stage"
+
+	DEGRADED_STAGES=()
+
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	local reason entry
+	reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE")
+	local -a expected=(
+		"task 1 (one) [file evidence: shared.sh]\
+ - files shared with still-failed task 2"
+		"task 2 (two) [file evidence: shared.sh]\
+ - files shared with still-failed task 1"
+		"task 3 (three) [file evidence: untouched.sh]\
+ - not modified on branch"
+		"task 4 (four) [file evidence] - no declared files"
+		"task 5 (five) [file evidence: rejected.sh] - commit rejected"
+	)
+	for entry in "${expected[@]}"; do
+		[[ "$reason" == *"$entry"* ]] \
+			|| fail "reason lacks '$entry': $reason"
+	done
+}
+
+# =============================================================================
 # Issue #1006: the batch's wait-for-merge park must not start for a PR held
 # open BY CONFIGURATION (merge_block_kind == "manual"), but must still start
 # for the incidental kinds (convergence | partial | e2e) — the #861 protection.
