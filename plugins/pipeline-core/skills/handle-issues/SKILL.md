@@ -30,6 +30,8 @@ failure_modes:
     mitigation: fix the failing issues then run /handle-issues "resume" to continue the batch
   - id: rate_limit
     mitigation: orchestrator handles automatically — waits for reset then resumes; no operator action needed
+  - id: api_error
+    mitigation: check the API status and the CLI login, then run /handle-issues "resume" to re-run the halted issue and the ones not yet reached
   - id: incomplete_batch
     mitigation: on next run operator is offered resume or fresh start; choose resume to skip completed issues
 ---
@@ -371,7 +373,7 @@ Before fetching issues, check if a previous batch was interrupted:
 if [[ -f status.json ]]; then
     STATE=$(jq -r '.state' status.json)
 
-    if [[ "$STATE" == "running" || "$STATE" == "circuit_breaker" || "$STATE" == "interrupted" ]]; then
+    if [[ "$STATE" == "running" || "$STATE" == "circuit_breaker" || "$STATE" == "interrupted" || "$STATE" == "api_error" ]]; then
         PROGRESS=$(jq -r '.progress | "\(.completed)/\(.total) complete, \(.failed) failed, \(.pending) pending"' status.json)
         LOG_DIR=$(jq -r '.log_dir' status.json)
         BRANCH=$(jq -r '.base_branch' status.json)
@@ -641,7 +643,7 @@ fi
 ```
 
 If `STATE` is **not** `completed`, `completed_with_errors`, `completed_with_skips`, `circuit_breaker`,
-`budget_exceeded`, `halted_on_manual_merge`, `park_timeout`, or `interrupted`, call `ScheduleWakeup`
+`budget_exceeded`, `halted_on_manual_merge`, `park_timeout`, `api_error`, or `interrupted`, call `ScheduleWakeup`
 again with `delaySeconds=270`. Otherwise run the **completion block** below
 (`interrupted` is terminal — the orchestrator stopped; Step 0 offers resume on the next run).
 
@@ -657,6 +659,7 @@ again with `delaySeconds=270`. Otherwise run the **completion block** below
 | `halted_on_manual_merge` | yes | Halted: a PR is held open by `REQUIRE_MANUAL_MERGE`. |
 | `park_timeout` | yes | Halted: an open PR was still unmerged after the park timeout. |
 | `interrupted` | yes | Orchestrator received a signal and stopped. |
+| `api_error` | yes | Halted: an issue's run stopped on a Claude API error. No failure is counted; that issue and the ones not yet reached stay `pending`. |
 
 **Completion block** — run once when the batch reaches a terminal state:
 
@@ -715,6 +718,23 @@ if [[ "$STATE" == "circuit_breaker" ]]; then
     echo "3 consecutive failures detected. Batch stopped to prevent further issues."
     echo ""
     echo "**To resume:** Fix the underlying issues, then run:"
+    echo "\`/handle-issues \"resume\"\`"
+fi
+
+# Show the API-error halt (state api_error). The status and stage come from the
+# halted issue's own status file, which also covers a halted follow-up issue.
+if [[ "$STATE" == "api_error" ]]; then
+    API_HALT=$(jq -r 'select(.state == "error" and .api_error_halt != null)
+        | "status \(.api_error_halt.status // "unknown") at stage \(.api_error_halt.stage // "unknown")"' \
+        "$LOG_DIR"/issue-*-status.json 2>/dev/null)
+    echo ""
+    echo "### Stopped on an API Error"
+    echo ""
+    echo "Claude API error: ${API_HALT:-status and stage unknown (see the orchestrator log)}."
+    echo "No further issues were started and no failure was counted."
+    echo ""
+    echo "**To resume:** check the API status and the CLI login (one possible cause,"
+    echo "not the only one), then run:"
     echo "\`/handle-issues \"resume\"\`"
 fi
 
