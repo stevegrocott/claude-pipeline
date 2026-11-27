@@ -7594,12 +7594,15 @@ _make_plugin_version() {
 }
 
 # Run log_startup_environment from the plugin copy of <version> with PATH=<path>.
+# Optional further args replace the default `bash` as the shell (#1246).
 _run_startup_env() {
 	local cache="$1" version="$2" path_value="$3"
 	local fn="$TEST_TMP/fn.sh"
+	local -a shell=(bash)
+	(($# > 3)) && shell=("${@:4}")
 	_extract_function_body log_startup_environment \
 		"$BATCH_ORCHESTRATOR_SCRIPT" > "$fn"
-	run bash -c '
+	run "${shell[@]}" -c '
 		scripts="$1"; fn="$2"; PATH="$3"
 		source "$scripts/resolve-pipeline-root.sh"
 		SCRIPT_DIR="$scripts"
@@ -7641,6 +7644,20 @@ _run_startup_env() {
 	_run_startup_env "$cache" 0.8.19 "/usr/bin:/bin"
 	[ "$status" -eq 0 ]
 	[[ "$output" != *"removed other-version bin"* ]]
+}
+
+# /bin/bash is 3.2 on macOS, where an empty "${removed_entries[@]}" is unbound
+# under set -u (#1246). A bare `bash` may resolve to a newer one that hides it.
+@test "#1246: batch pin and start-up log survive /bin/bash -u with no sibling bin" {
+	[[ -x /bin/bash ]] || skip "no /bin/bash"
+	local cache="$TEST_TMP/cache"
+	_make_plugin_version "$cache" 0.8.19
+	_run_startup_env "$cache" 0.8.19 "/usr/bin:/bin" /bin/bash -u
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"LOG: Pipeline version: 0.8.19 (script dir: $cache/0.8.19/scripts)"* ]]
+	[[ "$output" != *"removed other-version bin"* ]]
+	[[ "$output" != *"unbound"* ]]
+	[[ "$output" == *"PATH0=$cache/0.8.19/bin"* ]]
 }
 
 @test "startup: other plugin bin left on PATH is warned on its own line" {

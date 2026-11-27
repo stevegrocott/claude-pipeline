@@ -518,7 +518,7 @@ log_startup_environment() {
     local -a leftover_bins=()
     # The "removed" warning names only what pipeline_pin_bin_first dropped.
     IFS=: read -r -a removed_entries <<< "${PIPELINE_PIN_REMOVED:-}"
-    for entry in "${removed_entries[@]}"; do
+    for entry in ${removed_entries[@]+"${removed_entries[@]}"}; do
         [[ -n "$entry" && "$entry" != "$bin_dir" ]] || continue
         stale_bins+=("$entry")
     done
