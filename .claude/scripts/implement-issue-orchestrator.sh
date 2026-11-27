@@ -7726,6 +7726,29 @@ sync_task_stage_verdicts() {
 	fi
 }
 
+# _set_task_evidence_gap() — record why reconciliation left a task "failed"
+# (issue #1009), or drop a value an earlier pass recorded.
+#
+# Arguments:
+#   $1 - numeric task id
+#   $2 - "shared_with_task:<id>" | "no_declared_files" | "not_modified";
+#        empty removes the field
+# Globals:
+#   STATUS_FILE - .tasks[].evidence_gap written or deleted
+_set_task_evidence_gap() {
+	local task_id="$1"
+	local gap="${2:-}"
+
+	status_json_write --argjson id "$task_id" --arg gap "$gap" \
+		'if $gap == ""
+		 then del((.tasks[] | select(.id == $id)).evidence_gap)
+		 else (.tasks[] | select(.id == $id)).evidence_gap = $gap
+		 end |
+		 .last_update = (now | todate)' ||
+		log_warn "_set_task_evidence_gap: failed to persist evidence_gap" \
+			"for task $task_id"
+}
+
 # reconcile_failed_tasks_with_branch_evidence() — convergence-verdict
 # re-evaluation (issue #616/#618/#620 task 2).
 #
@@ -7770,6 +7793,11 @@ sync_task_stage_verdicts() {
 #
 # A task with no declared files, or none of them evidenced on the branch, is
 # left "failed" so a genuine gap (issue #618) still blocks the merge.
+#
+# Each task left "failed" for one of these reasons carries it in
+# .tasks[].evidence_gap (_set_task_evidence_gap(), issue #1009). A red suite
+# is a run-wide cause, not a per-task one, so it records none; promotion
+# removes the field.
 #
 # Arguments:
 #   $1 - base branch name to diff against (e.g. "main")
@@ -7860,6 +7888,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 				   '(.tasks[] | select(.id == $id)).status = "completed" |
 				    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
 				    (.tasks[] | select(.id == $id)).evidence_kind = "operational" |
+				    del((.tasks[] | select(.id == $id)).evidence_gap) |
 				    .last_update = (now | todate)'; then
 					sync_status_to_log
 					reconciled=$((reconciled + 1))
@@ -7885,6 +7914,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 		if ((${#recon_files[@]} == 0)); then
 			log "Task $recon_id remains failed —" \
 				"no declared file evidence vs $base_branch"
+			_set_task_evidence_gap "$recon_id" "no_declared_files"
 			continue
 		fi
 
@@ -7906,6 +7936,8 @@ reconcile_failed_tasks_with_branch_evidence() {
 					"(${recon_files[*]}) are also declared by still-failed" \
 					"task $sib_id; branch evidence cannot attribute them" \
 					"to one task."
+				_set_task_evidence_gap "$recon_id" \
+					"shared_with_task:$sib_id"
 				continue
 			fi
 			recon_kind="post_implement"
@@ -7913,6 +7945,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 
 		if ((tests_green == 0)); then
 			log "Task $recon_id remains failed — test suite not green this run"
+			_set_task_evidence_gap "$recon_id" ""
 			continue
 		fi
 
@@ -7947,6 +7980,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 			    (if $kind == "" then .
 			     else (.tasks[] | select(.id == $id)).evidence_kind = $kind
 			     end) |
+			    del((.tasks[] | select(.id == $id)).evidence_gap) |
 			    .reconciled_count = ((.reconciled_count // 0) + 1) |
 			    .last_update = (now | todate)'; then
 				sync_status_to_log
@@ -7959,6 +7993,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 		else
 			log "Task $recon_id remains failed —" \
 				"no declared file evidence vs $base_branch"
+			_set_task_evidence_gap "$recon_id" "not_modified"
 		fi
 	done <<< "$recon_ids"
 
