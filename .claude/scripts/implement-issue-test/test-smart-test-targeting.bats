@@ -3879,6 +3879,36 @@ _capture_loop_prompt_for() {
     run_test_loop "$TEST_TMP/repo" "$(git branch --show-current)" "" "$scope"
 }
 
+# Helper: commit file $1 with content $2 on main, so it is part of the repo
+# under test rather than of the branch diff _capture_loop_prompt_for creates.
+_commit_on_main() {
+    local path="$1" content="$2"
+    cd "$TEST_TMP/repo" || return 1
+
+    printf '%s\n' "$content" > "$path"
+    git add "$path"
+    git commit -q -m "add $path"
+}
+
+# Helpers: assert which blocking command reached the test-stage prompt.
+_assert_prompt_runs_jest() {
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"npx jest --passWithNoTests"* ]] || fail \
+        "expected the incremental Jest command in the test prompt"
+    [[ -z "${TEST_UNIT_CMD:-}" || "$captured" != *"$TEST_UNIT_CMD"* ]] \
+        || fail "TEST_UNIT_CMD must not appear when Jest is the runner"
+}
+
+_assert_prompt_runs_unit_cmd() {
+    local captured
+    captured=$(< "$prompt_file")
+    [[ "$captured" == *"&& $TEST_UNIT_CMD"* ]] || fail \
+        "expected TEST_UNIT_CMD ('$TEST_UNIT_CMD') as the blocking command"
+    [[ "$captured" != *"npx jest"* ]] || fail \
+        "Jest must not run when TEST_UNIT_CMD is the runner"
+}
+
 @test "#965 AC1: unknown-code scope with TEST_UNIT_CMD runs that command as the blocking gate" {
     export TEST_UNIT_CMD="uv run pytest"
     _capture_loop_prompt_for "src/app/main.py" "unknown-code"
@@ -3926,6 +3956,8 @@ _capture_loop_prompt_for() {
     # pre-existing filter depends on that explicit mode to decide which
     # failures the PR owns; a full-suite substitution would lose it.
     export TEST_UNIT_CMD="npm test"
+    export TEST_TS_RUNNER=auto
+    _commit_on_main jest.config.js 'module.exports = {};'
     _capture_loop_prompt_for "src/lib/other.ts" "typescript"
 
     local captured
@@ -3933,6 +3965,48 @@ _capture_loop_prompt_for() {
     [[ "$captured" == *"npx jest --passWithNoTests"* ]] || fail \
         "setting TEST_UNIT_CMD must not take a TS consumer off the" \
         "incremental Jest path (#965 AC4)"
+}
+
+@test "#1010: TypeScript scope with no Jest runs TEST_UNIT_CMD" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_unit_cmd
+}
+
+@test "#1010: TypeScript scope with no Jest and no TEST_UNIT_CMD runs Jest" {
+    unset TEST_UNIT_CMD
+    export TEST_TS_RUNNER=auto
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+}
+
+@test "#1010: a \"jest\" key in package.json keeps Jest" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    _commit_on_main package.json '{"name":"fixture","jest":{}}'
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+}
+
+@test "#1010: TEST_TS_RUNNER=jest forces Jest in a repo with no Jest" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=jest
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_jest
+}
+
+@test "#1010: TEST_TS_RUNNER=unit-cmd overrides a tracked Jest config" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=unit-cmd
+    _commit_on_main jest.config.js 'module.exports = {};'
+    _capture_loop_prompt_for "src/lib/thing.ts" "typescript"
+
+    _assert_prompt_runs_unit_cmd
 }
 
 @test "#965: unknown-code with TEST_UNIT_CMD unset falls back to Jest and warns" {
