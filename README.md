@@ -431,6 +431,24 @@ TEST_E2E_CMD="npx playwright test"
 TEST_E2E_BASE_URL="http://localhost:3000"
 ```
 
+### Test runner for TypeScript scopes
+
+`TEST_TS_RUNNER` in `platform.sh` selects the command the blocking test loop runs for the `typescript`, `ts-frontend`, `frontend` and `mixed` change scopes:
+
+```bash
+TEST_TS_RUNNER="auto"    # auto | jest | unit-cmd
+```
+
+| Value | Blocking test command |
+|-------|-----------------------|
+| `auto` (default) | `TEST_UNIT_CMD` or Jest, chosen by the detection rule below |
+| `jest` | Always Jest (incremental) |
+| `unit-cmd` | Always `TEST_UNIT_CMD` (the whole suite on every iteration) |
+
+**`auto` detection rule:** `TEST_UNIT_CMD` is used only when it is set **and** the repository has no tracked `jest.config.*` file and no top-level `"jest"` key in any tracked `package.json`. Otherwise Jest runs.
+
+A missing `TEST_TS_RUNNER` line behaves as `auto`, and so does an unrecognised value (with a warning). If `TEST_UNIT_CMD` is unset, Jest runs even with `unit-cmd`. When `TEST_UNIT_CMD` is the blocking command, a failing run is not dismissed as pre-existing just because the PR changed no test file.
+
 ## MCP Tools
 
 The pipeline optionally integrates with MCP servers for enhanced code exploration and documentation lookup.

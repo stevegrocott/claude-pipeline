@@ -256,6 +256,7 @@ Categorize every `.claude/` file into one of four buckets:
 | JIRA_PROJECT / transitions | Set if using Jira |
 | MERGE_STYLE | Set during brainstorming |
 | TEST_UNIT_CMD / TEST_E2E_CMD | Set based on project stack |
+| TEST_TS_RUNNER | Leave as `auto` (default) unless detection picks the wrong runner; see the values below |
 | LINT_CMD / FORMAT_CMD | Set based on project tooling. The pipeline runs `FORMAT_CMD` before the PR push; leave empty to skip |
 
 **Prompts:**
@@ -417,6 +418,10 @@ Based on brainstorming answers, modify `.claude/config/platform.sh`:
 - Set JIRA_PROJECT, JIRA_DONE_TRANSITION, JIRA_IN_PROGRESS_TRANSITION if Jira
 - Set MERGE_STYLE
 - Set TEST_UNIT_CMD, TEST_E2E_CMD, LINT_CMD, FORMAT_CMD based on project stack (the pipeline runs `FORMAT_CMD` before the PR push)
+- Set TEST_TS_RUNNER only if needed. It selects the blocking test command for the `typescript`, `ts-frontend`, `frontend` and `mixed` change scopes:
+  - `auto` (default): `TEST_UNIT_CMD` when it is set **and** the repo has no tracked `jest.config.*` file and no top-level `"jest"` key in any tracked `package.json`; otherwise Jest. A missing line or an unrecognised value behaves as `auto` (the latter with a warning)
+  - `jest`: always Jest (incremental)
+  - `unit-cmd`: always `TEST_UNIT_CMD` (the whole suite on every iteration); Jest still runs if `TEST_UNIT_CMD` is unset
 
 **Parallel execution:** Tasks in different workstreams with no shared files can run in parallel using `dispatching-parallel-agents`.
 
