@@ -7622,6 +7622,52 @@ _file_set_contained() {
 	return 0
 }
 
+# _files_changed_since_implement_end() — true only when status.json records an
+# implement_end_sha that resolves to an ancestor of HEAD AND every given path
+# changed between that commit and HEAD (issue #1009). A commit made after the
+# implement stage ended was not made by any task, so it is not subject to the
+# sibling-attribution doubt the containment guard exists for.
+#
+# Arguments:
+#   $1.. - declared paths, already normalised (_task_declared_files()); one
+#          ending in "/" covers everything under it
+# Globals:
+#   STATUS_FILE - read .implement_end_sha from
+# Returns:
+#   0 when every path changed after implement end; 1 otherwise, including a
+#   missing or unresolvable SHA, or no paths
+_files_changed_since_implement_end() {
+	(($# > 0)) || return 1
+
+	local sha
+	sha=$(jq -r '.implement_end_sha // ""' "$STATUS_FILE" 2>/dev/null)
+	[[ "$sha" =~ ^[0-9a-fA-F]{7,64}$ ]] || return 1
+	# A SHA that is unknown, or no longer in HEAD's history (rewritten
+	# branch), cannot bound "after the implement stage".
+	git merge-base --is-ancestor "$sha" HEAD 2>/dev/null || return 1
+
+	local -a changed=()
+	local f
+	while IFS= read -r -d '' f; do
+		changed+=("$f")
+	done < <(git diff -z --no-renames --name-only "$sha" HEAD 2>/dev/null)
+	((${#changed[@]} > 0)) || return 1
+
+	local want found
+	for want in "$@"; do
+		found=0
+		for f in "${changed[@]}"; do
+			if [[ "$f" == "$want" ]] ||
+				[[ "$want" == */ && "$f" == "$want"* ]]; then
+				found=1
+				break
+			fi
+		done
+		((found == 1)) || return 1
+	done
+	return 0
+}
+
 # sync_task_stage_verdicts() — persist the evidence-reconciled per-task verdict
 # onto each .stages.implement_task_N entry (issue #1022).
 #
@@ -7631,7 +7677,8 @@ _file_set_contained() {
 # the completed count. Without this write-back a task that changed nothing
 # reads "completed" in its stage entry while merge_blocked_reason names it as
 # lacking evidence. .tasks[].status is the reconciled verdict, so copy it over,
-# together with .stages[].evidence_kind ("file" | "operational") naming the
+# together with .stages[].evidence_kind ("file" | "operational" |
+# "post_implement") naming the
 # evidence path that decided it.
 #
 # Only existing stage entries with a settled (completed|failed) task verdict
@@ -7714,7 +7761,12 @@ sync_task_stage_verdicts() {
 #     1-3 of #620 all declaring implement-issue-orchestrator.sh — branch
 #     evidence for that file cannot tell which task's work it reflects. A
 #     task whose declared file set is fully contained in (or equal to) a
-#     still-failed sibling's set is left "failed" rather than promoted.
+#     still-failed sibling's set is left "failed" rather than promoted —
+#     unless every one of its declared files changed after the recorded
+#     implement_end_sha (_files_changed_since_implement_end(), issue #1009),
+#     i.e. in a commit no task made. Such a promotion is stamped
+#     `evidence_kind: "post_implement"`; the suite-green and branch-evidence
+#     conjuncts still apply.
 #
 # A task with no declared files, or none of them evidenced on the branch, is
 # left "failed" so a genuine gap (issue #618) still blocks the merge.
@@ -7836,7 +7888,7 @@ reconcile_failed_tasks_with_branch_evidence() {
 			continue
 		fi
 
-		local ambiguous=0
+		local ambiguous=0 recon_kind=""
 		local j sib_id sib_files_str
 		for ((j = 0; j < ${#recon_all_ids[@]}; j++)); do
 			sib_id="${recon_all_ids[$j]}"
@@ -7844,14 +7896,20 @@ reconcile_failed_tasks_with_branch_evidence() {
 			sib_files_str="${recon_all_files[$j]}"
 			if _file_set_contained "$recon_files_str" "$sib_files_str"; then
 				ambiguous=1
+				break
+			fi
+		done
+		if ((ambiguous == 1)); then
+			if ! _files_changed_since_implement_end "${recon_files[@]}"
+			then
 				log "Task $recon_id remains failed — declared file(s)" \
 					"(${recon_files[*]}) are also declared by still-failed" \
 					"task $sib_id; branch evidence cannot attribute them" \
 					"to one task."
-				break
+				continue
 			fi
-		done
-		((ambiguous == 0)) || continue
+			recon_kind="post_implement"
+		fi
 
 		if ((tests_green == 0)); then
 			log "Task $recon_id remains failed — test suite not green this run"
@@ -7860,7 +7918,8 @@ reconcile_failed_tasks_with_branch_evidence() {
 
 		if task_files_modified_on_branch "$base_branch" "${recon_files[@]}"; then
 			log "Task $recon_id recorded failed but declared file(s) present" \
-				"vs $base_branch — reconciling to completed: ${recon_files[*]}"
+				"vs $base_branch — reconciling to completed" \
+				"(${recon_kind:-file} evidence): ${recon_files[*]}"
 			# Status-only write (issue #620 review): update_task() also stamps
 			# .current_task, which would rewind it to this reconciled task
 			# during gate-time re-evaluation. reconciled_from preserves the
@@ -7882,8 +7941,12 @@ reconcile_failed_tasks_with_branch_evidence() {
 			# $STATUS_FILE directly rather than sharing this function's call
 			# stack.
 			if status_json_write --argjson id "$recon_id" \
+			   --arg kind "$recon_kind" \
 			   '(.tasks[] | select(.id == $id)).status = "completed" |
 			    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
+			    (if $kind == "" then .
+			     else (.tasks[] | select(.id == $id)).evidence_kind = $kind
+			     end) |
 			    .reconciled_count = ((.reconciled_count // 0) + 1) |
 			    .last_update = (now | todate)'; then
 				sync_status_to_log
