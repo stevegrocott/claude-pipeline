@@ -608,6 +608,38 @@ _expect_no_shared_task_promoted() {
 		"the stale partial marker is dropped"
 }
 
+@test "revalidate: #1009 end-to-end — a post-implement commit clears the block on equal-set tasks" {
+	# The block is written by the shipped code, not hand-seeded: the first
+	# gate pass runs before any later commit, the second after it.
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	DEGRADED_STAGES=("implement:partial:0/3")
+
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	local gate_result reason
+	gate_result=$(_run_merge_gate)
+	expect_glob "${gate_result#*$'\x1e'}" 'partial' \
+		"the gate blocks while the file changed only during implement"
+	reason="${gate_result%%$'\x1e'*}"
+	expect_glob "$reason" '*files shared with still-failed task*' \
+		"the block names the shared-file cause"
+
+	_commit_after_implement
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	gate_result=$(_run_merge_gate)
+	[[ "$gate_result" == $'\x1e' ]] ||
+		fail "expected no block and no block kind, got '$gate_result'"
+
+	local tasks
+	tasks=$(jq -r '[.tasks[]
+		| "\(.status):\(.evidence_kind):\(has("evidence_gap"))"]
+		| unique | join(",")' "$STATUS_FILE")
+	expect_glob "$tasks" 'completed:post_implement:false' \
+		"every task is promoted, stamped, and its stale cause removed"
+}
+
 @test "reconcile: shared files changed only during implement promote no sibling" {
 	_seed_shared_file_failed_tasks
 	_record_implement_end
