@@ -2414,6 +2414,171 @@ _stub_git_push_verified() {
 }
 
 # =============================================================================
+# FIX-STAGE GUARD — PRE-EXISTING UNTRACKED FILES (#1008)
+# =============================================================================
+
+# Fix-stage repo holding a consumer's own stray files before the stage runs:
+# one at the root and one inside an untracked directory.
+_setup_dirty_fix_stage_repo() {
+    _setup_fix_stage_repo
+    printf 'old\n' > stray.txt
+    mkdir -p backups
+    printf 'old\n' > backups/old.bak
+}
+
+# The snapshot the production callers take before a stage.
+_tree_snapshot() {
+    git status --porcelain --untracked-files=all
+}
+
+# Asserts the guard's error in $output lists exactly the given paths.
+_assert_uncommitted_paths() {
+    local listed="${output##*Uncommitted paths: }"
+    [[ "$output" == *"Uncommitted paths: "* && "$listed" == "$1" ]] || \
+        fail "expected only '$1' to be listed, got: $output"
+}
+
+@test "#1008: verify_fix_stage_commit accepts a no-op stage with pre-existing untracked files" {
+    _setup_dirty_fix_stage_repo
+    local head_before snapshot
+    head_before=$(git rev-parse HEAD)
+    snapshot=$(_tree_snapshot)
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before" \
+        "$snapshot"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"only pre-existing changes"* ]] || \
+        fail "expected the genuine no-op message, got: $output"
+}
+
+@test "#1008: _handle_fix_stage_result returns 3 for a no-op stage with pre-existing untracked files" {
+    _setup_dirty_fix_stage_repo
+    local head_before snapshot
+    head_before=$(git rev-parse HEAD)
+    snapshot=$(_tree_snapshot)
+    _install_fix_stage_stubs
+
+    run _handle_fix_stage_result 77 1 "fix-branch" "$head_before" \
+        '{"status":"success"}' "feedback" "$snapshot"
+
+    [ "$status" -eq 3 ]
+    [[ "$(< "$TEST_TMP/comments.log")" != *"FAILED"* ]] || \
+        fail "a no-op stage must not be reported as failed"
+}
+
+@test "#1008: a new uncommitted file fails the guard and is the only path listed" {
+    _setup_dirty_fix_stage_repo
+    local head_before snapshot
+    head_before=$(git rev-parse HEAD)
+    snapshot=$(_tree_snapshot)
+
+    printf 'new\n' > branch-evidence.ts
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before" \
+        "$snapshot"
+
+    [ "$status" -eq 1 ]
+    _assert_uncommitted_paths "branch-evidence.ts"
+}
+
+@test "#1008: a new file inside an already-untracked directory is detected" {
+    _setup_dirty_fix_stage_repo
+    local head_before snapshot
+    head_before=$(git rev-parse HEAD)
+    snapshot=$(_tree_snapshot)
+
+    printf 'new\n' > backups/new.ts
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before" \
+        "$snapshot"
+
+    [ "$status" -eq 1 ]
+    _assert_uncommitted_paths "backups/new.ts"
+}
+
+@test "#1008: a newly modified tracked file fails the guard and is the only path listed" {
+    _setup_dirty_fix_stage_repo
+    local head_before snapshot
+    head_before=$(git rev-parse HEAD)
+    snapshot=$(_tree_snapshot)
+
+    printf 'fixed\n' >> src.ts
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before" \
+        "$snapshot"
+
+    [ "$status" -eq 1 ]
+    _assert_uncommitted_paths "src.ts"
+}
+
+@test "#1008: _handle_fix_stage_result fails a stage that left a new file and names only it" {
+    _setup_dirty_fix_stage_repo
+    local head_before snapshot
+    head_before=$(git rev-parse HEAD)
+    snapshot=$(_tree_snapshot)
+    _install_fix_stage_stubs
+
+    printf 'new\n' > backups/new.ts
+
+    run _handle_fix_stage_result 77 1 "fix-branch" "$head_before" \
+        '{"status":"success"}' "feedback" "$snapshot"
+
+    [ "$status" -eq 1 ]
+    _assert_uncommitted_paths "backups/new.ts"
+}
+
+@test "#1008: without a snapshot pre-existing untracked files still fail the guard" {
+    _setup_dirty_fix_stage_repo
+    local head_before
+    head_before=$(git rev-parse HEAD)
+    _install_fix_stage_stubs
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before"
+
+    [ "$status" -eq 1 ]
+    _assert_uncommitted_paths "backups/old.bak stray.txt"
+
+    run _handle_fix_stage_result 77 1 "fix-branch" "$head_before" \
+        '{"status":"success"}'
+
+    [ "$status" -eq 1 ]
+}
+
+@test "#1008: main passes the pre-stage tree snapshot to the fix-stage handler" {
+    _setup_dirty_fix_stage_repo
+    local block
+    block=$(_extract_fix_dispatch)
+    [[ "$block" == *"run_stage"*"_handle_fix_stage_result"* ]] || \
+        fail "could not extract the fix dispatch from main"
+
+    load_skill() { :; }
+    verify_on_feature_branch() { :; }
+    _halt_if_budget_exceeded() { :; }
+    _halt_if_api_error() { :; }
+    # Dirties the tree so a snapshot taken after the stage is caught.
+    run_stage() {
+        printf 'new\n' > made-by-stage.ts
+        printf '%s' '{"status":"success"}'
+    }
+    _handle_fix_stage_result() {
+        printf '%s\n' "$7" > "$TEST_TMP/handover-snapshot.txt"
+    }
+
+    eval "_dispatch() {
+        local pr_number=77 pr_iteration=1 branch=fix-branch AGENT=''
+        local review_result='{}'
+        local review_history_file=\"\$TEST_TMP/review-history.json\"
+        $block
+    }"
+    _dispatch
+
+    local expected=$'?? backups/old.bak\n?? stray.txt'
+    [[ "$(< "$TEST_TMP/handover-snapshot.txt")" == "$expected" ]] || \
+        fail "wrong snapshot: $(< "$TEST_TMP/handover-snapshot.txt")"
+}
+
+# =============================================================================
 # FULL-SUITE BATS CHECK — LOG PERSISTENCE & FAILURE-NAME EXTRACTION (#799)
 #
 # On 2026-08-11, PR #785 shipped a bundle-parity drift. The full-suite BATS
