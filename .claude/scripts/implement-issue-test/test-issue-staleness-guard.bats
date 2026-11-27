@@ -804,3 +804,54 @@ _save_long_criteria() {
 	[[ "$output" != *References* ]] || fail "next heading leaked"
 	[[ "$output" != *'reference noise'* ]] || fail "next section leaked"
 }
+
+@test "section: a three-hash section keeps four-hash subheadings (#1253)" {
+	_source_ac_helpers
+	local body="$LOG_BASE/context/issue-body.md"
+	local end
+	printf '%s\n' '#### Behaviour' '- AC1: first' \
+		'#### Tests' '- AC2: second' > "$TEST_TMP/expected"
+
+	# A same-depth heading and a shallower one each end the section.
+	for end in '### Notes' '## References'; do
+		_save_body '### Acceptance Criteria' \
+			'#### Behaviour' '- AC1: first' \
+			'#### Tests' '- AC2: second' \
+			"$end" '- next section noise'
+
+		_extract_issue_section "$body" 'Acceptance Criteria' \
+			> "$TEST_TMP/actual"
+		diff "$TEST_TMP/expected" "$TEST_TMP/actual" \
+			|| fail "wrong section when ended by '$end'"
+	done
+}
+
+@test "section: bodies without subheadings are unchanged (#1253)" {
+	_source_ac_helpers
+	local body="$LOG_BASE/context/issue-body.md"
+	local depth
+	printf '%s\n' '' '- [ ] a task' '' '#not a heading' '' \
+		> "$TEST_TMP/tasks"
+	printf '%s\n' '' '- AC1: it works' '  indented detail' '' \
+		> "$TEST_TMP/criteria"
+
+	for depth in '##' '###'; do
+		{
+			printf '%s\n' "$depth Implementation Tasks"
+			cat "$TEST_TMP/tasks"
+			printf '%s\n' "$depth Acceptance Criteria"
+			cat "$TEST_TMP/criteria"
+			printf '%s\n' "$depth References" 'noise'
+		} > "$body"
+
+		_extract_issue_section "$body" 'Implementation Tasks' \
+			> "$TEST_TMP/actual"
+		cmp "$TEST_TMP/tasks" "$TEST_TMP/actual" \
+			|| fail "tasks section changed at $depth"
+
+		_extract_issue_section "$body" 'Acceptance Criteria' \
+			> "$TEST_TMP/actual"
+		cmp "$TEST_TMP/criteria" "$TEST_TMP/actual" \
+			|| fail "criteria section changed at $depth"
+	done
+}
