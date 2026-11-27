@@ -526,6 +526,125 @@ teardown() {
 	expect_glob "$status3" 'failed' "task 3 remains failed — ambiguous attribution"
 }
 
+# Issue #1009: failed tasks declaring the same file are each refused because of
+# the other. A commit made after the implement stage ended belongs to no task,
+# so it breaks the deadlock.
+#
+# Seeds three failed tasks all declaring shared.sh and commits that file as the
+# implement stage would.
+_seed_shared_file_failed_tasks() {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "task one", status: "failed", affected_files: ["shared.sh"]},
+		{id: 2, description: "task two", status: "failed", affected_files: ["shared.sh"]},
+		{id: 3, description: "task three", status: "failed", affected_files: ["shared.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	echo "implement" > shared.sh
+	git add shared.sh
+	git commit -q -m "implement stage lands shared.sh"
+}
+
+# Records HEAD as implement_end_sha, as the orchestrator does when the
+# implement stage ends.
+_record_implement_end() {
+	local sha
+	sha=$(git rev-parse HEAD)
+	jq --arg sha "$sha" '.implement_end_sha = $sha' "$STATUS_FILE" \
+		> "$STATUS_FILE.tmp"
+	mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+_commit_after_implement() {
+	echo "review fix" >> shared.sh
+	git commit -q -am "later stage changes shared.sh"
+}
+
+# $1 - label for failure messages
+_expect_no_shared_task_promoted() {
+	local label="$1" count verdicts
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '0' "$label: nothing reconciles"
+
+	verdicts=$(jq -r '[.tasks[].status] | join(",")' "$STATUS_FILE")
+	expect_glob "$verdicts" 'failed,failed,failed' \
+		"$label: every task stays failed"
+}
+
+@test "reconcile: a commit after implement_end_sha promotes every sibling sharing the file" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_after_implement
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '3' "all three tasks reconcile"
+
+	local verdicts kinds
+	verdicts=$(jq -r '[.tasks[].status] | join(",")' "$STATUS_FILE")
+	expect_glob "$verdicts" 'completed,completed,completed' \
+		"every sibling is promoted"
+	kinds=$(jq -r '[.tasks[].evidence_kind] | join(",")' "$STATUS_FILE")
+	expect_glob "$kinds" 'post_implement,post_implement,post_implement' \
+		"each promotion is distinguishable from ordinary file evidence"
+}
+
+@test "reconcile: promoting siblings on a post-implement commit clears the partial merge block" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_after_implement
+	jq '.merge_blocked_reason = "Partial implementation: 0/3 tasks completed (implement:partial:0/3)."' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp"
+	mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+	DEGRADED_STAGES=("implement:partial:0/3")
+
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	local reason
+	reason=$(jq -r '.merge_blocked_reason // "cleared"' "$STATUS_FILE")
+	expect_glob "$reason" 'cleared' "the partial merge block is cleared"
+	expect_glob "${#DEGRADED_STAGES[@]}" '0' \
+		"the stale partial marker is dropped"
+}
+
+@test "reconcile: shared files changed only during implement promote no sibling" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	# A later commit that leaves the declared file alone is not evidence.
+	echo "other" > other.sh
+	git add other.sh
+	git commit -q -m "later stage changes an unrelated file"
+
+	_expect_no_shared_task_promoted "changed only during implement"
+}
+
+@test "reconcile: without implement_end_sha no sibling is promoted" {
+	_seed_shared_file_failed_tasks
+	_commit_after_implement
+
+	_expect_no_shared_task_promoted "implement_end_sha absent"
+}
+
+@test "reconcile: an unresolvable implement_end_sha promotes no sibling" {
+	_seed_shared_file_failed_tasks
+	_commit_after_implement
+	jq '.implement_end_sha = "0123456789012345678901234567890123456789"' \
+		"$STATUS_FILE" > "$STATUS_FILE.tmp"
+	mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+
+	_expect_no_shared_task_promoted "implement_end_sha unresolvable"
+}
+
+@test "reconcile: a red suite promotes no sibling despite a post-implement commit" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_after_implement
+	DEGRADED_STAGES=("test:full_suite_red")
+
+	_expect_no_shared_task_promoted "red suite"
+}
+
 @test "reconcile: does not promote an evidenced task while the test suite is red this run" {
 	# Issue #620's proposed direction requires file evidence AND a green
 	# test suite before treating a failed task as satisfied.
