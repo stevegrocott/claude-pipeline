@@ -12162,6 +12162,55 @@ _repo_uses_jest() {
 	return 1
 }
 
+# Chooses the blocking test runner for the typescript, ts-frontend, frontend
+# and mixed change scopes (issue #1010), and logs the choice and the reason.
+#
+# TEST_TS_RUNNER=jest and =unit-cmd are explicit and skip detection.  auto
+# picks TEST_UNIT_CMD only when it is set and the repository does not use
+# Jest; an unknown value warns and behaves as auto.  With TEST_UNIT_CMD unset
+# there is nothing else to run, so the answer is always jest.
+#
+# Arguments:
+#   $1 - loop_dir: a directory inside the repository under test
+# Outputs:
+#   "jest" or "unit-cmd" on stdout; all logging goes to stderr
+_select_ts_runner() {
+	local loop_dir="$1"
+	local setting="${TEST_TS_RUNNER:-auto}"
+	local runner='jest'
+	local reason
+
+	case "$setting" in
+		auto|jest|unit-cmd) ;;
+		*)
+			log_warn "Unknown TEST_TS_RUNNER value '$setting'" \
+				"(expected auto, jest or unit-cmd) — treating it as auto"
+			setting='auto'
+			;;
+	esac
+
+	if [[ "$setting" == 'jest' ]]; then
+		reason='TEST_TS_RUNNER=jest'
+	elif [[ -z "${TEST_UNIT_CMD:-}" ]]; then
+		reason='TEST_UNIT_CMD is unset'
+		if [[ "$setting" == 'unit-cmd' ]]; then
+			log_warn "TEST_TS_RUNNER=unit-cmd but TEST_UNIT_CMD is unset" \
+				"— keeping Jest"
+		fi
+	elif [[ "$setting" == 'unit-cmd' ]]; then
+		runner='unit-cmd'
+		reason='TEST_TS_RUNNER=unit-cmd'
+	elif _repo_uses_jest "$loop_dir"; then
+		reason='auto: the repo has a tracked Jest config or "jest" key'
+	else
+		runner='unit-cmd'
+		reason='auto: TEST_UNIT_CMD is set and the repo shows no sign of Jest'
+	fi
+
+	log "TypeScript-scope test runner: $runner ($reason)"
+	printf '%s\n' "$runner"
+}
+
 # Build the bash test command for a given loop directory.
 # Prefers run-tests.sh when it exists; falls back to direct bats glob otherwise.
 # Appends "&& bats [--jobs N] tests/*.bats" when at least one *.bats file
@@ -12511,13 +12560,8 @@ run_test_loop() {
             # deciding the stage and `npx jest` failing to start.
             #
             # Note this arm is reached ONLY for the unclassified-code scope.
-            # A genuine typescript/ts-frontend/mixed scope keeps the
-            # incremental Jest path below even when TEST_UNIT_CMD is set
-            # (#965 AC3, AC4): that path passes explicit changed test files
-            # and the pre-existing filter depends on that explicit mode to
-            # decide which failures the PR owns. Swapping in a full-suite
-            # command there would both lose that attribution and run the
-            # whole suite on every iteration.
+            # The TypeScript and frontend scopes choose their runner in the
+            # arm below.
             if [[ -n "${TEST_UNIT_CMD:-}" ]]; then
                 test_command="cd $safe_dir && ${TEST_UNIT_CMD}"
                 log "Unclassified-code scope — blocking test loop runs" \
@@ -12534,9 +12578,17 @@ run_test_loop() {
             fi
             ;;
         *)
-            # typescript, ts-frontend, frontend, mixed: run Jest.
+            # typescript, ts-frontend, frontend, mixed: incremental Jest for
+            # Jest repos (#965 AC3, AC4), TEST_UNIT_CMD for repos that test
+            # TypeScript with something else (#1010).
             # Mixed BATS pipeline tests run separately as non-blocking (see bats_section below).
-            test_command="cd $safe_dir && $jest_command"
+            local ts_runner
+            ts_runner=$(_select_ts_runner "$loop_dir")
+            if [[ "$ts_runner" == "unit-cmd" ]]; then
+                test_command="cd $safe_dir && ${TEST_UNIT_CMD}"
+            else
+                test_command="cd $safe_dir && $jest_command"
+            fi
             ;;
     esac
 
