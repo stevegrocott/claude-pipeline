@@ -14217,15 +14217,22 @@ _prior_merged_prs_for_issue() {
 # because the review findings were already addressed is a genuine no-op and
 # must still pass.  Only a DIRTY tree with no commit is a lost fix.
 #
+# Paths that were already dirty before the stage are not its work (issue
+# #1008).  Given a pre-stage snapshot, a status line present verbatim in it
+# is ignored, so only new paths and changed statuses count.
+#
 # Arguments:
 #   $1 - stage label, for the log line
 #   $2 - branch head SHA captured before the stage ran
+#   $3 - `git status --porcelain` output captured before the stage ran
+#        (optional; without it every dirty path counts)
 # Returns:
-#   0 - head advanced, or clean tree with nothing to commit (genuine no-op)
+#   0 - head advanced, or nothing left to commit (genuine no-op)
 #   1 - work left uncommitted; the error names the uncommitted paths
 verify_fix_stage_commit() {
 	local stage_label="$1"
 	local head_before="$2"
+	local snapshot="${3:-}"
 
 	local head_after
 	head_after=$(git rev-parse HEAD 2>/dev/null || printf '')
@@ -14234,11 +14241,23 @@ verify_fix_stage_commit() {
 		return 0
 	fi
 
-	local dirty
-	dirty=$(git status --porcelain 2>/dev/null || printf '')
+	local status_now
+	status_now=$(git status --porcelain 2>/dev/null || printf '')
+
+	local dirty="" line
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		if [[ $'\n'"$snapshot"$'\n' != *$'\n'"$line"$'\n'* ]]; then
+			dirty+="$line"$'\n'
+		fi
+	done <<< "$status_now"
 
 	if [[ -z "$dirty" ]]; then
-		log "$stage_label produced no commit and left a clean tree" \
+		local tree_state="a clean tree"
+		if [[ -n "$status_now" ]]; then
+			tree_state="only pre-existing changes"
+		fi
+		log "$stage_label produced no commit and left $tree_state" \
 			"— accepting as a genuine no-op"
 		return 0
 	fi
