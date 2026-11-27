@@ -3998,6 +3998,70 @@ _setup_status_634() {
 	expect_ok "silent no-op is not completed" test "$comp_len" -eq 0
 }
 
+# =============================================================================
+# #1008 — the serial no-op guard ignores dirt that predates the task
+#
+# Each test starts from a primary checkout that already holds untracked files,
+# one of them inside an untracked directory, and drives execute_batch_serial.
+# =============================================================================
+
+# Run one serial task, in a repo with pre-existing untracked files, through a
+# run_stage stub that claims already_done and commits nothing.
+# Arguments:
+#   $1 - path the stub leaves uncommitted, or empty to change nothing
+# Sets:
+#   comp_len, fail_len - sizes of the completed and failed arrays
+_run_serial_task_1008() {
+	_new_path_1008="${1:-}"
+	cd "$TEST_TMP/repo" || return 1
+	git checkout -q -b feature/serial-1008 main
+
+	mkdir -p "$LOG_BASE/stages" stray
+	printf 'local backup\n' > backup-1008.bak
+	printf 'old snapshot\n' > stray/old-1008.log
+
+	run_stage() {
+		if [[ -n "$_new_path_1008" ]]; then
+			printf 'lost work\n' > "$_new_path_1008"
+		fi
+		printf '%s' '{"status":"success","output":{"status":"success",' \
+			'"already_done":true,"commit":"none","summary":"done"}}'
+	}
+	should_run_quality_loop() { return 1; }
+	get_max_review_attempts() { printf '%s' "1"; }
+	get_stage_timeout() { printf '%s' "1800"; }
+	resolve_model() { printf '%s' "sonnet"; }
+	build_files_block() { printf '\n'; }
+	extract_task_size() { printf '%s' "S"; }
+
+	local tasks result
+	tasks='[{"id":108,"description":"Change the thing","agent":"default"}]'
+	result=$(execute_batch_serial "$tasks" "feature/serial-1008" "main")
+	comp_len=$(printf '%s' "$result" | jq '.completed | length')
+	fail_len=$(printf '%s' "$result" | jq '.failed | length')
+}
+
+@test "#1008 execute_batch_serial: untracked files that predate a no-commit task do not fail it" {
+	local comp_len fail_len
+	_run_serial_task_1008 ""
+
+	expect_ok "the task is completed" test "$comp_len" -eq 1
+	expect_ok "the task is not failed" test "$fail_len" -eq 0
+	refute grep -q 'Uncommitted paths:' "$LOG_FILE"
+}
+
+@test "#1008 execute_batch_serial: a new uncommitted file still fails the task and only that file is listed" {
+	local comp_len fail_len
+	# Inside the already-untracked directory, which plain porcelain would
+	# collapse to "?? stray/" both before and after.
+	_run_serial_task_1008 "stray/new-1008.ts"
+
+	expect_ok "the task is failed" test "$fail_len" -eq 1
+	expect_ok "the task is not completed" test "$comp_len" -eq 0
+	expect_ok "only the new path is listed" \
+		grep -q 'Uncommitted paths: stray/new-1008\.ts$' "$LOG_FILE"
+}
+
 @test "#796 execute_batch_parallel: a clean worktree with an already_done claim is completed, not failed" {
 	cd "$TEST_TMP/repo" || exit 1
 	git checkout -q main 2>/dev/null || true
