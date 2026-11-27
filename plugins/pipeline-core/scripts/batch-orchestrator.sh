@@ -26,11 +26,13 @@
 # Exit codes:
 #   0  - All issues processed successfully
 #   1  - Some issues failed (check status.json)
-#   2  - Circuit breaker triggered.  Two independent breakers share this code
-#        and set a distinct batch state before exiting:
+#   2  - Batch halted early.  Independent breakers share this code and set a
+#        distinct batch state before exiting:
 #          * consecutive failures    -> state "circuit_breaker"
 #          * per-batch token/cost cap -> state "budget_exceeded" (issue #583,
 #            terminal: the batch is never resumed or retried on a budget halt)
+#          * per-issue API-error halt -> state "api_error" (issue #949: no
+#            failure is counted; resume re-runs the pending issues)
 #   3  - Configuration/argument error
 #
 
@@ -191,13 +193,19 @@ _EPIC_SCOPE=""
 # Out-of-band terminal-status signal set by process_issue() (issue #809),
 # mirroring the _PREFLIGHT_SKIPPED pattern above. process_issue() returns 0
 # for several non-success terminal states (already_implemented,
-# merge_blocked, budget_exceeded) so they stay out of consecutive_failures
-# / the circuit breaker, but callers still need to tell those apart from a
-# genuine success when emitting telemetry. Reset to "" at the top of every
+# merge_blocked, budget_exceeded, api_error) so they stay out of
+# consecutive_failures / the circuit breaker, but callers still need to tell
+# those apart from a genuine success when emitting telemetry. Reset to "" at
+# the top of every
 # process_issue() call, set at each non-success return, and read by the
 # caller immediately after process_issue() returns — before any other
 # process_issue() invocation overwrites it.
 _TERMINAL_STATUS=""
+
+# API status and stage of an API-error halt (issue #949), set by
+# process_issue() alongside _TERMINAL_STATUS=api_error and read by
+# halt_on_api_error().
+_API_ERROR_DETAIL=""
 
 # Skip reason + merged-PR number set by check_issue_resolved_upstream();
 # read by the batch loop immediately after the call. Kept separate from
@@ -946,6 +954,26 @@ set_state() {
     local state="$1"
     jq --arg state "$state" '.state = $state | .last_update = (now | todate)' \
         "$STATUS_FILE" > "${STATUS_FILE}.tmp" && mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+}
+
+# Stop the batch after a per-issue API-error halt (issue #949).  The next
+# issue would run into the same error, so set batch state api_error and
+# exit_code 2; the caller must start no further issue.  No failure is counted.
+#
+# Arguments:
+#   $1 - the halted issue number
+halt_on_api_error() {
+    local issue_num="$1"
+
+    log_error "API ERROR HALT: Claude API error" \
+        "(${_API_ERROR_DETAIL:-status and stage unknown})" \
+        "on issue #$issue_num. Stopping batch. Check the API status and" \
+        "the CLI login, then resume."
+    set_state "api_error"
+    emit_event "batch_paused" "reason=api_error" "issue_num=$issue_num" \
+        "consecutive_failures:=${consecutive_failures:-0}" \
+        "max_failures:=$MAX_CONSECUTIVE_FAILURES"
+    exit_code=2
 }
 
 # Check the cumulative per-batch token/cost budget ceiling (issue #583).
@@ -2178,6 +2206,14 @@ process_issue() {
             error|max_iterations_quality|max_iterations_pr_review)
                 impl_status="error"
                 impl_error="Script exited with state: $state"
+                # Issue #949: an API-error halt (#1072) says nothing about
+                # the work.  Its own status keeps it out of the PR-recovery
+                # arm below, which would flip an unfinished run to success.
+                if [[ "$state" == "error" ]] \
+                    && jq -e '.api_error_halt' "$issue_status_file" \
+                        >/dev/null 2>&1; then
+                    impl_status="api_error"
+                fi
                 ;;
             interrupted_during_*)
                 local interrupted_stage="${state#interrupted_during_}"
@@ -2391,6 +2427,21 @@ process_issue() {
             fi
             update_progress
             git checkout "$BRANCH" 2>/dev/null || true
+            return 0
+        fi
+        if [[ "$impl_status" == "api_error" ]]; then
+            # Issue #949: leave the issue pending so a resume re-runs it, and
+            # return 0 to keep it out of consecutive_failures.
+            log "Issue #$issue_num: API-error halt — left pending for resume"
+            update_issue_field "$issue_num" "status" "pending"
+            update_issue_field "$issue_num" "error" "$impl_error"
+            update_progress
+            git checkout "$BRANCH" 2>/dev/null || true
+            _API_ERROR_DETAIL=$(jq -r '.api_error_halt
+                | "status \(.status? // "unknown")"
+                    + " at stage \(.stage? // "unknown")"' \
+                "$issue_status_file" 2>/dev/null)
+            _TERMINAL_STATUS="api_error"
             return 0
         fi
         update_issue_field "$issue_num" "status" "failed"
@@ -2837,7 +2888,10 @@ sweep_implement_followups() {
 
 		log "Sweep: implementing follow-up #$issue_num"
 		if process_issue "$issue_num"; then
-			if [[ "$_PREFLIGHT_SKIPPED" == true ]]; then
+			if [[ "${_TERMINAL_STATUS:-}" == "api_error" ]]; then
+				halt_on_api_error "$issue_num"
+				break
+			elif [[ "$_PREFLIGHT_SKIPPED" == true ]]; then
 				log "Sweep: follow-up #$issue_num skipped" \
 					"(preflight): ${_SKIP_REASON:-unknown reason}"
 			else
@@ -3306,6 +3360,12 @@ for issue in "${ISSUE_ARRAY[@]}"; do
         fi
     fi
 
+    # Issue #949: halt before waiting on a PR or starting another issue.
+    if [[ "$_TERMINAL_STATUS" == "api_error" ]]; then
+        halt_on_api_error "$issue"
+        break
+    fi
+
     # Do not fork the next issue while this issue's PR is still open (issue
     # #861). Applies to failures too: a merge_blocked issue leaves exactly
     # the open PR the next branch would conflict with. A timeout halts the
@@ -3357,9 +3417,14 @@ fi
 # second wave.  Runs after sweep_enrich_followups (above) so that any
 # needs-explore follow-ups are enriched before being implemented.
 # Failures inside sweep_implement_followups are warnings only — they never
-# change exit_code or the batch state.
+# change exit_code or the batch state.  The exception is an API-error halt
+# (issue #949), which stops the batch; after one, no follow-up is started.
 if [[ "$IMPLEMENT_FOLLOWUPS" == true ]]; then
-	sweep_implement_followups
+	if [[ "$(jq -r '.state' "$STATUS_FILE")" == "api_error" ]]; then
+		log_warn "Sweep: batch halted on API error — follow-ups not started"
+	else
+		sweep_implement_followups
+	fi
 fi
 
 # Final state (issue #690: a batch that skipped work is not fully clean,
@@ -3369,7 +3434,7 @@ fi
 final_failed=$(jq '.progress.failed' "$STATUS_FILE")
 final_skipped=$(jq '.progress.skipped' "$STATUS_FILE")
 if (( exit_code == 2 || exit_code == 3 )); then
-    # Circuit breaker / manual-merge halt already set state
+    # Circuit breaker / manual-merge / API-error halt already set state
     :
 elif (( final_failed > 0 )); then
     set_state "completed_with_errors"
