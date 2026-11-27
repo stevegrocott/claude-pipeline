@@ -6748,12 +6748,13 @@ _I1017_STATES=(
 	wall_timeout_test
 )
 
-# _run_state_dispatch <state> <pr_number|""> [current_stage]
+# _run_state_dispatch <state> <pr_number|""> [current_stage] [reason] [halt_json]
 # Runs the real case/recovery block against a synthetic status file and sets
 # d_status, d_error, d_pr in the caller. log/log_warn/log_error output is
 # captured to $d_log_file (truncated per call) for message assertions.
 _run_state_dispatch() {
 	local state="$1" pr="$2" stage="${3:-pr_review}" reason="${4:-}"
+	local halt="${5:-}"
 	d_log_file="$TEST_TMP/dispatch-log.txt"
 	: > "$d_log_file"
 	local issue_status_file="$TEST_TMP/dispatch-status.json"
@@ -6769,6 +6770,12 @@ _run_state_dispatch() {
 			'{state: $s, current_stage: $cs, stages: {}}
 			 | if $r != "" then .final_state_reason = $r else . end' \
 			> "$issue_status_file"
+	fi
+	# A non-empty halt_json is written as .api_error_halt (#1072).
+	if [[ -n "$halt" ]]; then
+		jq --argjson h "$halt" '.api_error_halt = $h' \
+			"$issue_status_file" > "$issue_status_file.tmp" || return 1
+		mv "$issue_status_file.tmp" "$issue_status_file"
 	fi
 
 	local block="$TEST_TMP/dispatch-block.sh"
@@ -6889,6 +6896,97 @@ _run_state_dispatch() {
 	_run_state_dispatch "error" 42 "pr_review"
 	[[ "$d_status" == "success" ]]
 	[[ "$d_pr" == "42" ]]
+}
+
+# =============================================================================
+# Issue #949: an API-error halt leaves the issue pending, not failed
+# =============================================================================
+
+_I949_HALT='{"stage":"implement-task-1","status":"403","detail":"Cloudflare"}'
+_I949_REASON='api_error: Claude API error (status 403) at stage implement-task-1'
+
+# _run_outcome_arm
+# Feeds the d_status/d_error/d_pr left by _run_state_dispatch into the real
+# non-success arm of process_issue, writing a real batch status file. Sets
+# o_rc, o_terminal and o_status_file in the caller.
+_run_outcome_arm() {
+	o_status_file="$TEST_TMP/batch-status.json"
+	jq -n '{issues: [{number: "1017", status: "in_progress"}],
+		progress: {}, cost_summary: {}}' > "$o_status_file"
+
+	local block="$TEST_TMP/outcome-block.sh"
+	awk '
+		/^    if \[\[ "\$impl_status" != "success" \]\]; then$/ { cap = 1 }
+		cap { print }
+		cap && /^    fi$/ { exit }
+	' "$BATCH_ORCHESTRATOR_SCRIPT" > "$block"
+	[[ -s "$block" ]] || { echo "outcome block not found" >&2; return 1; }
+
+	local out
+	out=$(
+		log() { :; }
+		log_error() { :; }
+		git() { :; }
+		check_issue_pr_merged() { return 1; }
+		eval "$(_extract_function_body update_issue_field \
+			"$BATCH_ORCHESTRATOR_SCRIPT")"
+		eval "$(_extract_function_body update_progress \
+			"$BATCH_ORCHESTRATOR_SCRIPT")"
+		STATUS_FILE="$o_status_file"
+		BRANCH=main
+		issue_num=1017
+		impl_status="$d_status" impl_error="$d_error" pr_number="$d_pr"
+		_TERMINAL_STATUS=""
+		runner() {
+			# shellcheck disable=SC1090
+			source "$block"
+		}
+		rc=0
+		runner || rc=$?
+		printf '%s|%s\n' "$rc" "$_TERMINAL_STATUS"
+	) || return 1
+	IFS='|' read -r o_rc o_terminal <<<"$out"
+}
+
+@test "i949: state error with api_error_halt yields terminal status api_error" {
+	_run_state_dispatch "error" "" "implement" "$_I949_REASON" "$_I949_HALT"
+	[[ "$d_status" == "api_error" ]] || fail "dispatch status: $d_status"
+
+	_run_outcome_arm
+	[[ "$o_terminal" == "api_error" ]] || fail "terminal: $o_terminal"
+	[[ "$o_rc" == "0" ]] || fail "rc $o_rc would count as a failure"
+}
+
+@test "i949: an API-error halt leaves the issue pending with the reason" {
+	_run_state_dispatch "error" "" "implement" "$_I949_REASON" "$_I949_HALT"
+	_run_outcome_arm
+
+	jq -e --arg r "$_I949_REASON" \
+		'.issues[0].status == "pending"
+		 and (.issues[0].error | startswith($r))
+		 and .progress.pending == 1
+		 and .progress.failed == 0' "$o_status_file" >/dev/null \
+		|| fail "batch status: $(cat "$o_status_file")"
+}
+
+@test "i949: an API-error halt with a PR is not recovered as success" {
+	_run_state_dispatch "error" 99 "pr_review" "$_I949_REASON" "$_I949_HALT"
+	[[ "$d_status" == "api_error" ]] || fail "dispatch status: $d_status"
+	[[ "$(< "$d_log_file")" != *"recovering as success"* ]] \
+		|| fail "halted run was recovered: $(< "$d_log_file")"
+}
+
+@test "i949: state error without api_error_halt is still a plain failure" {
+	# The reason text alone must not trigger the halt path.
+	_run_state_dispatch "error" "" "implement" "$_I949_REASON"
+	[[ "$d_status" == "error" ]] || fail "dispatch status: $d_status"
+
+	_run_outcome_arm
+	[[ "$o_rc" == "1" ]] || fail "rc $o_rc would not count as a failure"
+	[[ -z "$o_terminal" ]] || fail "terminal: $o_terminal"
+	jq -e '.issues[0].status == "failed" and .progress.failed == 1
+		and .progress.pending == 0' "$o_status_file" >/dev/null \
+		|| fail "batch status: $(cat "$o_status_file")"
 }
 
 # =============================================================================
