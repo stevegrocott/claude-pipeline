@@ -651,6 +651,32 @@ _expect_no_shared_task_promoted() {
 	_expect_no_shared_task_promoted "changed only during implement"
 }
 
+@test "reconcile: a base-branch merge after implement_end_sha promotes no sibling" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+
+	git checkout -q "$BASE_BRANCH"
+	echo "base edit" > shared.sh
+	git add shared.sh
+	git commit -q -m "base branch edits shared.sh"
+	git checkout -q feature
+	# Keep both sides' lines, so the merge is clean and the merged file
+	# still differs from the base as well as from implement_end_sha.
+	echo "shared.sh merge=union" > .git/info/attributes
+	git merge -q --no-ff -m "merge base into feature" "$BASE_BRANCH"
+
+	# Preconditions: without both, nothing could promote for any reason.
+	if git diff --quiet "$(jq -r '.implement_end_sha' "$STATUS_FILE")" HEAD \
+		-- shared.sh; then
+		fail "the base merge did not change shared.sh after implement end"
+	fi
+	if git diff --quiet "$BASE_BRANCH...HEAD" -- shared.sh; then
+		fail "shared.sh no longer counts as branch evidence"
+	fi
+
+	_expect_no_shared_task_promoted "changed only by a base merge"
+}
+
 @test "reconcile: without implement_end_sha no sibling is promoted" {
 	_seed_shared_file_failed_tasks
 	_commit_after_implement
