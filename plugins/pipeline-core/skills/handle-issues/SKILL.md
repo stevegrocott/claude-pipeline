@@ -400,6 +400,8 @@ fi
 
 If resuming, skip to Step 5 (launch orchestrator). The orchestrator calls `init_status` on startup; if a prior `status.json` for this batch exists, it preserves per-issue terminal statuses (`completed` and `already_implemented`) instead of resetting everything to `pending`. Non-terminal statuses (`failed`, `in_progress`) are reset to `pending` so they re-run. The main loop then skips any issue whose preserved status is `completed`, ensuring already-finished issues are not re-processed on relaunch.
 
+Follow-ups recorded before the halt are kept and swept. A resume with the same batch fingerprint keeps each parent's `follow_ups` list, the follow-up rows and the first run's `batch_started_at`. Relaunch with the same `--enrich-followups` / `--implement-followups` flags: the enrich sweep still covers follow-ups filed since the first launch, and the implement sweep re-runs a halted or unfinished follow-up but skips one already `completed` or `already_implemented`. A different fingerprint starts fresh and discards all of this.
+
 ### Step 1: Parse Context Query
 
 Extract from the user's context query:

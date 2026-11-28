@@ -649,6 +649,97 @@ source_init_status() {
 		|| fail "a pre-#781 status.json with no fingerprint was treated as a match (got: $status)"
 }
 
+# --- Issue #1270: follow-up state survives a fingerprint-matched resume ---
+
+# Writes the status.json a first launch of batch main:1,2 leaves behind: a
+# completed parent with follow-ups, a failed parent with follow-ups, and
+# follow-up rows as appended by sweep_implement_followups.
+_seed_followup_status() {
+	log() { :; }
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+
+	jq '(.issues[] | select(.number == "1")) |=
+			(.status = "completed" | .follow_ups = ["950", "951", "952"])
+		| (.issues[] | select(.number == "2")) |=
+			(.status = "failed" | .follow_ups = ["953"])
+		| .issues += [
+			{number: "950", status: "completed", follow_ups: ["990"]},
+			{number: "951", status: "already_implemented", follow_ups: []},
+			{number: "952", status: "failed", error: "boom",
+				stage: "implement-issue", follow_ups: []},
+			{number: "953", status: "in_progress", follow_ups: []}
+		]' "$STATUS_FILE" > "$STATUS_FILE.tmp" \
+		&& mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+@test "functional: init_status resume keeps the parents' follow_ups (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	init_status
+
+	run jq -c '[.issues[] | select(.number == "1" or .number == "2")
+		| [.number, .status, .follow_ups]]' "$STATUS_FILE"
+	[[ "$output" == \
+		'[["1","completed",["950","951","952"]],["2","pending",["953"]]]' ]] \
+		|| fail "parents' follow_ups not kept (got: $output)"
+}
+
+@test "functional: init_status resume keeps follow-up rows, terminal status kept, others pending (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	init_status
+
+	run jq -c '[.issues[] | [.number, .status]]' "$STATUS_FILE"
+	[[ "$output" == '[["1","completed"],["2","pending"],["950","completed"],["951","already_implemented"],["952","pending"],["953","pending"]]' ]] \
+		|| fail "follow-up rows not kept (got: $output)"
+
+	run jq -c '.issues[] | select(.number == "952") | [.error, .stage]' \
+		"$STATUS_FILE"
+	[[ "$output" == '[null,null]' ]] \
+		|| fail "pending follow-up row kept stale fields (got: $output)"
+}
+
+@test "functional: init_status resume counts carried follow-up rows in progress (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	init_status
+
+	run jq -c '.progress | [.total, .completed, .pending]' "$STATUS_FILE"
+	[[ "$output" == '[6,3,3]' ]] \
+		|| fail "progress does not count follow-up rows (got: $output)"
+}
+
+# The sweep collects follow_ups from every row, so carrying a follow-up row's
+# own follow_ups would auto-implement depth-2 issues on resume.
+@test "functional: init_status resume does not carry depth-2 follow_ups (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	init_status
+
+	run jq -c '[.issues[].follow_ups[]] | unique' "$STATUS_FILE"
+	[[ "$output" == '["950","951","952","953"]' ]] \
+		|| fail "unexpected follow_ups after resume (got: $output)"
+}
+
+@test "functional: init_status fingerprint mismatch drops follow-up rows and follow_ups (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	BRANCH="develop"
+	init_status
+
+	run jq -c '[.issues[] | [.number, .status, .follow_ups]]' "$STATUS_FILE"
+	[[ "$output" == '[["1","pending",[]],["2","pending",[]]]' ]] \
+		|| fail "mismatch did not reset follow-up state (got: $output)"
+}
+
 # --- Functional simulation ---
 #
 # Build a mock status.json with mixed issue statuses and verify that the
@@ -3266,6 +3357,46 @@ source_sweep_implement_followups() {
 	grep -qx '300' "$TEST_TMP/process_issue.calls"
 	# #200 was already in the original manifest — must NOT be re-processed.
 	! grep -qx '200' "$TEST_TMP/process_issue.calls"
+}
+
+@test "sweep_implement_followups skips follow-up rows already completed or already_implemented (#1270)" {
+	source_sweep_implement_followups \
+		|| fail "sweep_implement_followups() not found"
+
+	local MAX_FOLLOWUP_DEPTH=1 ENRICH_FOLLOWUPS=true
+	local _PREFLIGHT_SKIPPED=false _TERMINAL_STATUS=""
+	ISSUE_ARRAY=(1)
+
+	cat > "$STATUS_FILE" <<-'JSON'
+	{
+	  "progress": {"total": 4, "pending": 1, "completed": 3, "failed": 0},
+	  "issues": [
+	    {"number": "1", "status": "completed",
+	     "follow_ups": ["100", "101", "102"]},
+	    {"number": "100", "status": "completed", "follow_ups": []},
+	    {"number": "101", "status": "already_implemented", "follow_ups": []},
+	    {"number": "102", "status": "pending", "follow_ups": []}
+	  ]
+	}
+	JSON
+
+	log()      { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_warn() { :; }
+	process_issue() {
+		printf '%s\n' "$1" >> "$TEST_TMP/process_issue.calls"
+		return 0
+	}
+
+	sweep_implement_followups
+
+	[[ "$(< "$TEST_TMP/process_issue.calls")" == "102" ]] \
+		|| fail "processed: $(< "$TEST_TMP/process_issue.calls")"
+	grep -q '#100 row is completed' "$TEST_TMP/log.out" \
+		|| fail "no skip log for #100"
+	grep -q '#101 row is already_implemented' "$TEST_TMP/log.out" \
+		|| fail "no skip log for #101"
+	jq -e '.progress.total == 4' "$STATUS_FILE" > /dev/null \
+		|| fail "batch status: $(< "$STATUS_FILE")"
 }
 
 @test "sweep_implement_followups: an API-error halt stops the sweep and counts no failure (#949)" {
@@ -6682,6 +6813,113 @@ MOCK_CLAUDE
 		|| fail "no 'follow-ups not started' warning: $output"
 	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == $'901\n902' ]] \
 		|| fail "inner orchestrator calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+}
+
+# =============================================================================
+# #1270: follow-ups survive a resume after an API-error halt, end to end
+# =============================================================================
+
+# Replaces the process-pr mock with one that reports the follow-ups in $1 (a
+# JSON array) on its FIRST call only. A mock that repeats them on every call
+# would re-record them on resume and mask lost follow-up state.
+_install_batch_e2e_claude_first_call_followups() {
+	export FAKE_CLAUDE_FOLLOWUPS="$1"
+	export FAKE_CLAUDE_CALLED_MARKER="$TEST_TMP/claude-called"
+	cat > "$TEST_TMP/batch_e2e_bin/claude" << 'MOCK_CLAUDE'
+#!/usr/bin/env bash
+follow_ups='[]'
+if [[ ! -e "$FAKE_CLAUDE_CALLED_MARKER" ]]; then
+	: > "$FAKE_CLAUDE_CALLED_MARKER"
+	follow_ups="$FAKE_CLAUDE_FOLLOWUPS"
+fi
+printf '{"result":"mocked process-pr","structured_output":{"status":"merged","follow_up_issues":%s}}\n' "$follow_ups"
+MOCK_CLAUDE
+}
+
+@test "real batch-orchestrator.sh: resume implements the follow-up of a parent completed before the halt and keeps the batch start time (#1270)" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_api_halt
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	_install_batch_e2e_claude_first_call_followups '["950"]'
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export FAKE_HALT_ISSUE=902
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901,902" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 2 ]] \
+		|| fail "run 1 exited $status, expected 2: $output"
+	local recorded_start
+	recorded_start=$(jq -r '.batch_started_at // empty' status.json)
+
+	# Both runs can start within the same second, so backdate the recorded
+	# start: only a run that reuses it can then report this value.
+	local first_start="2000-01-01T00:00:00Z"
+	jq --arg t "$first_start" '.batch_started_at = $t' status.json \
+		> status.json.edit
+	mv status.json.edit status.json
+	export FAKE_HALT_ISSUE=none
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901,902" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 0 ]] \
+		|| fail "run 2 exited $status, expected 0: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == $'901\n902\n902\n950' ]] \
+		|| fail "inner orchestrator calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+	[[ -n "$recorded_start" ]] \
+		|| fail "run 1 recorded no batch_started_at"
+	jq -e --arg t "$first_start" '.batch_started_at == $t
+		and .state == "completed"
+		and .issues[0].follow_ups == ["950"]
+		and ([.issues[] | [.number, .status]] == [["901", "completed"],
+			["902", "completed"], ["950", "completed"]])
+		and .progress.total == 3
+		and .progress.pending == 0' status.json > /dev/null \
+		|| fail "batch status: $(< status.json)"
+	[[ "$output" == *"no needs-explore issues found since $first_start"* ]] \
+		|| fail "enrich sweep did not use the first start time: $output"
+}
+
+@test "real batch-orchestrator.sh: resume re-runs a halted follow-up and not one already completed (#1270)" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_api_halt
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	# 940 completes in the sweep before 950 halts it.
+	_install_batch_e2e_claude_first_call_followups '["940","950"]'
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export FAKE_HALT_ISSUE=950
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 2 ]] \
+		|| fail "run 1 exited $status, expected 2: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == $'901\n940\n950' ]] \
+		|| fail "run 1 inner calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+	export FAKE_HALT_ISSUE=none
+	: > "$FAKE_INNER_ORCH_CALL_LOG"
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 0 ]] \
+		|| fail "run 2 exited $status, expected 0: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == "950" ]] \
+		|| fail "run 2 inner calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+	jq -e '.state == "completed"
+		and .issues[0].follow_ups == ["940", "950"]
+		and ([.issues[] | [.number, .status]] == [["901", "completed"],
+			["940", "completed"], ["950", "completed"]])
+		and .progress.total == 3
+		and .progress.completed == 3
+		and .progress.pending == 0
+		and .progress.skipped == 0' status.json > /dev/null \
+		|| fail "batch status: $(< status.json)"
 }
 
 # =============================================================================
