@@ -914,6 +914,36 @@ _commit_in_docs_range() {
 	expect_glob "$status" 'failed' "the task remains failed while the test suite is red"
 }
 
+@test "reconcile: a red suite records not_modified on an unmodified task only" {
+	# Issue #1268: the cause is known without trusting the suite, so it is
+	# recorded even though nothing may be promoted.
+	set_tasks "$(jq -n '[
+		{id: 1, description: "task one", status: "failed",
+		 affected_files: ["src/one.sh"], evidence_gap: "not_modified"},
+		{id: 2, description: "task two", status: "failed",
+		 affected_files: ["src/two.sh"]}
+	]')"
+
+	mkdir -p src
+	echo "one" > src/one.sh
+	git add src
+	git commit -q -m "implement task one only"
+
+	DEGRADED_STAGES=("test:full_suite_red")
+
+	local count
+	count=$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")
+	expect_glob "$count" '0' "a red suite promotes nothing"
+
+	local verdicts gaps
+	verdicts=$(jq -r '[.tasks[].status] | join(",")' "$STATUS_FILE")
+	expect_glob "$verdicts" 'failed,failed' "both tasks stay failed"
+	# Task 1 starts with a stale cause, which its file evidence must clear.
+	gaps=$(jq -r '[.tasks[] | .evidence_gap // ""] | join(",")' "$STATUS_FILE")
+	expect_glob "$gaps" ',not_modified' \
+		"only the unmodified task records a cause"
+}
+
 @test "reconcile: leaves completed and pending tasks untouched" {
 	local tasks_json
 	tasks_json=$(jq -n '[
