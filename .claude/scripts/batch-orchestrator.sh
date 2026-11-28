@@ -2445,7 +2445,12 @@ process_issue() {
     fi
 
     if [[ "$impl_status" != "success" ]]; then
-        log_error "implement-issue failed for #$issue_num: ${impl_error:-unknown error}"
+        # Issue #1273: an API-error halt is not a counted failure, so it
+        # must not log as one; its own arm below warns instead.
+        if [[ "$impl_status" != "api_error" ]]; then
+            log_error "implement-issue failed for #$issue_num:" \
+                "${impl_error:-unknown error}"
+        fi
         if check_issue_pr_merged "$issue_num"; then
             log "Issue #$issue_num: reported failure reconciled — $_RECONCILE_REASON"
             update_issue_field "$issue_num" "status" "completed"
@@ -2460,7 +2465,8 @@ process_issue() {
         if [[ "$impl_status" == "api_error" ]]; then
             # Issue #949: leave the issue pending so a resume re-runs it, and
             # return 0 to keep it out of consecutive_failures.
-            log "Issue #$issue_num: API-error halt — left pending for resume"
+            log_warn "Issue #$issue_num: stopped by a Claude API error —" \
+                "${impl_error:-unknown error}; left pending for resume"
             update_issue_field "$issue_num" "status" "pending"
             update_issue_field "$issue_num" "error" "$impl_error"
             update_progress

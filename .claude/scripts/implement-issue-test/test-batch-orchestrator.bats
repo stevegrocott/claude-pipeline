@@ -7334,11 +7334,14 @@ _I949_REASON='api_error: Claude API error (status 403) at stage implement-task-1
 # _run_outcome_arm
 # Feeds the d_status/d_error/d_pr left by _run_state_dispatch into the real
 # non-success arm of process_issue, writing a real batch status file. Sets
-# o_rc, o_terminal and o_status_file in the caller.
+# o_rc, o_terminal, o_status_file and o_log_file (every log/log_warn/log_error
+# message) in the caller.
 _run_outcome_arm() {
 	o_status_file="$TEST_TMP/batch-status.json"
 	jq -n '{issues: [{number: "1017", status: "in_progress"}],
 		progress: {}, cost_summary: {}}' > "$o_status_file"
+	o_log_file="$TEST_TMP/outcome-log.txt"
+	: > "$o_log_file"
 
 	local block="$TEST_TMP/outcome-block.sh"
 	awk '
@@ -7350,8 +7353,9 @@ _run_outcome_arm() {
 
 	local out
 	out=$(
-		log() { :; }
-		log_error() { :; }
+		log() { printf '%s\n' "$*" >> "$o_log_file"; }
+		log_warn() { printf '%s\n' "$*" >> "$o_log_file"; }
+		log_error() { printf '%s\n' "$*" >> "$o_log_file"; }
 		git() { :; }
 		check_issue_pr_merged() { return 1; }
 		eval "$(_extract_function_body update_issue_field \
@@ -7402,6 +7406,19 @@ _run_outcome_arm() {
 		|| fail "halted run was recovered: $(< "$d_log_file")"
 }
 
+@test "i949: an API-error halt is logged as stopped, not failed (#1273)" {
+	_run_state_dispatch "error" "" "implement" "$_I949_REASON" "$_I949_HALT"
+	_run_outcome_arm
+
+	local logged
+	logged=$(< "$o_log_file")
+	[[ "$logged" == *"Issue #1017: stopped by a Claude API error"* ]] \
+		|| fail "no API-error wording: $logged"
+	[[ "$logged" == *"$_I949_REASON"* ]] || fail "reason not logged: $logged"
+	[[ "$logged" != *"implement-issue failed for"* ]] \
+		|| fail "halt logged as a failure: $logged"
+}
+
 @test "i949: state error without api_error_halt is still a plain failure" {
 	# The reason text alone must not trigger the halt path.
 	_run_state_dispatch "error" "" "implement" "$_I949_REASON"
@@ -7410,6 +7427,8 @@ _run_outcome_arm() {
 	_run_outcome_arm
 	[[ "$o_rc" == "1" ]] || fail "rc $o_rc would not count as a failure"
 	[[ -z "$o_terminal" ]] || fail "terminal: $o_terminal"
+	[[ "$(< "$o_log_file")" == *"implement-issue failed for #1017"* ]] \
+		|| fail "no failure line: $(< "$o_log_file")"
 	jq -e '.issues[0].status == "failed" and .progress.failed == 1
 		and .progress.pending == 0' "$o_status_file" >/dev/null \
 		|| fail "batch status: $(cat "$o_status_file")"
