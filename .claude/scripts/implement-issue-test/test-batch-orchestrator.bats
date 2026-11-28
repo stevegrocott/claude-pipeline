@@ -3359,6 +3359,46 @@ source_sweep_implement_followups() {
 	! grep -qx '200' "$TEST_TMP/process_issue.calls"
 }
 
+@test "sweep_implement_followups skips follow-up rows already completed or already_implemented (#1270)" {
+	source_sweep_implement_followups \
+		|| fail "sweep_implement_followups() not found"
+
+	local MAX_FOLLOWUP_DEPTH=1 ENRICH_FOLLOWUPS=true
+	local _PREFLIGHT_SKIPPED=false _TERMINAL_STATUS=""
+	ISSUE_ARRAY=(1)
+
+	cat > "$STATUS_FILE" <<-'JSON'
+	{
+	  "progress": {"total": 4, "pending": 1, "completed": 3, "failed": 0},
+	  "issues": [
+	    {"number": "1", "status": "completed",
+	     "follow_ups": ["100", "101", "102"]},
+	    {"number": "100", "status": "completed", "follow_ups": []},
+	    {"number": "101", "status": "already_implemented", "follow_ups": []},
+	    {"number": "102", "status": "pending", "follow_ups": []}
+	  ]
+	}
+	JSON
+
+	log()      { printf '%s\n' "$*" >> "$TEST_TMP/log.out"; }
+	log_warn() { :; }
+	process_issue() {
+		printf '%s\n' "$1" >> "$TEST_TMP/process_issue.calls"
+		return 0
+	}
+
+	sweep_implement_followups
+
+	[[ "$(< "$TEST_TMP/process_issue.calls")" == "102" ]] \
+		|| fail "processed: $(< "$TEST_TMP/process_issue.calls")"
+	grep -q '#100 row is completed' "$TEST_TMP/log.out" \
+		|| fail "no skip log for #100"
+	grep -q '#101 row is already_implemented' "$TEST_TMP/log.out" \
+		|| fail "no skip log for #101"
+	jq -e '.progress.total == 4' "$STATUS_FILE" > /dev/null \
+		|| fail "batch status: $(< "$STATUS_FILE")"
+}
+
 @test "sweep_implement_followups: an API-error halt stops the sweep and counts no failure (#949)" {
 	source_sweep_implement_followups \
 		|| fail "sweep_implement_followups() not found"

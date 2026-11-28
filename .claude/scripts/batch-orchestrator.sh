@@ -2884,6 +2884,19 @@ sweep_implement_followups() {
 	done
 
 	for issue_num in "${new_followups[@]}"; do
+		# A resumed batch keeps follow-up rows (issue #1270): one that
+		# already finished must not be implemented again.
+		local row_status
+		row_status=$(jq -r --arg num "$issue_num" \
+			'.issues[] | select(.number == $num) | .status' \
+			"$STATUS_FILE" 2>/dev/null) || row_status=""
+		case "$row_status" in
+			completed|already_implemented)
+				log "Sweep: #$issue_num row is $row_status — skipping"
+				continue
+				;;
+		esac
+
 		# When ENRICH_FOLLOWUPS is false, skip any follow-up that still
 		# carries the needs-explore label — it was never enriched and
 		# would likely fail the implement stage.
