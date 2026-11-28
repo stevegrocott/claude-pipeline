@@ -546,14 +546,19 @@ _seed_shared_file_failed_tasks() {
 	git commit -q -m "implement stage lands shared.sh"
 }
 
+# $1 - status.json key to set to the current HEAD
+_record_head_as() {
+	local sha
+	sha=$(git rev-parse HEAD)
+	jq --arg key "$1" --arg sha "$sha" '.[$key] = $sha' "$STATUS_FILE" \
+		> "$STATUS_FILE.tmp"
+	mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
 # Records HEAD as implement_end_sha, as the orchestrator does when the
 # implement stage ends.
 _record_implement_end() {
-	local sha
-	sha=$(git rev-parse HEAD)
-	jq --arg sha "$sha" '.implement_end_sha = $sha' "$STATUS_FILE" \
-		> "$STATUS_FILE.tmp"
-	mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+	_record_head_as implement_end_sha
 }
 
 _commit_after_implement() {
@@ -814,6 +819,54 @@ $block
 	git commit -q -am "later stage changes a file under lib/"
 	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
 		'3' "a change under the declared directory is evidence"
+}
+
+# Issue #1267: commits made by the docs stage (docs_start_sha..docs_end_sha)
+# are never task work, so they are not post-implement evidence.
+_commit_in_docs_range() {
+	_record_head_as docs_start_sha
+	echo "# doc comment" >> shared.sh
+	git commit -q -am "docs stage comments shared.sh"
+	_record_head_as docs_end_sha
+}
+
+@test "reconcile: a commit inside the docs range promotes no sibling" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_in_docs_range
+
+	_expect_no_shared_task_promoted "changed only by the docs stage"
+}
+
+@test "reconcile: a commit after docs_end_sha still promotes every sibling" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_in_docs_range
+	_commit_after_implement
+
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "a change after the docs stage is evidence"
+}
+
+@test "reconcile: a commit between implement end and docs_start_sha still promotes" {
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_after_implement
+	_commit_in_docs_range
+
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "a change before the docs stage is evidence"
+}
+
+@test "reconcile: docs_start_sha without docs_end_sha excludes nothing" {
+	# An interrupted docs stage leaves only the start marker.
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_record_head_as docs_start_sha
+	_commit_after_implement
+
+	expect_glob "$(reconcile_failed_tasks_with_branch_evidence "$BASE_BRANCH")" \
+		'3' "one marker alone changes nothing"
 }
 
 @test "reconcile: does not promote an evidenced task while the test suite is red this run" {
