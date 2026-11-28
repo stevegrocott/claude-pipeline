@@ -7628,6 +7628,28 @@ _file_set_contained() {
 	return 0
 }
 
+# _record_docs_sha() — record HEAD under the given status.json key, marking
+# one end of the docs stage's commit range (issue #1267). //= keeps the first
+# value, so a resumed run that re-runs docs does not move the range.
+#
+# Arguments:
+#   $1 - docs_start_sha or docs_end_sha
+# Globals:
+#   STATUS_FILE - written via status_json_write
+# Returns:
+#   0 always; an unresolvable HEAD is logged and leaves the key unset
+_record_docs_sha() {
+	local key="$1"
+	local sha
+
+	if ! sha=$(git rev-parse --verify -q 'HEAD^{commit}'); then
+		log_warn "Could not resolve HEAD — $key not recorded"
+		return 0
+	fi
+	status_json_write --arg key "$key" --arg sha "$sha" '.[$key] //= $sha'
+	sync_status_to_log
+}
+
 # _files_changed_since_implement_end() — true only when status.json records an
 # implement_end_sha that resolves to an ancestor of HEAD AND every given path
 # was touched by a non-merge first-parent commit after it (issue #1009). A
@@ -16392,6 +16414,9 @@ The pipeline is proceeding to PR creation. Once you have triggered and confirmed
             set_stage_completed "docs"
         else
             set_stage_started "docs"
+            # Issue #1267: bracket the docs stage's commits so they can be
+            # told apart from task work.
+            _record_docs_sha "docs_start_sha"
 
             local file_idx=0
             while IFS= read -r ts_file; do
@@ -16424,6 +16449,7 @@ git commit -m 'docs(issue-$ISSUE_NUMBER): add JSDoc comments'
 Only the files listed above should be staged and committed."
             run_stage "docs-commit" "$docs_commit_prompt" "implement-issue-implement.json" "default"
 
+            _record_docs_sha "docs_end_sha"
             set_stage_completed "docs"
         fi
     fi
