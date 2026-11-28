@@ -3984,6 +3984,39 @@ _assert_prompt_runs_unit_cmd() {
     _assert_prompt_runs_jest
 }
 
+@test "#1010: ts-frontend scope with no Jest runs TEST_UNIT_CMD" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    _capture_loop_prompt_for "src/lib/thing.tsx" "ts-frontend"
+
+    _assert_prompt_runs_unit_cmd
+}
+
+@test "#1010: frontend scope with no Jest runs TEST_UNIT_CMD" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    _capture_loop_prompt_for "src/app/page.css" "frontend"
+
+    _assert_prompt_runs_unit_cmd
+}
+
+@test "#1010: mixed scope with no Jest runs TEST_UNIT_CMD" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    _capture_loop_prompt_for "src/lib/thing.ts" "mixed"
+
+    _assert_prompt_runs_unit_cmd
+}
+
+@test "#1010: mixed scope with a tracked Jest config keeps Jest" {
+    export TEST_UNIT_CMD="node --test src/"
+    export TEST_TS_RUNNER=auto
+    _commit_on_main jest.config.js 'module.exports = {};'
+    _capture_loop_prompt_for "src/lib/thing.ts" "mixed"
+
+    _assert_prompt_runs_jest
+}
+
 @test "#1010: a \"jest\" key in package.json keeps Jest" {
     export TEST_UNIT_CMD="node --test src/"
     export TEST_TS_RUNNER=auto
