@@ -7630,9 +7630,11 @@ _file_set_contained() {
 
 # _files_changed_since_implement_end() — true only when status.json records an
 # implement_end_sha that resolves to an ancestor of HEAD AND every given path
-# changed between that commit and HEAD (issue #1009). A commit made after the
-# implement stage ended was not made by any task, so it is not subject to the
-# sibling-attribution doubt the containment guard exists for.
+# was touched by a non-merge first-parent commit after it (issue #1009). A
+# commit made after the implement stage ended was not made by any task, so it
+# is not subject to the sibling-attribution doubt the containment guard exists
+# for. Merge commits and the history they bring in are excluded, so merging
+# the base branch is not evidence (issue #1266).
 #
 # Arguments:
 #   $1.. - declared paths, already normalised (_task_declared_files()); one
@@ -7640,7 +7642,7 @@ _file_set_contained() {
 # Globals:
 #   STATUS_FILE - read .implement_end_sha from
 # Returns:
-#   0 when every path changed after implement end; 1 otherwise, including a
+#   0 when every path was touched after implement end; 1 otherwise, including a
 #   missing or unresolvable SHA, or no paths
 _files_changed_since_implement_end() {
 	(($# > 0)) || return 1
@@ -7653,10 +7655,22 @@ _files_changed_since_implement_end() {
 	git merge-base --is-ancestor "$sha" HEAD 2>/dev/null || return 1
 
 	local -a changed=()
-	local f
+	local f seen dup
 	while IFS= read -r -d '' f; do
-		changed+=("$f")
-	done < <(git diff -z --no-renames --name-only "$sha" HEAD 2>/dev/null)
+		# git log separates commits with extra NULs and repeats a path
+		# once per commit that touched it.
+		[[ -n "$f" ]] || continue
+		dup=0
+		# ${a[@]+...}: bash 3.2 rejects an empty array under set -u
+		for seen in ${changed[@]+"${changed[@]}"}; do
+			if [[ "$seen" == "$f" ]]; then
+				dup=1
+				break
+			fi
+		done
+		((dup == 1)) || changed+=("$f")
+	done < <(git log -z --first-parent --no-merges --no-renames \
+		--name-only --format= "$sha"..HEAD 2>/dev/null)
 	((${#changed[@]} > 0)) || return 1
 
 	local want found
