@@ -10397,24 +10397,15 @@ _primary_checkout_status() {
 _report_primary_checkout_dirt() {
 	local baseline="${1:-}"
 	local batch_num="${2:-?}"
-	local now
+	local now fresh
 	now=$(_primary_checkout_status)
-	[[ -n "$now" ]] || return 0
+	fresh=$(_porcelain_new_lines "$now" "$baseline")
 
-	local -a fresh=()
-	local line
-	while IFS= read -r line; do
-		[[ -z "$line" ]] && continue
-		if [[ $'\n'"$baseline"$'\n' != *$'\n'"$line"$'\n'* ]]; then
-			fresh+=("$line")
-		fi
-	done <<< "$now"
-
-	((${#fresh[@]} > 0)) || return 0
+	[[ -n "$fresh" ]] || return 0
 	log_error "Batch $batch_num: primary checkout paths changed during" \
 		"parallel batch (a task may have escaped its worktree, or an" \
 		"operator/another session edited them):" \
-		"$(_porcelain_dirty_paths "$(printf '%s\n' "${fresh[@]}")")"
+		"$(_porcelain_dirty_paths "$fresh")"
 	return 1
 }
 
