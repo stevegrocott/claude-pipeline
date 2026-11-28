@@ -10315,13 +10315,13 @@ _porcelain_new_lines() {
 	local current="${1:-}"
 	local snapshot="${2:-}"
 
-	local line
-	while IFS= read -r line; do
-		[[ -z "$line" ]] && continue
-		if [[ $'\n'"$snapshot"$'\n' != *$'\n'"$line"$'\n'* ]]; then
-			printf '%s\n' "$line"
-		fi
-	done <<< "$current"
+	# One pass over each input.  The snapshot is never empty to awk (printf
+	# always emits a newline), so NR == FNR selects it reliably.  LC_ALL=C
+	# keeps the comparison byte-for-byte.
+	LC_ALL=C awk '
+		NR == FNR { seen[$0] = 1; next }
+		$0 != "" && !($0 in seen)
+	' <(printf '%s\n' "$snapshot") <(printf '%s\n' "$current")
 }
 
 # True when a task that produced no commit and left no new changes may be

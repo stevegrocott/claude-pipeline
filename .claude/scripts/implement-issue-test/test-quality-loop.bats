@@ -3085,3 +3085,80 @@ _run_fix_dispatch() {
     [ "$rc" -eq 2 ]
     [ ! -e "$TEST_TMP/pr_comment" ]
 }
+
+# =============================================================================
+# _porcelain_new_lines: direct tests (#1261)
+# =============================================================================
+
+# Compares $TEST_TMP/actual byte for byte with one line per argument; no
+# arguments means no output at all.  `run` is avoided because it strips the
+# trailing newline.
+_assert_porcelain_output_1261() {
+    : > "$TEST_TMP/expected"
+    if (( $# )); then
+        printf '%s\n' "$@" > "$TEST_TMP/expected"
+    fi
+    cmp "$TEST_TMP/expected" "$TEST_TMP/actual" || \
+        fail "unexpected output: $(cat "$TEST_TMP/actual")"
+}
+
+@test "#1261: _porcelain_new_lines returns all non-empty lines for an empty snapshot" {
+    local current=$' M a.sh\n?? b.txt\nA  c.md'
+
+    _porcelain_new_lines "$current" "" > "$TEST_TMP/actual"
+
+    _assert_porcelain_output_1261 ' M a.sh' '?? b.txt' 'A  c.md'
+}
+
+@test "#1261: _porcelain_new_lines keeps the order of current" {
+    local current=$'?? z.txt\n?? old.txt\n M m.sh\n?? a.txt'
+    local snapshot=$'?? a-gone.txt\n?? old.txt'
+
+    _porcelain_new_lines "$current" "$snapshot" > "$TEST_TMP/actual"
+
+    _assert_porcelain_output_1261 '?? z.txt' ' M m.sh' '?? a.txt'
+}
+
+@test "#1261: _porcelain_new_lines matches spaced, quoted and rename lines literally" {
+    local snapshot=$'?? "dir/with space.txt"\n M plain dir/file name\n?? "caf\\303\\251.txt"\nR  old name.sh -> new name.sh\n?? [ab]*.txt'
+
+    _porcelain_new_lines "$snapshot" "$snapshot" > "$TEST_TMP/actual"
+    _assert_porcelain_output_1261
+
+    # Near matches are new: a glob match, a changed status, a different
+    # rename target and a prefix of a snapshot line.
+    local current=$'?? a.txt\nM  plain dir/file name\nR  old name.sh -> other.sh\n?? "dir/with space'
+    _porcelain_new_lines "$current" "$snapshot" > "$TEST_TMP/actual"
+
+    _assert_porcelain_output_1261 '?? a.txt' 'M  plain dir/file name' \
+        'R  old name.sh -> other.sh' '?? "dir/with space'
+}
+
+@test "#1261: _porcelain_new_lines drops blank lines" {
+    local current=$'\n?? a.txt\n\n\n?? b.txt\n'
+
+    _porcelain_new_lines "$current" "" > "$TEST_TMP/actual"
+    _assert_porcelain_output_1261 '?? a.txt' '?? b.txt'
+
+    _porcelain_new_lines "$current" $'\n?? a.txt\n\n' > "$TEST_TMP/actual"
+    _assert_porcelain_output_1261 '?? b.txt'
+
+    _porcelain_new_lines $'\n\n' "" > "$TEST_TMP/actual"
+    _assert_porcelain_output_1261
+}
+
+@test "#1261: _porcelain_new_lines runs under /bin/bash -u" {
+    local func_file="$TEST_TMP/porcelain_new_lines.bash"
+    awk '/^_porcelain_new_lines\(\) \{/,/^\}/' \
+        "$BATS_TEST_DIRNAME/../implement-issue-orchestrator.sh" > "$func_file"
+
+    run /bin/bash -u -c 'source "$1"
+        _porcelain_new_lines
+        _porcelain_new_lines "" ""
+        _porcelain_new_lines "?? a.txt"
+        _porcelain_new_lines "$2" "?? a.txt"' \
+        _ "$func_file" $'?? a.txt\n?? b.txt'
+
+    [ "$status" -eq 0 ]
+    [ "$output" = $'?? a.txt\n?? b.txt' ]
+}
