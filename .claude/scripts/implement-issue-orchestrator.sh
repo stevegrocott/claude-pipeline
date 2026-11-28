@@ -10331,9 +10331,10 @@ _porcelain_new_lines() {
 # True when a task that produced no commit and left no new changes may be
 # credited as a genuine no-op (issue #796).
 #
-# verify_fix_stage_commit accepts every clean tree, because a fix stage is
-# handed review findings that may already be addressed and "nothing to do"
-# is a routine outcome there.  A planned implementation task is different:
+# verify_fix_stage_commit accepts every clean tree, and every tree holding
+# only pre-existing changes, because a fix stage is handed review findings
+# that may already be addressed and "nothing to do" is a routine outcome
+# there.  A planned implementation task is different:
 # it was scheduled precisely because something was supposed to change, and
 # "claimed success, committed nothing, tree clean" is the exact silent no-op
 # the guard was built for (issue #790).  The tree alone cannot tell the two
