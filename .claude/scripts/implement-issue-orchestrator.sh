@@ -7656,16 +7656,18 @@ _record_docs_sha() {
 # commit made after the implement stage ended was not made by any task, so it
 # is not subject to the sibling-attribution doubt the containment guard exists
 # for. Merge commits and the history they bring in are excluded, so merging
-# the base branch is not evidence (issue #1266).
+# the base branch is not evidence (issue #1266). Nor are the docs stage's own
+# commits, docs_start_sha..docs_end_sha (issue #1267).
 #
 # Arguments:
 #   $1.. - declared paths, already normalised (_task_declared_files()); one
 #          ending in "/" covers everything under it
 # Globals:
-#   STATUS_FILE - read .implement_end_sha from
+#   STATUS_FILE - read .implement_end_sha, .docs_start_sha, .docs_end_sha
 # Returns:
 #   0 when every path was touched after implement end; 1 otherwise, including a
-#   missing or unresolvable SHA, or no paths
+#   missing or unresolvable SHA, a recorded docs range no longer in HEAD's
+#   history, or no paths
 _files_changed_since_implement_end() {
 	(($# > 0)) || return 1
 
@@ -7676,6 +7678,22 @@ _files_changed_since_implement_end() {
 	# branch), cannot bound "after the implement stage".
 	git merge-base --is-ancestor "$sha" HEAD 2>/dev/null || return 1
 
+	# The docs range applies only once both ends are recorded.
+	local docs_start docs_end marker
+	docs_start=$(jq -r '.docs_start_sha // ""' "$STATUS_FILE" 2>/dev/null)
+	docs_end=$(jq -r '.docs_end_sha // ""' "$STATUS_FILE" 2>/dev/null)
+	if [[ -n "$docs_start" && -n "$docs_end" ]]; then
+		# A rewritten docs range cannot be excluded, so nothing after
+		# implement end can be trusted as non-docs work.
+		for marker in "$docs_start" "$docs_end"; do
+			[[ "$marker" =~ ^[0-9a-fA-F]{7,64}$ ]] || return 1
+			git merge-base --is-ancestor "$marker" HEAD 2>/dev/null ||
+				return 1
+		done
+	fi
+
+	local -a log_opts=(-z --first-parent --no-merges --no-renames
+		--name-only --format=)
 	local -a changed=()
 	local f seen dup
 	while IFS= read -r -d '' f; do
@@ -7691,8 +7709,17 @@ _files_changed_since_implement_end() {
 			fi
 		done
 		((dup == 1)) || changed+=("$f")
-	done < <(git log -z --first-parent --no-merges --no-renames \
-		--name-only --format= "$sha"..HEAD 2>/dev/null)
+	done < <(
+		if [[ -n "$docs_start" && -n "$docs_end" ]]; then
+			# After implement end, either side of the docs range. Two
+			# walks: one cannot drop a range from its middle.
+			git log "${log_opts[@]}" "$docs_start" "^$sha" 2>/dev/null
+			git log "${log_opts[@]}" HEAD "^$docs_end" "^$sha" \
+				2>/dev/null
+		else
+			git log "${log_opts[@]}" "$sha"..HEAD 2>/dev/null
+		fi
+	)
 	((${#changed[@]} > 0)) || return 1
 
 	local want found

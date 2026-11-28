@@ -869,6 +869,26 @@ _commit_in_docs_range() {
 		'3' "one marker alone changes nothing"
 }
 
+@test "reconcile: a docs range older than implement_end_sha admits no earlier commit" {
+	# A resumed run can record implement_end_sha after the docs stage ran.
+	_seed_shared_file_failed_tasks
+	_commit_in_docs_range
+	_commit_after_implement
+	_record_implement_end
+
+	_expect_no_shared_task_promoted "nothing after implement end"
+}
+
+@test "reconcile: a docs marker outside HEAD's history promotes no sibling" {
+	# A rewritten docs commit can no longer be told apart from task work.
+	_seed_shared_file_failed_tasks
+	_record_implement_end
+	_commit_in_docs_range
+	git commit -q --amend -m "docs commit rewritten"
+
+	_expect_no_shared_task_promoted "docs_end_sha not an ancestor"
+}
+
 @test "reconcile: does not promote an evidenced task while the test suite is red this run" {
 	# Issue #620's proposed direction requires file evidence AND a green
 	# test suite before treating a failed task as satisfied.
