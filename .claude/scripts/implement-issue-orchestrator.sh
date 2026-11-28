@@ -7865,8 +7865,9 @@ _set_task_evidence_gap() {
 #
 # Each task left "failed" for one of these reasons carries it in
 # .tasks[].evidence_gap (_set_task_evidence_gap(), issue #1009). A red suite
-# is a run-wide cause, not a per-task one, so it records none; promotion
-# removes the field.
+# is a run-wide cause, not a per-task one, so it records none of its own, but
+# the branch-modification check still runs and records "not_modified" (issue
+# #1268); promotion removes the field.
 #
 # Arguments:
 #   $1 - base branch name to diff against (e.g. "main")
@@ -8012,57 +8013,61 @@ reconcile_failed_tasks_with_branch_evidence() {
 			recon_kind="post_implement"
 		fi
 
+		# Checked ahead of the red-suite skip (issue #1268): whether a
+		# task's files were modified is known without trusting the suite.
+		if ! task_files_modified_on_branch "$base_branch" \
+			"${recon_files[@]}"; then
+			log "Task $recon_id remains failed —" \
+				"no declared file evidence vs $base_branch"
+			_set_task_evidence_gap "$recon_id" "not_modified"
+			continue
+		fi
+
 		if ((tests_green == 0)); then
 			log "Task $recon_id remains failed — test suite not green this run"
 			_set_task_evidence_gap "$recon_id" ""
 			continue
 		fi
 
-		if task_files_modified_on_branch "$base_branch" "${recon_files[@]}"; then
-			log "Task $recon_id recorded failed but declared file(s) present" \
-				"vs $base_branch — reconciling to completed" \
-				"(${recon_kind:-file} evidence): ${recon_files[*]}"
-			# Status-only write (issue #620 review): update_task() also stamps
-			# .current_task, which would rewind it to this reconciled task
-			# during gate-time re-evaluation. reconciled_from preserves the
-			# raw stage verdict (issue #617) instead of discarding it, so both
-			# the original and reconciled status stay auditable.
-			# review_attempts is intentionally left untouched — jq only
-			# rewrites fields this filter names, so omitting it already
-			# preserves the recorded history without a read-back-and-
-			# reassign round trip.
-			# .reconciled_count is a run-level tally (issue #810 task 1),
-			# incremented alongside the per-task write so it stays atomic
-			# with the promotion it counts. It persists in $STATUS_FILE
-			# rather than a local variable because this function runs up to
-			# three times per run (the implement stage's own task-loop call,
-			# plus revalidate_partial_block_against_branch()'s gate-time
-			# re-check called once at the top of the "complete" stage and
-			# again at the merge gate — issue #912) and downstream consumers
-			# — the completion comment and export_metrics() — read
-			# $STATUS_FILE directly rather than sharing this function's call
-			# stack.
-			if status_json_write --argjson id "$recon_id" \
-			   --arg kind "$recon_kind" \
-			   '(.tasks[] | select(.id == $id)).status = "completed" |
-			    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
-			    (if $kind == "" then .
-			     else (.tasks[] | select(.id == $id)).evidence_kind = $kind
-			     end) |
-			    del((.tasks[] | select(.id == $id)).evidence_gap) |
-			    .reconciled_count = ((.reconciled_count // 0) + 1) |
-			    .last_update = (now | todate)'; then
-				sync_status_to_log
-				reconciled=$((reconciled + 1))
-			else
-				log_warn "reconcile_failed_tasks_with_branch_evidence:" \
-					"failed to persist reconciliation for task $recon_id" \
-					"— leaving it recorded as failed"
-			fi
+		log "Task $recon_id recorded failed but declared file(s) present" \
+			"vs $base_branch — reconciling to completed" \
+			"(${recon_kind:-file} evidence): ${recon_files[*]}"
+		# Status-only write (issue #620 review): update_task() also stamps
+		# .current_task, which would rewind it to this reconciled task
+		# during gate-time re-evaluation. reconciled_from preserves the
+		# raw stage verdict (issue #617) instead of discarding it, so both
+		# the original and reconciled status stay auditable.
+		# review_attempts is intentionally left untouched — jq only
+		# rewrites fields this filter names, so omitting it already
+		# preserves the recorded history without a read-back-and-
+		# reassign round trip.
+		# .reconciled_count is a run-level tally (issue #810 task 1),
+		# incremented alongside the per-task write so it stays atomic
+		# with the promotion it counts. It persists in $STATUS_FILE
+		# rather than a local variable because this function runs up to
+		# three times per run (the implement stage's own task-loop call,
+		# plus revalidate_partial_block_against_branch()'s gate-time
+		# re-check called once at the top of the "complete" stage and
+		# again at the merge gate — issue #912) and downstream consumers
+		# — the completion comment and export_metrics() — read
+		# $STATUS_FILE directly rather than sharing this function's call
+		# stack.
+		if status_json_write --argjson id "$recon_id" \
+		   --arg kind "$recon_kind" \
+		   '(.tasks[] | select(.id == $id)).status = "completed" |
+		    (.tasks[] | select(.id == $id)).reconciled_from = "failed" |
+		    (if $kind == "" then .
+		     else (.tasks[] | select(.id == $id)).evidence_kind = $kind
+		     end) |
+		    del((.tasks[] | select(.id == $id)).evidence_gap) |
+		    .reconciled_count = ((.reconciled_count // 0) + 1) |
+		    .last_update = (now | todate)'; then
+			sync_status_to_log
+			reconciled=$((reconciled + 1))
 		else
-			log "Task $recon_id remains failed —" \
-				"no declared file evidence vs $base_branch"
-			_set_task_evidence_gap "$recon_id" "not_modified"
+			log_warn "reconcile_failed_tasks_with_branch_evidence:" \
+				"failed to persist reconciliation for task $recon_id" \
+				"— leaving it recorded as failed"
 		fi
 	done <<< "$recon_ids"
 
@@ -8278,7 +8283,7 @@ completion_footer() {
 # than only reporting a count (AC3). A task still "failed" after
 # reconcile_failed_tasks_with_branch_evidence() is NOT always a genuine gap:
 # that function refuses to promote ANY task while this run's test suite is
-# red, short-circuiting before it ever checks branch evidence (issue #824).
+# red, even one whose files were modified on the branch (issue #824).
 # Callers must only treat this summary's output as a genuine gap when this
 # run's test suite was green — see revalidate_partial_block_against_branch()'s
 # reval_tests_green guard, which calls this only on that path.
@@ -8476,7 +8481,7 @@ revalidate_partial_block_against_branch() {
 	DEGRADED_STAGES=("${reval_kept[@]+"${reval_kept[@]}"}")
 
 	# A red test suite makes reconcile_failed_tasks_with_branch_evidence()
-	# short-circuit before it ever evaluates a task's file evidence (issue
+	# refuse every promotion, whatever a task's file evidence says (issue
 	# #824) — every task still "failed" afterward then reads as a
 	# missing-evidence gap when the real cause is that suppression. Re-detect
 	# the same DEGRADED_STAGES markers the reconcile function checks so the
@@ -8501,9 +8506,23 @@ revalidate_partial_block_against_branch() {
 			"partial merge block stands."
 		local reval_reason
 		if ((reval_tests_green == 0)); then
-			# Evidence was never evaluated for the still-failed tasks, so
-			# don't claim it's lacking — name the suppression instead.
+			# The suppression blocked every promotion, so don't claim
+			# evidence is lacking — name the suppression instead. The one
+			# finding that holds without the suite is added after it: which
+			# tasks reconciliation recorded "not_modified" (issue #1268).
+			# A commit_rejected task is never re-checked, so any such
+			# value on it is stale.
 			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}; blocked by a red test suite this run (${reval_red_marker}) — remaining failed task(s)' file evidence was not evaluated."
+			local reval_unmodified
+			reval_unmodified=$(jq -r '[(.tasks // [])[]
+				| select(.status == "failed"
+					and .evidence_gap == "not_modified"
+					and (.commit_rejected // false) != true)
+				| .id | tostring] | join(", ")' "$STATUS_FILE" 2>/dev/null)
+			if [[ -n "$reval_unmodified" ]]; then
+				reval_reason+=" Not modified on the branch:"
+				reval_reason+=" task(s) ${reval_unmodified}."
+			fi
 		else
 			local reval_lacking
 			reval_lacking=$(_lacking_evidence_summary)

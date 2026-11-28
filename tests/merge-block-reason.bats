@@ -147,6 +147,93 @@ teardown() {
 		bash -c '[[ "$1" != *"lacking evidence"* ]]' _ "$reason"
 }
 
+# Issue #1268: the modification check does not depend on the suite, so a red
+# reason also says which failed tasks still have no change on the branch.
+@test "#1268: red suite reason names the unmodified task, not lacking evidence" {
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "landed", status: "failed",
+		 affected_files: ["src/one.sh"]},
+		{id: 2, description: "never landed", status: "failed",
+		 affected_files: ["src/two.sh"]}
+	]')
+	set_tasks "$tasks_json"
+
+	mkdir -p src
+	echo "one" > src/one.sh
+	git add src
+	git commit -q -m "task one landed"
+
+	DEGRADED_STAGES=("test:full_suite_red")
+
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	local statuses
+	statuses=$(jq -r '[.tasks[].status] | join(",")' "$STATUS_FILE")
+	[[ "$statuses" == "failed,failed" ]] \
+		|| fail "a red suite must not promote any task: $statuses"
+
+	local reason
+	reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE")
+	[[ "$reason" == 'Partial implementation:'* ]] \
+		|| fail "reason lost its Partial implementation: prefix: $reason"
+	[[ "$reason" == *'red test suite'*'test:full_suite_red'* ]] \
+		|| fail "reason must still name the red suite: $reason"
+	# The closing period right after "2" proves task 1 is not listed too.
+	[[ "$reason" == *' Not modified on the branch: task(s) 2.'* ]] \
+		|| fail "reason does not name only the unmodified task: $reason"
+	[[ "$reason" != *"lacking evidence"* ]] \
+		|| fail "red-suite reason must not claim lacking evidence: $reason"
+}
+
+@test "#1268: red suite reason lists every unmodified id, not rejected ones" {
+	# Task 3 carries a stale cause from before its commit was rejected;
+	# reconciliation never re-checks it, so it must not be listed.
+	local tasks_json
+	tasks_json=$(jq -n '[
+		{id: 1, description: "a", status: "failed",
+		 affected_files: ["src/one.sh"]},
+		{id: 2, description: "b", status: "failed",
+		 affected_files: ["src/two.sh"]},
+		{id: 3, description: "c", status: "failed",
+		 affected_files: ["src/three.sh"], commit_rejected: true,
+		 evidence_gap: "not_modified"}
+	]')
+	set_tasks "$tasks_json"
+
+	DEGRADED_STAGES=("test:full_suite_red")
+
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	local reason
+	reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE")
+	[[ "$reason" == *' Not modified on the branch: task(s) 1, 2.' ]] \
+		|| fail "reason does not list exactly tasks 1 and 2: $reason"
+}
+
+@test "#1268: red suite reason omits the sentence when all are modified" {
+	set_tasks "$(jq -n '[
+		{id: 1, description: "landed", status: "failed",
+		 affected_files: ["src/one.sh"]}
+	]')"
+
+	mkdir -p src
+	echo "one" > src/one.sh
+	git add src
+	git commit -q -m "task one landed"
+
+	DEGRADED_STAGES=("test:full_suite_red")
+
+	revalidate_partial_block_against_branch "$BASE_BRANCH"
+
+	local reason
+	reason=$(jq -r '.merge_blocked_reason // ""' "$STATUS_FILE")
+	[[ "$reason" == *'red test suite'* ]] \
+		|| fail "reason must still name the red suite: $reason"
+	[[ "$reason" != *"Not modified on the branch"* ]] \
+		|| fail "no task is unmodified, yet reason lists one: $reason"
+}
+
 # =============================================================================
 # AC2: tests green + a genuine gap — the reason still names the specific task
 # lacking evidence (regression guard: the AC1 fix must not blank out the
