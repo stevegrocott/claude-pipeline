@@ -6685,6 +6685,113 @@ MOCK_CLAUDE
 }
 
 # =============================================================================
+# #1270: follow-ups survive a resume after an API-error halt, end to end
+# =============================================================================
+
+# Replaces the process-pr mock with one that reports the follow-ups in $1 (a
+# JSON array) on its FIRST call only. A mock that repeats them on every call
+# would re-record them on resume and mask lost follow-up state.
+_install_batch_e2e_claude_first_call_followups() {
+	export FAKE_CLAUDE_FOLLOWUPS="$1"
+	export FAKE_CLAUDE_CALLED_MARKER="$TEST_TMP/claude-called"
+	cat > "$TEST_TMP/batch_e2e_bin/claude" << 'MOCK_CLAUDE'
+#!/usr/bin/env bash
+follow_ups='[]'
+if [[ ! -e "$FAKE_CLAUDE_CALLED_MARKER" ]]; then
+	: > "$FAKE_CLAUDE_CALLED_MARKER"
+	follow_ups="$FAKE_CLAUDE_FOLLOWUPS"
+fi
+printf '{"result":"mocked process-pr","structured_output":{"status":"merged","follow_up_issues":%s}}\n' "$follow_ups"
+MOCK_CLAUDE
+}
+
+@test "real batch-orchestrator.sh: resume implements the follow-up of a parent completed before the halt and keeps the batch start time (#1270)" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_api_halt
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	_install_batch_e2e_claude_first_call_followups '["950"]'
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export FAKE_HALT_ISSUE=902
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901,902" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 2 ]] \
+		|| fail "run 1 exited $status, expected 2: $output"
+	local recorded_start
+	recorded_start=$(jq -r '.batch_started_at // empty' status.json)
+
+	# Both runs can start within the same second, so backdate the recorded
+	# start: only a run that reuses it can then report this value.
+	local first_start="2000-01-01T00:00:00Z"
+	jq --arg t "$first_start" '.batch_started_at = $t' status.json \
+		> status.json.edit
+	mv status.json.edit status.json
+	export FAKE_HALT_ISSUE=none
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901,902" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 0 ]] \
+		|| fail "run 2 exited $status, expected 0: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == $'901\n902\n902\n950' ]] \
+		|| fail "inner orchestrator calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+	[[ -n "$recorded_start" ]] \
+		|| fail "run 1 recorded no batch_started_at"
+	jq -e --arg t "$first_start" '.batch_started_at == $t
+		and .state == "completed"
+		and .issues[0].follow_ups == ["950"]
+		and ([.issues[] | [.number, .status]] == [["901", "completed"],
+			["902", "completed"], ["950", "completed"]])
+		and .progress.total == 3
+		and .progress.pending == 0' status.json > /dev/null \
+		|| fail "batch status: $(< status.json)"
+	[[ "$output" == *"no needs-explore issues found since $first_start"* ]] \
+		|| fail "enrich sweep did not use the first start time: $output"
+}
+
+@test "real batch-orchestrator.sh: resume re-runs a halted follow-up and not one already completed (#1270)" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_api_halt
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	# 940 completes in the sweep before 950 halts it.
+	_install_batch_e2e_claude_first_call_followups '["940","950"]'
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+	export FAKE_HALT_ISSUE=950
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 2 ]] \
+		|| fail "run 1 exited $status, expected 2: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == $'901\n940\n950' ]] \
+		|| fail "run 1 inner calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+	export FAKE_HALT_ISSUE=none
+	: > "$FAKE_INNER_ORCH_CALL_LOG"
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901" --branch main \
+		--implement-followups
+
+	[[ "$status" -eq 0 ]] \
+		|| fail "run 2 exited $status, expected 0: $output"
+	[[ "$(< "$FAKE_INNER_ORCH_CALL_LOG")" == "950" ]] \
+		|| fail "run 2 inner calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
+	jq -e '.state == "completed"
+		and .issues[0].follow_ups == ["940", "950"]
+		and ([.issues[] | [.number, .status]] == [["901", "completed"],
+			["940", "completed"], ["950", "completed"]])
+		and .progress.total == 3
+		and .progress.completed == 3
+		and .progress.pending == 0
+		and .progress.skipped == 0' status.json > /dev/null \
+		|| fail "batch status: $(< status.json)"
+}
+
+# =============================================================================
 # #1020: process-pr result with permission_denials produces a WARN
 # =============================================================================
 
