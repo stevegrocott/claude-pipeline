@@ -745,13 +745,17 @@ init_status() {
     #
     # Follow-up state is preserved too (issue #1270): status.json is the only
     # place sweep_implement_followups discovers follow-ups, and the skipped
-    # completed parents never re-collect them.
+    # completed parents never re-collect them. So is batch_started_at, which
+    # keeps follow-ups filed before the halt inside the enrich sweep's window.
     local prior_rows="[]"
+    local prior_started_at=""
     if [[ -f "$STATUS_FILE" ]]; then
         local prior_fingerprint
         prior_fingerprint=$(jq -r '.batch_fingerprint // empty' \
             "$STATUS_FILE" 2>/dev/null)
         if [[ "$prior_fingerprint" == "$batch_fingerprint" ]]; then
+            prior_started_at=$(jq -r '.batch_started_at // empty' \
+                "$STATUS_FILE" 2>/dev/null)
             # Carry over every prior row. Only terminal statuses survive;
             # the rest become pending so they re-run on resume. A row outside
             # the manifest is a follow-up row: its own follow_ups are depth-2
@@ -794,6 +798,12 @@ init_status() {
                 "resetting all issues to pending instead of resuming"
         fi
     fi
+
+    # A resume keeps the first launch's start time. A fresh batch, or a prior
+    # status.json that recorded none, uses this launch's.
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    BATCH_START_TIME="${prior_started_at:-${BATCH_START_TIME:-$now}}"
 
     # Manifest issues first, then any follow-up rows from the prior launch.
     local -a row_numbers=("${ISSUE_ARRAY[@]}")
@@ -843,10 +853,12 @@ init_status() {
         --argjson issues "$issues_json" \
         --arg log_dir "$LOG_BASE" \
         --arg fingerprint "$batch_fingerprint" \
+        --arg started_at "$BATCH_START_TIME" \
         '{
             state: $state,
             base_branch: $branch,
             batch_fingerprint: $fingerprint,
+            batch_started_at: $started_at,
             current_issue: null,
             progress: {
                 total: $total,
@@ -3299,6 +3311,7 @@ emit_event "batch_start" "total_issues:=${#ISSUE_ARRAY[@]}" "branch=$BRANCH"
 # `createdAt` — this lets jq compare the two values lexicographically
 # without timezone-offset skew (a local "+10:00" timestamp would never
 # compare correctly against a UTC "Z" timestamp from gh).
+# On a resume, init_status replaces this with the first launch's start time.
 BATCH_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 init_status
