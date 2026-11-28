@@ -2452,6 +2452,22 @@ _assert_uncommitted_paths() {
         fail "expected the genuine no-op message, got: $output"
 }
 
+# An edit to an already-dirty path is not detected, so the accept log must
+# name those paths for an operator to check.
+@test "#1260: the no-op accept log names a pre-existing untracked path" {
+    _setup_dirty_fix_stage_repo
+    local head_before snapshot
+    head_before=$(git rev-parse HEAD)
+    snapshot=$(_tree_snapshot)
+
+    run verify_fix_stage_commit "fix-pr-review-iter-1" "$head_before" \
+        "$snapshot"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"only pre-existing changes"*"stray.txt"* ]] || \
+        fail "expected the accept log to name stray.txt, got: $output"
+}
+
 @test "#1008: _handle_fix_stage_result returns 3 for a no-op stage with pre-existing untracked files" {
     _setup_dirty_fix_stage_repo
     local head_before snapshot
