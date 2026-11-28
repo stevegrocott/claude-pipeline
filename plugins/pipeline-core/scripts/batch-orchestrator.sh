@@ -742,23 +742,40 @@ init_status() {
     # instead of resetting every issue to pending. Without this the
     # idempotency skip in the primary loop is dead code — each relaunch
     # would reset status to pending and re-run already-finished issues.
-    local prior_status="{}"
+    #
+    # Follow-up state is preserved too (issue #1270): status.json is the only
+    # place sweep_implement_followups discovers follow-ups, and the skipped
+    # completed parents never re-collect them. So is batch_started_at, which
+    # keeps follow-ups filed before the halt inside the enrich sweep's window.
+    local prior_rows="[]"
+    local prior_started_at=""
     if [[ -f "$STATUS_FILE" ]]; then
         local prior_fingerprint
         prior_fingerprint=$(jq -r '.batch_fingerprint // empty' \
             "$STATUS_FILE" 2>/dev/null)
         if [[ "$prior_fingerprint" == "$batch_fingerprint" ]]; then
-            # Build a {number: status} map of issues whose prior status was
-            # terminal. Non-terminal (pending/failed/in_progress) issues are
-            # intentionally omitted so they re-run on resume.
-            prior_status=$(jq -c '
-                [.issues[]?
-                 | select(.status == "completed"
-                          or .status == "already_implemented")]
-                | map({(.number): .status})
-                | add // {}' "$STATUS_FILE" 2>/dev/null) || prior_status="{}"
-            if [[ -z "$prior_status" ]]; then
-                prior_status="{}"
+            prior_started_at=$(jq -r '.batch_started_at // empty' \
+                "$STATUS_FILE" 2>/dev/null)
+            # Carry over every prior row. Only terminal statuses survive;
+            # the rest become pending so they re-run on resume. A row outside
+            # the manifest is a follow-up row: its own follow_ups are depth-2
+            # and are dropped, or the sweep would implement them.
+            prior_rows=$(jq -c --arg manifest "${ISSUE_ARRAY[*]}" '
+                ($manifest | split(" ")) as $parents
+                | [.issues[]?
+                   | .number as $num
+                   | ($parents | index($num) != null) as $is_parent
+                   | {
+                       number: $num,
+                       is_parent: $is_parent,
+                       status: (if .status == "completed"
+                                   or .status == "already_implemented"
+                                then .status else "pending" end),
+                       follow_ups:
+                           (if $is_parent then .follow_ups // [] else [] end)
+                     }]' "$STATUS_FILE" 2>/dev/null) || prior_rows="[]"
+            if [[ -z "$prior_rows" ]]; then
+                prior_rows="[]"
             fi
         elif [[ -z "$prior_fingerprint" ]]; then
             # An ABSENT fingerprint is not evidence of a different batch — it
@@ -782,26 +799,35 @@ init_status() {
         fi
     fi
 
-    local preserved_count=0
+    # A resume keeps the first launch's start time. A fresh batch, or a prior
+    # status.json that recorded none, uses this launch's.
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    BATCH_START_TIME="${prior_started_at:-${BATCH_START_TIME:-$now}}"
+
+    # Manifest issues first, then any follow-up rows from the prior launch.
+    local -a row_numbers=("${ISSUE_ARRAY[@]}")
+    local issue
+    while IFS= read -r issue; do
+        [[ -n "$issue" ]] && row_numbers+=("$issue")
+    done < <(printf '%s' "$prior_rows" \
+        | jq -r '.[] | select(.is_parent | not) | .number')
+
     local issues_json="[]"
-    for issue in "${ISSUE_ARRAY[@]}"; do
-        local issue_status="pending"
+    for issue in "${row_numbers[@]}"; do
         local prior
-        prior=$(printf '%s' "$prior_status" \
-            | jq -r --arg num "$issue" '.[$num] // empty')
-        if [[ -n "$prior" ]]; then
-            issue_status="$prior"
-            preserved_count=$((preserved_count + 1))
-        fi
+        prior=$(printf '%s' "$prior_rows" \
+            | jq -c --arg num "$issue" 'map(select(.number == $num))
+                | first // {status: "pending", follow_ups: []}')
         issues_json=$(printf '%s' "$issues_json" \
-            | jq --arg num "$issue" --arg status "$issue_status" '. + [{
+            | jq --arg num "$issue" --argjson prior "$prior" '. + [{
             "number": $num,
-            "status": $status,
+            "status": $prior.status,
             "stage": null,
             "pr": null,
             "session_id": null,
             "error": null,
-            "follow_ups": [],
+            "follow_ups": $prior.follow_ups,
             "deploy_verify_failed": false,
             "started_at": null,
             "stage_started_at": null,
@@ -822,15 +848,17 @@ init_status() {
     jq -n \
         --arg state "running" \
         --arg branch "$BRANCH" \
-        --argjson total "${#ISSUE_ARRAY[@]}" \
+        --argjson total "${#row_numbers[@]}" \
         --argjson completed "$completed_count" \
         --argjson issues "$issues_json" \
         --arg log_dir "$LOG_BASE" \
         --arg fingerprint "$batch_fingerprint" \
+        --arg started_at "$BATCH_START_TIME" \
         '{
             state: $state,
             base_branch: $branch,
             batch_fingerprint: $fingerprint,
+            batch_started_at: $started_at,
             current_issue: null,
             progress: {
                 total: $total,
@@ -862,8 +890,8 @@ init_status() {
             log_dir: $log_dir
         }' > "$STATUS_FILE"
 
-    if ((preserved_count > 0)); then
-        log "Resuming batch: preserved $preserved_count completed issue(s)"
+    if ((completed_count > 0)); then
+        log "Resuming batch: preserved $completed_count completed issue(s)"
     fi
     log "Initialized status file: $STATUS_FILE"
 }
@@ -2868,6 +2896,19 @@ sweep_implement_followups() {
 	done
 
 	for issue_num in "${new_followups[@]}"; do
+		# A resumed batch keeps follow-up rows (issue #1270): one that
+		# already finished must not be implemented again.
+		local row_status
+		row_status=$(jq -r --arg num "$issue_num" \
+			'.issues[] | select(.number == $num) | .status' \
+			"$STATUS_FILE" 2>/dev/null) || row_status=""
+		case "$row_status" in
+			completed|already_implemented)
+				log "Sweep: #$issue_num row is $row_status — skipping"
+				continue
+				;;
+		esac
+
 		# When ENRICH_FOLLOWUPS is false, skip any follow-up that still
 		# carries the needs-explore label — it was never enriched and
 		# would likely fail the implement stage.
@@ -3270,6 +3311,7 @@ emit_event "batch_start" "total_issues:=${#ISSUE_ARRAY[@]}" "branch=$BRANCH"
 # `createdAt` — this lets jq compare the two values lexicographically
 # without timezone-offset skew (a local "+10:00" timestamp would never
 # compare correctly against a UTC "Z" timestamp from gh).
+# On a resume, init_status replaces this with the first launch's start time.
 BATCH_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 init_status
