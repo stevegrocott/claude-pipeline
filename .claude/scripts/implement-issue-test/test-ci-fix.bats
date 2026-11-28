@@ -232,7 +232,8 @@ make_log() {
 # =============================================================================
 
 # Real git repo plus a run_stage stub. STUB_STAGE_ACTION picks what the fake
-# fix stage does: commit, commit_workflow, dirty or nothing.
+# fix stage does: commit, commit_workflow, dirty, commit_dirty,
+# commit_new_file or nothing.
 fix_setup() {
 	git init -q "$TEST_TMP/repo"
 	cd "$TEST_TMP/repo" || return 1
@@ -278,6 +279,11 @@ STUB
 				printf 'b\n' >> a.sh
 				git commit -q -am "fix ci"
 				printf 'c\n' >> a.sh
+				;;
+			commit_new_file)
+				printf 'b\n' >> a.sh
+				git commit -q -am "fix ci"
+				printf 'n\n' > new-leftover.sh
 				;;
 		esac
 		printf '{"status":"success"}'
@@ -393,6 +399,55 @@ STUB
 	run _ci_fix_attempt 7 "Bats Suite" 1
 	[[ "$status" -ne 0 ]]
 	[[ "$output" == *"hard-denied"* || "$output" == *"CI fix rejected"* ]]
+}
+
+# Repo with untracked files already present before the fix stage runs.
+untracked_setup() {
+	fix_setup
+	mkdir -p notes
+	printf 'x\n' > old-leftover.txt
+	printf 'y\n' > notes/old-notes.txt
+}
+
+# _ci_fix_attempt is called directly: `run` would lose _ci_fix_result.
+@test "#1264: pre-existing untracked files and no commit is no change" {
+	untracked_setup
+	STUB_STAGE_ACTION=nothing
+
+	local rc=0 _ci_fix_result=""
+	_ci_fix_attempt 7 "Bats Suite" 1 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ "$_ci_fix_result" == "fix stage made no change" ]]
+}
+
+@test "#1264: pre-existing untracked files do not reject a committed fix" {
+	untracked_setup
+	STUB_STAGE_ACTION=commit
+
+	local rc=0 _ci_fix_result=""
+	_ci_fix_attempt 7 "Bats Suite" 1 || rc=$?
+
+	[[ "$rc" -eq 0 ]]
+	[[ -z "$_ci_fix_result" ]]
+}
+
+@test "#1264: a new untracked file after the commit is the only one reported" {
+	untracked_setup
+	STUB_STAGE_ACTION=commit_new_file
+	local error_file="$TEST_TMP/error"
+	log_error() { printf '%s\n' "$*" >> "$error_file"; }
+
+	local rc=0 _ci_fix_result=""
+	_ci_fix_attempt 7 "Bats Suite" 1 || rc=$?
+
+	[[ "$rc" -eq 1 ]]
+	[[ "$_ci_fix_result" == "fix stage left uncommitted changes" ]]
+	local errors
+	errors=$(< "$error_file")
+	[[ "$errors" == *'Uncommitted paths: new-leftover.sh' ]]
+	[[ "$errors" != *'old-leftover.txt'* ]]
+	[[ "$errors" != *'old-notes.txt'* ]]
 }
 
 # =============================================================================
