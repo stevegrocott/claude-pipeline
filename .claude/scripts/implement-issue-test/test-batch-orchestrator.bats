@@ -6815,6 +6815,44 @@ MOCK_CLAUDE
 		|| fail "inner orchestrator calls: $(< "$FAKE_INNER_ORCH_CALL_LOG")"
 }
 
+@test "real batch-orchestrator.sh: after an API-error halt --enrich-followups dispatches no /enrich-issue (#1271)" {
+	_make_batch_e2e_scripts_copy
+	_install_fake_inner_orchestrator_api_halt
+	_install_batch_e2e_mocks
+	_init_batch_e2e_repo
+	# The sweep has a needs-explore issue to find, so only the guard can
+	# keep it from being dispatched.
+	cat > "$TEST_TMP/batch_e2e_bin/gh" << 'MOCK_GH'
+#!/usr/bin/env bash
+if [[ "$*" == "issue list --label needs-explore"* ]]; then
+	echo '[{"number":950,"createdAt":"9999-01-01T00:00:00Z"}]'
+	exit 0
+fi
+exit 1
+MOCK_GH
+	cat > "$TEST_TMP/batch_e2e_bin/claude" << 'MOCK_CLAUDE'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_CLAUDE_CALL_LOG"
+echo '{"result":"mocked","structured_output":{"status":"merged","follow_up_issues":[]}}'
+MOCK_CLAUDE
+	export FAKE_CLAUDE_CALL_LOG="$TEST_TMP/claude-calls.log"
+	: > "$FAKE_CLAUDE_CALL_LOG"
+	export FAKE_INNER_ORCH_CALL_LOG="$TEST_TMP/inner-orch-calls.log"
+	export BATCH_WAIT_FOR_MERGE_MAX=0
+
+	run "$BATCH_E2E_ORCH_COPY" --issues "901,902" --branch main \
+		--enrich-followups
+
+	[[ "$status" -eq 2 ]] \
+		|| fail "batch exited $status, expected 2: $output"
+	jq -e '.state == "api_error"' status.json > /dev/null \
+		|| fail "batch status: $(< status.json)"
+	[[ "$(< "$FAKE_CLAUDE_CALL_LOG")" != *"/enrich-issue"* ]] \
+		|| fail "enrich dispatched: $(< "$FAKE_CLAUDE_CALL_LOG")"
+	[[ "$output" == *"follow-ups not enriched"* ]] \
+		|| fail "no 'follow-ups not enriched' warning: $output"
+}
+
 # =============================================================================
 # #1270: follow-ups survive a resume after an API-error halt, end to end
 # =============================================================================
