@@ -4236,6 +4236,9 @@ _assert_prompt_runs_unit_cmd() {
     grep -qi 'Runner Did Not Start' "$msgs_file" || fail \
         "the failure must be surfaced on the issue; comments:" \
         "$(cat "$msgs_file")"
+    grep -qF 'TEST_TS_RUNNER' "$msgs_file" || fail \
+        "the runner-did-not-start comment must name TEST_TS_RUNNER;" \
+        "comments: $(cat "$msgs_file")"
 }
 
 @test "#965 AC2: a genuine assertion failure is still treated as a test failure" {
