@@ -734,6 +734,8 @@ if [[ "$STATE" == "api_error" ]]; then
     echo ""
     echo "Claude API error: ${API_HALT:-status and stage unknown (see the orchestrator log)}."
     echo "No further issues were started and no failure was counted."
+    echo "Follow-ups were neither enriched nor implemented. To have the resumed run"
+    echo "handle them, pass the same follow-up flags as the first launch."
     echo ""
     echo "**To resume:** check the API status and the CLI login (one possible cause,"
     echo "not the only one), then run:"
