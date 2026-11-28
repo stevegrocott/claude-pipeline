@@ -7335,7 +7335,8 @@ _I949_REASON='api_error: Claude API error (status 403) at stage implement-task-1
 # Feeds the d_status/d_error/d_pr left by _run_state_dispatch into the real
 # non-success arm of process_issue, writing a real batch status file. Sets
 # o_rc, o_terminal, o_status_file and o_log_file (every log/log_warn/log_error
-# message) in the caller.
+# message) in the caller. STUB_MERGED_PR=<n> makes the stubbed
+# check_issue_pr_merged report merged PR <n> (default: no merged PR).
 _run_outcome_arm() {
 	o_status_file="$TEST_TMP/batch-status.json"
 	jq -n '{issues: [{number: "1017", status: "in_progress"}],
@@ -7357,7 +7358,11 @@ _run_outcome_arm() {
 		log_warn() { printf '%s\n' "$*" >> "$o_log_file"; }
 		log_error() { printf '%s\n' "$*" >> "$o_log_file"; }
 		git() { :; }
-		check_issue_pr_merged() { return 1; }
+		check_issue_pr_merged() {
+			_RECONCILE_PR="${STUB_MERGED_PR:-}"
+			[[ -n "$_RECONCILE_PR" ]] || return 1
+			_RECONCILE_REASON="PR #$_RECONCILE_PR already merged"
+		}
 		eval "$(_extract_function_body update_issue_field \
 			"$BATCH_ORCHESTRATOR_SCRIPT")"
 		eval "$(_extract_function_body update_progress \
@@ -7417,6 +7422,18 @@ _run_outcome_arm() {
 	[[ "$logged" == *"$_I949_REASON"* ]] || fail "reason not logged: $logged"
 	[[ "$logged" != *"implement-issue failed for"* ]] \
 		|| fail "halt logged as a failure: $logged"
+}
+
+@test "i949: an API-error halt whose PR already merged is completed (#1272)" {
+	_run_state_dispatch "error" 99 "pr_review" "$_I949_REASON" "$_I949_HALT"
+	[[ "$d_status" == "api_error" ]] || fail "dispatch status: $d_status"
+
+	STUB_MERGED_PR=99 _run_outcome_arm
+	[[ "$o_rc" == "0" ]] || fail "rc: $o_rc"
+	[[ -z "$o_terminal" ]] || fail "terminal: $o_terminal"
+	jq -e '.issues[0].status == "completed" and .issues[0].pr == 99' \
+		"$o_status_file" >/dev/null \
+		|| fail "batch status: $(cat "$o_status_file")"
 }
 
 @test "i949: state error without api_error_halt is still a plain failure" {
