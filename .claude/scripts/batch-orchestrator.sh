@@ -3450,9 +3450,14 @@ done
 # created during this run.  Runs even when the circuit breaker fired so
 # that follow-ups from the issues that DID complete get enriched.
 # Failures inside sweep_enrich_followups are warnings only — they never
-# change exit_code or the batch state.
+# change exit_code or the batch state.  The exception is an API-error halt
+# (issue #1271): every enrich dispatch would hit the same error, so skip.
 if [[ "$ENRICH_FOLLOWUPS" == true ]]; then
-	sweep_enrich_followups
+	if [[ "$(jq -r '.state' "$STATUS_FILE")" == "api_error" ]]; then
+		log_warn "Sweep: batch halted on API error — follow-ups not enriched"
+	else
+		sweep_enrich_followups
+	fi
 fi
 
 # Post-batch sweep: implement follow-up issues created during this run as a
