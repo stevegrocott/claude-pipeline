@@ -8506,9 +8506,23 @@ revalidate_partial_block_against_branch() {
 			"partial merge block stands."
 		local reval_reason
 		if ((reval_tests_green == 0)); then
-			# Evidence was never evaluated for the still-failed tasks, so
-			# don't claim it's lacking — name the suppression instead.
+			# The suppression blocked every promotion, so don't claim
+			# evidence is lacking — name the suppression instead. The one
+			# finding that holds without the suite is added after it: which
+			# tasks reconciliation recorded "not_modified" (issue #1268).
+			# A commit_rejected task is never re-checked, so any such
+			# value on it is stale.
 			reval_reason="Partial implementation: ${reval_completed}/${reval_total} tasks completed (implement:partial:${reval_completed}/${reval_total}); stage-reported ${reval_raw_completed}/${reval_total}; blocked by a red test suite this run (${reval_red_marker}) — remaining failed task(s)' file evidence was not evaluated."
+			local reval_unmodified
+			reval_unmodified=$(jq -r '[(.tasks // [])[]
+				| select(.status == "failed"
+					and .evidence_gap == "not_modified"
+					and (.commit_rejected // false) != true)
+				| .id | tostring] | join(", ")' "$STATUS_FILE" 2>/dev/null)
+			if [[ -n "$reval_unmodified" ]]; then
+				reval_reason+=" Not modified on the branch:"
+				reval_reason+=" task(s) ${reval_unmodified}."
+			fi
 		else
 			local reval_lacking
 			reval_lacking=$(_lacking_evidence_summary)
