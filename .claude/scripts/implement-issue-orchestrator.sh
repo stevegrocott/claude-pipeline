@@ -14601,7 +14601,10 @@ verify_fix_stage_commit() {
 	if [[ -z "$dirty" ]]; then
 		local tree_state="a clean tree"
 		if [[ -n "$status_now" ]]; then
+			# Named so an operator can check them: further edits to
+			# an already-dirty path are not detected.
 			tree_state="only pre-existing changes"
+			tree_state+=" ($(_porcelain_dirty_paths "$status_now"))"
 		fi
 		log "$stage_label produced no commit and left $tree_state" \
 			"— accepting as a genuine no-op"
