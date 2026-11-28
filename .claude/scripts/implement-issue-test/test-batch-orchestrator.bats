@@ -649,6 +649,97 @@ source_init_status() {
 		|| fail "a pre-#781 status.json with no fingerprint was treated as a match (got: $status)"
 }
 
+# --- Issue #1270: follow-up state survives a fingerprint-matched resume ---
+
+# Writes the status.json a first launch of batch main:1,2 leaves behind: a
+# completed parent with follow-ups, a failed parent with follow-ups, and
+# follow-up rows as appended by sweep_implement_followups.
+_seed_followup_status() {
+	log() { :; }
+	BRANCH="main"
+	ISSUE_ARRAY=(1 2)
+	rm -f "$STATUS_FILE"
+	init_status
+
+	jq '(.issues[] | select(.number == "1")) |=
+			(.status = "completed" | .follow_ups = ["950", "951", "952"])
+		| (.issues[] | select(.number == "2")) |=
+			(.status = "failed" | .follow_ups = ["953"])
+		| .issues += [
+			{number: "950", status: "completed", follow_ups: ["990"]},
+			{number: "951", status: "already_implemented", follow_ups: []},
+			{number: "952", status: "failed", error: "boom",
+				stage: "implement-issue", follow_ups: []},
+			{number: "953", status: "in_progress", follow_ups: []}
+		]' "$STATUS_FILE" > "$STATUS_FILE.tmp" \
+		&& mv "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+@test "functional: init_status resume keeps the parents' follow_ups (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	init_status
+
+	run jq -c '[.issues[] | select(.number == "1" or .number == "2")
+		| [.number, .status, .follow_ups]]' "$STATUS_FILE"
+	[[ "$output" == \
+		'[["1","completed",["950","951","952"]],["2","pending",["953"]]]' ]] \
+		|| fail "parents' follow_ups not kept (got: $output)"
+}
+
+@test "functional: init_status resume keeps follow-up rows, terminal status kept, others pending (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	init_status
+
+	run jq -c '[.issues[] | [.number, .status]]' "$STATUS_FILE"
+	[[ "$output" == '[["1","completed"],["2","pending"],["950","completed"],["951","already_implemented"],["952","pending"],["953","pending"]]' ]] \
+		|| fail "follow-up rows not kept (got: $output)"
+
+	run jq -c '.issues[] | select(.number == "952") | [.error, .stage]' \
+		"$STATUS_FILE"
+	[[ "$output" == '[null,null]' ]] \
+		|| fail "pending follow-up row kept stale fields (got: $output)"
+}
+
+@test "functional: init_status resume counts carried follow-up rows in progress (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	init_status
+
+	run jq -c '.progress | [.total, .completed, .pending]' "$STATUS_FILE"
+	[[ "$output" == '[6,3,3]' ]] \
+		|| fail "progress does not count follow-up rows (got: $output)"
+}
+
+# The sweep collects follow_ups from every row, so carrying a follow-up row's
+# own follow_ups would auto-implement depth-2 issues on resume.
+@test "functional: init_status resume does not carry depth-2 follow_ups (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	init_status
+
+	run jq -c '[.issues[].follow_ups[]] | unique' "$STATUS_FILE"
+	[[ "$output" == '["950","951","952","953"]' ]] \
+		|| fail "unexpected follow_ups after resume (got: $output)"
+}
+
+@test "functional: init_status fingerprint mismatch drops follow-up rows and follow_ups (#1270)" {
+	source_init_status
+	_seed_followup_status
+
+	BRANCH="develop"
+	init_status
+
+	run jq -c '[.issues[] | [.number, .status, .follow_ups]]' "$STATUS_FILE"
+	[[ "$output" == '[["1","pending",[]],["2","pending",[]]]' ]] \
+		|| fail "mismatch did not reset follow-up state (got: $output)"
+}
+
 # --- Functional simulation ---
 #
 # Build a mock status.json with mixed issue statuses and verify that the
