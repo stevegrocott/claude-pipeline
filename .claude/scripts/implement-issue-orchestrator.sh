@@ -10305,6 +10305,10 @@ _porcelain_dirty_paths() {
 # so paths already dirty before a stage are not counted as its work (issue
 # #1008).  A line counts as present only when it matches verbatim.
 #
+# Known limitation: further edits to a path that was already dirty in the
+# snapshot leave the status line identical and are NOT detected, so a caller
+# that treats "no new lines" as a no-op may falsely accept one.
+#
 # Arguments:
 #   $1 - current `git status --porcelain` output
 #   $2 - earlier output to compare against (may be empty)
